@@ -1,0 +1,9 @@
+[submodule "inference-sim"]
+	path = inference-sim
+	url = https://github.com/inference-sim/inference-sim.git
+[submodule "llm-d-inference-scheduler"]
+	path = llm-d-inference-scheduler
+	url = https://github.com/llm-d/llm-d-inference-scheduler.git
+[submodule "llm-d-benchmark"]
+	path = llm-d-benchmark
+	url = https://github.com/llm-d/llm-d-benchmark.git
