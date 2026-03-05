@@ -1,0 +1,31 @@
+# Project-specific
+docs/plans/scratch/
+tmp/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor/IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.iml
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+
+# Build artifacts
+*.o
+*.a
+*.so
+*.dylib
+
+# Binaries
+bin/
