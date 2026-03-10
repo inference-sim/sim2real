@@ -29,3 +29,6 @@ Thumbs.db
 
 # Binaries
 bin/
+
+# Transfer pipeline workspace (inter-stage artifacts)
+workspace/
