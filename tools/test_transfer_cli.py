@@ -770,26 +770,37 @@ class TestUnknownSignalDetection:
 
     def test_unknown_field_access_produces_unknown_type(self):
         import tempfile, shutil
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-            shutil.copy2(str(ROUTING_DIR / "best_program.py"), str(tmpdir / "best_program.py"))
-            shutil.copy2(str(ROUTING_DIR / "best_program_info.json"), str(tmpdir / "best_program_info.json"))
-            src = (tmpdir / "best_program.py").read_text()
-            src = src.replace(
-                "// EVOLVE-BLOCK-START",
-                "// EVOLVE-BLOCK-START\n\tunknown_val = snap.NovelMetricXYZ",
-            )
-            (tmpdir / "best_program.py").write_text(src)
-            result = subprocess.run(
-                [sys.executable, str(CLI), "extract", str(tmpdir)],
-                capture_output=True, text=True, cwd=str(REPO_ROOT),
-            )
-            assert result.returncode == 0
-            summary = json.loads((WORKSPACE / "algorithm_summary.json").read_text())
-            unknown_signals = [s for s in summary["signals"] if s["type"] == "unknown"]
-            assert len(unknown_signals) > 0
-            assert any(s["name"] == "NovelMetricXYZ" for s in unknown_signals)
-            assert "NovelMetricXYZ" in result.stderr
+        mapping = REPO_ROOT / "docs" / "transfer" / "blis_to_llmd_mapping.md"
+        backup = mapping.with_suffix(".md.bak")
+        # Temporarily hide mapping so fidelity check doesn't reject the unknown signal
+        if mapping.exists():
+            shutil.move(str(mapping), str(backup))
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmpdir = Path(tmpdir)
+                shutil.copy2(str(ROUTING_DIR / "best_program.py"), str(tmpdir / "best_program.py"))
+                shutil.copy2(str(ROUTING_DIR / "best_program_info.json"), str(tmpdir / "best_program_info.json"))
+                src = (tmpdir / "best_program.py").read_text()
+                src = src.replace(
+                    "// EVOLVE-BLOCK-START",
+                    "// EVOLVE-BLOCK-START\n\tunknown_val = snap.NovelMetricXYZ",
+                )
+                (tmpdir / "best_program.py").write_text(src)
+                env = {k: v for k, v in os.environ.items() if k != "CI"}
+                result = subprocess.run(
+                    [sys.executable, str(CLI), "extract", str(tmpdir)],
+                    capture_output=True, text=True, cwd=str(REPO_ROOT),
+                    env=env,
+                )
+                assert result.returncode == 0
+                summary = json.loads((WORKSPACE / "algorithm_summary.json").read_text())
+                unknown_signals = [s for s in summary["signals"] if s["type"] == "unknown"]
+                assert len(unknown_signals) > 0
+                assert any(s["name"] == "NovelMetricXYZ" for s in unknown_signals)
+                assert "NovelMetricXYZ" in result.stderr
+        finally:
+            if backup.exists():
+                shutil.move(str(backup), str(mapping))
 
 
 class TestExtractDeterminism:

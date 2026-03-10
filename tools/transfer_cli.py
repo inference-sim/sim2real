@@ -518,9 +518,9 @@ def cmd_validate_mapping(args: argparse.Namespace) -> int:
                                 "Expected pipe-delimited table rows."],
                         mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=True)
 
-    # Check each extracted signal has a mapping entry
+    # Check each extracted signal has a mapping entry (allow optional parenthetical annotation)
     missing = [name for name in sorted(extracted_names)
-               if not re.search(rf'\|\s*{re.escape(name)}\s*\|', content)]
+               if not re.search(rf'\|\s*{re.escape(name)}(?:\s*\([^)]*\))?\s*\|', content)]
 
     # Check for extra signals in mapping not present in extract
     mapping_signals = set()
@@ -531,7 +531,11 @@ def cmd_validate_mapping(args: argparse.Namespace) -> int:
             continue
         mapping_signal_counts[candidate] = mapping_signal_counts.get(candidate, 0) + 1
         mapping_signals.add(candidate)
-    extra = sorted(mapping_signals - extracted_names)
+    # Include composite signal names so they're not flagged as extra
+    composite_names = {c['name'] for c in summary.get('composite_signals', [])
+                       if isinstance(c, dict) and 'name' in c}
+    known_names = extracted_names | composite_names
+    extra = sorted(mapping_signals - known_names)
     duplicates = sorted(k for k, v in mapping_signal_counts.items() if v > 1)
 
     # Check commit hash presence
