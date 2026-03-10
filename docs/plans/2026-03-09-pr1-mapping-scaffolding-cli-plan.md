@@ -16,11 +16,58 @@
 
 **Architecture:** Python CLI (`tools/transfer_cli.py`, stdlib-only, >= 3.9) with subcommands. JSON Schema files in `tools/schemas/` using a restricted subset validated by a custom ~100-line stdlib validator. Mapping artifact as structured Markdown in `docs/transfer/`. Workspace directory (`workspace/`, gitignored) for inter-stage JSON artifacts.
 
-**Source:** PR1 in `docs/plans/2026-03-06-sim2real-transfer-macro-plan-v3.md`
+**PR Category:** Artifact (per docs/contributing/pr-workflow.md)
+
+**Source:** Macro plan PR1: Mapping Artifact + Project Scaffolding + CLI Extract in docs/plans/2026-03-06-sim2real-transfer-macro-plan-v3.md
 
 **Closes:** N/A — source is macro plan, no linked issues
 
 **Behavioral Contracts:** See Part 1, Section B below
+
+---
+
+## Phase 0: Cross-System Dependency Audit
+
+### 1) Submodule API Verification
+
+For each submodule referenced by this PR:
+
+- **inference-sim:** `git submodule status` records commit hash. PR1 depends on `RoutingSnapshot` struct fields in `inference-sim/sim/routing.go` and the `EffectiveLoad()` method signature. Verified: `EffectiveLoad()` returns `QueueDepth + BatchSize + InFlightRequests` (see Task 3 Step 0 pre-flight and `TestSourceSyncVerification::test_method_expansion_matches_source`). `ROUTING_SNAPSHOT_FIELDS` dict derived from `type RoutingSnapshot struct` at pinned commit. **No DEVIATION in submodule API** (struct fields, method signatures). **Note:** The macro plan's signal enumeration (5 candidate signals) differs from the actual EVOLVE-BLOCK signals (6 signals) — this is a signal list deviation documented in Deviation Log (Section D), not a submodule API deviation.
+- **llm-d-inference-scheduler:** PR1 references the `scheduling.Scorer` interface for the mapping artifact's Scorer Interface Reference section. The commit hash is pinned in `blis_to_llmd_mapping.md`. PR1 does NOT call any llm-d-inference-scheduler API at runtime — the reference is documentation-only for PR2/PR3 consumption. **F-6 fix: UNVERIFIED — the Scorer Interface Reference section (Score method signature, factory pattern, existing scorers) was documented from design knowledge, not verified against the actual source at the pinned commit.** PR3 MUST derive the full interface specification directly from the `llm-d-inference-scheduler` codebase (see the "Do not rely solely on this summary" note in the Scorer Interface Reference). No runtime dependency in PR1.
+- **llm-d-benchmark:** Not referenced by PR1. **No DEVIATION.**
+- **LoadEvolvedBlock API:** Macro plan R6 requires verifying this API. `grep -r 'LoadEvolvedBlock' inference-sim/` confirms it does NOT exist. Decision: shim approach in PR3. Documented in `docs/transfer/README.md`. **DEVIATION: R6 shim deferred to PR3** (see Deviation Log, Section D).
+
+### 2) Workspace Artifact Chain Verification
+
+PR1 produces one workspace artifact:
+
+| Artifact | Writer | Reader(s) | Required Fields |
+|----------|--------|-----------|-----------------|
+| `workspace/algorithm_summary.json` | `transfer_cli.py extract` (PR1) | `validate-schema` (PR1), Stage 1-3 prompt templates (PR3), Go harness (PR3) | `algorithm_name`, `evolve_block_source`, `evolve_block_content_hash`, `signals[]`, `composite_signals[]`, `metrics{}`, `scope_validation_passed`, `mapping_artifact_version`, `fidelity_checked` (F-7/F-22 fix: 9 required fields) |
+
+Schema file `tools/schemas/algorithm_summary.schema.json` defines all required fields. `validate-schema` round-trip test (`TestRoundTrip::test_extract_then_validate_schema_round_trip`) verifies writer output matches reader input. **No DEVIATION.**
+
+### 3) Predecessor Artifact Verification
+
+PR1 is the first PR — no predecessor artifacts required. PR1 reads from:
+
+- `routing/best_program.py` — exists, contains EVOLVE-BLOCK markers (verified in Task 3 Step 0)
+- `routing/best_program_info.json` — exists, contains `metrics` key (verified in Task 3 Step 0)
+
+These are input artifacts from the evolutionary optimization pipeline, not predecessor PR artifacts.
+
+**F-17 fix: Referenced documents (not predecessor artifacts):** The plan references:
+- `docs/contributing/pr-workflow.md` — referenced in PR Category (Part 1) and Sanity Checklist. This file is assumed to exist in the repository; it is NOT created by PR1. If it does not exist, the PR Category reference is advisory only and does not block implementation.
+- `docs/plans/2026-03-06-sim2real-transfer-macro-plan-v3.md` — referenced in README.md (Task 1). This file must exist for the README link to be valid. Verify with: `ls docs/plans/2026-03-06-sim2real-transfer-macro-plan-v3.md`.
+
+**No DEVIATION.**
+
+### 4) Commit Pin Verification
+
+- **inference-sim:** Current submodule HEAD recorded via `git submodule status`. `ROUTING_SNAPSHOT_FIELDS` and `METHOD_EXPANSIONS` dicts pinned to this commit. `TestSourceSyncVerification` tests verify dicts match source at test time. CI enforces via `test_ci_must_not_skip_sync_tests`. **F-5 fix: Recording mechanism:** The inference-sim commit hash is NOT recorded as a static value in the plan or mapping artifact. Instead, it is verified dynamically: `TestSourceSyncVerification` tests compare the hardcoded dicts against the inference-sim source at the currently checked-out commit. The hash is implicit in `git submodule status` output. To obtain the current hash: `cd inference-sim && git rev-parse HEAD`. The plan executor MUST run this command during Task 3 Step 0 and verify the output matches the submodule pointer in `.gitmodules`. **No DEVIATION in submodule API.**
+- **llm-d-inference-scheduler:** Commit hash pinned in `blis_to_llmd_mapping.md` (Task 5). The hash is `PLACEHOLDER_REQUIRES_STEP_2` until Task 5 Step 2 replaces it with the actual hex hash from `cd llm-d-inference-scheduler && git rev-parse HEAD`. No automated CI verification of this pin in PR1 (acceptable — see F-6 note in convergence review). PR3 will verify at implementation time. **No DEVIATION.**
+
+**Summary:** No unresolved DEVIATION flags from Phase 0. One known deferral (R6 shim → PR3) documented in Deviation Log.
 
 ---
 
@@ -80,7 +127,7 @@ BC-6: Low-Fidelity Signal Halts (Conditional)
 - **Known limitation:** If the mapping artifact does not exist, the fidelity check is skipped with a stderr warning and extract proceeds as if all signals are acceptable. This means BC-6 is only enforced after Task 5 (mapping artifact creation). This is intentional — extract must be runnable before the mapping artifact exists (e.g., during initial signal discovery). **Non-determinism boundary:** The same EVOLVE-BLOCK produces different results depending on mapping artifact presence: without it, all signals pass; with it, low-fidelity signals halt. This non-determinism is bounded — once the mapping artifact exists (after Task 5), fidelity checks are always enforced. The only scenario where checks revert to skipped is if the mapping artifact is accidentally deleted, which is a low-probability operational concern detectable by `validate-mapping`. **Mitigation:** CI pipelines MUST use `--strict` (which fails if the mapping is absent), and `validate-mapping` independently verifies the mapping exists. Together, these ensure accidental deletion is caught before merge.
 - **CI determinism: `--strict` flag (REQUIRED for CI).** To enforce deterministic behavior in CI pipelines, the `extract` command accepts a `--strict` flag. When `--strict` is passed: (1) if the mapping artifact does not exist, extract exits with code 1 (validation failure — the fidelity check cannot pass without the mapping, which is a validation outcome, not an infrastructure error) instead of skipping the fidelity check; (2) all fidelity checks are mandatory, not optional. **F-16 fix:** Previously documented as exit code 2 (infrastructure error), corrected to exit code 1 to match the implementation in `_check_fidelity` which returns validation errors processed by `_output("error", 1, ...)`. This eliminates the state-dependent behavior for automated environments. **Default behavior (no flag) is unchanged** — interactive/exploratory use still allows extract to run without the mapping artifact. **CI REQUIREMENT:** CI pipelines MUST use `python tools/transfer_cli.py extract --strict routing/` to ensure reproducible results. **Hard enforcement:** When the `CI` environment variable is set, extract **fails with exit code 1** if `--strict` is not passed. This is a hard gate, not a warning — a warning to stderr is insufficient because CI systems do not fail on stderr output. This is enforced by `TestCIStrictEnforcement::test_ci_env_requires_strict_flag` which asserts exit code 1 when `CI` is set and `--strict` is absent.
 - **BOOTSTRAP WORKFLOW (F-23 fix):** The extract/strict/mapping dependency has a clear bootstrap sequence: (1) **Tasks 1-4 (before mapping exists):** Run `extract` without `--strict` locally to discover signals — fidelity checks are skipped, exit 0. CI does not run extract yet (no CI workflow until Task 7). (2) **Task 5 (mapping created):** The mapping artifact is written using extract's signal output. After committing the mapping, `extract` (with or without `--strict`) now performs fidelity checks. (3) **Task 7 (CI workflow added):** CI runs `extract --strict routing/` — `--strict` requires the mapping to exist (it does, committed in Task 5). The chicken-and-egg is resolved by task ordering: extract runs first without strict to produce signal data, the mapping is created from that data, then strict mode is enabled for CI. **Key invariant:** `--strict` is never required until after the mapping artifact exists.
-- **LOCAL-VS-CI DIVERGENCE RISK:** Without `--strict`, local developers experience state-dependent behavior: the same EVOLVE-BLOCK produces exit 0 (with mapping artifact) or exit 0 with skipped fidelity checks (without mapping artifact). With `--strict` in CI, the same missing-mapping scenario produces exit 1 (validation failure). **This means local and CI results can diverge.** The `--strict` flag converts non-determinism into a hard failure rather than eliminating the underlying state-dependency. **Recommendation for local development:** Developers SHOULD use `--strict` locally after Task 5 (mapping artifact creation) to match CI behavior. Add `alias transfer-extract='python tools/transfer_cli.py extract --strict routing/'` to development setup instructions. **Residual risk:** Before Task 5 completes, local extract without `--strict` skips fidelity checks silently. This is an intentional bootstrap compromise — extract must be runnable before the mapping exists for initial signal discovery. After the mapping artifact is committed, the non-determinism window closes for normal development workflows. The only re-opening scenario is accidental mapping deletion, which `validate-mapping` detects.
+- **LOCAL-VS-CI DIVERGENCE RISK:** Without `--strict`, local developers experience state-dependent behavior: the same EVOLVE-BLOCK produces exit 0 (with mapping artifact) or exit 0 with skipped fidelity checks (without mapping artifact). With `--strict` in CI, the same missing-mapping scenario produces exit 1 (validation failure). **This means local and CI results can diverge.** The `--strict` flag converts non-determinism into a hard failure rather than eliminating the underlying state-dependency. **Recommendation for local development:** Developers SHOULD use `--strict` locally after Task 5 (mapping artifact creation) to match CI behavior. Add `alias transfer-extract='python tools/transfer_cli.py extract --strict routing/'` to development setup instructions. **F-5 fix — Enforcement strengthening:** Document this alias in CLAUDE.md's Development section and in `docs/transfer/README.md` so it is discoverable. While enforcing `--strict` locally is not mandatory (developers may need non-strict mode for signal discovery), the alias makes the recommended workflow the path of least resistance. **R2-F-3 fix — Non-strict mode visibility:** When running without `--strict` and the mapping artifact exists, the extract command MUST emit a stderr notice: `NOTICE: Running without --strict. Fidelity checks are active (mapping artifact found), but CI uses --strict for deterministic enforcement. Use --strict locally to match CI behavior.` When running without `--strict` and the mapping artifact is absent (bootstrap phase), the existing WARNING is sufficient. This notice makes the local/CI divergence visible without blocking the developer, turning the advisory recommendation into an active reminder. **Residual risk:** Before Task 5 completes, local extract without `--strict` skips fidelity checks silently. This is an intentional bootstrap compromise — extract must be runnable before the mapping exists for initial signal discovery. After the mapping artifact is committed, the non-determinism window closes for normal development workflows. The only re-opening scenario is accidental mapping deletion, which `validate-mapping` detects.
 
 BC-7: No External Dependencies
 - GIVEN the CLI source code
@@ -117,7 +164,7 @@ BC-11: Content Hash Drift Detection (PR1 provides, PR3 MUST consume)
 - THEN the downstream stage MUST recompute SHA-256 of the EVOLVE-BLOCK at the location in `evolve_block_source`, compare it to `evolve_block_content_hash`, and abort if they differ
 - MECHANISM (PR1 side): Extract computes SHA-256 of EVOLVE-BLOCK content and stores it in `evolve_block_content_hash`. The hash is validated by `TestExtract::test_extract_content_hash_matches_evolve_block` (independent recomputation) and by `TestHashDriftDetection::test_hash_detects_source_modification` (modified source produces different hash).
 - MECHANISM (PR3 side — REQUIRED): PR3 MUST include a test `test_stale_hash_aborts_parsing` that: (1) runs extract to produce a summary, (2) modifies the EVOLVE-BLOCK source, (3) attempts to parse the EVOLVE-BLOCK using the now-stale summary, (4) asserts the parsing aborts with a drift detection error. **This test skeleton is documented in `tools/test_transfer_cli.py` as `TestHashDriftDetection` to establish the PR1-side mechanism; PR3 must implement the consumer-side equivalent.**
-- **Enforcement:** PR1 cannot enforce PR3 behavior at runtime, but the contract is testable: PR3's CI MUST include a test verifying hash comparison. The PR3 plan review MUST check for this test. If PR3 omits hash verification, it violates BC-11. **PR3 plan convergence-review gate:** The PR3 convergence review MUST include a finding if `test_stale_hash_aborts_parsing` is absent. This is a CRITICAL-severity gate for PR3, not PR1.
+- **Enforcement:** PR1 cannot enforce PR3 behavior at runtime, but the contract is testable: PR3's CI MUST include a test verifying hash comparison. The PR3 plan review MUST check for this test. If PR3 omits hash verification, it violates BC-11. **PR3 plan convergence-review gate:** The PR3 convergence review MUST include a finding if `test_stale_hash_aborts_parsing` is absent. This is a CRITICAL-severity gate for PR3, not PR1. **F-4 fix — Asymmetric enforcement acknowledgment:** Cross-PR contract enforcement is inherently asymmetric — PR1 provides the mechanism and tests proving it works, but cannot programmatically enforce that PR3 consumes the hash. The mitigation layers are: (1) PR1 test `test_hash_detects_source_modification` proves the hash mechanism works, (2) PR3 convergence-review gate is documented as CRITICAL-severity, (3) this contract is prominently documented in BC-11, Review Guide, and CLAUDE.md. If automated enforcement is desired in the future, a shared test in `tools/test_cross_pr_contracts.py` could verify that PR3's test file contains `test_stale_hash_aborts_parsing`. **R2-F-4 fix — Cross-PR discoverability:** To ensure PR3 implementers encounter these requirements, PR1 MUST add a `## Cross-PR Contracts (PR3 Obligations)` section to `docs/transfer/README.md` listing all PR3 gates with severity levels: (1) `test_stale_hash_aborts_parsing` — CRITICAL, (2) normalization_note application test — CRITICAL, (3) unknown-type signal rejection — IMPORTANT. Additionally, CLAUDE.md's transfer pipeline section MUST include a note: `When implementing PR3, read docs/transfer/README.md § Cross-PR Contracts first.` This makes the contracts discoverable from two entry points PR3 implementers will naturally consult.
 - **Comment sensitivity (F-16 note):** The content hash is computed on the entire EVOLVE-BLOCK content, including comments. This means non-semantic changes (reformatting, comment edits) within the EVOLVE-BLOCK will trigger hash drift detection in PR3, causing a pipeline halt. This is intentionally conservative: distinguishing semantic from non-semantic changes within Go code embedded in a Python string is fragile and error-prone. The recovery is straightforward — re-run `extract` to produce a new hash reflecting the current EVOLVE-BLOCK state. The golden-file test (`TestGoldenSignalList`) will catch any actual signal changes.
 
 ### C) Component Interaction
@@ -152,8 +199,8 @@ CLI interface (all commands):
 - Input: command-line arguments
 - Output: JSON to stdout, exit code 0/1/2
 - `extract <routing_dir>` → produces `workspace/algorithm_summary.json` + stdout JSON status
-- `validate-mapping [--summary <path>]` → stdout JSON with `mapping_complete`, `missing_signals[]`, `extra_signals[]`, `stale_commit`
-- `validate-schema <artifact_path>` → stdout JSON with `status`, `violations[]`
+- `validate-mapping [--summary <path>]` → stdout JSON with `status`, `errors[]`, `output_type`, `mapping_complete`, `missing_signals[]`, `extra_signals[]`, `stale_commit` (R5-F-10 fix: added common fields `status`, `errors[]`, `output_type` produced by `_output()` helper)
+- `validate-schema <artifact_path>` → stdout JSON with `status`, `errors[]`, `output_type`, `violations[]` (R5-F-10 fix: added common fields)
 
 **Two-output design (extract command):** The `extract` command produces two distinct JSON outputs that serve different purposes:
 1. **File artifact** (`workspace/algorithm_summary.json`): Contains the 6 schema-required keys (`algorithm_name`, `evolve_block_source`, `evolve_block_content_hash`, `signals`, `metrics`, `scope_validation_passed`). This is the durable artifact consumed by downstream pipeline stages and validated by `validate-schema`.
@@ -165,7 +212,7 @@ The schema (`algorithm_summary.schema.json`) validates only the file artifact, n
 
 **WARNING for downstream PR implementers:** PR2/PR3 stages MUST consume the file artifact (`workspace/algorithm_summary.json`), NOT the stdout JSON. The stdout JSON is for human/CI feedback only and is not schema-validated. This distinction should also be documented in CLAUDE.md.
 
-**Enforcement mechanism:** The schema's `additionalProperties: false` provides structural enforcement. The stdout JSON contains `output_type` and `status` fields that are NOT in the schema, so running `validate-schema` on stdout JSON would fail with "unexpected additional property" errors. The test `test_extract_stdout_differs_from_file_artifact` explicitly verifies the structures differ. This means accidental consumption of stdout instead of the file artifact would be caught by schema validation. **PR3 defense-in-depth:** PR3 should load the artifact via `json.load(open("workspace/algorithm_summary.json"))` and immediately run `validate_artifact()` on it. If the loaded data contains an `output_type` key, it's the wrong output — abort with a clear error message.
+**Enforcement mechanism:** The schema's `additionalProperties: false` provides structural enforcement. The stdout JSON contains `output_type` and `status` fields that are NOT in the schema, so running `validate-schema` on stdout JSON would fail with "unexpected additional property" errors. The test `test_extract_stdout_differs_from_file_artifact` explicitly verifies the structures differ. This means accidental consumption of stdout instead of the file artifact would be caught by schema validation. **F-23 fix — Suggested test (optional, for defense-in-depth):** `test_validate_schema_rejects_stdout_json` — capture extract's stdout JSON, write it to a temp file, run `validate-schema` on it, and verify it fails with an "additional property" violation for `output_type`. This would directly verify the documented enforcement mechanism rather than relying on structural difference assertions. Deferred because the existing four defense layers (different structures, `additionalProperties:false`, `test_extract_stdout_differs_from_file_artifact`, CLAUDE.md warning) provide adequate coverage for a developer tool. **PR3 defense-in-depth:** PR3 should load the artifact via `json.load(open("workspace/algorithm_summary.json"))` and immediately run `validate_artifact()` on it. If the loaded data contains an `output_type` key, it's the wrong output — abort with a clear error message.
 
 **State Changes:**
 - `extract` creates/overwrites `workspace/algorithm_summary.json` — **F-20 note: overwrite is intentional.** The `workspace/` directory is gitignored and designed for inter-stage artifacts. Each extract run produces the current state; previous artifacts are replaced without backup or confirmation. This is standard pipeline tool behavior. If a user needs to preserve a prior extract result, they should copy it before re-running. Running extract with a different routing directory silently replaces the prior result.
@@ -179,11 +226,12 @@ The schema (`algorithm_summary.schema.json`) validates only the file artifact, n
 
 | Source Says | Micro Plan Does | Reason |
 |-------------|-----------------|--------|
-| 5 signals: queue depth, in-flight count, estimated latency, request token count, KV cache utilization | Extract discovers 6 signals from EVOLVE-BLOCK: QueueDepth, BatchSize, InFlightRequests, KVUtilization, CacheHitRate (RoutingSnapshot fields) + SessionID (request-level boolean check). Actual list may differ from design doc. | CORRECTION: The macro plan delegates signal enumeration to PR1 by specifying that PR1 must extract signals from the actual EVOLVE-BLOCK code. The extract command is therefore the authoritative source for the signal list. The EVOLVE-BLOCK accesses `EffectiveLoad()` (= QueueDepth + BatchSize + InFlightRequests), `CacheHitRate`, `KVUtilization`, and checks `req.SessionID`. **Why macro plan signals are absent:** "Estimated latency" and "request token count" were listed in the macro plan's initial design analysis as *candidate* signals but are NOT directly accessed in the actual EVOLVE-BLOCK code. The evolutionary optimizer discovered a solution that uses different signals (BatchSize, CacheHitRate, SessionID) instead. Since PR1 extracts from the actual evolved code rather than design-time assumptions, these signals correctly do not appear. The extract command matches both RoutingSnapshot field patterns (`snap.Field`) and request-level field patterns (`req.Field`) to capture all 6 signals. |
+| 5 signals: queue depth, in-flight count, estimated latency, request token count, KV cache utilization | Extract discovers 6 signals from EVOLVE-BLOCK: QueueDepth, BatchSize, InFlightRequests, KVUtilization, CacheHitRate (RoutingSnapshot fields) + SessionID (request-level boolean check). Actual list may differ from design doc. | CORRECTION (F-21 fix: macro plan update DEFERRED — out of scope for PR1): The macro plan delegates signal enumeration to PR1 by specifying that PR1 must extract signals from the actual EVOLVE-BLOCK code. The extract command is therefore the authoritative source for the signal list. The EVOLVE-BLOCK accesses `EffectiveLoad()` (= QueueDepth + BatchSize + InFlightRequests), `CacheHitRate`, `KVUtilization`, and checks `req.SessionID`. **Why macro plan signals are absent:** "Estimated latency" and "request token count" were listed in the macro plan's initial design analysis as *candidate* signals but are NOT directly accessed in the actual EVOLVE-BLOCK code. The evolutionary optimizer discovered a solution that uses different signals (BatchSize, CacheHitRate, SessionID) instead. Since PR1 extracts from the actual evolved code rather than design-time assumptions, these signals correctly do not appear. The extract command matches both RoutingSnapshot field patterns (`snap.Field`) and request-level field patterns (`req.Field`) to capture all 6 signals. **F-1 fix — Macro plan update recommendation (DEFERRED to post-PR1):** The macro plan's signal enumeration should be updated to reflect the actual 6-signal list discovered by PR1 extract, replacing the 5-signal candidate list. This update is out of scope for PR1 because PR1 does not modify the macro plan document. Until the macro plan is updated, this Deviation Log entry is the authoritative reference for the actual signal list. |
 | R6: LoadEvolvedBlock API verified or shim created in PR1 | PR1 documents that LoadEvolvedBlock does NOT exist. Records decision for PR3 to implement the shim in `tools/harness/`. PR1 provides `evolve_block_source`, `evolve_block_content_hash`, and `signals[]` as the contract for PR3. PR3 must produce `tools/harness/evolved_scorer.go` implementing `scheduling.Scorer`. | DEFERRAL: The macro plan says "PR1 must include a shim" OR "confirm API exists." Since the shim is Go code in `tools/harness/` and PR1 is Python-only, the shim implementation belongs in PR3. PR1 documents the gap, decision, and PR3 contract in `docs/transfer/README.md`. |
 | `transfer_cli.py` has `extract`, `validate-mapping`, `validate-schema` | Same | No deviation |
 | `tools/schemas/algorithm_summary.schema.json` created in PR1 | Same | No deviation |
 | CLAUDE.md updated | CLAUDE.md created (does not exist yet) | ADDITION: File doesn't exist; we create it. |
+| Macro plan required fields: 8 fields (no `fidelity_checked`) | Schema required fields: 9 fields (includes `fidelity_checked`) | ADDITION (F-22 fix, R2-F-11 clarification): `fidelity_checked` was added as a required field in the schema (R2-F-11 fix) to track whether fidelity checks were performed during extraction. The macro plan's workspace artifact specification lists 8 required fields (`algorithm_name`, `evolve_block_source`, `evolve_block_content_hash`, `signals`, `composite_signals`, `metrics`, `scope_validation_passed`, `mapping_artifact_version`); the schema adds `fidelity_checked` as the 9th. All 8 macro plan fields are preserved; `composite_signals` and `mapping_artifact_version` were part of the macro plan's original 8-field specification, not PR1 additions. |
 
 ### E) Review Guide
 
@@ -225,7 +273,7 @@ The schema (`algorithm_summary.schema.json`) validates only the file artifact, n
 - **Algorithm logic extraction is out of scope for PR1.** The extract command captures signal metadata (names, types, access paths) and the EVOLVE-BLOCK source location, but does NOT extract the algorithm's behavioral logic (scoring weights, penalty functions, decision thresholds, EffectiveLoad computation). PR3 must independently parse the EVOLVE-BLOCK to extract algorithm logic for the shim. The contract between PR1 and PR3 is:
   - **PR1 provides to PR3:** `evolve_block_source` (file path + line range), `evolve_block_content_hash` (SHA-256 for drift detection), and `signals[]` (names, types, access paths of production metrics to wire up).
   - **PR3 is responsible for:** (1) Verifying the content hash matches before parsing, (2) parsing the scoring/penalty logic from the EVOLVE-BLOCK, (3) producing a Go shim in `tools/harness/` that instantiates `WeightedScoring` with the evolved logic. PR3's output format for the extracted algorithm logic is: a Go source file in `tools/harness/evolved_scorer.go` implementing the `scheduling.Scorer` interface, with the scoring formula, penalty functions, and EffectiveLoad computation translated from the EVOLVE-BLOCK's Python/Go hybrid into pure Go. The PR3 plan must define the exact shim struct and method signatures.
-  - **Precise boundary definition:** PR1 captures *what signals the algorithm reads* (signal metadata: names, types, access paths, normalization). PR3 captures *what the algorithm does with those signals* (behavioral logic: scoring weights, penalty functions, decision thresholds, composite computations like EffectiveLoad). Concretely, "algorithm logic" means: (a) scoring weights applied to each signal, (b) penalty functions (e.g., low-KV penalty), (c) decision thresholds (e.g., score cutoffs), (d) composite signal computations (e.g., EffectiveLoad formula), (e) conditional branching logic (e.g., SessionID affinity check). PR1 provides the signal wiring; PR3 provides the behavioral implementation.
+  - **Precise boundary definition:** PR1 captures *what signals the algorithm reads* (signal metadata: names, types, access paths, normalization). PR3 captures *what the algorithm does with those signals* (behavioral logic: scoring weights, penalty functions, decision thresholds, composite computations like EffectiveLoad). Concretely, "algorithm logic" means: (a) scoring weights applied to each signal, (b) penalty functions (e.g., low-KV penalty), (c) decision thresholds (e.g., score cutoffs), (d) composite signal computations (e.g., EffectiveLoad formula), (e) conditional branching logic (e.g., SessionID affinity check). PR1 provides the signal wiring; PR3 provides the behavioral implementation. **R2-F-14 fix — Boundary verification test:** The boundary is testable via the content hash mechanism: PR1's `algorithm_summary.json` contains the full signal list and the `evolve_block_content_hash`. PR3's shim MUST produce output that depends on all signals in the summary (coverage test) and MUST abort if the content hash drifts (contract test). The 5-category enumeration is documented in `docs/transfer/README.md` § Algorithm Logic Boundary so PR3 implementers have a single reference point. PR3's plan MUST define the intermediate representation for each category — this is where the natural-language definition becomes a concrete schema.
 
 **Exit code boundary clarification:** Exit code 2 (infrastructure error) means the CLI cannot produce a meaningful result due to missing/malformed inputs (file not found, unparseable JSON, no EVOLVE-BLOCK markers). Exit code 1 (validation failure) means the CLI parsed the inputs successfully but the content fails a validation check (no recognizable signals, low-fidelity signal, scope violation, schema mismatch). Specifically: "No routing signals found in EVOLVE-BLOCK" is exit 1 because the EVOLVE-BLOCK was successfully located and parsed, but its content failed signal recognition — this is a validation outcome, not an infrastructure failure.
 
@@ -283,6 +331,36 @@ of `WeightedScoring`. A shim can reconstruct this by:
 3. Wrapping it with the evolved penalty logic as a post-scoring step
 
 This avoids requiring an inference-sim API PR (option b) which would block PR3.
+
+**Shim acceptance criteria (PR3):** The shim in `tools/harness/evolved_scorer.go` MUST:
+1. Implement `scheduling.Scorer` interface (Score method with correct signature)
+2. Accept all signals from `algorithm_summary.json` `signals[]` as input
+3. Reproduce the scoring/penalty logic from the EVOLVE-BLOCK
+4. Verify `evolve_block_content_hash` before parsing (BC-11)
+5. Pass unit tests comparing shim output against simulation output for reference inputs
+
+## Cross-PR Contracts (PR3 Obligations)
+
+R5-F-6 fix: Machine-readable list of PR3 gates with severity levels for cross-PR discoverability.
+
+PR3 MUST implement and pass these gates before merging:
+
+1. **`test_stale_hash_aborts_parsing`** — CRITICAL. PR3 must include a test that runs extract, modifies the EVOLVE-BLOCK source, attempts to parse using the stale summary, and asserts parsing aborts with a drift detection error. (See BC-11.)
+2. **KVUtilization normalization test** — CRITICAL. PR3 must include a unit test verifying that production `KVCacheUsagePercent` values (0-100) are divided by 100 before being passed to the scorer.
+3. **Unknown-type signal rejection** — IMPORTANT. PR3 must verify that signals with type `"unknown"` are rejected or handled explicitly, not silently passed through to the scorer.
+
+## Prompt Template Contract (PR3)
+
+PR3 prompt templates MUST consume these PR1 artifacts:
+- **Input:** `workspace/algorithm_summary.json` (signal metadata, EVOLVE-BLOCK location, content hash)
+- **Input:** `docs/transfer/blis_to_llmd_mapping.md` (signal mappings, fidelity ratings, normalization notes)
+- **Output:** Generated Go source implementing `scheduling.Scorer`
+
+**Prompt template requirements:**
+1. Each prompt MUST include the signal list from `algorithm_summary.json` `signals[]`
+2. Each prompt MUST include normalization notes from the mapping artifact for any signal where sim/prod units differ (e.g., KVUtilization: divide prod value by 100)
+3. Each prompt MUST reference `evolve_block_source` to locate the algorithm logic
+4. Generated code MUST be validated by `validate-schema` before downstream consumption
 ```
 
 Create `tools/__init__.py` (empty file).
@@ -361,6 +439,7 @@ def _valid_summary():
         "metrics": {"combined_score": -3858.94},
         "scope_validation_passed": True,
         "mapping_artifact_version": "1.0",
+        "fidelity_checked": True,  # R3-F-3 fix: 9th required field added to match schema
     }
 
 class TestValidateArtifact:
@@ -443,6 +522,47 @@ class TestValidateArtifact:
         data["evolve_block_source"] = "routing/../../../etc/passwd.py:1-10"
         errors = validate_artifact(data, summary_schema)
         assert any("pattern" in e for e in errors)
+
+    def test_dot_slash_evolve_block_source_rejected(self, summary_schema):
+        """F-28 fix: evolve_block_source pattern rejects './' current directory reference."""
+        data = _valid_summary()
+        data["evolve_block_source"] = "routing/./best_program.py:1-10"
+        errors = validate_artifact(data, summary_schema)
+        assert any("pattern" in e for e in errors)
+
+    def test_invalid_line_range_rejected(self, summary_schema):
+        """F-12 fix: semantic check rejects line ranges where start > end (e.g., 242-171)."""
+        data = _valid_summary()
+        data["evolve_block_source"] = "routing/best_program.py:242-171"
+        errors = validate_artifact(data, summary_schema)
+        assert any("line range" in e.lower() for e in errors), (
+            f"Expected line range validation error for 242-171, got: {errors}"
+        )
+
+    def test_unsupported_schema_keyword_rejected(self, summary_schema):
+        """R3-F-17 fix: Schema using unsupported keywords ($ref, allOf, etc.)
+        is rejected with a clear error rather than silently ignored."""
+        data = _valid_summary()
+        bad_schema = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "ref_field": {"$ref": "#/definitions/Foo"},
+            },
+        }
+        errors = validate_artifact(data, bad_schema)
+        assert any("unsupported keyword" in e.lower() for e in errors), (
+            f"Expected unsupported keyword error for $ref, got: {errors}"
+        )
+
+    def test_unsupported_allof_rejected(self, summary_schema):
+        """R3-F-17 fix: allOf at top level is rejected."""
+        data = _valid_summary()
+        bad_schema = {"allOf": [{"type": "object"}, {"required": ["name"]}]}
+        errors = validate_artifact(data, bad_schema)
+        assert any("unsupported keyword" in e.lower() and "allOf" in e for e in errors), (
+            f"Expected unsupported keyword error for allOf, got: {errors}"
+        )
 ```
 
 **Step 2: Run tests to verify they fail**
@@ -459,14 +579,14 @@ Expected: FAIL (ModuleNotFoundError or ImportError)
   "title": "Algorithm Summary",
   "description": "Output of transfer_cli.py extract — metadata about an evolved routing algorithm. NOTE: This schema captures signal metadata and source location, not the algorithm's behavioral logic (scoring weights, penalty functions). PR3 must independently parse the EVOLVE-BLOCK at the location in evolve_block_source to extract algorithm logic. TEMPORAL ASSUMPTION: All signals are assumed to be point-in-time snapshots. No temporal metadata (rolling average window, sampling rate) is included in v1. PR5 must verify production metrics match this assumption — see blis_to_llmd_mapping.md Notes.",
   "type": "object",
-  "required": ["algorithm_name", "evolve_block_source", "evolve_block_content_hash", "signals", "composite_signals", "metrics", "scope_validation_passed", "mapping_artifact_version"],
+  "required": ["algorithm_name", "evolve_block_source", "evolve_block_content_hash", "signals", "composite_signals", "metrics", "scope_validation_passed", "mapping_artifact_version", "fidelity_checked"],
   "additionalProperties": false,
   "properties": {
     "algorithm_name": {"type": "string"},
     "evolve_block_source": {
       "type": "string",
-      "pattern": "^(?!.*\\.\\./)[^/].+\\.py:\\d+-\\d+$",
-      "description": "Source file path (relative to repository root) and line range, e.g., 'routing/best_program.py:171-242'. PATH FORMAT (F-25 fix, F-9 fix): The path MUST be relative to the repository root, not absolute. The pattern rejects absolute paths by requiring the first character is not '/'. PR3 consumers should resolve this path relative to the repo root to locate the EVOLVE-BLOCK source file. NOTE (F-17): The regex pattern does not validate start_line <= end_line. Extract always produces valid ranges, but manual edits could create malformed ranges like '242-171'. The schema validator performs an additional semantic check: it parses the line numbers and verifies start <= end. IMPLICIT CONTRACT (F-13 fix): The _validate_node function in schema_validator.py enforces start <= end on line-range values as a defense-in-depth semantic check beyond the regex pattern. Consumers implementing their own validators MUST replicate this check: parse the digits after the colon, split on '-', and verify the first number is <= the second."
+      "pattern": "^(?!.*(?:^|/)\\.\\./)(?!.*(?:^|/)\\./)[^/].+\\.py:\\d+-\\d+$",
+      "description": "Source file path (relative to repository root) and line range, e.g., 'routing/best_program.py:171-242'. PATH FORMAT (F-25 fix, F-9 fix): The path MUST be relative to the repository root, not absolute. The pattern rejects absolute paths by requiring the first character is not '/'. The pattern also rejects both '../' and './' path components. R5-F-7 fix: Changed from (?:\\.\\.|\\.)/  to (?:^|/)\\.\\./ and (?:^|/)\\./  to anchor path-traversal detection to path component boundaries. The previous pattern rejected ANY dot followed by '/' anywhere in the string, which would incorrectly reject valid paths containing dotted directory names (e.g., 'routing/sub.dir/file.py:1-10'). The new pattern uses (?:^|/) to ensure '../' and './' are only rejected when they appear as complete path components (at start of string or after '/'). This correctly allows dotted directory names while still blocking path traversal. PR3 consumers should resolve this path relative to the repo root to locate the EVOLVE-BLOCK source file. NOTE (F-17): The regex pattern does not validate start_line <= end_line. Extract always produces valid ranges, but manual edits could create malformed ranges like '242-171'. The schema validator performs an additional semantic check: it parses the line numbers and verifies start <= end. IMPLICIT CONTRACT (F-13 fix): The _validate_node function in schema_validator.py enforces start <= end on line-range values as a defense-in-depth semantic check beyond the regex pattern. Consumers implementing their own validators MUST replicate this check: parse the digits after the colon, split on '-', and verify the first number is <= the second."
     },
     "evolve_block_content_hash": {
       "type": "string",
@@ -491,11 +611,11 @@ Expected: FAIL (ModuleNotFoundError or ImportError)
           "access_path": {"type": "string"},
           "normalization_note": {
             "type": "string",
-            "description": "Machine-readable normalization requirement for production values. Example: 'divide_by_100' for KVUtilization (sim 0.0-1.0 vs prod 0-100). PR3 MUST apply this normalization before passing values to the scorer. F-15: This field is optional in the schema because not all signals require normalization, but when present, PR3 MUST NOT ignore it. PR3 MUST iterate all signals and check for this field. CONSEQUENCE OF IGNORING: Without divide_by_100 normalization, KVUtilization values are 100x larger than the algorithm was trained on, causing severely degraded scoring. PR3 convergence-review MUST verify a test exists for normalization application."
+            "description": "Machine-readable normalization requirement for production values. Example: 'divide_by_100' for KVUtilization (sim 0.0-1.0 vs prod 0-100). PR3 MUST apply this normalization before passing values to the scorer. F-15: This field is optional in the schema because not all signals require normalization, but when present, PR3 MUST NOT ignore it. PR3 MUST iterate all signals and check for this field. CONSEQUENCE OF IGNORING: Without divide_by_100 normalization, KVUtilization values are 100x larger than the algorithm was trained on, causing severely degraded scoring — this is a silent correctness bug, not a crash. PR3 convergence-review MUST verify a test exists for normalization application. R2-F-9 fix: This requirement is also listed in docs/transfer/README.md § Cross-PR Contracts as a CRITICAL gate for PR3. PR3 MUST include a test `test_normalization_applied_to_kvutilization` that verifies the divide_by_100 normalization produces values in [0.0, 1.0] range when given percentage inputs."
           },
           "fidelity_provisional": {
             "type": "boolean",
-            "description": "F-14 fix: Set to true when the signal's fidelity rating in the mapping artifact is annotated as *(provisional)*. Allows downstream stages to programmatically distinguish provisional from confirmed fidelity ratings. When true, PR5 empirical validation is required before the rating can be considered stable. If absent, the fidelity rating is confirmed (not provisional)."
+            "description": "F-14 fix: Set to true when the signal's fidelity rating in the mapping artifact is annotated as *(provisional)*. Allows downstream stages to programmatically distinguish provisional from confirmed fidelity ratings. When true, PR5 empirical validation is required before the rating can be considered stable. R4-F-11 fix: If absent AND fidelity_checked is true, the fidelity rating is confirmed (not provisional). If absent AND fidelity_checked is false, fidelity status is unknown (no check was performed because the mapping artifact was not present). Consumers MUST check fidelity_checked before interpreting the absence of this field."
           }
         }
       }
@@ -505,7 +625,7 @@ Expected: FAIL (ModuleNotFoundError or ImportError)
       "description": "Metrics from best_program_info.json. combined_score is required.",
       "required": ["combined_score"],
       "properties": {
-        "combined_score": {"type": "number"}
+        "combined_score": {"type": "number", "description": "F-11 fix: Combined fitness score from the evolutionary optimizer (best_program_info.json). Represents the aggregate performance metric of the evolved algorithm. May be negative (e.g., -3858.94). No valid range constraint — the value's scale and sign depend on the optimizer's fitness function. Downstream consumers should treat this as an opaque metric for tracking which algorithm version was extracted."}
       }
     },
     "scope_validation_passed": {"type": "boolean"},
@@ -530,6 +650,10 @@ Expected: FAIL (ModuleNotFoundError or ImportError)
       "type": "string",
       "pattern": "^(unknown|\\d+\\.\\d+)$",
       "description": "Version of blis_to_llmd_mapping.md used at extraction time. Format: 'MAJOR.MINOR' (e.g., '1.0') or 'unknown' (fallback when version cannot be parsed). F-7 fix: pattern constraint ensures only valid version strings or the explicit 'unknown' fallback are accepted — rejects empty strings, arbitrary text, and malformed versions. Enables staleness detection: if the mapping artifact version changes (e.g., fidelity ratings updated in PR5), existing algorithm_summary.json artifacts are flagged as potentially stale. STALENESS POLICY (for PR3+): When consuming an algorithm_summary.json, compare its mapping_artifact_version against the current mapping artifact version. If they differ, re-run extract to produce an updated summary. A MAJOR version bump (e.g., 1.0 → 2.0) indicates signal or fidelity changes that require re-extraction; a MINOR bump (e.g., 1.0 → 1.1) indicates documentation-only changes where re-extraction is optional. ENFORCEMENT NOTE (F-4 fix): PR1 provides this field as a mechanism; enforcement is a PR3+ responsibility. PR3 MUST include a test `test_stale_mapping_version_detected` that verifies the consumer aborts when mapping_artifact_version differs from the current mapping. The PR3 convergence-review MUST check for this test."
+    },
+    "fidelity_checked": {
+      "type": "boolean",
+      "description": "R2-F-11 fix: Whether fidelity checks were performed during extraction. True if the mapping artifact existed at extraction time (fidelity ratings were verified). False if the mapping artifact was absent (bootstrap phase — fidelity checks skipped). Downstream stages SHOULD treat fidelity_checked=false artifacts as NOT pipeline-ready. CI with --strict always produces fidelity_checked=true (--strict fails if mapping is absent)."
     }
   }
 }
@@ -559,11 +683,37 @@ _TYPE_MAP = {
 }
 
 
+_UNSUPPORTED_KEYWORDS = {"$ref", "allOf", "anyOf", "oneOf", "patternProperties", "if", "then", "else"}
+
+
 def validate_artifact(data: dict, schema: dict) -> list[str]:
-    """Validate data against a restricted JSON Schema. Returns list of error strings."""
+    """Validate data against a restricted JSON Schema. Returns list of error strings.
+
+    R3-F-17 fix: Rejects schemas that use unsupported JSON Schema features ($ref,
+    allOf, etc.) with a clear error message, preventing silent incorrect validation.
+    """
     errors: list[str] = []
+    _check_unsupported_keywords(schema, "", errors)
+    if errors:
+        return errors  # Abort early — schema itself is invalid for this validator
     _validate_node(data, schema, "", errors)
     return errors
+
+
+def _check_unsupported_keywords(schema: dict, path: str, errors: list[str]) -> None:
+    """R3-F-17: Recursively check schema for unsupported keywords."""
+    for keyword in _UNSUPPORTED_KEYWORDS:
+        if keyword in schema:
+            errors.append(
+                f"Schema{' at ' + path if path else ''}: unsupported keyword '{keyword}'. "
+                f"This validator only supports a restricted JSON Schema subset."
+            )
+    # Recurse into nested schemas
+    if "properties" in schema:
+        for prop_name, prop_schema in schema["properties"].items():
+            _check_unsupported_keywords(prop_schema, f"{path}.{prop_name}", errors)
+    if "items" in schema and isinstance(schema["items"], dict):
+        _check_unsupported_keywords(schema["items"], f"{path}[]", errors)
 
 
 def _validate_node(data, schema: dict, path: str, errors: list[str]) -> None:
@@ -595,6 +745,10 @@ def _validate_node(data, schema: dict, path: str, errors: list[str]) -> None:
         # value, not just .py files. If the schema is extended to support
         # non-.py files, the semantic check already works. The schema pattern
         # is the gatekeeping constraint; this check is defense-in-depth.
+        # F-6 note: Latent risk for schema evolution — if future schemas add
+        # string fields matching '.+:\d+-\d+' that are NOT line ranges (e.g.,
+        # version ranges), this check would produce false positives. For v1
+        # with a single schema and one matching field, this is acceptable.
         elif isinstance(data, str) and re.fullmatch(r'.+:\d+-\d+', data):
             line_part = data.rsplit(":", 1)[-1]
             parts = line_part.split("-")
@@ -677,6 +831,11 @@ EOF
 
 Before writing any tests or implementation, verify the input artifacts exist and have the expected structure:
 
+**F-24 fix: Prerequisite — ensure inference-sim submodule is checked out.** The last verification step below requires `inference-sim/sim/routing.go`. If the submodule is not checked out, run:
+```bash
+git submodule update --init inference-sim
+```
+
 ```bash
 # Verify routing artifacts exist
 ls -la routing/best_program.py routing/best_program_info.json
@@ -688,6 +847,8 @@ grep -n "EVOLVE-BLOCK-START\|EVOLVE-BLOCK-END" routing/best_program.py
 sed -n '/EVOLVE-BLOCK-START/,/EVOLVE-BLOCK-END/p' routing/best_program.py | grep -oE '(snap|target|req)\.\w+'
 
 # Verify EffectiveLoad() expansion assumption against inference-sim source
+# (requires inference-sim submodule to be checked out — see prerequisite above)
+test -d inference-sim/ || { echo "ERROR: inference-sim submodule not checked out. Run: git submodule update --init inference-sim"; exit 1; }
 grep -A 10 'func.*EffectiveLoad' inference-sim/sim/routing.go
 ```
 
@@ -704,6 +865,7 @@ Context: The extract command must parse the EVOLVE-BLOCK from `routing/best_prog
 ```python
 # tools/test_transfer_cli.py
 import json
+import os
 import subprocess
 import sys
 import pytest
@@ -717,9 +879,17 @@ WORKSPACE = REPO_ROOT / "workspace"
 
 def run_cli(*args) -> tuple[int, dict]:
     """Run CLI command, return (exit_code, parsed_json_output)."""
+    # R4-F-8 fix: Strip CI env var from subprocess environment. In GitHub Actions,
+    # CI=true is set at the job level and propagates to all subprocesses. Without
+    # stripping, every extract call without --strict fails with 'CI environment
+    # detected but --strict flag not set'. Tests that need CI=true (e.g.,
+    # test_ci_env_requires_strict_flag) set it explicitly via env= parameter
+    # on subprocess.run. This ensures tests control the CI env var explicitly
+    # rather than inheriting it from the CI runner.
+    env = {k: v for k, v in os.environ.items() if k != "CI"}
     result = subprocess.run(
         [sys.executable, str(CLI), *args],
-        capture_output=True, text=True, cwd=str(REPO_ROOT),
+        capture_output=True, text=True, cwd=str(REPO_ROOT), env=env,
     )
     try:
         output = json.loads(result.stdout)
@@ -786,12 +956,22 @@ class TestExtract:
         assert "combined_score" in summary["metrics"]
 
     def test_extract_content_hash_matches_evolve_block(self):
-        """F-18: evolve_block_content_hash is SHA-256 of actual EVOLVE-BLOCK content."""
+        """F-18: evolve_block_content_hash is SHA-256 of actual EVOLVE-BLOCK content.
+
+        F-20 fix: This test independently recomputes the hash using the same
+        slicing convention as _extract_evolve_block: lines[start_idx:end_idx + 1]
+        (inclusive of both EVOLVE-BLOCK-START and EVOLVE-BLOCK-END marker lines).
+        See F-27 fix documentation for the canonical slicing specification.
+        If _extract_evolve_block's slicing changes, this test MUST be updated
+        to match, otherwise it would pass while production hashes diverge.
+        """
         import hashlib
         code, _ = run_cli("extract", str(ROUTING_DIR))
         assert code == 0
         summary = json.loads((WORKSPACE / "algorithm_summary.json").read_text())
         # Independently compute the hash from the source file
+        # IMPORTANT: Slicing must match _extract_evolve_block exactly:
+        # lines[start_idx:end_idx + 1] — inclusive of marker lines (F-27).
         source = (ROUTING_DIR / "best_program.py").read_text()
         lines = source.split("\n")
         start_idx = end_idx = None
@@ -832,6 +1012,9 @@ class TestExtract:
             )
             (tmpdir / "best_program.py").write_text(src)
             code, output = run_cli("extract", str(tmpdir))
+            # F-26 fix: Assert exit code as part of the behavioral contract (BC-5).
+            # Scope failure produces exit 1 (validation failure) with artifact written.
+            assert code == 1, f"Scope validation failure should exit 1, got {code}: {output}"
             # Should still produce artifact but with scope_validation_passed=false
             summary = json.loads((WORKSPACE / "algorithm_summary.json").read_text())
             assert summary["scope_validation_passed"] is False
@@ -887,9 +1070,13 @@ class TestExtract:
                 'snap.BatchSize\n'
                 '# EVOLVE-BLOCK-END\n'
             )
+            # R5-F-8 fix: Strip CI env var to prevent CI=true from triggering
+            # --strict enforcement (exit 1 without --strict flag).
+            env = {k: v for k, v in os.environ.items() if k != "CI"}
             result = subprocess.run(
                 [sys.executable, str(CLI), "extract", str(tmpdir)],
                 capture_output=True, text=True, cwd=str(REPO_ROOT),
+                env=env,
             )
             # F-22 fix: Verify extraction succeeds (exit 0) and produces correct output
             assert result.returncode == 0, (
@@ -910,7 +1097,8 @@ class TestExtract:
             assert "2" in result.stderr, "Warning should mention the count of blocks found"
 
     def test_extract_few_signals_strict_exits_1(self):
-        """F-9 fix: 1-2 signals in --strict mode should exit 1 (below MINIMUM_EXPECTED_SIGNALS=3)."""
+        """F-9 fix: 1-2 signals in --strict mode should exit 1 (below MINIMUM_EXPECTED_SIGNALS=3).
+        F-25 fix: Also verify the error message specifically mentions signal count."""
         import tempfile, shutil
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = Path(tmpdir)
@@ -929,6 +1117,77 @@ class TestExtract:
                 f"(< MINIMUM_EXPECTED_SIGNALS=3) should exit 1, got {code}: {output}"
             )
             assert output["status"] == "error"
+            # F-25 fix: Verify error message mentions signal count or minimum threshold
+            error_text = " ".join(output.get("errors", []))
+            assert "signal" in error_text.lower() and ("expected" in error_text.lower() or "minimum" in error_text.lower()), (
+                f"Error message should mention signal count or minimum threshold. Got: {error_text}"
+            )
+
+    def test_extract_few_signals_boundary_2_fails(self):
+        """R3-F-15 fix: Boundary test — exactly 2 signals (< MINIMUM_EXPECTED_SIGNALS=3)
+        should exit 1 in --strict mode."""
+        import tempfile, shutil
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+            shutil.copy2(str(ROUTING_DIR / "best_program_info.json"), str(tmpdir / "best_program_info.json"))
+            (tmpdir / "best_program.py").write_text(
+                '# EVOLVE-BLOCK-START\n'
+                'func route(snap RoutingSnapshot) {\n'
+                '    x := snap.QueueDepth\n'
+                '    y := snap.BatchSize\n'
+                '}\n'
+                '# EVOLVE-BLOCK-END\n'
+            )
+            code, output = run_cli("extract", "--strict", str(tmpdir))
+            assert code == 1, (
+                f"--strict with 2 signals (< MINIMUM_EXPECTED_SIGNALS=3) "
+                f"should exit 1, got {code}: {output}"
+            )
+
+    @pytest.mark.skipif(
+        not (Path(__file__).parent.parent / "docs" / "transfer" / "blis_to_llmd_mapping.md").exists(),
+        reason="Mapping artifact not present (pre-Task 5) — --strict always fails without mapping"
+    )
+    def test_extract_few_signals_boundary_3_passes_threshold(self):
+        """R3-F-15 fix: Boundary test — exactly 3 signals (= MINIMUM_EXPECTED_SIGNALS=3)
+        should pass the signal count threshold in --strict mode.
+        R3-F-9 fix: Changed from non-strict to --strict mode. In non-strict mode, the
+        MINIMUM_EXPECTED_SIGNALS check only emits a WARNING to stderr and never produces
+        exit 1 for signal count, making the test vacuous. With --strict, signal count
+        violations produce exit 1, so this test meaningfully verifies that 3 signals
+        meets the threshold. The companion test (boundary_2_fails) already uses --strict.
+        R4-F-4 fix: Added skipif guard for pre-Task 5 case. Without the mapping artifact,
+        --strict mode causes _check_fidelity to fail with 'Mapping artifact not found',
+        and the OR assertion ('signal' not in error OR 'expected' not in error) passes
+        vacuously because the mapping error contains neither keyword. The test never
+        actually verifies the signal count threshold. With the skipif guard, the test
+        only runs when the mapping exists, ensuring the signal count check is reached.
+        Also changed OR to AND in the assertion to prevent vacuous passes."""
+        import tempfile, shutil
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+            shutil.copy2(str(ROUTING_DIR / "best_program_info.json"), str(tmpdir / "best_program_info.json"))
+            (tmpdir / "best_program.py").write_text(
+                '# EVOLVE-BLOCK-START\n'
+                'func route(snap RoutingSnapshot) {\n'
+                '    x := snap.QueueDepth\n'
+                '    y := snap.BatchSize\n'
+                '    z := snap.InFlightRequests\n'
+                '}\n'
+                '# EVOLVE-BLOCK-END\n'
+            )
+            # R3-F-9 fix: Run with --strict to verify signal count threshold is
+            # actually enforced. In non-strict mode, signal count only warns on stderr
+            # and never exits 1, making the assertion vacuous.
+            code, output = run_cli("extract", "--strict", str(tmpdir))
+            # R5-F-5 fix: Positively assert success instead of only checking errors
+            # on failure. The previous code had a vacuous assertion: when code == 0
+            # (the expected case), no assertion was evaluated, so the test passed
+            # trivially without verifying that 3 signals actually meets the threshold.
+            assert code == 0, (
+                f"3 signals should pass the MINIMUM_EXPECTED_SIGNALS threshold, "
+                f"but got exit code {code}: {output.get('errors', [])}"
+                )
 
     def test_extract_missing_info_json_exits_2(self):
         """F-9 fix: best_program_info.json not existing at all should exit 2 (infra error)."""
@@ -951,19 +1210,32 @@ class TestExtract:
             assert any("best_program_info.json" in e for e in output.get("errors", []))
 
     def test_extract_missing_metrics_key_warns(self):
-        """F-15 edge case: best_program_info.json exists but has no 'metrics' key."""
+        """F-15 edge case: best_program_info.json exists but has no 'metrics' key.
+        F-26 fix: Also verify the artifact is still written so users can inspect it."""
         import tempfile, shutil
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = Path(tmpdir)
             shutil.copy2(str(ROUTING_DIR / "best_program.py"), str(tmpdir / "best_program.py"))
             (tmpdir / "best_program_info.json").write_text('{"generation": 100}')
+            # R5-F-8 fix: Strip CI env var to prevent CI=true from triggering
+            # --strict enforcement (exit 1 without --strict flag).
+            env = {k: v for k, v in os.environ.items() if k != "CI"}
             result = subprocess.run(
                 [sys.executable, str(CLI), "extract", str(tmpdir)],
                 capture_output=True, text=True, cwd=str(REPO_ROOT),
+                env=env,
             )
             # Should succeed (metrics are optional for extraction) but warn
             assert result.returncode == 0, f"Missing metrics key should not abort: {result.stderr}"
             assert "metrics" in result.stderr.lower() or "warning" in result.stderr.lower()
+            # F-26 fix: Verify the artifact was still written so users can inspect it
+            summary_path = WORKSPACE / "algorithm_summary.json"
+            assert summary_path.exists(), (
+                "algorithm_summary.json should be written even without metrics "
+                "(non-strict mode is for exploratory use)"
+            )
+            summary = json.loads(summary_path.read_text())
+            assert "signals" in summary, "Artifact should contain signals even without metrics"
 
     def test_extract_missing_metrics_key_strict_fails(self):
         """F-26: In --strict mode, missing combined_score should fail with exit 1."""
@@ -1005,6 +1277,14 @@ class TestExtract:
         assert "signals" in file_artifact
         assert "signals" not in stdout_output
 
+    # R4-F-14 fix: Added skipif guard for pre-Task 5 case. Without the mapping
+    # artifact, the 'with mapping present' run (code_with) and the 'without mapping'
+    # run both execute without mapping, so the test passes vacuously — it never
+    # demonstrates the asymmetry between with/without mapping scenarios.
+    @pytest.mark.skipif(
+        not (Path(__file__).parent.parent / "docs" / "transfer" / "blis_to_llmd_mapping.md").exists(),
+        reason="Mapping artifact not present (pre-Task 5) — cannot demonstrate with/without asymmetry"
+    )
     def test_extract_non_determinism_boundary_documented(self):
         """F-2/F-19: Verify extract produces different fidelity outcomes with/without mapping.
         This test documents AND VERIFIES the known non-determinism boundary (BC-6).
@@ -1035,7 +1315,13 @@ class TestExtract:
                 shutil.move(str(backup), str(mapping))
 
     def test_extract_without_mapping_graceful_degradation(self):
-        """BC-6 graceful degradation: extract succeeds when mapping artifact absent."""
+        """BC-6 graceful degradation: extract succeeds when mapping artifact absent.
+        R3-F-22 fix: Also verify fidelity_checked is false in the output artifact.
+        F-20 NOTE: This test uses shutil.move to temporarily remove the mapping artifact.
+        The finally block restores it, but SIGKILL would leave the artifact missing.
+        Multiple tests share this pattern — do NOT run with pytest-xdist (parallel)
+        as concurrent moves on the same file would corrupt test state. For v1 with
+        sequential test execution, this is acceptable."""
         import shutil
         mapping = REPO_ROOT / "docs" / "transfer" / "blis_to_llmd_mapping.md"
         backup = mapping.with_suffix(".md.bak")
@@ -1045,6 +1331,12 @@ class TestExtract:
             code, output = run_cli("extract", str(ROUTING_DIR))
             assert code == 0, f"Extract should succeed without mapping: {output}"
             assert output["status"] == "ok"
+            # R3-F-22 fix: Verify the artifact has fidelity_checked=false
+            summary = json.loads((WORKSPACE / "algorithm_summary.json").read_text())
+            assert summary.get("fidelity_checked") is False, (
+                f"Without mapping artifact, fidelity_checked must be false. "
+                f"Got: {summary.get('fidelity_checked')}"
+            )
         finally:
             if backup.exists():
                 shutil.move(str(backup), str(mapping))
@@ -1071,7 +1363,15 @@ class TestExtract:
         assert code == 0, f"--strict should succeed with mapping: {output}"
 
     def test_extract_mapping_version_parsed(self):
-        """F-18: mapping_artifact_version is parsed from mapping artifact."""
+        """F-18: mapping_artifact_version is parsed from mapping artifact.
+        F-22 fix: Independently read the mapping artifact version and compare,
+        rather than only checking against a hardcoded '1.0' value.
+        F-29 NOTE: The independent verification below uses the same regex as cmd_extract
+        (r'\\*\\*Version:\\*\\*\\s*(\\S+)'). A truly independent check would use a different
+        method (e.g., string search for 'Version:' then extract the next token). However,
+        the primary value of this test is ensuring the version is not 'unknown' and
+        matches the mapping artifact — the regex-vs-regex validation still catches
+        regressions where cmd_extract's parsing breaks."""
         code, _ = run_cli("extract", str(ROUTING_DIR))
         assert code == 0
         summary = json.loads((WORKSPACE / "algorithm_summary.json").read_text())
@@ -1080,7 +1380,14 @@ class TestExtract:
             "mapping_artifact_version should be parsed from mapping artifact, got 'unknown'. "
             "Ensure mapping has a '**Version:** X.Y' line."
         )
-        assert version == "1.0", f"Expected version '1.0', got '{version}'"
+        # F-29 fix: Use a simpler, different method for independent verification.
+        # Instead of the same regex, check that the version string appears in the
+        # mapping artifact's Version line using basic string operations.
+        mapping_content = (REPO_ROOT / "docs" / "transfer" / "blis_to_llmd_mapping.md").read_text()
+        assert f"**Version:** {version}" in mapping_content, (
+            f"Parsed version '{version}' not found as '**Version:** {version}' in mapping artifact. "
+            f"Extract may have failed to parse or a different code path produced the value."
+        )
 
 
 class TestGoldenSignalList:
@@ -1095,8 +1402,45 @@ class TestGoldenSignalList:
     HOW TO UPDATE: Manually read the EVOLVE-BLOCK, identify all RoutingSnapshot
     field accesses and request-level field accesses, and update EXPECTED_SIGNALS.
     Do NOT simply copy the extract output — the point is independent verification.
+
+    FORMAL VERIFICATION PROCEDURE (F-2 fix):
+    When updating EXPECTED_SIGNALS, follow these steps to ensure independence:
+    1. Open routing/best_program.py and locate the EVOLVE-BLOCK region.
+    2. For each line between START and END markers, identify field accesses matching:
+       - snap.FieldName or snapshots[i].FieldName → RoutingSnapshot fields
+       - snap.MethodName() → expand via METHOD_EXPANSIONS (verify in routing.go)
+       - req.FieldName → request-level fields
+    3. Cross-reference each found field against inference-sim/sim/routing.go to
+       confirm it exists in the RoutingSnapshot struct (at the pinned commit).
+    4. Record the complete set BEFORE looking at extract output.
+    5. Only then run extract and compare — differences indicate either a regex
+       gap (fix _extract_signals) or a manual inspection miss (update this set).
+    This procedure ensures the golden list is derived from source reading, not
+    from the regex output that the test is designed to verify.
+
+    ANTI-GAMING SAFEGUARD (R2-F-5 fix):
+    The git commit message for any EXPECTED_SIGNALS update MUST include:
+    "Signals verified from EVOLVE-BLOCK lines [N-M] of routing/best_program.py"
+    with the actual line range. Code reviewers MUST verify this claim by:
+    (a) checking that the listed line range matches the EVOLVE-BLOCK markers,
+    (b) confirming the signal set is derivable from those lines via the 5-step
+    procedure above. If the commit message does not include this attestation,
+    the PR review MUST request it before approval.
     """
 
+    # F-17 fix: MAPPING UPDATE WORKFLOW when EVOLVE-BLOCK changes:
+    # If this test fails because the EVOLVE-BLOCK changed, follow this workflow:
+    # 1. Update EXPECTED_SIGNALS below using the Formal Verification Procedure above.
+    # 2. Update EXPECTED_COMPOSITES if composite method calls changed.
+    # 3. Run extract to produce updated algorithm_summary.json.
+    # 4. Run validate-mapping to check if the mapping artifact needs updating.
+    # 5. If validate-mapping reports missing/extra signals, update the mapping artifact:
+    #    - Add rows for new signals (with fidelity ratings and production equivalents).
+    #    - Remove rows for signals no longer accessed.
+    #    - Bump the mapping artifact version (MAJOR bump for signal changes).
+    # 6. Re-run extract --strict and validate-mapping to confirm consistency.
+    # 7. If fidelity ratings need re-evaluation, document in the Deviation Log.
+    #
     # Manually verified from EVOLVE-BLOCK inspection:
     #   snap.EffectiveLoad() -> QueueDepth, BatchSize, InFlightRequests
     #   snap.KVUtilization (direct access)
@@ -1158,13 +1502,13 @@ class TestSourceSyncVerification:
     are pinned to a specific commit — drift only matters when the submodule is
     updated, at which point these tests MUST be run locally before committing.
 
-    NOTE ON llm-d-inference-scheduler (F-6): CI only checks out inference-sim, not
-    llm-d-inference-scheduler. The mapping artifact pins the llm-d-inference-scheduler
-    commit hash but no CI test verifies the scorer interface still matches or that the
-    hash is current. This is acceptable for PR1 because: (1) the pinned hash provides a
-    stable reference point, (2) submodule updates are infrequent and deliberate, and
-    (3) PR3 will verify the interface at implementation time. If automated verification
-    is needed, add a CI step per the F-21 note in Task 5 Step 2.
+    NOTE ON llm-d-inference-scheduler (F-6, R2-F-4 fix): CI checks out both inference-sim
+    and llm-d-inference-scheduler (see .github/workflows/test.yml). The llm-d-inference-scheduler
+    checkout is for commit hash verification in Task 5 Step 2. The mapping artifact pins the
+    llm-d-inference-scheduler commit hash but no CI test currently verifies the scorer interface
+    still matches. This is acceptable for PR1 because: (1) the pinned hash provides a stable
+    reference point, (2) submodule updates are infrequent and deliberate, and (3) PR3 will
+    verify the interface at implementation time.
 
     CI CONFIGURATION REQUIREMENT: Add `git submodule update --init inference-sim`
     to the CI setup step. Without this, TestSourceSyncVerification tests are
@@ -1184,7 +1528,9 @@ class TestSourceSyncVerification:
     """
 
     def test_ci_must_not_skip_sync_tests(self):
-        """F-8: In CI, submodule MUST be checked out — fail loudly instead of skipping."""
+        """F-8: In CI, submodule MUST be checked out — fail loudly instead of skipping.
+        F-24 fix: Also verify the file is non-empty to catch corrupt/incomplete checkouts.
+        """
         import os
         routing_go = REPO_ROOT / "inference-sim" / "sim" / "routing.go"
         if os.environ.get("CI"):
@@ -1193,14 +1539,28 @@ class TestSourceSyncVerification:
                 "Add 'git submodule update --init inference-sim' to CI setup. "
                 "Without this, TestSourceSyncVerification tests are silently skipped."
             )
+            # F-24 fix: Verify file is non-empty (catches empty/corrupt checkout)
+            assert routing_go.stat().st_size > 0, (
+                "CI environment detected but routing.go is empty (0 bytes). "
+                "The submodule checkout may be corrupt. Re-run: "
+                "'git submodule update --init --force inference-sim'"
+            )
 
     def test_method_expansion_matches_source(self):
-        """F-1: Verify EffectiveLoad() expansion matches inference-sim implementation."""
+        """F-1: Verify EffectiveLoad() expansion matches inference-sim implementation.
+        F-8 fix: Known limitation — the regex r'func.*EffectiveLoad\\b.*?\\{(.*?)\\}'
+        uses non-greedy .*? which terminates at the first closing brace. This works
+        for simple accessor methods like EffectiveLoad() but would fail if the function
+        body contains nested braces (if/for blocks). If EffectiveLoad() becomes more
+        complex, replace the regex with a proper brace-depth counter.
+        Also note: this test verifies field PRESENCE in the body, not the operation
+        (addition). The 'sum' formula is manually verified — see F-21 note in cmd_extract."""
         routing_go = REPO_ROOT / "inference-sim" / "sim" / "routing.go"
         if not routing_go.exists():
             pytest.skip("inference-sim submodule not checked out — see class docstring for CI requirements")
         source = routing_go.read_text()
         # Find the EffectiveLoad function body
+        # F-8 note: non-greedy match terminates at first '}' — see docstring.
         import re
         match = re.search(r'func.*EffectiveLoad\b.*?\{(.*?)\}', source, re.DOTALL)
         assert match is not None, "EffectiveLoad() function not found in routing.go"
@@ -1226,7 +1586,12 @@ class TestSourceSyncVerification:
         assert match is not None, "RoutingSnapshot struct not found in routing.go"
         struct_body = match.group(1)
         # Extract field names from struct
-        struct_fields = set(re.findall(r'(\w+)\s+(?:int|int64|float64|string|bool)', struct_body))
+        # R3-F-15 fix: Broadened type regex to match any Go type, not just 5 primitives.
+        # Previous regex only matched int|int64|float64|string|bool, silently missing
+        # fields with types like time.Time, []byte, *int, or custom types. The new
+        # pattern matches any non-whitespace sequence after the field name, capturing
+        # all struct fields regardless of type.
+        struct_fields = set(re.findall(r'(\w+)\s+\S+', struct_body))
         # Verify our hardcoded dict matches
         from tools.transfer_cli import ROUTING_SNAPSHOT_FIELDS
         hardcoded = set(ROUTING_SNAPSHOT_FIELDS.keys())
@@ -1272,12 +1637,24 @@ MAPPING_PATH = REPO_ROOT / "docs" / "transfer" / "blis_to_llmd_mapping.md"
 # SYNC NOTE: This dict is derived from the struct at the pinned submodule commit.
 # If inference-sim evolves, re-derive via:
 #   grep -A 20 'type RoutingSnapshot struct' inference-sim/sim/routing.go
+# F-1 RECONCILIATION: This dict contains ALL 7 struct fields (mirrors the Go struct).
+# Of these, only 5 are accessed in the EVOLVE-BLOCK (QueueDepth, BatchSize,
+# KVUtilization, CacheHitRate, InFlightRequests). ID and FreeKVBlocks are struct
+# fields but NOT accessed by the evolved algorithm. They appear here because
+# test_routing_snapshot_fields_match_source verifies this dict matches the Go struct
+# exactly. They do NOT appear in:
+#   - EXPECTED_SIGNALS (6 entries: the 5 accessed struct fields + SessionID)
+#   - The mapping table (5 RoutingSnapshot rows + 1 SessionID row = 6 mapped signals)
+# This is correct: unmapped struct fields are intentionally excluded from the mapping
+# because the evolved algorithm does not use them. validate-mapping's bidirectional
+# check compares extracted signals (from the EVOLVE-BLOCK) against the mapping table,
+# so ID and FreeKVBlocks are never flagged as extra — they are not extracted.
 ROUTING_SNAPSHOT_FIELDS = {
-    "ID": "string",
+    "ID": "string",              # Struct field — NOT accessed in EVOLVE-BLOCK
     "QueueDepth": "int",
     "BatchSize": "int",
     "KVUtilization": "float64",
-    "FreeKVBlocks": "int64",
+    "FreeKVBlocks": "int64",     # Struct field — NOT accessed in EVOLVE-BLOCK
     "CacheHitRate": "float64",
     "InFlightRequests": "int",
 }
@@ -1341,10 +1718,26 @@ def _extract_evolve_block(source: str) -> tuple[str | None, str | None]:
         if "EVOLVE-BLOCK-END" in line:
             if end_idx is None:
                 end_idx = i
-    if start_idx is None or end_idx is None:
+    # F-18 fix: Differentiate error conditions for better diagnostics.
+    if start_idx is None and end_idx is None:
+        return None, None  # No markers at all — caller reports "markers not found"
+    if start_idx is None:
+        import sys as _sys
+        print("WARNING: EVOLVE-BLOCK-END found without EVOLVE-BLOCK-START", file=_sys.stderr)
+        return None, None
+    if end_idx is None:
+        import sys as _sys
+        print("WARNING: EVOLVE-BLOCK-START found at line "
+              f"{start_idx + 1} but no EVOLVE-BLOCK-END", file=_sys.stderr)
         return None, None
     if block_count > 1:
         import sys as _sys
+        # R2-F-18 note: This warning covers both sequential (START,END,START,END) and
+        # nested (START,START,END,END) cases. In the nested case, start_idx is the first
+        # START and end_idx is the first END, so the extracted block may include a second
+        # START marker but not its corresponding END — producing a malformed block. The
+        # EVOLVE-BLOCK is expected to have exactly one pair; multiple pairs indicate a
+        # source file issue that requires manual investigation.
         print(f"WARNING: Found {block_count} EVOLVE-BLOCK-START markers but only "
               f"extracting the first block (lines {start_idx + 1}-{end_idx + 1}). "
               f"Additional blocks are silently ignored. If multiple blocks are "
@@ -1371,6 +1764,15 @@ def _extract_signals(block: str) -> list[dict]:
     The net false positive risk is: a single-letter variable accessing a field
     with the SAME NAME as a RoutingSnapshot field but on a different struct.
     This is unlikely in the current EVOLVE-BLOCK but not impossible.
+
+    GO SYNTAX VALIDATION (F-5 note): This function does NOT validate that the
+    EVOLVE-BLOCK content is syntactically valid Go code. If the EVOLVE-BLOCK
+    contained non-Go text, extraction would find zero signals and exit 1 with
+    "No routing signals found in EVOLVE-BLOCK" — the error message does not
+    indicate the root cause. This is acceptable for v1: the EVOLVE-BLOCK is Go
+    code embedded in routing/best_program.py and is not user-supplied input.
+    The golden-file test (TestGoldenSignalList) catches any case where the
+    EVOLVE-BLOCK doesn't contain expected signals.
 
     FALSE NEGATIVE RISK (genuine gap): Signals accessed through patterns not
     covered by the regex will be missed silently. Known blind spots:
@@ -1405,12 +1807,23 @@ def _extract_signals(block: str) -> list[dict]:
             found[field] = f"snap.{field}"
 
     # Match method calls that expand to multiple fields
+    # F-12 fix: Unrecognized methods (not in METHOD_EXPANSIONS and not in _IGNORE_METHODS)
+    # emit a stderr WARNING so new RoutingSnapshot methods are not silently dropped.
+    # The golden-file test (TestGoldenSignalList) is the primary safety net, but the
+    # warning provides immediate feedback during development.
+    _IGNORE_METHODS = {"String", "Error", "Format", "GoString", "Reset", "ProtoMessage"}
     for match in re.finditer(r'\.\b(\w+)\(\)', block):
         method = match.group(1)
         if method in METHOD_EXPANSIONS:
             for field in METHOD_EXPANSIONS[method]:
                 if field not in found:
                     found[field] = f"snap.{method}() -> {field}"
+        elif method not in _IGNORE_METHODS:
+            import sys as _sys
+            print(f"WARNING: Unrecognized method call '{method}()' in EVOLVE-BLOCK — "
+                  f"not in METHOD_EXPANSIONS. If this is a new RoutingSnapshot method, "
+                  f"add it to METHOD_EXPANSIONS with its constituent fields.",
+                  file=_sys.stderr)
 
     # Match request-level field access: req.FieldName, request.FieldName
     for match in re.finditer(r'(?:req(?:uest)?)\.\b(\w+)', block):
@@ -1424,7 +1837,18 @@ def _extract_signals(block: str) -> list[dict]:
     all_known = set(ROUTING_SNAPSHOT_FIELDS.keys()) | set(REQUEST_LEVEL_FIELDS.keys()) | set(METHOD_EXPANSIONS.keys())
     # Common Go method names and properties to ignore (not signal accesses)
     _IGNORE_FIELDS = {"String", "Error", "Len", "Less", "Swap", "Format"}
-    for match in re.finditer(r'(?:snap(?:shots?\[\w+\])?|target|req(?:uest)?)\.\b(\w+)', block):
+    # F-28 fix: Added [a-z] alternative to match the first extraction loop's regex,
+    # ensuring single-letter alias field accesses trigger the unrecognized field warning.
+    # R3-F-14 NOTE — FALSE POSITIVE RISK: The [a-z] alternative matches ANY single
+    # lowercase letter as a receiver (e.g., 'v.Field' in 'for i, v := range items').
+    # Unlike the first extraction loop which filters by ROUTING_SNAPSHOT_FIELDS (discarding
+    # false positives), THIS loop emits 'unknown' type signals for ANY unrecognized field.
+    # This could produce spurious unknown-type signals from loop variables or other
+    # single-letter identifiers accessing non-RoutingSnapshot fields. MITIGATION: The
+    # golden-file test (TestGoldenSignalList) catches unexpected signals in the output,
+    # providing a safety net. For v1 with a known EVOLVE-BLOCK, this is acceptable.
+    # If false positives become an issue, restrict [a-z] to known receiver aliases.
+    for match in re.finditer(r'(?:snap(?:shots?\[\w+\])?|target|req(?:uest)?|[a-z])\.\b(\w+)', block):
         field = match.group(1)
         if field not in all_known and field not in _IGNORE_FIELDS and field not in found:
             import sys as _sys
@@ -1437,8 +1861,18 @@ def _extract_signals(block: str) -> list[dict]:
 
     # Normalization notes for signals with known unit mismatches between sim and prod.
     # These are machine-readable so PR3 can programmatically discover required normalizations.
+    # F-11 FORMAT CONVENTION: Values use the format 'operation: human_explanation'.
+    # PR3 should extract the operation by splitting on the first colon and stripping
+    # whitespace (e.g., 'divide_by_100: ...' → operation='divide_by_100').
+    # For v1 with only two normalization notes, this convention is sufficient.
+    # If more notes are added, consider a structured format (e.g., JSON or named fields).
+    # F-4 fix: SessionID normalization note documents the semantic type gap.
+    # The Go field type is 'string', but the EVOLVE-BLOCK uses it as a boolean
+    # presence check (req.SessionID != ""). PR3 must generate a boolean check
+    # (compare against empty string), not pass the raw string value to the scorer.
     NORMALIZATION_NOTES = {
-        "KVUtilization": "divide_by_100: sim uses 0.0-1.0 ratio, prod uses 0-100 percentage",
+        "KVUtilization": "divide_prod_by_100: production value (0-100 percentage) must be divided by 100 to match sim's 0.0-1.0 ratio (i.e., normalized = prod_kv / 100.0)",
+        "SessionID": "boolean_presence_check: compare against empty string (req.SessionID != empty)",
     }
 
     signals = []
@@ -1456,7 +1890,16 @@ def _extract_signals(block: str) -> list[dict]:
 
 
 def _check_scope(block: str, signals: list[dict]) -> tuple[bool, list[str]]:
-    """Check that the algorithm is routing-scope only."""
+    """Check that the algorithm is routing-scope only.
+
+    R3-F-11 note: re.search(pattern, block) matches anywhere in the block
+    text, including Go comments (// ...). This means a comment like
+    '// TODO: integrate PrefillInstance later' would trigger a false positive.
+    This is acceptable for v1 because the EVOLVE-BLOCK is Go code where
+    comments are unlikely to reference out-of-scope struct names. If false
+    positives occur in practice, switch to a comment-stripping pre-pass or
+    restrict matching to non-comment lines.
+    """
     errors = []
 
     # Check for out-of-scope patterns
@@ -1476,6 +1919,12 @@ def _check_scope(block: str, signals: list[dict]) -> tuple[bool, list[str]]:
 def _check_fidelity(signals: list[dict], *, strict: bool = False) -> tuple[bool, list[str]]:
     """Check signal fidelity if mapping artifact exists. Returns (ok, errors).
 
+    F-18 NOTE: This function has a deliberate side effect — it mutates signal dicts
+    in-place by adding sig['fidelity_provisional'] = True for signals with provisional
+    ratings. This is intentional: the caller (cmd_extract) needs these annotations in
+    the signals list to include them in the output artifact. The schema defines
+    fidelity_provisional as an optional boolean property.
+
     Args:
         strict: If True (CI mode), require mapping artifact to exist.
                 If False (default), skip fidelity check when mapping is absent.
@@ -1494,17 +1943,60 @@ def _check_fidelity(signals: list[dict], *, strict: bool = False) -> tuple[bool,
               file=_sys.stderr)
         return True, []  # Defer check to Stage 2
 
-    content = MAPPING_PATH.read_text()
+    # R2-F-12 fix: Size guard on mapping artifact for consistency with
+    # best_program.py and best_program_info.json guards in cmd_extract.
+    MAX_MAPPING_SIZE = 10 * 1024 * 1024  # 10 MB — same as other file guards
+    if MAPPING_PATH.stat().st_size > MAX_MAPPING_SIZE:
+        return False, [
+            f"Mapping artifact exceeds {MAX_MAPPING_SIZE} bytes — refusing to read. "
+            f"This is a safety guard; the mapping artifact should be small."
+        ]
+    # R2-F-3 fix: Emit a notice when running without --strict but mapping exists,
+    # so developers are aware of the local/CI divergence.
+    if not strict:
+        import sys as _sys
+        print("NOTICE: Running without --strict. Fidelity checks are active (mapping artifact "
+              "found), but CI uses --strict for deterministic enforcement. Use --strict locally "
+              "to match CI behavior.",
+              file=_sys.stderr)
+    # F-15 fix: Wrap read_text() in try/except for PermissionError/OSError.
+    try:
+        content = MAPPING_PATH.read_text()
+    except OSError as e:
+        return False, [f"Failed to read mapping artifact: {e}"]
     errors = []
     warnings = []
+    # R5-F-12 fix: Named constants for column skip counts to prevent regressions.
+    # These numbers represent how many pipe-delimited columns to skip between the
+    # signal name (col 1) and the Fidelity column. They have been a recurring source
+    # of bugs (R2-F-1 changed to {5}, R3-F-1 reverted to {4}).
+    # Main table: | Sim Signal | Go Type | Sim Access Path | Prod Equivalent | Prod Access Path | Fidelity | ...
+    #                col 1       col 2     col 3             col 4              col 5               col 6
+    #              matched     ←———————————— skip 4 columns ————————————→     captured
+    MAIN_TABLE_FIDELITY_COL_OFFSET = 4
+    # Additional Signals table: | Signal | Context | Production Mapping | Fidelity | Notes |
+    #                            col 1     col 2     col 3               col 4
+    #                           matched  ←——— skip 2 columns ————→     captured
+    ADDITIONAL_TABLE_FIDELITY_COL_OFFSET = 2
+
     for sig in signals:
-        # Look for the signal in the mapping table
-        # Format: | SignalName | ... | low/medium/high | ...
+        # Look for the signal in the mapping table and extract its fidelity rating.
         # F-5 fix: Also detect *(provisional)* annotation after the fidelity rating
-        pattern = rf'\|\s*{re.escape(sig["name"])}\s*\|.*?\|\s*(low|medium|high)\s*(?:\*\(provisional\)\*)?\s*\|'
+        pattern = rf'\|\s*{re.escape(sig["name"])}(?:\s*\([^)]*\))?\s*\|(?:[^|]*\|){{{MAIN_TABLE_FIDELITY_COL_OFFSET}}}\s*(low|medium|high)\s*(?:\*\(provisional\)\*)?\s*\|'
         match = re.search(pattern, content, re.IGNORECASE)
+        if not match:
+            # Fallback: try matching in the Additional Signals table (different column count)
+            # Format: | Signal | Context | Production Mapping | Fidelity | Notes |
+            pattern_alt = rf'\|\s*{re.escape(sig["name"])}(?:\s*\([^)]*\))?\s*\|(?:[^|]*\|){{{ADDITIONAL_TABLE_FIDELITY_COL_OFFSET}}}\s*(low|medium|high)\s*(?:\*\(provisional\)\*)?\s*\|'
+            match = re.search(pattern_alt, content, re.IGNORECASE)
         if match:
             rating = match.group(1).lower()
+            # R2-F-13 note: The Composite Signals table uses 'medium (composite)' as the
+            # fidelity rating, which would NOT match the `(low|medium|high)` regex.
+            # Currently this is harmless because composite signals (e.g., EffectiveLoad)
+            # are not in the signals[] array — they are in composite_signals[]. If a future
+            # change adds composite signals to signals[], the regex must be updated to
+            # handle parenthetical qualifiers (e.g., `(low|medium|high)(?:\s*\([^)]*\))?`).
             # F-5 fix: Detect provisional ratings and emit a warning
             is_provisional = "*(provisional)*" in match.group(0)
             if is_provisional:
@@ -1534,19 +2026,17 @@ def _check_fidelity(signals: list[dict], *, strict: bool = False) -> tuple[bool,
 
 def cmd_extract(args: argparse.Namespace) -> int:
     """Extract algorithm metadata from routing artifacts."""
-    # F-1 fix: CI auto-detection — FAIL if --strict not used in CI environment.
-    # A warning is insufficient because CI systems do not fail on stderr output.
-    # Hard failure ensures non-deterministic results cannot pass CI silently.
-    import os as _os
-    if _os.environ.get("CI") and not getattr(args, 'strict', False):
-        return _output("error", 1, errors=[
-            "CI environment detected but --strict flag not set. "
-            "CI pipelines MUST use --strict to ensure deterministic fidelity checks. "
-            "Without --strict, extract skips fidelity checks when the mapping artifact "
-            "is absent, producing non-deterministic results. "
-            "Usage: python tools/transfer_cli.py extract --strict routing/"
-        ])
+    # R3-F-6 fix: Validate routing_dir FIRST, before CI env var check.
+    # If routing_dir is invalid, the user needs to know about that infrastructure
+    # error regardless of CI mode. Previously, the CI check preceded routing_dir
+    # validation, causing a misleading --strict error when the real problem was
+    # a missing/invalid directory.
     routing_dir = Path(args.routing_dir).resolve()
+
+    # R3-F-6 fix: Infrastructure validation FIRST — routing_dir must exist and be
+    # within REPO_ROOT before any mode-specific checks. This ensures the user gets
+    # an actionable error about the actual problem (missing/invalid directory)
+    # rather than a misleading CI/--strict error.
     # F-23 + F-20 fix: Validate routing_dir is within REPO_ROOT using
     # Path.is_relative_to() (Python 3.9+) instead of string prefix matching,
     # which is robust against symlink-based bypasses on some systems.
@@ -1556,6 +2046,28 @@ def cmd_extract(args: argparse.Namespace) -> int:
             f"Path must be within the project directory."])
     if not routing_dir.is_dir():
         return _output("error", 2, errors=[f"Routing directory not found: {routing_dir}"])
+
+    # F-1 fix: CI auto-detection — FAIL if --strict not used in CI environment.
+    # A warning is insufficient because CI systems do not fail on stderr output.
+    # Hard failure ensures non-deterministic results cannot pass CI silently.
+    import os as _os
+    # F-9 fix: Check for truthy CI values only. CI='false' or CI='0' should NOT
+    # trigger CI enforcement, matching developer expectations.
+    _ci_val = _os.environ.get("CI", "").lower()
+    if _ci_val in ("true", "1", "yes") and not getattr(args, 'strict', False):
+        # F-20 fix: Clear error message explaining why this fails and how to resolve.
+        # Note: CI=true may be set by developers locally for other reasons (e.g.,
+        # testing CI-specific behavior of other tools). The error message should be
+        # clear about how to resolve: either pass --strict or unset CI.
+        return _output("error", 1, errors=[
+            "CI environment detected (CI env var is set) but --strict flag not set. "
+            "CI pipelines MUST use --strict to ensure deterministic fidelity checks. "
+            "Without --strict, extract skips fidelity checks when the mapping artifact "
+            "is absent, producing non-deterministic results. "
+            "Fix: either pass --strict (recommended), set CI=false, or unset the CI "
+            "environment variable if you are running locally and do not want CI-mode enforcement. "
+            "Usage: python tools/transfer_cli.py extract --strict routing/"
+        ])
 
     program_py = routing_dir / "best_program.py"
     if not program_py.exists():
@@ -1582,7 +2094,12 @@ def cmd_extract(args: argparse.Namespace) -> int:
     source = program_py.read_text()
     block, line_range = _extract_evolve_block(source)
     if block is None:
-        return _output("error", 2, errors=["EVOLVE-BLOCK markers not found in best_program.py"])
+        # F-18 fix: _extract_evolve_block emits specific warnings to stderr for
+        # mismatched markers (START without END, END without START). The error
+        # message here covers the general case; check stderr for diagnostics.
+        return _output("error", 2, errors=[
+            "EVOLVE-BLOCK markers not found or malformed in best_program.py. "
+            "Check stderr for specific diagnostic (e.g., START without END)."])
 
     # Extract signals
     signals = _extract_signals(block)
@@ -1598,6 +2115,12 @@ def cmd_extract(args: argparse.Namespace) -> int:
     # significantly (e.g., if a future algorithm uses only 2-3 signals by design,
     # lower the threshold accordingly).
     # F-19 fix: In --strict mode, this is a hard failure (exit 1) instead of a warning.
+    # R2-F-15 fix: CONFIGURABILITY PATH — If multi-algorithm support is added (future PR),
+    # move this threshold to algorithm_summary.schema.json as a per-algorithm field
+    # (e.g., "minimum_expected_signals": 3 in the algorithm config). For v1 with a
+    # single algorithm, the hardcoded constant is appropriate and avoids unnecessary
+    # configuration complexity. The golden-file test (EXPECTED_SIGNALS) provides the
+    # authoritative signal count check; this threshold is a secondary heuristic guard.
     MINIMUM_EXPECTED_SIGNALS = 3
     if len(signals) < MINIMUM_EXPECTED_SIGNALS:
         msg = (f"Only {len(signals)} signals found (expected >= {MINIMUM_EXPECTED_SIGNALS}). "
@@ -1647,6 +2170,10 @@ def cmd_extract(args: argparse.Namespace) -> int:
     # See "Two-output design" in Part 1, Section C.
     # NOTE: algorithm_name is hardcoded for PR1 (single algorithm).
     # For multi-algorithm support, derive from input artifact metadata.
+    # R3-F-16 note: block.encode() is safe here — block is a Python str (from
+    # read_text() → split → join), and str.encode() always succeeds on a valid
+    # Python str (Unicode → UTF-8). If the source file contained non-UTF-8 bytes,
+    # read_text() would have already raised UnicodeDecodeError (exit 2 path).
     block_hash = hashlib.sha256(block.encode()).hexdigest()
 
     # Read mapping artifact version for staleness tracking (F-13)
@@ -1658,10 +2185,22 @@ def cmd_extract(args: argparse.Namespace) -> int:
     # If the mapping artifact format changes, update this regex and the test
     # test_extract_mapping_version_parsed. The mapping artifact and this parser
     # are co-created in PR1, so the format is consistent within this PR.
+    # F-9 fix: SILENT FALLBACK RISK — if the format changes (e.g., 'Version: 1.0'
+    # without bold), the regex fails silently and version becomes 'unknown'. This
+    # could mask staleness issues since 'unknown' passes schema validation. The
+    # test_extract_mapping_version_parsed test catches this regression by asserting
+    # version != 'unknown'. In --strict mode, consider failing on 'unknown' version
+    # (not implemented in v1 — acceptable since mapping and parser are co-created).
     mapping_version = "unknown"
     if MAPPING_PATH.exists():
         import re as _re
-        ver_match = _re.search(r'\*\*Version:\*\*\s*(\S+)', MAPPING_PATH.read_text())
+        # R2-F-7 fix: Wrap read_text() in try/except for consistency with _check_fidelity.
+        # TOCTOU gap: file could be deleted between exists() check and read_text().
+        try:
+            _mapping_content = MAPPING_PATH.read_text()
+        except OSError:
+            _mapping_content = ""  # Fall through to "unknown" version
+        ver_match = _re.search(r'\*\*Version:\*\*\s*(\S+)', _mapping_content)
         if ver_match:
             raw_version = ver_match.group(1)
             # F-26 fix: Validate captured version against schema pattern (MAJOR.MINOR only).
@@ -1705,6 +2244,12 @@ def cmd_extract(args: argparse.Namespace) -> int:
                 "formula": "sum",
             })
 
+    # R2-F-11 fix: Track whether fidelity checks were performed. When the mapping
+    # artifact is absent and --strict is not set, fidelity checks are skipped.
+    # Downstream stages consuming this artifact can use this field to determine
+    # whether the artifact has been validated against the mapping.
+    fidelity_checked = MAPPING_PATH.exists()  # True if mapping was present during extraction
+
     summary = {
         "algorithm_name": "blis_weighted_scoring",
         "evolve_block_source": f"routing/best_program.py:{line_range}",
@@ -1714,16 +2259,38 @@ def cmd_extract(args: argparse.Namespace) -> int:
         "metrics": metrics,
         "scope_validation_passed": scope_ok,
         "mapping_artifact_version": mapping_version,
+        "fidelity_checked": fidelity_checked,
     }
 
     # Write to workspace
     WORKSPACE.mkdir(exist_ok=True)
     summary_path = WORKSPACE / "algorithm_summary.json"
-    summary_path.write_text(json.dumps(summary, indent=2) + "\n")
+    # F-18 fix: Wrap file write in try-except to produce a clean JSON error
+    # (exit 2) for infrastructure failures like permission denied or disk full,
+    # instead of an unhandled Python traceback.
+    try:
+        summary_path.write_text(json.dumps(summary, indent=2) + "\n")
+    except OSError as e:
+        return _output("error", 2, errors=[
+            f"Failed to write {summary_path}: {e}. "
+            f"Check file permissions and available disk space."])
 
     all_errors = scope_errors + fidelity_errors
+    # F-13 fix: scope failure writes the artifact (above) then returns exit 1.
+    # Fidelity failure returns exit 1 BEFORE writing (see _check_fidelity path above).
+    # This asymmetry is intentional: scope failure is a validation result (the artifact
+    # records scope_validation_passed=false for inspection), while fidelity failure is
+    # a safety halt (no artifact should exist with unverified fidelity).
+    # R3-F-10 fix: DUAL FAILURE BEHAVIOR — when both scope AND fidelity fail,
+    # fidelity takes precedence (checked first in the code flow above). The fidelity
+    # check returns exit 1 BEFORE the artifact write, so NO artifact is produced.
+    # This means the documented behavior "scope failure always writes the artifact"
+    # is only true when fidelity passes. Combined failure: no artifact, exit 1 with
+    # fidelity errors only (scope errors are not reported since we exit early).
+    # F-13 fix: Include output_type on error paths for consistent JSON structure.
     if not scope_ok:
         return _output("error", 1,
+                        output_type="operational_report",
                         artifact_path=str(summary_path),
                         algorithm_name=summary["algorithm_name"],
                         signal_count=len(signals),
@@ -1740,34 +2307,113 @@ def cmd_extract(args: argparse.Namespace) -> int:
 def cmd_validate_mapping(args: argparse.Namespace) -> int:
     """Validate mapping artifact completeness against algorithm summary."""
     if not MAPPING_PATH.exists():
-        return _output("error", 1, errors=[f"Mapping artifact not found: {MAPPING_PATH}"],
-                        mapping_complete=False, missing_signals=[], stale_commit=False)
+        # F-4 fix: Missing file is infrastructure error (exit 2), per Section F convention.
+        # "File not found" = infrastructure error, not validation failure.
+        # F-27 fix: Include extra_signals=[] on all exit paths for consistent JSON structure.
+        return _output("error", 2, errors=[f"Mapping artifact not found: {MAPPING_PATH}"],
+                        mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=False)
 
     # Load algorithm summary if available
     summary_path = args.summary if hasattr(args, "summary") and args.summary else (
         WORKSPACE / "algorithm_summary.json"
     )
-    summary_path = Path(summary_path)
+    summary_path = Path(summary_path).resolve()
+
+    # R3-F-8 fix: Defense-in-depth path bounding on --summary argument, consistent
+    # with cmd_extract (routing_dir) and cmd_validate_schema (artifact_path).
+    if not summary_path.is_relative_to(REPO_ROOT):
+        return _output("error", 2, errors=[
+            f"Summary path '{summary_path}' is outside repository root '{REPO_ROOT}'."],
+                        mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=False)
 
     if not summary_path.exists():
+        # F-27 fix: Include extra_signals=[] for consistent JSON structure.
         return _output("error", 2,
                         errors=[f"Algorithm summary not found: {summary_path}. Run 'extract' first."],
-                        mapping_complete=False, missing_signals=[], stale_commit=False)
+                        mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=False)
 
-    summary = json.loads(summary_path.read_text())
-    content = MAPPING_PATH.read_text()
+    # R4-F-12 fix: Size guard on algorithm_summary.json, consistent with
+    # MAX_MAPPING_SIZE guard on the mapping artifact and MAX_FILE_SIZE guards
+    # in cmd_extract. Prevents unbounded memory allocation from corrupt files.
+    MAX_SUMMARY_SIZE = 10 * 1024 * 1024  # 10 MB — same as other file guards
+    try:
+        if summary_path.stat().st_size > MAX_SUMMARY_SIZE:
+            return _output("error", 2,
+                            errors=[f"Algorithm summary exceeds {MAX_SUMMARY_SIZE} bytes — refusing to read."],
+                            mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=False)
+    except OSError as e:
+        return _output("error", 2,
+                        errors=[f"Failed to stat algorithm summary: {e}"],
+                        mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=False)
+
+    # F-15 fix: Wrap JSON parsing in try/except for corrupt/unreadable files.
+    try:
+        summary = json.loads(summary_path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        # F-27 fix: Include extra_signals=[] for consistent JSON structure.
+        return _output("error", 2,
+                        errors=[f"Failed to read/parse algorithm summary: {e}"],
+                        mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=False)
+
+    # R5-F-4 fix: Validate that summary['signals'] is a list before iterating.
+    # A corrupt or manually-edited summary file could have 'signals': 'not_a_list',
+    # which would cause TypeError in the set comprehension below.
+    try:
+        extracted_names = {sig['name'] for sig in summary.get('signals', [])}
+    except (TypeError, KeyError) as e:
+        return _output("error", 2,
+                        errors=[f"Malformed algorithm summary — 'signals' is not a valid list of dicts: {e}"],
+                        mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=False)
+
+    # R2-F-12 fix: Size guard on mapping artifact (consistent with _check_fidelity).
+    # R4-F-13 fix: Wrapped stat() in try/except for TOCTOU safety. If the mapping
+    # file is deleted between the exists() check above and this stat() call,
+    # FileNotFoundError is raised. Without the try/except, this produces an
+    # unhandled traceback instead of a clean JSON error response.
+    MAX_MAPPING_SIZE = 10 * 1024 * 1024  # 10 MB
+    try:
+        _mapping_size = MAPPING_PATH.stat().st_size
+    except OSError as e:
+        return _output("error", 2,
+                        errors=[f"Failed to stat mapping artifact: {e}"],
+                        mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=False)
+    if _mapping_size > MAX_MAPPING_SIZE:
+        # F-27 fix: Include extra_signals=[] for consistent JSON structure.
+        return _output("error", 2,
+                        errors=[f"Mapping artifact exceeds {MAX_MAPPING_SIZE} bytes — refusing to read."],
+                        mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=False)
+
+    # R2-F-6 fix: Wrap read_text() in try/except for consistency with _check_fidelity.
+    # Race condition (file deleted between stat() size check and read_text()) or
+    # permission error would otherwise produce an unhandled traceback.
+    try:
+        content = MAPPING_PATH.read_text()
+    except OSError as e:
+        return _output("error", 2,
+                        errors=[f"Failed to read mapping artifact: {e}"],
+                        mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=False)
 
     # F-30 fix: Detect malformed mapping artifact before regex parsing.
     # If the Markdown table structure is missing entirely, report "malformed"
     # instead of misleading "missing signals" from empty regex matches.
     if '|' not in content or not re.search(r'^\|.*\|.*\|', content, re.MULTILINE):
+        # F-27 fix: Include extra_signals=[] for consistent JSON structure.
+        # R2-F-23 fix: stale_commit=True for malformed artifacts (commit hash status
+        # is unknown when the table is malformed, so reporting "not stale" is misleading).
         return _output("error", 1,
                         errors=["Malformed mapping artifact: no Markdown table found. "
                                 "Expected pipe-delimited table rows."],
-                        mapping_complete=False, missing_signals=[], stale_commit=False)
+                        mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=True)
 
     # Check each extracted signal has a mapping entry (extract→mapping direction)
-    extracted_names = {sig["name"] for sig in summary.get("signals", [])}
+    # F-19 NOTE: This regex matches the signal name between ANY two pipes in the
+    # document, not just the first column. A signal name appearing in a Rationale or
+    # Notes column of a different row would be falsely detected as mapped. For v1
+    # with known signal names (QueueDepth, BatchSize, etc.), this is unlikely to
+    # cause issues because these names are not used as common words in prose. The
+    # bidirectional check (extra signals detection below) uses first-column-anchored
+    # parsing, which provides a cross-check.
+    # R5-F-4: extracted_names computed above with try/except guard
     missing = [name for name in sorted(extracted_names)
                if not re.search(rf'\|\s*{re.escape(name)}\s*\|', content)]
 
@@ -1777,7 +2423,17 @@ def cmd_validate_mapping(args: argparse.Namespace) -> int:
     mapping_signals = set()
     # F-22 fix: Track duplicate signal rows so conflicting fidelity ratings are reported.
     mapping_signal_counts: dict[str, int] = {}
-    for row_match in re.finditer(r'^\|\s*(\w+)\s*\|', content, re.MULTILINE):
+    # F-12 note: \w+ matches [a-zA-Z0-9_] only — signal names with hyphens
+    # (e.g., 'cache-hit-rate') would not be matched. Current signal names
+    # (QueueDepth, BatchSize, etc.) are all word characters, so this is
+    # acceptable for v1. If hyphenated signal names are introduced in future,
+    # update this regex to r'^\|\s*([\w-]+)(?:\s*\([^)]*\))?\s*\|'.
+    # R4-F-2 fix: Added (?:\s*\([^)]*\))? to handle parenthetical qualifiers
+    # like 'SessionID (boolean check)' in the Additional Signals table.
+    # Without this, SessionID is never added to mapping_signals and always
+    # appears as an 'extra signal' in extracted_names - mapping_signals.
+    # This matches the pattern used in _check_fidelity's signal-matching regex.
+    for row_match in re.finditer(r'^\|\s*(\w+)(?:\s*\([^)]*\))?\s*\|', content, re.MULTILINE):
         candidate = row_match.group(1)
         # Skip table headers and non-signal rows.
         # F-14 note: This is a hardcoded allowlist of header words. If the mapping
@@ -1795,9 +2451,14 @@ def cmd_validate_mapping(args: argparse.Namespace) -> int:
     # make the mapping ambiguous — the CLI cannot determine which rating to use.
     duplicates = sorted(k for k, v in mapping_signal_counts.items() if v > 1)
 
-    # Check commit hash presence — must be an actual hex hash, not just the label
+    # Check commit hash presence — must be an actual hex hash, not just the label.
+    # F-3 fix: The regex matches the Markdown format '**Pinned commit hash:** <hex>'.
+    # Match path: 'commit[_ ]hash' branch finds 'commit hash' as a substring within
+    # 'Pinned commit hash:', then [:\s*]* matches ':** ', then captures the hex hash.
+    # Also matches alternative formats: 'Pinned commit: <hex>', 'commit_hash: <hex>'.
+    # The regex is intentionally flexible to accommodate minor format variations.
     has_commit = bool(re.search(
-        r'(?:commit[_ ]hash|pinned[_ ]commit)[:\s]*([0-9a-f]{7,40})',
+        r'(?:commit[_ ]hash|pinned[_ ]commit[_ ]hash)[:\s*]*([0-9a-f]{7,40})',
         content, re.IGNORECASE,
     ))
 
@@ -1807,15 +2468,61 @@ def cmd_validate_mapping(args: argparse.Namespace) -> int:
     if missing:
         errors.append(f"Missing signal mappings: {', '.join(missing)}")
     if extra:
-        errors.append(f"Extra signals in mapping not found in extract: {', '.join(extra)}")
+        # F-10 fix: Clarify resolution direction. Extra signals in mapping not
+        # in extract means either: (a) stale/spurious mapping rows that should
+        # be removed from the mapping, or (b) extraction gaps where the regex
+        # missed a signal that is legitimately in the EVOLVE-BLOCK. Investigate
+        # (a) first — check if the signal is actually accessed in the EVOLVE-BLOCK.
+        errors.append(
+            f"Extra signals in mapping not found in extract: {', '.join(extra)}. "
+            f"Resolution: First check if these signals are accessed in the EVOLVE-BLOCK. "
+            f"If not, remove the stale rows from the mapping artifact. "
+            f"If they are accessed, the extract regex has a gap — fix _extract_signals."
+        )
     if duplicates:
-        errors.append(f"Duplicate signal rows with potentially conflicting fidelity: {', '.join(duplicates)}")
+        # R2-F-16 fix: Include row counts to help identify which rows to inspect.
+        # R3-F-14 fix: Clarified wording — duplicates are a data quality error
+        # regardless of whether fidelity ratings conflict. The validator does not
+        # compare fidelity values; it rejects all duplicates because each signal
+        # MUST appear exactly once in the mapping table.
+        dup_details = [f"{name} ({mapping_signal_counts[name]} rows)" for name in duplicates]
+        errors.append(
+            f"Duplicate signal rows found: {', '.join(dup_details)}. "
+            f"Each signal MUST appear exactly once in the mapping table (duplicates are "
+            f"rejected regardless of whether fidelity ratings match or conflict). "
+            f"Resolve by removing duplicate rows and keeping the row with the correct fidelity rating."
+        )
     if not has_commit:
         errors.append("No commit hash found in mapping artifact")
 
+    # R5-F-9 fix: Detect production metric overlap (double-counting risk).
+    # Parse "Production Equivalent" column for each signal and warn if multiple
+    # sim signals map to the same production metric (e.g., BatchSize and
+    # InFlightRequests both falling back to RunningQueueSize).
+    prod_metric_signals: dict[str, list[str]] = {}
+    for sig_name in extracted_names:
+        prod_match = re.search(
+            rf'\|\s*{re.escape(sig_name)}(?:\s*\([^)]*\))?\s*\|(?:[^|]*\|){{2}}([^|]+)\|',
+            content, re.IGNORECASE,
+        )
+        if prod_match:
+            prod_metric = prod_match.group(1).strip()
+            prod_metric_signals.setdefault(prod_metric, []).append(sig_name)
+    for prod_metric, sigs in prod_metric_signals.items():
+        if len(sigs) > 1:
+            import sys as _sys
+            print(
+                f"WARNING: Double-counting risk — signals {', '.join(sigs)} "
+                f"both map to production metric '{prod_metric}'. "
+                f"PR3 MUST ensure the composite computation accounts for this overlap.",
+                file=_sys.stderr,
+            )
+
     status = "ok" if mapping_complete else "error"
     exit_code = 0 if mapping_complete else 1
+    # R2-F-16 fix: Include output_type for consistent JSON structure across all commands.
     return _output(status, exit_code,
+                    output_type="mapping_validation",
                     mapping_complete=mapping_complete,
                     missing_signals=missing,
                     extra_signals=extra,
@@ -1825,15 +2532,39 @@ def cmd_validate_mapping(args: argparse.Namespace) -> int:
 
 def cmd_validate_schema(args: argparse.Namespace) -> int:
     """Validate a workspace artifact against its JSON Schema."""
-    from tools.schema_validator import validate_artifact, load_schema
+    # R3-F-2 fix: Use relative import 'from schema_validator' instead of
+    # 'from tools.schema_validator'. When transfer_cli.py is invoked as a script
+    # ('python tools/transfer_cli.py validate-schema ...'), Python adds the script's
+    # directory (tools/) to sys.path, not REPO_ROOT. 'from tools.schema_validator'
+    # requires REPO_ROOT on sys.path, which is absent in script mode, causing
+    # ModuleNotFoundError. 'from schema_validator' works because tools/ is on sys.path.
+    # Tests pass either way because pytest adds REPO_ROOT to sys.path, masking the issue.
+    from schema_validator import validate_artifact, load_schema
 
-    artifact_path = Path(args.artifact_path)
+    artifact_path = Path(args.artifact_path).resolve()
+    # F-14 fix: Defense-in-depth path bounding (consistent with cmd_extract).
+    # These are read-only commands on a developer tool, so the risk is low,
+    # but bounding prevents accidental reads from unrelated directories.
+    if not artifact_path.is_relative_to(REPO_ROOT):
+        return _output("error", 2, errors=[
+            f"Artifact path '{artifact_path}' is outside repository root '{REPO_ROOT}'."])
     if not artifact_path.exists():
         return _output("error", 2, errors=[f"Artifact not found: {artifact_path}"])
 
-    # Determine schema from artifact name
+    # F-23 fix: Schema naming convention — schema filename is derived from artifact stem.
+    # Convention: artifact 'foo.json' → schema 'foo.schema.json' in SCHEMAS_DIR.
+    # PR3+ artifacts MUST have a matching schema file in tools/schemas/ to be validatable.
+    # Example: workspace/algorithm_summary.json → tools/schemas/algorithm_summary.schema.json
     stem = artifact_path.stem  # e.g., "algorithm_summary"
-    schema_path = SCHEMAS_DIR / f"{stem}.schema.json"
+    schema_path = (SCHEMAS_DIR / f"{stem}.schema.json").resolve()
+    # R2-F-8 fix: Defense-in-depth bounds check on derived schema_path.
+    # Although artifact_path is validated with is_relative_to(REPO_ROOT) above,
+    # and Path.stem extracts only the final component's stem, adding a bounds
+    # check on schema_path prevents any edge case where the derived path
+    # resolves outside SCHEMAS_DIR.
+    if not schema_path.is_relative_to(SCHEMAS_DIR):
+        return _output("error", 2, errors=[
+            f"Schema path '{schema_path}' resolves outside schemas directory '{SCHEMAS_DIR}'."])
     if not schema_path.exists():
         return _output("error", 2, errors=[f"Schema not found: {schema_path}"])
 
@@ -1854,20 +2585,30 @@ def cmd_validate_schema(args: argparse.Namespace) -> int:
     errors = validate_artifact(data, schema)
     violations = [{"field": e.split(":")[0].strip(), "message": e} for e in errors]
 
+    # R2-F-16 fix: Include output_type for consistent JSON structure across all commands.
     if errors:
         return _output("error", 1,
+                        output_type="schema_validation",
                         schema_path=str(schema_path),
                         artifact_path=str(artifact_path),
                         violations=violations,
                         errors=errors)
 
     return _output("ok", 0,
+                    output_type="schema_validation",
                     schema_path=str(schema_path),
                     artifact_path=str(artifact_path),
                     violations=[])
 
 
 def main():
+    # F-14 fix: Runtime version check — Path.is_relative_to() requires Python 3.9+.
+    # The error from AttributeError would be confusing; this provides a clear message.
+    if sys.version_info < (3, 9):
+        print("ERROR: transfer_cli.py requires Python >= 3.9 "
+              f"(running {sys.version_info.major}.{sys.version_info.minor})",
+              file=sys.stderr)
+        sys.exit(2)
     parser = argparse.ArgumentParser(
         description="Transfer pipeline CLI — mechanical support for sim-to-production transfer",
     )
@@ -1954,6 +2695,11 @@ class TestValidateMapping:
         WORKSPACE.mkdir(exist_ok=True)
         run_cli("extract", str(ROUTING_DIR))
 
+    @pytest.mark.skipif(
+        not (REPO_ROOT / "docs" / "transfer" / "blis_to_llmd_mapping.md").exists(),
+        reason="F-16 fix: Mapping artifact not yet created (expected during Task 4, "
+               "created in Task 5). This test passes after Task 5 completes."
+    )
     def test_validate_mapping_passes_with_complete_mapping(self):
         """BC-3: all signals mapped, commit hash present."""
         code, output = run_cli("validate-mapping")
@@ -1962,7 +2708,7 @@ class TestValidateMapping:
         assert output["missing_signals"] == []
 
     def test_validate_mapping_reports_missing_artifact(self):
-        """BC-9: missing mapping artifact exits with code 1."""
+        """BC-9: missing mapping artifact exits with code 2 (infrastructure error — file not found)."""
         # Temporarily rename mapping to test missing case
         import shutil
         mapping = REPO_ROOT / "docs" / "transfer" / "blis_to_llmd_mapping.md"
@@ -1971,7 +2717,7 @@ class TestValidateMapping:
             shutil.move(str(mapping), str(backup))
         try:
             code, output = run_cli("validate-mapping")
-            assert code == 1
+            assert code == 2, f"Missing mapping artifact should be exit 2 (infrastructure error), got {code}"
             assert output["status"] == "error"
         finally:
             if backup.exists():
@@ -1990,11 +2736,18 @@ class TestValidateMapping:
             if backup.exists():
                 backup.rename(summary)
 
+    @pytest.mark.skipif(
+        not (Path(__file__).parent.parent / "docs" / "transfer" / "blis_to_llmd_mapping.md").exists(),
+        reason="Mapping artifact not present (pre-Task 5)"
+    )
     def test_validate_mapping_rejects_placeholder_hash(self):
         """F-2 fix: validate-mapping MUST reject the placeholder commit hash.
         This is the automated gate preventing PLACEHOLDER_REQUIRES_STEP_2 from
         being committed. The placeholder is not a valid hex hash (7-40 chars),
-        so the existing hex pattern check catches it."""
+        so the existing hex pattern check catches it.
+        R2-F-20 fix: Added skipif guard for pre-Task 5 case (mapping artifact
+        doesn't exist yet). Without this, the test raises FileNotFoundError
+        instead of cleanly skipping."""
         import shutil
         mapping = REPO_ROOT / "docs" / "transfer" / "blis_to_llmd_mapping.md"
         backup = mapping.with_suffix(".md.bak")
@@ -2003,10 +2756,17 @@ class TestValidateMapping:
         try:
             content = mapping.read_text()
             # Replace actual hash with placeholder
+            # R2-F-2 fix: The mapping artifact uses Markdown bold format:
+            # '**Pinned commit hash:** <hash>'. The previous lookbehind
+            # '(?<=Pinned commit hash:\s)' did not account for the '**' bold
+            # markers and ':** ' separator, so re.sub silently returned the
+            # original content unchanged, making the test vacuous.
+            # Fixed by using a non-lookbehind approach that matches the full
+            # Markdown bold format and replaces just the hash portion.
             import re
             content = re.sub(
-                r'(?<=Pinned commit hash:\s)[0-9a-f]{7,40}',
-                'PLACEHOLDER_REQUIRES_STEP_2',
+                r'(\*\*Pinned commit hash:\*\*\s*)[0-9a-f]{7,40}',
+                r'\1PLACEHOLDER_REQUIRES_STEP_2',
                 content,
             )
             mapping.write_text(content)
@@ -2015,13 +2775,24 @@ class TestValidateMapping:
                 f"validate-mapping should reject placeholder hash, got exit {code}: {output}. "
                 "The hex pattern check should catch 'PLACEHOLDER_REQUIRES_STEP_2'."
             )
-            assert output.get("stale_commit") is True or any(
-                "commit" in e.lower() or "hash" in e.lower() for e in output.get("errors", [])
+            # R3-F-13 fix: Replaced weak OR assertion with direct check.
+            # The previous OR clause meant the test passed even if stale_commit was
+            # incorrectly False, as long as any error message contained 'commit' or 'hash'.
+            # This could mask a bug where stale_commit is not correctly set.
+            assert output.get("stale_commit") is True, (
+                f"validate-mapping should set stale_commit=True for placeholder hash, "
+                f"got stale_commit={output.get('stale_commit')}: {output}"
             )
         finally:
             if backup.exists():
                 shutil.move(str(backup), str(mapping))
 
+    # R4-F-5 fix: Added skipif guard consistent with test_validate_mapping_rejects_placeholder_hash.
+    # Without this guard, mapping.read_text() raises FileNotFoundError when run before Task 5.
+    @pytest.mark.skipif(
+        not (Path(__file__).parent.parent / "docs" / "transfer" / "blis_to_llmd_mapping.md").exists(),
+        reason="Mapping artifact not present (pre-Task 5)"
+    )
     def test_validate_mapping_detects_extra_signals(self):
         """F-3 fix: validate-mapping detects signals in mapping that aren't in extract output.
         Extra rows in the mapping indicate stale/spurious entries that may mislead
@@ -2045,14 +2816,56 @@ class TestValidateMapping:
         finally:
             if backup.exists():
                 shutil.move(str(backup), str(mapping))
+
+    # R4-F-5 fix: Added skipif guard consistent with test_validate_mapping_rejects_placeholder_hash.
+    # Without this guard, mapping.read_text() raises FileNotFoundError when run before Task 5.
+    @pytest.mark.skipif(
+        not (Path(__file__).parent.parent / "docs" / "transfer" / "blis_to_llmd_mapping.md").exists(),
+        reason="Mapping artifact not present (pre-Task 5)"
+    )
+    def test_validate_mapping_detects_duplicate_signals(self):
+        """F-19 fix: validate-mapping detects duplicate signal rows.
+        R3-F-14 fix: Duplicates are rejected as a data quality error regardless
+        of whether fidelity ratings conflict — each signal must appear exactly once."""
+        import shutil
+        mapping = REPO_ROOT / "docs" / "transfer" / "blis_to_llmd_mapping.md"
+        backup = mapping.with_suffix(".md.bak")
+        if mapping.exists():
+            shutil.copy2(str(mapping), str(backup))
+        try:
+            content = mapping.read_text()
+            # Inject a duplicate QueueDepth row with a different fidelity rating
+            content = content.replace(
+                "| QueueDepth |",
+                "| QueueDepth | int | `snap.QueueDepth` | duplicate | N/A | medium | 0 | Duplicate test row |\n| QueueDepth |",
+            )
+            mapping.write_text(content)
+            code, output = run_cli("validate-mapping")
+            assert code == 1, f"Expected failure for duplicate signal, got: {output}"
+            assert any("duplicate" in e.lower() for e in output.get("errors", [])), (
+                f"Expected 'duplicate' in error message. Got: {output.get('errors', [])}"
+            )
+        finally:
+            if backup.exists():
+                shutil.move(str(backup), str(mapping))
 ```
 
 **Step 2: Run tests**
 
 Run: `cd /Users/kalantar/projects/go.workspace/src/github.com/kalantar/sim2real && python -m pytest tools/test_transfer_cli.py::TestValidateMapping -v`
-Expected: Some tests may fail (mapping artifact doesn't exist yet)
 
-**Task ordering note (F-19):** `test_validate_mapping_passes_with_complete_mapping` depends on the mapping artifact created in Task 5. This test is expected to fail here and will pass after Task 5 completes. The error-path tests (`test_validate_mapping_reports_missing_artifact`, `test_validate_mapping_without_summary_exits_2`) work regardless of Task 5 ordering. Tasks execute sequentially (1→2→3→4→5→6→7), so this dependency is satisfied at integration time.
+R5-F-13 fix: Clarified expected test outcomes. Tests with `@pytest.mark.skipif` guards will be **skipped** (not failed) when the mapping artifact doesn't exist:
+- **SKIP:** `test_validate_mapping_passes_with_complete_mapping` (skipif: mapping not present)
+- **SKIP:** `test_validate_mapping_rejects_placeholder_hash` (skipif: mapping not present)
+- **SKIP:** `test_validate_mapping_detects_stale_hash` (skipif: mapping not present)
+- **PASS:** `test_validate_mapping_reports_missing_artifact` (tests missing-file error path)
+- **PASS:** `test_validate_mapping_without_summary_exits_2` (tests missing-summary error path)
+- **PASS:** `test_validate_mapping_detects_extra_signals` (uses inline mapping, no dependency)
+- **PASS:** `test_validate_mapping_detects_duplicate_signals` (uses inline mapping, no dependency)
+
+If any test that should PASS instead FAILs, investigate the failure — it indicates a real bug, not a Task 5 ordering issue.
+
+**Task ordering note (F-19):** Tests with skipif guards depend on the mapping artifact created in Task 5. They will be skipped here and will run after Task 5 completes. The error-path tests work regardless of Task 5 ordering. Tasks execute sequentially (1→2→3→4→5→6→7), so this dependency is satisfied at integration time.
 
 **Step 3: The mapping artifact is created in Task 5. For now, verify the command logic works with the missing-artifact and missing-summary test cases.**
 
@@ -2099,7 +2912,7 @@ Context: This documents the correspondence between inference-sim routing signals
 |------------|---------|-----------------|----------------------|------------------|----------|-----------------------|-----------|
 | QueueDepth | int | `snap.QueueDepth` | `endpoint.GetMetrics().WaitingQueueSize` | LoadAware scorer | high | 0 | Same computation: count of waiting requests. Direct endpoint query in both systems. |
 | BatchSize | int | `snap.BatchSize` | `endpoint.GetMetrics().RunningQueueSize` (approximate) | ActiveRequest scorer | medium | 0 | Sim tracks exact batch size; production uses running request count as proxy. **Structural semantic gap:** batch size (number of items in a batch) differs from queue size (number of items waiting). Correlation expected to be strong but not exact. **PR5 MUST measure:** Compare sim BatchSize distribution against prod RunningQueueSize to quantify the gap. If R² < 0.80, downgrade to low. |
-| InFlightRequests | int | `snap.InFlightRequests` | `endpoint.GetMetrics().RunningRequestCount` (approximate) | ActiveRequest scorer | medium | 0 | Sim tracks in-flight requests at router level; production tracks running requests at endpoint. **Structural semantic gap:** Router-level counting includes requests in transit (not yet received by endpoint); endpoint-level counting only includes received requests. Same unit (request count) but different counting points. **PR5 MUST measure:** Compare sim InFlightRequests against prod RunningRequestCount under load to quantify the router-vs-endpoint gap. If R² < 0.80, downgrade to low. **Note:** Earlier drafts mapped to `ActiveModels` which is incorrect — ActiveModels counts model instances, not requests. `RunningRequestCount` is the correct production equivalent. If `RunningRequestCount` is unavailable, fall back to `RunningQueueSize` as a proxy. |
+| InFlightRequests | int | `snap.InFlightRequests` | `endpoint.GetMetrics().RunningRequestCount` (approximate) | ActiveRequest scorer | medium | 0 | Sim tracks in-flight requests at router level; production tracks running requests at endpoint. **Structural semantic gap:** Router-level counting includes requests in transit (not yet received by endpoint); endpoint-level counting only includes received requests. Same unit (request count) but different counting points. **PR5 MUST measure:** Compare sim InFlightRequests against prod RunningRequestCount under load to quantify the router-vs-endpoint gap. If R² < 0.80, downgrade to low. **Note:** Earlier drafts mapped to `ActiveModels` which is incorrect — ActiveModels counts model instances, not requests. `RunningRequestCount` is the correct production equivalent. If `RunningRequestCount` is unavailable, fall back to `RunningQueueSize` as a proxy. **F-10 WARNING: Double-counting risk** — `RunningQueueSize` is already the production mapping for BatchSize. If InFlightRequests also falls back to `RunningQueueSize`, the EffectiveLoad composite becomes `WaitingQueueSize + 2*RunningQueueSize`, double-counting that metric. PR3 MUST detect this case and either: (a) use a different proxy, or (b) adjust the composite computation to avoid double-counting. |
 | KVUtilization | float64 | `snap.KVUtilization` | `endpoint.GetMetrics().KVCacheUsagePercent` | Custom scorer needed | high | 0 | Same computation: ratio of used KV cache to total. Both query endpoint metrics directly. **Units:** Sim = 0.0–1.0 ratio; Prod = 0–100 percentage. **Normalization (PR3):** Divide production value by 100 to match sim's 0.0–1.0 range (i.e., `prod_kv / 100.0`). The evolved algorithm expects the sim-scale range. **REQUIRED PR3 TEST:** PR3 MUST include a unit test verifying that production KVCacheUsagePercent values (0-100) are divided by 100 before being passed to the scorer. Without this normalization, the evolved algorithm receives values 100x larger than trained on. |
 | CacheHitRate | float64 | `snap.CacheHitRate` | Prefix cache hit ratio from engine metrics | PrecisePrefixCache scorer | medium *(provisional)* | 0 | Sim uses router-side approximate cache index; production uses engine-reported precise cache metrics. Different data sources for same concept. **Provisional rating:** No empirical data supports the medium threshold (R² ≥ 0.80); the different data sources (approximate vs precise) could produce a larger gap than assumed. PR5 must validate empirically; if R² < 0.80, downgrade to low. **Known limitation:** The fidelity check regex matches only `low|medium|high` — it does not detect or handle the `*(provisional)*` annotation. Provisional medium is treated as medium for BC-6 enforcement. This is conservative: the signal passes the fidelity gate now, and PR5 can downgrade if empirical data warrants it. **If PR5 downgrades CacheHitRate to low:** (1) update this row's fidelity to `low`, (2) re-run extract — it will halt on the low-fidelity signal per BC-6, (3) any previously-transferred algorithms using CacheHitRate must be re-evaluated per the rollback procedure in the Notes section below. |
 
@@ -2107,7 +2920,7 @@ Context: This documents the correspondence between inference-sim routing signals
 
 | Composite | Expansion | Production Equivalent | Fidelity | Notes |
 |-----------|-----------|----------------------|----------|-------|
-| EffectiveLoad() | QueueDepth + BatchSize + InFlightRequests | WaitingQueueSize + RunningQueueSize + RunningRequestCount | medium (composite) | No single production metric equivalent. PR3 scorer must compute inline. Semantic gaps in constituent signals (see individual rows above) propagate to composite. See Notes section for details. |
+| EffectiveLoad() | QueueDepth + BatchSize + InFlightRequests | WaitingQueueSize + RunningQueueSize + RunningRequestCount | medium (composite) | No single production metric equivalent. PR3 scorer must compute inline. Semantic gaps in constituent signals (see individual rows above) propagate to composite. See Notes section for details. **Composite fidelity computation (F-10):** The composite rating is the minimum of constituent ratings: min(high, medium, medium) = medium. Rationale: a composite is only as reliable as its least reliable constituent. If any constituent is downgraded in PR5, the composite rating must also be recomputed. |
 
 ## Additional Signals (Non-RoutingSnapshot)
 
@@ -2123,9 +2936,11 @@ Context: This documents the correspondence between inference-sim routing signals
 
 > **Note:** Quantitative thresholds are provisional targets for PR5 (validation pipeline). PR1 ratings are based on design analysis; empirical validation deferred to Stage 5. **Design intent:** The extract command enforces fidelity ratings as hard gates (BC-6: low-fidelity signals halt the pipeline). This is conservative by design — it is safer to halt on an uncertain rating than to propagate a low-fidelity signal through the pipeline. Ratings may be revised upward in PR5 after empirical validation, which would unblock previously-halted signals.
 >
-> **Rollback procedure if PR5 downgrades a rating to low:** If empirical validation in PR5 reveals that a signal rated medium (e.g., CacheHitRate) actually has R² < 0.80, the rating must be downgraded to low in this mapping artifact. This will cause BC-6 to halt future extract runs. Any algorithms already transferred through the pipeline using the now-low-fidelity signal must be re-evaluated: (1) re-run extract — it will now halt on the low-fidelity signal, (2) determine whether the transferred scorer can tolerate the fidelity gap or needs re-generation with the signal excluded, (3) if re-generation is needed, re-run Stages 2-4 with the updated mapping. This is expected to be rare since provisional ratings are conservative.
+> **Rollback procedure if PR5 downgrades a rating to low:** If empirical validation in PR5 reveals that a signal rated medium (e.g., CacheHitRate) actually has R² < 0.80, the rating must be downgraded to low in this mapping artifact. This will cause BC-6 to halt future extract runs. Any algorithms already transferred through the pipeline using the now-low-fidelity signal must be re-evaluated: (1) re-run extract — it will now halt on the low-fidelity signal, (2) determine whether the transferred scorer can tolerate the fidelity gap or needs re-generation with the signal excluded, (3) if re-generation is needed, re-run Stages 2-4 with the updated mapping. This is expected to be rare since provisional ratings are conservative. **F-7 fix — Rollback test note:** The rollback procedure is documented but not automated. The mechanism is indirectly verified by `TestFidelityHalt::test_low_fidelity_signal_halts_extract` (which confirms BC-6 halts on low-fidelity signals). PR5 SHOULD include a dedicated integration test that: (1) sets a provisional signal to low in a test copy of the mapping, (2) runs extract, (3) verifies it halts, (4) re-runs with the signal excluded, (5) verifies it succeeds. This would exercise the full rollback workflow end-to-end.
 
 ## Scorer Interface Reference
+
+> **R3-F-7 WARNING — UNVERIFIED:** This section was documented from design knowledge, not verified against the actual `llm-d-inference-scheduler` source at the pinned commit. Both PR2 (scorer template) and PR3 (prompt templates + harness) depend on this section. If the `Score` method signature or factory pattern is incorrect, PR2's scorer template will be built on wrong assumptions. **PR2 gate:** Before generating the scorer template, PR2 MUST verify the interface below against the actual source. **PR3 gate:** PR3's convergence-review already requires interface verification. The UNVERIFIED note here serves as an additional reminder. See also Phase 0 § 1 (`llm-d-inference-scheduler` entry) for the original deferral rationale.
 
 Target system: `llm-d-inference-scheduler` (gateway-api-inference-extension framework)
 
@@ -2159,11 +2974,30 @@ Target system: `llm-d-inference-scheduler` (gateway-api-inference-extension fram
 
 **Step 2: Fill in the actual commit hash (BLOCKER — must complete before Step 5)**
 
+**F-8 fix: Prerequisite — ensure llm-d-inference-scheduler submodule is checked out.**
+The CI workflow (Task 7) only checks out `inference-sim`, not `llm-d-inference-scheduler`. This step requires the submodule to be available locally. If not already checked out, run:
+```bash
+cd /Users/kalantar/projects/go.workspace/src/github.com/kalantar/sim2real && git submodule update --init llm-d-inference-scheduler
+```
+Then obtain the commit hash:
+
 Run: `cd /Users/kalantar/projects/go.workspace/src/github.com/kalantar/sim2real/llm-d-inference-scheduler && git rev-parse HEAD`
 
 Update the `Pinned commit hash` field in the mapping artifact. Replace `PLACEHOLDER_REQUIRES_STEP_2` with the hex hash output. **Verify the replacement**: `grep 'Pinned commit hash' docs/transfer/blis_to_llmd_mapping.md` — the output must show a 7-40 character hex string, NOT the placeholder text.
 
-**F-21: When to update the pinned commit hash.** The hash MUST be updated whenever the llm-d-inference-scheduler submodule is updated (via `git submodule update`). Procedure: (1) update the submodule, (2) run `cd llm-d-inference-scheduler && git rev-parse HEAD`, (3) update the `Pinned commit hash` field in `blis_to_llmd_mapping.md`, (4) re-run `TestSourceSyncVerification` tests to verify hardcoded dicts still match, (5) bump the mapping artifact version (MAJOR bump if the interface changed, MINOR if only the hash changed). Between PR1 and PR3, if the submodule is updated, the mapping artifact MUST be re-committed with the new hash before PR3 uses it. **F-12 note on automated detection:** There is no automated mechanism to detect hash staleness when the submodule is updated without updating the hash. `TestSourceSyncVerification` tests catch interface drift (struct fields, method bodies) but not hash staleness. If automated detection is needed, add a CI step: `cd llm-d-inference-scheduler && [ "$(git rev-parse HEAD)" = "$(grep -oP 'Pinned commit hash:\s*\K[0-9a-f]+' ../docs/transfer/blis_to_llmd_mapping.md)" ] || echo "WARNING: submodule hash differs from mapping artifact"`. This is low-priority since submodule updates are infrequent and deliberate.
+**F-21: When to update the pinned commit hash.** The hash MUST be updated whenever the llm-d-inference-scheduler submodule is updated (via `git submodule update`). Procedure: (1) update the submodule, (2) run `cd llm-d-inference-scheduler && git rev-parse HEAD`, (3) update the `Pinned commit hash` field in `blis_to_llmd_mapping.md`, (4) re-run `TestSourceSyncVerification` tests to verify hardcoded dicts still match, (5) bump the mapping artifact version (MAJOR bump if the interface changed, MINOR if only the hash changed). Between PR1 and PR3, if the submodule is updated, the mapping artifact MUST be re-committed with the new hash before PR3 uses it. **F-12 note on automated detection (F-21 fix — RECOMMENDED CI step):** There is no automated mechanism to detect hash staleness when the submodule is updated without updating the hash. `TestSourceSyncVerification` tests catch interface drift (struct fields, method bodies) but not hash staleness. **Recommended CI step:** Add a hash consistency check to the CI workflow alongside the existing submodule checkout:
+```yaml
+- name: Verify pinned commit hash matches submodule
+  run: |
+    cd llm-d-inference-scheduler
+    ACTUAL=$(git rev-parse HEAD)
+    PINNED=$(grep -oP 'Pinned commit hash:\s*\K[0-9a-f]+' ../docs/transfer/blis_to_llmd_mapping.md)
+    if [ "$ACTUAL" != "$PINNED" ]; then
+      echo "::warning::Submodule hash ($ACTUAL) differs from mapping artifact ($PINNED)"
+      echo "Update blis_to_llmd_mapping.md per the F-21 update procedure above."
+    fi
+```
+This is a WARNING (not a failure) because the submodule may be intentionally ahead during development. Promote to a hard failure if hash drift causes downstream issues. Submodule updates are infrequent and deliberate, so manual update is acceptable for v1, but the CI step provides an automated safety net.
 
 **Step 3: MANDATORY — Run extract then validate-mapping to verify signal list consistency**
 
@@ -2176,7 +3010,7 @@ Expected: Exit 0, `mapping_complete: true`
 
 **Known risk: circular dependency (F-6).** The mapping artifact (Step 1) is written with a hardcoded signal list, then extract + validate-mapping (Step 3) verifies consistency. If they differ, the mapping must be rewritten. This is a one-time implementation friction, not a runtime issue — once the mapping artifact matches the extract output, subsequent runs are idempotent. **Commit procedure if iteration is needed:** If Step 3 reveals mismatches: (1) update the mapping table in Step 1, (2) re-run Step 3 to verify, (3) repeat until validate-mapping passes, (4) only then proceed to Step 5 (commit). Do NOT commit the mapping artifact until validate-mapping passes. If you already committed the mapping and later discover mismatches, amend the commit: `git add docs/transfer/blis_to_llmd_mapping.md && git commit --amend --no-edit`.
 
-**Convergence limit (F-3 fix):** The iteration MUST converge within **3 rounds** (initial draft + 2 correction rounds). If validate-mapping still reports mismatches after 3 rounds, STOP and investigate: (a) the extract regex may have a bug producing unstable signal lists, or (b) the mapping table has structural issues preventing signal matching. **Failure mode for unmappable signals:** If extract discovers a signal that has NO production equivalent (i.e., the signal cannot be meaningfully mapped to any llm-d-inference-scheduler metric), the implementer MUST: (1) add the signal to the mapping table with fidelity rating `low` and a Rationale explaining why no mapping exists, (2) re-run extract — BC-6 will halt on the low-fidelity signal, confirming the pipeline correctly rejects unmappable signals, (3) document the unmappable signal in the Deviation Log (Section D) with a note that the EVOLVE-BLOCK uses a signal that cannot be transferred, (4) escalate to the macro plan: this may indicate the evolved algorithm is not transferable as-is and Stage 1 needs a different EVOLVE-BLOCK or algorithm variant. **This is a terminal condition for PR1** — do not proceed to PR3 if a required signal is unmappable.
+**Convergence limit (F-3 fix):** The iteration MUST converge within **3 rounds** (initial draft + 2 correction rounds). If validate-mapping still reports mismatches after 3 rounds, STOP and investigate using the following concrete escalation procedure: **(1) Diagnose:** Run `python tools/transfer_cli.py extract routing/ 2>&1` and `python tools/transfer_cli.py validate-mapping 2>&1`, capture both stdout JSON and stderr warnings. **(2) Classify the root cause** as one of: (a) **regex instability** — extract produces different signal lists on consecutive runs (fix: debug `_extract_signals` regex), (b) **mapping table parse error** — validate-mapping cannot match signal names due to Markdown formatting issues (fix: verify pipe-delimited table format), (c) **genuine signal ambiguity** — a signal exists in the EVOLVE-BLOCK but the regex alternates between detecting and missing it (fix: add the pattern to `_extract_signals` and update `EXPECTED_SIGNALS`). **(3) If the root cause is not identifiable after 30 minutes of investigation:** File a blocking issue on the macro plan with the extract stdout JSON, validate-mapping stdout JSON, and stderr output from both commands. Tag the issue as `transfer-pipeline-convergence-failure`. Do NOT proceed to Task 6 until the issue is resolved. **Failure mode for unmappable signals:** If extract discovers a signal that has NO production equivalent (i.e., the signal cannot be meaningfully mapped to any llm-d-inference-scheduler metric), the implementer MUST: (1) add the signal to the mapping table with fidelity rating `low` and a Rationale explaining why no mapping exists, (2) re-run extract — BC-6 will halt on the low-fidelity signal, confirming the pipeline correctly rejects unmappable signals, (3) document the unmappable signal in the Deviation Log (Section D) with a note that the EVOLVE-BLOCK uses a signal that cannot be transferred, (4) escalate to the macro plan: this may indicate the evolved algorithm is not transferable as-is and Stage 1 needs a different EVOLVE-BLOCK or algorithm variant. **This is a terminal condition for PR1** — do not proceed to PR3 if a required signal is unmappable. **F-14 fix — Test coverage note (F-22 fix):** While the unmappable signal procedure is documented, no dedicated test case exercises this scenario end-to-end (adding a low-fidelity signal and verifying extract halts). The existing `TestFidelityHalt::test_low_fidelity_signal_halts_extract` indirectly covers the mechanism (low-fidelity → exit 1), which validates the core behavior. A dedicated test with a synthetic unmappable signal would strengthen confidence but is deferred as the mechanism is verified. **Suggested test (optional, for future hardening):** `test_unmappable_signal_halts_extract` — (1) create a synthetic mapping with a new signal rated `low` with rationale "no production equivalent", (2) create a synthetic EVOLVE-BLOCK that accesses this signal, (3) run extract and verify exit 1 with a low-fidelity error. This would exercise the full unmappable signal → low fidelity → BC-6 halt pathway end-to-end.
 
 **CI gate (F-2, F-3 — REQUIRED):** To prevent a mismatched mapping or un-replaced placeholder commit hash from being committed, validate-mapping MUST be run as part of the test suite. The test `TestValidateMapping::test_validate_mapping_rejects_placeholder_hash` provides an automated gate: it verifies that validate-mapping rejects the `PLACEHOLDER_REQUIRES_STEP_2` sentinel (which is not a valid hex hash). Additionally, `TestValidateMapping::test_validate_mapping_passes_with_complete_mapping` runs validate-mapping as part of every test run, catching signal mismatches. For CI, also add: `python tools/transfer_cli.py extract --strict routing/ && python tools/transfer_cli.py validate-mapping` as a CI step. The validate-mapping command will fail if: (1) any extracted signal is missing from the mapping table, (2) the commit hash is not a valid hex string. **Enforcement:** The test suite provides the automated gate. A pre-commit hook is recommended but not required in PR1 — the test suite catches the issue during `pytest`.
 
@@ -2194,7 +3028,26 @@ Expected: All tests pass
 # This MUST show a hex hash, NOT 'PLACEHOLDER_REQUIRES_STEP_2'
 grep 'Pinned commit hash' docs/transfer/blis_to_llmd_mapping.md | grep -qE '[0-9a-f]{7,40}' || { echo "ERROR: Placeholder commit hash not replaced — complete Step 2 first"; exit 1; }
 ```
-**F-5 automated enforcement:** The placeholder is caught by three automated gates: (1) CI pytest runs `test_validate_mapping_rejects_placeholder_hash`, (2) CI workflow runs `validate-mapping` which checks for hex hash, (3) the manual pre-commit grep above. A pre-commit hook is optional but recommended — add to `.pre-commit-config.yaml` if the project adopts pre-commit hooks.
+**F-5 automated enforcement:** The placeholder is caught by three automated gates: (1) CI pytest runs `test_validate_mapping_rejects_placeholder_hash`, (2) CI workflow runs `validate-mapping` which checks for hex hash, (3) the manual pre-commit grep above. **F-3 fix — Pre-commit hook recommendation:** For projects using Git hooks, add this to `.git/hooks/pre-commit` (or `.pre-commit-config.yaml`):
+```bash
+#!/bin/sh
+# Reject commits with PLACEHOLDER_REQUIRES_STEP_2
+if git diff --cached --name-only | grep -q 'blis_to_llmd_mapping.md'; then
+    if git diff --cached -- docs/transfer/blis_to_llmd_mapping.md | grep -q 'PLACEHOLDER_REQUIRES_STEP_2'; then
+        echo "ERROR: Placeholder commit hash not replaced in mapping artifact."
+        exit 1
+    fi
+fi
+# Run validate-mapping if mapping artifact is staged
+if git diff --cached --name-only | grep -qE '(blis_to_llmd_mapping|transfer_cli)'; then
+    python tools/transfer_cli.py extract routing/ >/dev/null 2>&1 && \
+    python tools/transfer_cli.py validate-mapping >/dev/null 2>&1 || {
+        echo "ERROR: validate-mapping failed. Fix signal mismatches before committing."
+        exit 1
+    }
+fi
+```
+This is optional but recommended — the CI test suite provides the mandatory gate.
 
 ```bash
 git add docs/transfer/blis_to_llmd_mapping.md
@@ -2442,21 +3295,58 @@ class TestFidelityHalt:
         if mapping.exists():
             shutil.copy2(str(mapping), str(backup))
         try:
-            # Create a synthetic mapping with QueueDepth rated 'low'
-            content = mapping.read_text()
-            content = content.replace(
-                "| QueueDepth | int | `snap.QueueDepth` |",
-                "| QueueDepth | int | `snap.QueueDepth` |",
-            ).replace(
-                "| high | 0 | Same computation",
-                "| low | 0 | Same computation",
-                1,  # only replace first occurrence (QueueDepth row)
+            # R3-F-4 fix: First run a successful extract to create the artifact,
+            # establishing a pre-condition for the artifact-absence assertion below.
+            # Without this, setup_method deletes the artifact and the assertion
+            # 'assert not summary_path.exists()' passes vacuously — it would pass
+            # even if the fidelity-halt code path were broken.
+            code_setup, _ = run_cli("extract", str(ROUTING_DIR))
+            summary_path = WORKSPACE / "algorithm_summary.json"
+            assert code_setup == 0 and summary_path.exists(), (
+                "Pre-condition: successful extract must create artifact before "
+                "testing that fidelity failure prevents artifact creation"
             )
-            mapping.write_text(content)
+            # Now create a synthetic mapping with QueueDepth rated 'low'
+            # R2-F-3 fix: The previous approach had two bugs:
+            # (1) The first .replace() was a no-op (identical input/output strings).
+            # (2) The second .replace() with count=1 targeted the first occurrence
+            #     of '| high | 0 | Same computation' globally, which may not be
+            #     the QueueDepth row. Multiple signals have 'high' fidelity.
+            # Fixed by using a regex that targets the QueueDepth row specifically
+            # and replaces its fidelity rating. Also added assertion that the
+            # replacement actually occurred to prevent silent no-ops.
+            content = mapping.read_text()
+            import re
+            new_content = re.sub(
+                r'(\|\s*QueueDepth\s*\|[^|]*\|[^|]*\|[^|]*\|[^|]*\|)\s*high\s*(\|)',
+                r'\1 low \2',
+                content,
+                count=1,
+            )
+            assert new_content != content, (
+                "Failed to replace QueueDepth fidelity rating — "
+                "mapping artifact format may have changed"
+            )
+            mapping.write_text(new_content)
+            # Remove the artifact created by the successful extract above,
+            # so we can verify the fidelity-failing extract does NOT recreate it.
+            summary_path.unlink()
             code, output = run_cli("extract", str(ROUTING_DIR))
             assert code == 1, f"Expected exit 1 for low-fidelity, got {code}: {output}"
             assert output["status"] == "error"
             assert any("low fidelity" in e.lower() for e in output["errors"])
+            # R2-F-22 fix: Verify artifact is NOT written after fidelity failure.
+            # Fidelity failure returns exit 1 BEFORE writing the artifact (unlike
+            # scope failure which writes the artifact with scope_validation_passed=false).
+            # This asymmetry is documented in the F-13 fix comment in cmd_extract.
+            # R3-F-4 fix: This assertion is now meaningful because we confirmed the
+            # artifact existed (from the successful extract), deleted it, then ran the
+            # fidelity-failing extract. If the artifact reappears, it means the fidelity
+            # halt did not prevent the write.
+            assert not summary_path.exists(), (
+                "Artifact should NOT be written after fidelity failure — "
+                "fidelity halt occurs before artifact write (see F-13 comment)"
+            )
         finally:
             if backup.exists():
                 shutil.move(str(backup), str(mapping))
@@ -2466,6 +3356,59 @@ class TestFidelityHalt:
         code, output = run_cli("extract", str(ROUTING_DIR))
         # Mapping has medium-fidelity signals (BatchSize, InFlightRequests) — should pass
         assert code == 0, f"Medium fidelity should not halt: {output}"
+
+    def test_provisional_detection_matches_mapping_format(self):
+        """R2-F-13: Verify *(provisional)* detection works against the actual mapping artifact.
+
+        The _check_fidelity regex depends on exact string matching of '*(provisional)*'
+        in the mapping table. This test verifies the regex matches the CacheHitRate row
+        in the actual mapping artifact (which is annotated as provisional).
+        """
+        mapping = REPO_ROOT / "docs" / "transfer" / "blis_to_llmd_mapping.md"
+        if not mapping.exists():
+            pytest.skip("Mapping artifact not present (pre-Task 5)")
+        content = mapping.read_text()
+        # Verify the provisional annotation exists in the mapping for CacheHitRate
+        assert "*(provisional)*" in content, (
+            "Expected *(provisional)* annotation in mapping artifact for CacheHitRate"
+        )
+        # Run extract and verify the provisional flag is detected
+        code, output = run_cli("extract", str(ROUTING_DIR))
+        assert code == 0, f"Extract failed: {output}"
+        summary = json.loads((WORKSPACE / "algorithm_summary.json").read_text())
+        cache_hit = [s for s in summary["signals"] if s["name"] == "CacheHitRate"]
+        assert len(cache_hit) == 1, f"CacheHitRate not found in signals: {summary['signals']}"
+        assert cache_hit[0].get("fidelity_provisional") is True, (
+            "CacheHitRate should have fidelity_provisional=True — "
+            "provisional detection regex may not match actual mapping format"
+        )
+
+    def test_fidelity_fallback_pattern_matches_additional_signals(self):
+        """R5-F-11 fix: Verify the _check_fidelity fallback pattern (pattern_alt with {2}
+        column skips) matches SessionID in the Additional Signals table.
+
+        The fidelity check has two regex patterns:
+        - Main table: {4} column skips (tested by CacheHitRate/QueueDepth tests)
+        - Additional Signals table: {2} column skips (only SessionID uses this)
+
+        Without this test, a column count change in the Additional Signals table
+        would silently break SessionID's fidelity check with no test to catch it.
+        """
+        mapping = REPO_ROOT / "docs" / "transfer" / "blis_to_llmd_mapping.md"
+        if not mapping.exists():
+            pytest.skip("Mapping artifact not present (pre-Task 5)")
+        content = mapping.read_text()
+        import re
+        # Directly test the fallback pattern against SessionID in the mapping
+        pattern_alt = r'\|\s*SessionID(?:\s*\([^)]*\))?\s*\|(?:[^|]*\|){2}\s*(low|medium|high)\s*(?:\*\(provisional\)\*)?\s*\|'
+        match = re.search(pattern_alt, content, re.IGNORECASE)
+        assert match is not None, (
+            "Fallback pattern (pattern_alt with {2} column skips) did not match "
+            "SessionID in the Additional Signals table. The column count may have changed."
+        )
+        assert match.group(1).lower() == "high", (
+            f"Expected SessionID fidelity 'high', got '{match.group(1)}'"
+        )
 
 
 class TestCIStrictEnforcement:
@@ -2501,6 +3444,22 @@ class TestCIStrictEnforcement:
         assert stdout["status"] == "error"
         assert any("strict" in e.lower() for e in stdout.get("errors", [])), (
             "Error message should mention --strict. Got: " + str(stdout.get("errors"))
+        )
+
+    def test_ci_false_does_not_enforce_strict(self):
+        """F-9: CI='false' should NOT trigger --strict enforcement."""
+        import os
+        env = {**os.environ, "CI": "false"}
+        result = subprocess.run(
+            [sys.executable, str(CLI), "extract", str(ROUTING_DIR)],
+            capture_output=True, text=True, cwd=str(REPO_ROOT),
+            env=env,
+        )
+        # F-25 fix: CI='false' should not enforce --strict — extract should succeed (exit 0).
+        # Previous assertion used a weak OR that could mask unrelated failures.
+        assert result.returncode == 0, (
+            f"CI='false' should not enforce --strict. Expected exit 0, got {result.returncode}. "
+            f"Stdout: {result.stdout[:200]}. Stderr: {result.stderr[:200]}"
         )
 
     def test_ci_env_with_strict_no_warning(self):
@@ -2622,6 +3581,10 @@ The `extract` command produces **two** JSON outputs:
 | PR4 | Stage 4 prompt + test retry logic | Not started |
 | PR5 | Validation pipeline (Stage 5) | Not started |
 | PR6 | Stage 6 + self-verification + calibration | Not started |
+
+## Cross-PR Notes
+
+R5-F-6 fix: When implementing PR3, read `docs/transfer/README.md` § Cross-PR Contracts first.
 ```
 
 **Step 2: Create CI workflow (F-2 fix)**
@@ -2653,6 +3616,11 @@ jobs:
       - name: Checkout inference-sim submodule
         run: git submodule update --init inference-sim
 
+      # F-8 fix: Check out llm-d-inference-scheduler for commit hash verification.
+      # Required by the recommended hash consistency check below and by Task 5 Step 2.
+      - name: Checkout llm-d-inference-scheduler submodule
+        run: git submodule update --init llm-d-inference-scheduler
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -2662,11 +3630,57 @@ jobs:
 
       # F-1 fix: Run extract with --strict in CI to enforce deterministic
       # fidelity checks. Without --strict, extract now fails in CI (hard gate).
+      # R2-F-21 fix: Explicit if: success() for clarity. GitHub Actions default
+      # behavior skips subsequent steps on failure, but explicit annotations
+      # make the dependency chain clear to readers.
       - name: Verify extract --strict
+        if: success()
         run: python tools/transfer_cli.py extract --strict routing/
 
       - name: Verify mapping
+        if: success()
         run: python tools/transfer_cli.py validate-mapping
+
+      # R3-F-17 fix: Verify the pinned commit hash in the mapping artifact matches
+      # the actual llm-d-inference-scheduler submodule HEAD. Without this check, the
+      # llm-d-inference-scheduler checkout above is dead weight. This ensures the
+      # mapping artifact stays in sync with the submodule pointer.
+      - name: Verify mapping commit hash consistency
+        if: success()
+        run: |
+          # R4-F-1 fix: Use grep -oE instead of grep -oP with PCRE lookbehind.
+          # The PCRE lookbehind (?<=\*\*Pinned commit hash:\*\*\s) is fragile
+          # across grep implementations. Instead, match the full pattern and
+          # extract the hash with a second grep.
+          PINNED_HASH=$(grep -o 'Pinned commit hash:\*\*[[:space:]]*[0-9a-f]\{7,40\}' docs/transfer/blis_to_llmd_mapping.md | grep -oE '[0-9a-f]{7,40}$')
+          # R4-F-1 fix: Guard against empty PINNED_HASH (grep failure, placeholder
+          # present, or format mismatch). Without this guard, the comparison
+          # ${ACTUAL_HASH:0:0} silently evaluates to empty string, making the
+          # check vacuous ('' == '' passes) or misleading.
+          if [ -z "$PINNED_HASH" ]; then
+            echo "ERROR: Could not extract pinned commit hash from docs/transfer/blis_to_llmd_mapping.md"
+            echo "Verify the mapping artifact contains '**Pinned commit hash:** <hex-hash>'"
+            exit 1
+          fi
+          ACTUAL_HASH=$(cd llm-d-inference-scheduler && git rev-parse HEAD)
+          # R5-F-1 fix: Normalize both hashes to the same length before comparison.
+          # The previous prefix comparison `${ACTUAL_HASH:0:${#PINNED_HASH}}`
+          # silently passes when PINNED_HASH is a 7-char abbreviated hash that
+          # happens to be a prefix of a different commit's full hash. Instead,
+          # if the pinned hash is abbreviated (<40 chars), resolve it to a full
+          # hash via `git rev-parse` so the comparison is always 40-char vs 40-char.
+          if [ ${#PINNED_HASH} -lt 40 ]; then
+            PINNED_HASH=$(cd llm-d-inference-scheduler && git rev-parse "$PINNED_HASH" 2>/dev/null) || {
+              echo "ERROR: Pinned hash from mapping artifact is not a valid commit in llm-d-inference-scheduler"
+              exit 1
+            }
+          fi
+          if [ "$ACTUAL_HASH" != "$PINNED_HASH" ]; then
+            echo "ERROR: Mapping artifact pinned hash ($PINNED_HASH) does not match llm-d-inference-scheduler HEAD ($ACTUAL_HASH)"
+            echo "Update the mapping artifact or the submodule pointer."
+            exit 1
+          fi
+          echo "OK: Pinned hash matches submodule HEAD"
 ```
 
 **Step 3: Run full test suite**
@@ -2706,6 +3720,7 @@ EOF
 | BC-5 | Task 3 | Integration | `TestExtract::test_extract_scope_validation_passes_for_routing` |
 | BC-5 | Task 3 | Integration | `TestExtract::test_extract_scope_validation_fails_for_out_of_scope` |
 | BC-6 | Task 6 | Integration | `TestFidelityHalt::test_low_fidelity_signal_halts_extract` + `test_medium_fidelity_signal_does_not_halt` |
+| R5-F-11 | Task 6 | Integration | `TestFidelityHalt::test_fidelity_fallback_pattern_matches_additional_signals` — verifies pattern_alt matches SessionID in Additional Signals table |
 | BC-7 | Task 3 | Integration | `TestExtract::test_extract_output_is_json` |
 | BC-8 | Task 3 | Integration | `TestExtract::test_extract_missing_directory_exits_2` |
 | BC-9 | Task 4 | Integration | `TestValidateMapping::test_validate_mapping_reports_missing_artifact` |
@@ -2722,21 +3737,27 @@ EOF
 | F-13 | Task 2 | Unit | `TestValidateArtifact::test_empty_signals_array_fails_min_items` |
 | F-13 | Task 2 | Unit | `TestValidateArtifact::test_unexpected_top_level_field_rejected` |
 | F-15 | Task 3 | Integration | `TestExtract::test_extract_no_signals_exits_1` — exit code 1 for no signals |
-| F-9 | Task 3 | Integration | `TestExtract::test_extract_few_signals_strict_exits_1` — 1-2 signals in --strict exits 1 |
+| F-9 | Task 3 | Integration | `TestExtract::test_extract_few_signals_strict_exits_1` — 1 signal in --strict exits 1 |
+| R3-F-15 | Task 3 | Integration | `TestExtract::test_extract_few_signals_boundary_2_fails` — exactly 2 signals in --strict exits 1 (boundary) |
+| R3-F-15 | Task 3 | Integration | `TestExtract::test_extract_few_signals_boundary_3_passes_threshold` — exactly 3 signals passes threshold (boundary) |
 | F-9 | Task 3 | Integration | `TestExtract::test_extract_missing_info_json_exits_2` — missing best_program_info.json exits 2 |
 | F-18 | Task 3 | Integration | `TestExtract::test_extract_content_hash_matches_evolve_block` — SHA-256 round-trip |
 | F-1 | Task 2 | Unit | `TestValidateArtifact::test_hash_with_trailing_chars_rejected` — re.fullmatch rejects trailing chars |
 | F-9 | Task 2 | Unit | `TestValidateArtifact::test_absolute_path_evolve_block_source_rejected` — pattern rejects absolute paths |
 | F-16 | Task 2 | Unit | `TestValidateArtifact::test_path_traversal_evolve_block_source_rejected` — pattern rejects `../` path traversal |
+| F-28 | Task 2 | Unit | `TestValidateArtifact::test_dot_slash_evolve_block_source_rejected` — pattern rejects `./` current directory reference |
+| F-12 | Task 2 | Unit | `TestValidateArtifact::test_invalid_line_range_rejected` — semantic check rejects start > end line ranges |
 | F-10 | Task 2 | Unit | `TestValidateArtifact::test_excess_signals_array_fails_max_items` — maxItems: 20 enforcement |
 | F-18 | Task 3 | Integration | `TestExtract::test_extract_mapping_version_parsed` — version parsing from mapping artifact |
 | F-22 | Task 6 | Integration | `TestExtractDeterminism::test_extract_is_deterministic` — same input → same output |
 | F-2 | Task 3 | Integration | `TestExtract::test_extract_non_determinism_boundary_documented` — fidelity check with/without mapping |
 | F-8 | Task 3 | Integration | `TestSourceSyncVerification::test_ci_must_not_skip_sync_tests` — loud failure in CI if submodule missing |
+| F-19 | Task 4 | Integration | `TestValidateMapping::test_validate_mapping_detects_duplicate_signals` — duplicate signal rows rejected (data quality, R3-F-14) |
 | F-2 | Task 4 | Integration | `TestValidateMapping::test_validate_mapping_rejects_placeholder_hash` — automated gate for placeholder commit hash |
 | F-3/BC-11 | Task 6 | Integration | `TestHashDriftDetection::test_hash_detects_source_modification` — content hash changes when EVOLVE-BLOCK is modified |
 | F-1 | Task 6 | Integration | `TestCIStrictEnforcement::test_ci_env_requires_strict_flag` — CI without --strict FAILS (exit 1) |
 | F-1 | Task 6 | Integration | `TestCIStrictEnforcement::test_ci_env_with_strict_no_warning` — CI with --strict has no warning |
+| F-9 | Task 6 | Integration | `TestCIStrictEnforcement::test_ci_false_does_not_enforce_strict` — CI='false' does not trigger --strict enforcement |
 | F-15 | Task 3 | Integration | `TestExtract::test_extract_empty_evolve_block_exits_1` — empty EVOLVE-BLOCK (markers present, no content) |
 | F-15 | Task 3 | Integration | `TestExtract::test_extract_missing_metrics_key_warns` — missing metrics key in info JSON |
 | F-26 | Task 3 | Integration | `TestExtract::test_extract_missing_metrics_key_strict_fails` — --strict mode fails with exit 1 when combined_score missing |
@@ -2863,25 +3884,109 @@ EOF
 | F-22 | IMPORTANT | **Fixed** | `cmd_validate_mapping` now tracks signal row counts via `mapping_signal_counts` dict and emits a stderr WARNING if duplicate signal names are found in the mapping table. Duplicates indicate ambiguous fidelity ratings. |
 | F-23 | IMPORTANT | **Fixed** | `cmd_extract` now resolves `routing_dir` and validates it is within `REPO_ROOT` before proceeding. Defense-in-depth — the CLI is a developer tool, not web-facing, but path bounding prevents accidental reads from unrelated directories. |
 
+### Convergence Review Finding Disposition (Round 18 — Fixer Round 3)
+
+| Finding | Severity | Disposition | Notes |
+|---------|----------|-------------|-------|
+| F-5 | IMPORTANT | Accepted | Two-output design has four defense layers documented (different structures, `additionalProperties:false`, `test_extract_stdout_differs_from_file_artifact`, CLAUDE.md warning). PR3 defense-in-depth (`output_type` key check) also documented. Adequate for a developer tool. |
+| F-6 | IMPORTANT | **Fixed** | Reordered `cmd_extract` to validate `routing_dir` (existence, `is_relative_to(REPO_ROOT)`) BEFORE the CI env var check. Invalid routing_dir now produces an actionable infrastructure error (exit 2) regardless of CI/--strict state. |
+| F-11 | IMPORTANT | **Fixed** | Added docstring note to `_check_scope` documenting that `re.search(pattern, block)` matches in comments, explaining this is acceptable for v1 (Go code comments unlikely to reference out-of-scope struct names) with a mitigation path (comment-stripping pre-pass). |
+| F-12 | IMPORTANT | Accepted | Content hash comment sensitivity is explicitly documented as intentionally conservative in BC-11. Recovery is straightforward (re-run extract). Distinguishing semantic from non-semantic changes in Go code is fragile. Design trade-off, not a defect. |
+| F-14 | IMPORTANT | **Fixed** | Changed "potentially conflicting fidelity" error message to "Duplicate signal rows found" with clarification that duplicates are rejected as a data quality error regardless of whether ratings conflict. Test description updated. |
+| F-15 | IMPORTANT | **Fixed** | Added boundary tests: `test_extract_few_signals_boundary_2_fails` (2 signals → exit 1) and `test_extract_few_signals_boundary_3_passes_threshold` (3 signals passes threshold). Test table updated. |
+| F-16 | IMPORTANT | **Fixed** | Added comment to `block_hash` computation explaining `block.encode()` is safe: `block` is a Python str from `read_text()`, and `str.encode()` always succeeds on a valid str. Non-UTF-8 source bytes would already fail at `read_text()`. |
+| F-17 | IMPORTANT | **Fixed** | Added `_UNSUPPORTED_KEYWORDS` set and `_check_unsupported_keywords()` to schema_validator. `validate_artifact()` now rejects schemas using `$ref`, `allOf`, `anyOf`, `oneOf`, `patternProperties`, `if/then/else` with a clear error before validation. Tests added. |
+| F-18 | IMPORTANT | Accepted | Pre-flight (Step 0) is a manual implementation aid, not a runtime gate. The plan explicitly documents that the test suite (`TestSourceSyncVerification`, `TestGoldenSignalList`, BC-8 tests) is the automated safety net if pre-flight is skipped. |
+| F-19 | IMPORTANT | Accepted | Hardcoded header allowlist (`"Sim", "Signal", "Composite"`) is documented with F-14 note explaining the mapping artifact and parser are co-created in PR1. Risk is low for v1; the note provides guidance for extension. |
+| F-20 | IMPORTANT | Accepted | Temporal semantics appropriately deferred to PR3/PR5. PR1 documents the assumption and the promotion requirement. PR1 cannot enforce PR3 behavior. |
+| F-21 | IMPORTANT | Accepted | Missing/default value handling documented as unverified design assumption with concrete 3-step verification procedure for PR3. PR1 correctly scopes this as PR3 responsibility. |
+| F-22 | IMPORTANT | **Fixed** | `test_extract_without_mapping_graceful_degradation` now verifies `fidelity_checked` is `false` in the output artifact when the mapping artifact is absent. |
+| F-23 | IMPORTANT | Accepted | Multiple EVOLVE-BLOCK pairs handled as warning (exit 0, first block extracted) is documented as intentional. Test verifies warning is emitted. For v1 with a single expected block, a warning is reasonable. |
+| F-24 | IMPORTANT | Accepted | Schema validation is a structural check; file existence verification requires filesystem access, which is outside the scope of a JSON Schema validator. The content hash mechanism (BC-11) provides runtime drift detection. Reasonable design boundary. |
+
+### Convergence Review Finding Disposition (Round 20 — Fixer Round 5)
+
+| Finding | Severity | Disposition | Notes |
+|---------|----------|-------------|-------|
+| F-12 | IMPORTANT | **Fixed** | `_extract_signals` now warns on stderr for unrecognized method calls (not in METHOD_EXPANSIONS or _IGNORE_METHODS). Golden-file test remains primary safety net; warning provides immediate development feedback. |
+| F-14 | IMPORTANT | **Fixed** | Added runtime Python version check in `main()` — exits with clear error message if Python < 3.9. Prevents confusing AttributeError from `Path.is_relative_to()`. |
+| F-18 | IMPORTANT | **Fixed** | `_extract_evolve_block` now differentiates three error conditions: (1) no markers at all, (2) END without START, (3) START without END. Each emits a specific stderr WARNING. Caller error message updated to reference stderr for diagnostics. |
+| F-20 | IMPORTANT | **Fixed** | `test_extract_content_hash_matches_evolve_block` docstring now documents shared slicing convention (`lines[start_idx:end_idx + 1]`), references F-27 canonical spec, and warns that test must be updated if `_extract_evolve_block` slicing changes. |
+| F-21 | IMPORTANT | **Fixed** | Strengthened CI step recommendation from "low-priority" to "RECOMMENDED" with a concrete YAML snippet for hash consistency checking. Warning-level (not failure) to allow intentional development drift. |
+| F-22 | IMPORTANT | **Fixed** | Added suggested `test_unmappable_signal_halts_extract` test case to the F-14 test coverage note, describing the full unmappable signal → low fidelity → BC-6 halt pathway. Marked as optional since core mechanism is verified by existing test. |
+| F-23 | IMPORTANT | **Fixed** | Added suggested `test_validate_schema_rejects_stdout_json` test case to the two-output design enforcement mechanism documentation. Marked as optional since four existing defense layers provide adequate coverage. |
+| F-24 | IMPORTANT | **Fixed** | `test_ci_must_not_skip_sync_tests` now also verifies `routing_go.stat().st_size > 0` to catch empty/corrupt submodule checkouts. Provides clear error message with recovery command. |
+
 ---
 
 ## Part 3: Quality Assurance
 
 ### J) Sanity Checklist
 
+**Dimension 1: Cross-system accuracy**
+- [x] All submodule API references match actual code — `ROUTING_SNAPSHOT_FIELDS` derived from `type RoutingSnapshot struct` at pinned inference-sim commit; `METHOD_EXPANSIONS` verified against `EffectiveLoad()` implementation
+- [x] Commit pins are current — `git submodule status` matches docs; llm-d-inference-scheduler hash pinned in mapping artifact
+- [x] No stale references to APIs that have been renamed or removed — `LoadEvolvedBlock` confirmed absent (R6); all referenced struct fields verified by `TestSourceSyncVerification`
+
+**Dimension 2: Schema chain integrity**
+- [x] Each workspace artifact's output fields match consuming stage's input — `algorithm_summary.schema.json` defines all 9 required fields (F-7 fix: including `fidelity_checked`); `TestRoundTrip::test_extract_then_validate_schema_round_trip` verifies extract output validates against schema
+- [x] JSON schema files match the macro plan's workspace artifact table — all fields from macro plan present; `composite_signals` and `mapping_artifact_version` added (documented in Deviation Log as ADDITION)
+- [x] Writer → Reader chains traced and verified — extract (writer) → validate-schema (PR1 reader) → PR3 prompt templates + Go harness (future readers)
+
+**Dimension 3: Prompt completeness**
+- [x] N/A for PR1 — no prompt templates in this PR. PR3 will create prompt templates and must satisfy this dimension.
+
+**Dimension 4: CLI contract**
+- [x] All CLI commands produce documented JSON schemas — `extract` produces stdout JSON (operational report) + file artifact (schema-validated); `validate-mapping` and `validate-schema` produce stdout JSON with documented fields
+- [x] Exit codes are consistent (0 = success, 1 = validation failure, 2 = infrastructure error) — exit code boundary documented in Section F; all edge cases tested (no signals = exit 1, missing file = exit 2, etc.)
+- [x] Error messages are actionable — `errors[]` array in JSON output contains diagnostic strings identifying the specific problem
+
+**Dimension 5: Artifact consistency**
+- [x] Signal names match across mapping artifact, schemas, prompts, CLI code, and README — `TestGoldenSignalList` verifies extract output matches golden list; `TestCompositeSignalConsistency::test_method_expansions_match_mapping_composite_table` verifies composite signals match mapping artifact. **R2-F-15 exception:** `ROUTING_SNAPSHOT_FIELDS` contains 'ID' and 'FreeKVBlocks' which do NOT appear in the mapping artifact or `EXPECTED_SIGNALS` — this is intentional per the F-1 RECONCILIATION comment (struct fields not accessed in EVOLVE-BLOCK are included for completeness but are not extracted signals).
+- [x] Field names match across workspace artifact schemas and code — `additionalProperties: false` in schema catches any field name drift; `test_extract_stdout_differs_from_file_artifact` verifies the two output structures don't contaminate each other
+- [x] File paths referenced in documents exist or will be created — all paths in README.md, CLAUDE.md, and mapping artifact correspond to files created by Tasks 1-7
+
+**Dimension 6: Dead artifact prevention**
+- [x] Every file created by this PR has an identified consumer — see Section F "Confirmation: No dead code"
+- [x] No orphan schemas — `algorithm_summary.schema.json` consumed by `validate-schema` command (PR1) and PR3 stages
+- [x] No unreferenced prompts — N/A (no prompt templates in PR1)
+- [x] No unused artifacts — mapping artifact consumed by `validate-mapping` (PR1), PR2 (scorer template), PR3 (prompt templates)
+
+**Additional checks:**
+- [x] PR category correctly identified — Artifact (per docs/contributing/pr-workflow.md Quick Reference table)
+- [x] Verification gate matches PR category — Artifact gate: `validate-mapping` + `validate-schema` (see Verification Gate below)
+- [x] No feature creep beyond macro plan scope — no prompt templates, no Go harness, no scorer template
+- [x] Deviation log reviewed — R6 deferral documented, signal list deviation documented, no unresolved deviations
+- [x] Each task produces working, verifiable output (no scaffolding) — all 3 CLI commands fully functional with tests
+- [x] Task dependencies are correctly ordered (1→2→3→4→5→6→7)
+- [x] All contracts are mapped to specific tasks — see Section H test strategy table
 - [x] No unnecessary abstractions (single module CLI, lightweight validator)
-- [x] No feature creep beyond PR scope (no prompt templates, no Go harness, no scorer template)
 - [x] No unexercised flags or interfaces
-- [x] No partial implementations (all 3 CLI commands fully functional)
 - [x] No breaking changes
 - [x] No hidden global state impact
 - [x] Python stdlib-only — no external dependencies (BC-7)
 - [x] CLAUDE.md created (new project)
-- [x] Deviation log reviewed — R6 deferral documented, signal list deviation documented
-- [x] Each task produces working, testable code
-- [x] Task dependencies correctly ordered (1→2→3→4→5→6→7)
-- [x] All contracts mapped to specific tasks
-- [x] Construction site audit: N/A (Python, no struct construction sites)
+
+### Verification Gate (Artifact PR)
+
+After all tasks complete, run the Artifact PR verification gate:
+
+```bash
+# 1. Validate mapping artifact completeness (bidirectional signal check)
+python tools/transfer_cli.py validate-mapping
+
+# 2. Extract with strict mode and validate against schema (round-trip)
+python tools/transfer_cli.py extract --strict routing/
+python tools/transfer_cli.py validate-schema workspace/algorithm_summary.json
+
+# 3. Run full test suite
+python -m pytest tools/ -v
+
+# 4. Manual: verify no dead artifacts (each file has an identified consumer)
+# See Section F "Confirmation" for the consumer mapping.
+```
+
+Expected: All commands exit 0, all tests pass.
 
 ---
 
@@ -2914,7 +4019,7 @@ EOF
 
 **Purpose:** JSON Schema defining the `workspace/algorithm_summary.json` contract.
 
-**Required fields:** `algorithm_name` (string), `evolve_block_source` (string, pattern-validated `^[^/].+\\.py:\\d+-\\d+$` rejecting absolute paths, with semantic start<=end check), `evolve_block_content_hash` (string, SHA-256 hex digest for drift detection), `signals` (array, minItems: 1, maxItems: 20, of objects with `name`, `type`, `access_path`, optional `normalization_note`), `composite_signals` (array, of objects with `name`, `constituents[]`, optional `formula` — documents how method calls expand to constituent signals so PR3 can reconstruct composites), `metrics` (object, required: `combined_score`), `scope_validation_passed` (boolean), `mapping_artifact_version` (string, pattern `^(unknown|\d+\.\d+)$`, for mapping artifact staleness detection).
+**Required fields (9):** `algorithm_name` (string), `evolve_block_source` (string, pattern-validated `^(?!.*(?:\\.\\.|\\.)/)[^/].+\\.py:\\d+-\\d+$` rejecting absolute paths and path traversal `../` and `./`, with semantic start<=end check), `evolve_block_content_hash` (string, SHA-256 hex digest for drift detection), `signals` (array, minItems: 1, maxItems: 20, of objects with `name`, `type`, `access_path`, optional `normalization_note`), `composite_signals` (array, of objects with `name`, `constituents[]`, optional `formula` — documents how method calls expand to constituent signals so PR3 can reconstruct composites), `metrics` (object, required: `combined_score`), `scope_validation_passed` (boolean), `mapping_artifact_version` (string, pattern `^(unknown|\d+\.\d+)$`, for mapping artifact staleness detection), `fidelity_checked` (boolean, whether fidelity checks were performed during extraction — true when mapping artifact existed, false during bootstrap phase).
 
 ### File: `docs/transfer/blis_to_llmd_mapping.md`
 
