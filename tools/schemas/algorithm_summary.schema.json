@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Algorithm Summary",
+  "description": "Output of transfer_cli.py extract — metadata about an evolved routing algorithm. NOTE: This schema captures signal metadata and source location, not the algorithm's behavioral logic (scoring weights, penalty functions). PR3 must independently parse the EVOLVE-BLOCK at the location in evolve_block_source to extract algorithm logic. TEMPORAL ASSUMPTION: All signals are assumed to be point-in-time snapshots. No temporal metadata (rolling average window, sampling rate) is included in v1. PR5 must verify production metrics match this assumption — see blis_to_llmd_mapping.md Notes.",
+  "type": "object",
+  "required": ["algorithm_name", "evolve_block_source", "evolve_block_content_hash", "signals", "composite_signals", "metrics", "scope_validation_passed", "mapping_artifact_version", "fidelity_checked"],
+  "additionalProperties": false,
+  "properties": {
+    "algorithm_name": {"type": "string"},
+    "evolve_block_source": {
+      "type": "string",
+      "pattern": "^(?!.*(?:^|/)\\.\\./)(?!.*(?:^|/)\\./)[^/].+\\.py:\\d+-\\d+$",
+      "description": "Source file path (relative to repository root) and line range, e.g., 'routing/best_program.py:171-242'. The path MUST be relative to the repository root, not absolute. The pattern rejects absolute paths, '../' and './' path components. IMPLICIT CONTRACT: The schema validator enforces start <= end on line-range values as a defense-in-depth semantic check beyond the regex pattern."
+    },
+    "evolve_block_content_hash": {
+      "type": "string",
+      "description": "SHA-256 hex digest of the EVOLVE-BLOCK content at extraction time. PR3 MUST recompute this hash and compare before parsing — if it differs, the source changed since extraction and the signal list may be stale.",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "signals": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "description": "maxItems is a defense-in-depth guard against spurious regex matches. The golden-file test (TestGoldenSignalList) is the primary safeguard for signal count correctness.",
+      "items": {
+        "type": "object",
+        "required": ["name", "type", "access_path"],
+        "properties": {
+          "name": {"type": "string"},
+          "type": {
+            "type": "string",
+            "enum": ["int", "int64", "float64", "string", "bool", "unknown"],
+            "description": "Go type of the signal. 'unknown' indicates the signal was found in the EVOLVE-BLOCK but is not in ROUTING_SNAPSHOT_FIELDS or REQUEST_LEVEL_FIELDS. Downstream stages MUST treat 'unknown' as an error."
+          },
+          "access_path": {"type": "string"},
+          "normalization_note": {
+            "type": "string",
+            "description": "Machine-readable normalization requirement for production values. Example: 'divide_by_100' for KVUtilization (sim 0.0-1.0 vs prod 0-100). PR3 MUST apply this normalization before passing values to the scorer."
+          },
+          "fidelity_provisional": {
+            "type": "boolean",
+            "description": "Set to true when the signal's fidelity rating in the mapping artifact is annotated as *(provisional)*. When true, PR5 empirical validation is required before the rating can be considered stable."
+          }
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "description": "Metrics from best_program_info.json. combined_score is required.",
+      "required": ["combined_score"],
+      "properties": {
+        "combined_score": {"type": "number", "description": "Combined fitness score from the evolutionary optimizer. May be negative. No valid range constraint."}
+      }
+    },
+    "scope_validation_passed": {"type": "boolean"},
+    "composite_signals": {
+      "type": "array",
+      "description": "Composite signals (method calls that expand to multiple fields). Documents how constituent signals combine, so PR3 can reconstruct the composite.",
+      "items": {
+        "type": "object",
+        "required": ["name", "constituents"],
+        "properties": {
+          "name": {"type": "string", "description": "Method name, e.g., 'EffectiveLoad'"},
+          "constituents": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "List of signal names that compose this method"
+          },
+          "formula": {"type": "string", "enum": ["sum"], "description": "How constituents combine. Extend this enum when adding new composite formulas."}
+        }
+      }
+    },
+    "mapping_artifact_version": {
+      "type": "string",
+      "pattern": "^(unknown|\\d+\\.\\d+)$",
+      "description": "Version of blis_to_llmd_mapping.md used at extraction time. Format: 'MAJOR.MINOR' (e.g., '1.0') or 'unknown' (fallback when version cannot be parsed)."
+    },
+    "fidelity_checked": {
+      "type": "boolean",
+      "description": "Whether fidelity checks were performed during extraction. True if the mapping artifact existed at extraction time. False if the mapping artifact was absent (bootstrap phase). CI with --strict always produces fidelity_checked=true."
+    }
+  }
+}
