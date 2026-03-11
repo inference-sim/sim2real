@@ -1,8 +1,8 @@
 # PR Review Perspective Prompts
 
-Reference file for the convergence-review skill. Contains exact prompts for the 20 PR review perspectives across plan review and code review gates.
+Reference file for the convergence-review skill. Contains exact prompts for PR review perspectives across plan review, code review, and cross-system plan review gates.
 
-**Canonical source:** `docs/contributing/pr-workflow.md` (v3.0). If prompts here diverge from pr-workflow.md, the process doc is authoritative.
+**Canonical source:** `docs/contributing/pr-workflow.md`. If prompts here diverge from pr-workflow.md, the process doc is authoritative. Sections A and B use inference-sim perspectives (v3.0). Section C uses sim2real perspectives (v1.0).
 
 **Dispatch pattern:** Launch each perspective as a parallel Task agent. **Do NOT paste the artifact content into the prompt** — this causes output generation to hang when dispatching 8+ agents in parallel. Instead, tell agents to read the file themselves:
 ```
@@ -179,12 +179,14 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 
 ## Section B: PR Code Review (10 perspectives) — Step 4.5
 
+**Codebase access:** These reviewers are launched as `claude -p` subprocesses with Read, Glob, Grep, and Bash tools. They should run `git diff HEAD` to see the diff, then use Read/Glob/Grep to examine surrounding code context (imports, call sites, type definitions, tests) to verify claims about code outside the diff.
+
 ### PC-1: Substance & Design
 
 ```
 Review this diff for substance: Are there logic bugs, design mismatches between contracts and implementation, mathematical errors, or silent regressions? Check from first principles — not just structural patterns. Does the implementation actually achieve what the behavioral contracts promise?
 
-First, run `git diff` using the Bash tool to see the current code changes. Then review them.
+First, run `git diff HEAD` using the Bash tool to see the current code changes. Then use the Read, Glob, and Grep tools to examine surrounding code context — check imports, call sites, type definitions, and related tests to verify your findings against the actual codebase.
 
 Rate each finding as CRITICAL, IMPORTANT, or SUGGESTION.
 Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (3) total IMPORTANT count.
@@ -205,7 +207,7 @@ Review this diff for code quality. Check all of these:
 (9) Any method >50 lines spanning multiple concerns (scheduling + latency + metrics)? (R14)
 (10) Any changes to docs/contributing/standards/ files — are CLAUDE.md working copies updated? (DRY)
 
-First, run `git diff` using the Bash tool to see the current code changes. Then review them.
+First, run `git diff HEAD` using the Bash tool to see the current code changes. Then use Read/Glob/Grep to verify findings — for example, check all construction sites of a struct, or grep for all callers of a changed function.
 
 Rate each finding as CRITICAL, IMPORTANT, or SUGGESTION.
 Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (3) total IMPORTANT count.
@@ -224,7 +226,7 @@ Also check:
 - Do tests verify laws (conservation, monotonicity, causality) not just values?
 - Would each test still pass if the implementation were completely rewritten?
 
-First, run `git diff` using the Bash tool to see the current code changes. Then review them.
+First, run `git diff HEAD` using the Bash tool to see the current code changes. Then use Read to examine the full test files and Grep to find related test helpers or fixtures.
 
 Rate each finding as CRITICAL, IMPORTANT, or SUGGESTION.
 Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (3) total IMPORTANT count.
@@ -244,7 +246,7 @@ Check:
 - Unclear extension points
 - README not updated for new features
 
-First, run `git diff` using the Bash tool to see the current code changes. Then review them.
+First, run `git diff HEAD` using the Bash tool to see the current code changes. Then use Read/Glob to check README files, examples, and contributor guides for completeness.
 
 Rate each finding as CRITICAL, IMPORTANT, or SUGGESTION.
 Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (3) total IMPORTANT count.
@@ -262,7 +264,7 @@ The upstream community uses GitHub Copilot, Claude, and Codex to review PRs. Do 
 - Style inconsistencies
 - Missing error returns
 
-First, run `git diff` using the Bash tool to see the current code changes. Then review them.
+First, run `git diff HEAD` using the Bash tool to see the current code changes. Then use Grep to search for exported globals, panic calls, and KnownFields usage across the codebase.
 
 Rate each finding as CRITICAL, IMPORTANT, or SUGGESTION.
 Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (3) total IMPORTANT count.
@@ -279,7 +281,7 @@ Review this diff as a discrete-event simulation expert. Check for:
 - Work-conserving property violations (INV-8)
 - Event-driven race conditions
 
-First, run `git diff` using the Bash tool to see the current code changes. Then review them.
+First, run `git diff HEAD` using the Bash tool to see the current code changes. Then use Read to examine event processing code and Grep to trace signal propagation paths.
 
 Rate each finding as CRITICAL, IMPORTANT, or SUGGESTION.
 Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (3) total IMPORTANT count.
@@ -296,7 +298,7 @@ Review this diff as a vLLM/SGLang inference serving expert. Check for:
 - Missing scheduling features
 - Flag any assumption about LLM serving that this code gets wrong
 
-First, run `git diff` using the Bash tool to see the current code changes. Then review them.
+First, run `git diff HEAD` using the Bash tool to see the current code changes. Then use Read/Grep to examine the scheduling and batching implementation for context.
 
 Rate each finding as CRITICAL, IMPORTANT, or SUGGESTION.
 Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (3) total IMPORTANT count.
@@ -313,7 +315,7 @@ Review this diff as a distributed inference platform expert (llm-d, KServe, vLLM
 - Horizontal scaling assumption violations
 - Prefix-affinity routing correctness
 
-First, run `git diff` using the Bash tool to see the current code changes. Then review them.
+First, run `git diff HEAD` using the Bash tool to see the current code changes. Then use Read/Grep to examine multi-instance coordination and routing code.
 
 Rate each finding as CRITICAL, IMPORTANT, or SUGGESTION.
 Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (3) total IMPORTANT count.
@@ -330,7 +332,7 @@ Review this diff as a performance and scalability analyst. Check for:
 - Memory growth patterns
 - Changes degrading performance at 1000+ requests or 10+ instances
 
-First, run `git diff` using the Bash tool to see the current code changes. Then review them.
+First, run `git diff HEAD` using the Bash tool to see the current code changes. Then use Read to examine hot paths and Grep to find callers of changed functions to assess performance impact.
 
 Rate each finding as CRITICAL, IMPORTANT, or SUGGESTION.
 Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (3) total IMPORTANT count.
@@ -347,7 +349,191 @@ Review this diff as a security and robustness reviewer. Check for:
 - Configuration injection risks
 - Silent data loss in error paths
 
-First, run `git diff` using the Bash tool to see the current code changes. Then review them.
+First, run `git diff HEAD` using the Bash tool to see the current code changes. Then use Grep to trace input validation paths and Read to check error handling in changed files.
+
+Rate each finding as CRITICAL, IMPORTANT, or SUGGESTION.
+Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (3) total IMPORTANT count.
+```
+
+---
+
+## Section C: Cross-System PR Plan Review (5 perspectives) — x-pr-plan
+
+For sim2real cross-system transfer PRs. 5 perspectives aligned with `docs/contributing/pr-workflow.md` (v1.0). Not all perspectives are used for every PR category — see the pr-workflow's Perspective Assignment table.
+
+**Canonical source:** `docs/contributing/pr-workflow.md` (v1.0). If prompts here diverge from pr-workflow.md, the process doc is authoritative.
+
+### XPP-1: Cross-System Contract Integrity
+
+```
+Review this plan for cross-system contract integrity. Check:
+(1) Do artifacts correctly describe the APIs in submodules? Read the actual submodule source files referenced in the plan and compare API signatures, types, and method names against what the plan documents.
+(2) Are commit pins current? Run `git submodule status` and compare against any commit hashes referenced in the plan or mapping artifact.
+(3) Do workspace artifact schemas chain correctly between stages? For each workspace artifact (algorithm_summary.json, signal_coverage.json, validation_results.json), verify that the fields written by the producing stage match the fields expected by consuming stages.
+(4) Signal mapping accuracy: does each signal name in the mapping artifact match the actual field name in both the source system (inference-sim) and target system (llm-d-inference-scheduler)? Check for semantic drift, type mismatches (int vs float, absolute vs relative), unit mismatches (ms vs s), and temporal mismatches (point-in-time vs rolling average).
+(5) Plugin interface compliance: do references to the target system's scorer interface, registration pattern, and config format match the actual code in the submodule?
+
+First, read the plan file at ARTIFACT_PATH using the Read tool. Then read the relevant submodule source files to verify claims.
+
+Rate each finding as CRITICAL, IMPORTANT, or SUGGESTION.
+Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (3) total IMPORTANT count.
+```
+
+### XPP-2: Artifact Completeness & Consistency
+
+```
+Review this plan for artifact completeness and cross-artifact consistency. Check:
+(1) Are all required sections present in each artifact the plan creates or modifies? (Mapping artifact: signal table, types, metric paths, staleness windows, fidelity ratings, commit pin. Scorer template: all 8 sections per design doc. Prompt templates: prerequisites, validation steps, halt conditions, expected outputs.)
+(2) Do signal names match exactly across all artifacts? Grep for each signal name in the mapping artifact, JSON schemas, prompt templates, CLI code, and README. Any spelling or casing mismatch is a bug.
+(3) Do field names match across workspace artifact schemas and the code that reads/writes them?
+(4) Do file paths referenced in the plan exist or will be created by a preceding task? Flag any reference to a file that doesn't exist and isn't created by an earlier task.
+(5) Is the deviation log current? If the plan deviates from the macro plan, is each deviation documented with rationale?
+(6) Dead artifact check: is every file created by this plan consumed by a test, a later PR, or the pipeline runtime? If a file has no consumer, flag it.
+
+First, read the plan file at ARTIFACT_PATH using the Read tool.
+
+Rate each finding as CRITICAL, IMPORTANT, or SUGGESTION.
+Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (3) total IMPORTANT count.
+```
+
+### XPP-3: Prompt Template Quality
+
+```
+Review this plan's prompt templates (or plans for prompt templates) for quality and completeness. Check:
+(1) Does each prompt template specify prerequisites — which workspace artifacts must exist before this stage runs, and how to validate them (schema check + file existence)?
+(2) Does each prompt template specify validation steps — how the operator or LLM verifies the stage's output before writing to workspace artifacts?
+(3) Are halt conditions clear and unambiguous? For each condition that should stop the pipeline, is the trigger specific (not "if something looks wrong") and is the action explicit (exit code, error message, user decision options)?
+(4) Are expected outputs fully specified — file names, JSON field names, format constraints?
+(5) Does the prompt reference predecessor artifact checks? Each consuming stage should validate the predecessor artifact's schema before reading.
+(6) Could the prompt cause LLM missteps? Look for ambiguous instructions, missing context, or steps where the LLM would need to guess. Each step should be self-contained enough that a capable LLM can execute it without external knowledge of the codebase.
+
+First, read the plan file at ARTIFACT_PATH using the Read tool.
+
+Rate each finding as CRITICAL, IMPORTANT, or SUGGESTION.
+Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (3) total IMPORTANT count.
+```
+
+### XPP-4: Code Correctness (Python CLI + Go Harness)
+
+```
+Review this plan's code (Python CLI tools and Go test harness) for correctness. Check:
+(1) Edge cases: empty input files, missing fields in JSON, zero-length signal lists, malformed YAML.
+(2) Error handling: does every CLI command handle all three exit code paths (0 = success, 1 = validation failure, 2 = infrastructure error)? Are errors surfaced with actionable messages, not swallowed?
+(3) JSON output contract: does each CLI command's actual JSON output match the schema documented in the macro plan's Component Model section? Check field names, types, and required vs optional.
+(4) Go harness correctness: compilation against pinned submodule HEAD, test tuple handling, score comparison logic, timeout handling.
+(5) Input validation: CLI argument parsing safety, path traversal prevention in file operations, subprocess invocation safety.
+(6) Resource bounds: no unbounded file reads, no unlimited memory growth, no infinite retry loops without limits.
+
+First, read the plan file at ARTIFACT_PATH using the Read tool.
+
+Rate each finding as CRITICAL, IMPORTANT, or SUGGESTION.
+Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (3) total IMPORTANT count.
+```
+
+### XPP-5: Plan Structural Validation (perform directly, no agent)
+
+> **For Claude:** Perform these 5 checks directly. Do NOT dispatch an agent.
+
+**Check 1 — Task Dependencies:**
+For each task, verify it can actually start given what comes before it. Trace the dependency chain: what files does each task create/modify? Does any task require a file, type, or artifact that hasn't been created yet?
+
+**Check 2 — Template Completeness:**
+Verify all sections from `docs/contributing/templates/micro-plan-cross-system.md` are present and non-empty: Header, Part 1 (A-E), Part 2 (F-I), Part 3 (J), Appendix.
+
+**Check 3 — Executive Summary Clarity:**
+Read the executive summary as if you're a new team member unfamiliar with either codebase. Is the scope clear without reading the rest? Is the transfer direction obvious?
+
+**Check 4 — Under-specified Tasks:**
+For each task, verify it has complete code or complete artifact content. Flag any step an executing agent would need to figure out on its own, especially cross-system integration steps. Verify each task uses the correct variant (Code Task / Artifact Task / Prompt Template Task).
+
+**Check 5 — Verification Gate Alignment:**
+Does the plan's verification gate match the PR category from `docs/contributing/pr-workflow.md`? (Artifact → mapping validation + schema check. Pipeline Stage → pytest + go build + prompt check. Validation → pytest + go test + go build. Integration → end-to-end smoke test.)
+
+---
+
+## Section D: Cross-System PR Code Review (4 perspectives) — x-pr-code
+
+For sim2real cross-system transfer PRs — post-implementation code/artifact review. 4 perspectives aligned with `docs/contributing/pr-workflow.md` (v1.0), minus plan structural validation (which only applies to plans, not diffs). Not all perspectives are used for every PR category — see the pr-workflow's Perspective Assignment table.
+
+**Canonical source:** `docs/contributing/pr-workflow.md` (v1.0). If prompts here diverge from pr-workflow.md, the process doc is authoritative.
+
+**Codebase access:** These reviewers are launched as `claude -p` subprocesses with Read, Glob, Grep, and Bash tools. They should run `git diff HEAD` to see the diff, then use Read/Glob/Grep to examine surrounding code context (submodule sources, schemas, imports, call sites) to verify claims.
+
+**Perspective assignment for code review by PR category:**
+
+| Category | XPC-1 Contracts | XPC-2 Artifacts | XPC-3 Prompts | XPC-4 Code |
+|----------|:---:|:---:|:---:|:---:|
+| **Artifact** | X | X | | |
+| **Pipeline Stage** | X | X | X | |
+| **Validation** | X | X | X | X |
+| **Integration** | X | X | X | X |
+
+### XPC-1: Cross-System Contract Integrity
+
+```
+Review this diff for cross-system contract integrity. Check:
+(1) Do any changes to artifacts (mapping docs, schemas, README) still correctly describe the APIs in submodules? Read the actual submodule source files and compare API signatures, types, and method names against what the changed artifacts document.
+(2) Are commit pins still current? If the diff modifies files that reference submodule commit hashes, run `git submodule status` and verify they match.
+(3) Do workspace artifact schema changes maintain the chain? If a schema field was added, renamed, or removed, verify that both the producing stage and all consuming stages are updated consistently.
+(4) Signal mapping accuracy: if the diff touches signal names in any file (mapping artifact, schemas, CLI code, prompts), verify the name matches the actual field in both inference-sim and llm-d-inference-scheduler submodules.
+(5) Plugin interface compliance: if the diff touches scorer template or generated code patterns, verify they still match the target system's actual interface.
+
+First, run `git diff HEAD` using the Bash tool to see the current code changes. Then use Read to examine the actual submodule source files and Grep to search for signal names across the codebase to verify claims.
+
+Rate each finding as CRITICAL, IMPORTANT, or SUGGESTION.
+Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (3) total IMPORTANT count.
+```
+
+### XPC-2: Artifact Completeness & Consistency
+
+```
+Review this diff for artifact completeness and cross-artifact consistency. Check:
+(1) If the diff adds or modifies an artifact, are all required sections present? (Mapping artifact: signal table, types, metric paths, staleness windows, fidelity ratings, commit pin. Scorer template: all 8 sections per design doc. Prompt templates: prerequisites, validation steps, halt conditions, expected outputs.)
+(2) Do signal names match exactly across all files touched by this diff? Grep for each signal name in the mapping artifact, JSON schemas, prompt templates, CLI code, and README. Any spelling or casing mismatch is a bug.
+(3) Do field names in changed JSON schemas match the code that reads/writes those fields?
+(4) Do file paths referenced in changed documents actually exist in the repository?
+(5) Dead artifact check: does this diff create any file that has no consumer (no test reads it, no later stage uses it, no pipeline runtime depends on it)?
+
+First, run `git diff HEAD` using the Bash tool to see the current code changes. Then use Grep to search for signal names across all artifacts, and Glob to verify file paths exist.
+
+Rate each finding as CRITICAL, IMPORTANT, or SUGGESTION.
+Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (3) total IMPORTANT count.
+```
+
+### XPC-3: Prompt Template Quality
+
+```
+Review this diff's prompt templates for quality and completeness. Check:
+(1) Does each new or modified prompt template specify prerequisites — which workspace artifacts must exist before this stage runs, and how to validate them (schema check + file existence)?
+(2) Does each prompt specify validation steps — how the operator or LLM verifies the stage's output before writing to workspace artifacts?
+(3) Are halt conditions clear and unambiguous? For each condition that should stop the pipeline, is the trigger specific (not "if something looks wrong") and is the action explicit (exit code, error message, user decision options)?
+(4) Are expected outputs fully specified — file names, JSON field names, format constraints?
+(5) Does the prompt reference predecessor artifact checks? Each consuming stage should validate the predecessor artifact's schema before reading.
+(6) Could the prompt cause LLM missteps? Look for ambiguous instructions, missing context, or steps where the LLM would need to guess.
+
+If this diff does not touch any prompt templates, report "No prompt templates in diff — 0 CRITICAL, 0 IMPORTANT" and stop.
+
+First, run `git diff HEAD` using the Bash tool to see the current code changes. Then use Read to examine the full prompt template files for context beyond just the diff hunks.
+
+Rate each finding as CRITICAL, IMPORTANT, or SUGGESTION.
+Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (3) total IMPORTANT count.
+```
+
+### XPC-4: Code Correctness (Python CLI + Go Harness)
+
+```
+Review this diff's code (Python CLI tools and Go test harness) for correctness. Check:
+(1) Edge cases: empty input files, missing fields in JSON, zero-length signal lists, malformed YAML.
+(2) Error handling: does every CLI command handle all three exit code paths (0 = success, 1 = validation failure, 2 = infrastructure error)? Are errors surfaced with actionable messages, not swallowed?
+(3) JSON output contract: does each CLI command's JSON output match the schema documented in the macro plan? Check field names, types, and required vs optional.
+(4) Go harness correctness: compilation against pinned submodule HEAD, test tuple handling, score comparison logic, timeout handling.
+(5) Input validation: CLI argument parsing safety, path traversal prevention in file operations, subprocess invocation safety.
+(6) Resource bounds: no unbounded file reads, no unlimited memory growth, no infinite retry loops without limits.
+(7) Test quality: do tests verify observable behavior (not internal structure)? Do tests cover the contracts claimed in the plan?
+
+If this diff does not touch any Python or Go code, report "No code in diff — 0 CRITICAL, 0 IMPORTANT" and stop.
+
+First, run `git diff HEAD` using the Bash tool to see the current code changes. Then use Read to examine the full source files for context, and Grep to verify JSON schema contracts match the code.
 
 Rate each finding as CRITICAL, IMPORTANT, or SUGGESTION.
 Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (3) total IMPORTANT count.

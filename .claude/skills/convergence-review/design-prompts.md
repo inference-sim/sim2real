@@ -10,14 +10,10 @@ Reference file for the convergence-review skill. Contains exact prompts for desi
 - Macro plan process: `docs/contributing/macro-planning.md`
 - Macro plan template: `docs/contributing/templates/macro-plan.md`
 
-**Dispatch pattern:** Launch each perspective as a parallel Task agent. **Do NOT paste the artifact content into the prompt** — this causes output generation to hang when dispatching 8+ agents in parallel. Instead, tell agents to read the file themselves:
+**Dispatch pattern:** Launch each perspective as a parallel Task agent:
 ```
-Task(subagent_type="general-purpose", model=REVIEW_MODEL, run_in_background=True,
-     prompt="<prompt from below with ARTIFACT_PATH substituted>")
-```
-Each prompt below uses `ARTIFACT_PATH` as a placeholder. The dispatcher must replace it with the actual file path before launching agents.
-
-Model selection is controlled by the `--model` flag in the convergence-review skill (default: `haiku`).
+Task(subagent_type="general-purpose", model="haiku", run_in_background=True,
+     prompt="<prompt from below>\n\n<artifact content>")
 
 ---
 
@@ -26,7 +22,10 @@ Model selection is controlled by the `--model` flag in the convergence-review sk
 ### DD-1: Motivation & Scoping
 
 ```
-You are a design reviewer. First, read the design document at ARTIFACT_PATH using the Read tool. Then review it.
+You are reviewing a BLIS design document.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Motivation & Scoping
 - Are the analysis questions clear, specific, and testable?
@@ -43,7 +42,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### DD-2: Pipeline Correctness
 
 ```
-You are a design reviewer. First, read the design document at ARTIFACT_PATH using the Read tool. Then review it.
+You are reviewing a BLIS design document.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Pipeline Correctness
 - Are stage triggers and ordering well-defined? Which stages are sequential vs parallelizable?
@@ -60,7 +62,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### DD-3: Stage Contract Completeness
 
 ```
-You are a design reviewer. First, read the design document at ARTIFACT_PATH using the Read tool. Then review it.
+You are reviewing a BLIS design document.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Stage Contract Completeness
 - For each pipeline stage: are the inputs, outputs, and side effects (files created, PRs opened, comments posted) fully specified?
@@ -77,7 +82,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### DD-4: Integration Fit
 
 ```
-You are a design reviewer. First, read the design document at ARTIFACT_PATH using the Read tool. Then review it.
+You are reviewing a BLIS design document.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Integration Fit
 - Does the generated artifact (e.g., scorer plugin) follow the target system's conventions? Is it additive (new files only) or does it require modifying existing code?
@@ -94,7 +102,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### DD-5: Prohibited Content
 
 ```
-You are a design reviewer. First, read the design document at ARTIFACT_PATH using the Read tool. Then review it.
+You are reviewing a BLIS design document.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Prohibited Content
 Design docs describe WHAT the pipeline does and WHY, never HOW it's implemented. This doc spans two external systems (source simulator, target production system) whose internals will evolve. Check for:
@@ -112,7 +123,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### DD-6: Trade-off Quality
 
 ```
-You are a design reviewer. First, read the design document at ARTIFACT_PATH using the Read tool. Then review it.
+You are reviewing a BLIS design document.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Trade-off Quality
 - Does every non-obvious decision have alternatives listed with rationale?
@@ -131,7 +145,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### DD-7: Validation Strategy
 
 ```
-You are a design reviewer. First, read the design document at ARTIFACT_PATH using the Read tool. Then review it.
+You are reviewing a BLIS design document.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Validation Strategy
 - Are the right metrics chosen for each validation concern? Are there better alternatives?
@@ -150,7 +167,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### DD-8: Staleness Resistance
 
 ```
-You are a design reviewer. First, read the design document at ARTIFACT_PATH using the Read tool. Then review it.
+You are reviewing a BLIS design document.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Staleness Resistance
 - Apply the staleness test to every section: Would this content mislead if either the source system or target system changes their implementation?
@@ -175,7 +195,10 @@ These perspectives are system-agnostic. They apply to any cross-system transfer 
 ### GDD-1: Motivation & Scoping
 
 ```
-You are a design reviewer. First, read the design document at ARTIFACT_PATH using the Read tool. Then review it.
+You are a design reviewer
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Motivation & Scoping
 - Are the analysis questions clear, specific, and testable? Could you write a pass/fail test for each one?
@@ -192,7 +215,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### GDD-2: Pipeline Correctness
 
 ```
-You are a design reviewer. First, read the design document at ARTIFACT_PATH using the Read tool. Then review it.
+You are a design reviewer
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Pipeline Correctness
 - Are stage triggers and ordering well-defined? Which stages are sequential vs parallelizable?
@@ -209,7 +235,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### GDD-3: Stage Contract Completeness
 
 ```
-You are a design reviewer. First, read the design document at ARTIFACT_PATH using the Read tool. Then review it.
+You are a design reviewer
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Stage Contract Completeness
 - For each pipeline stage: are the inputs, outputs, and side effects (files created, PRs opened, comments posted, deployments triggered) fully specified?
@@ -226,7 +255,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### GDD-4: Integration Fit
 
 ```
-You are a design reviewer. First, read the design document at ARTIFACT_PATH using the Read tool. Then review it.
+You are a design reviewer
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Integration Fit
 - Does the generated artifact follow the TARGET system's conventions? Is it additive (new files only) or does it require modifying existing TARGET code?
@@ -244,7 +276,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### GDD-5: Prohibited Content
 
 ```
-You are a design reviewer. First, read the design document at ARTIFACT_PATH using the Read tool. Then review it.
+You are a design reviewer
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Prohibited Content
 Design docs describe WHAT the pipeline does and WHY, never HOW it's implemented. This doc spans two external systems whose internals will evolve independently. Check for:
@@ -262,7 +297,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### GDD-6: Trade-off Quality
 
 ```
-You are a design reviewer. First, read the design document at ARTIFACT_PATH using the Read tool. Then review it.
+You are a design reviewer
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Trade-off Quality
 - Does every non-obvious decision have alternatives listed with rationale?
@@ -279,7 +317,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### GDD-7: Validation Strategy
 
 ```
-You are a design reviewer. First, read the design document at ARTIFACT_PATH using the Read tool. Then review it.
+You are a design reviewer
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Validation Strategy
 - Are equivalence metrics and acceptance thresholds justified? What evidence supports the chosen values? Has anyone calibrated them against known-good and known-bad transfers?
@@ -296,7 +337,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### GDD-8: Staleness Resistance
 
 ```
-You are a design reviewer. First, read the design document at ARTIFACT_PATH using the Read tool. Then review it.
+You are a design reviewer
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Staleness Resistance
 - Apply the staleness test to every section: Would this content mislead if either the SOURCE or TARGET system changes their implementation?
@@ -315,7 +359,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### MP-1: Objective Clarity
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Objective Clarity (macro-plan template Phase 1)
 - Are 3-7 crisp objectives defined?
@@ -331,7 +378,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### MP-2: Concept Model Quality
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Concept Model Quality (macro-plan template Phase 2)
 - Is the concept model under 80 lines?
@@ -347,7 +397,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### MP-3: PR Decomposition
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: PR Decomposition Quality (macro-plan template Phase 6)
 - Is each PR independently mergeable? (No PR requires another PR's uncommitted code)
@@ -365,7 +418,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### MP-4: Abstraction Level
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Abstraction Level Compliance (macro-plan template Abstraction Level Rule)
 The macro plan describes WHAT to build and in WHAT ORDER, not HOW. Check:
@@ -382,7 +438,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### MP-5: Risk Register
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Risk Register Completeness (macro-plan template Phase 3)
 For each entry, verify:
@@ -403,7 +462,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### MP-6: Cross-Cutting Infrastructure
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Cross-Cutting Infrastructure (macro-plan template Phase 5)
 Verify Phase 5 is complete:
@@ -422,7 +484,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### MP-7: Extension Friction
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Extension Friction (design guidelines Section 4.5)
 - For each new module boundary, is the touch-point count for adding one more variant specified?
@@ -438,7 +503,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### MP-8: Design Bug Prevention
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Design Bug Prevention (macro-plan template Phase 8)
 Check that the plan prevents these failure modes:
@@ -469,7 +537,10 @@ These perspectives apply to macro plans written using the `macro-plan-cross-syst
 ### CMP-1: Objective Clarity
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Objective Clarity (cross-system macro-plan template Phase 1)
 - Are 3-7 crisp objectives defined?
@@ -486,7 +557,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### CMP-2: Component Model Quality
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Component Model Quality (cross-system macro-plan template Phase 2)
 - Is the component model under 100 lines?
@@ -504,7 +578,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### CMP-3: PR Decomposition
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: PR Decomposition Quality (cross-system macro-plan template Phase 6)
 - Does each PR specify its target repository?
@@ -522,7 +599,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### CMP-4: Abstraction Level
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Abstraction Level Compliance (cross-system macro-plan template Abstraction Level Rule)
 The macro plan describes WHAT to build and in WHAT ORDER, not HOW. Check:
@@ -539,7 +619,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### CMP-5: Risk Register
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Risk Register Completeness (cross-system macro-plan template Phase 3)
 For each entry, verify:
@@ -566,7 +649,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### CMP-6: Cross-Cutting Infrastructure
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Cross-Cutting Infrastructure (cross-system macro-plan template Phase 5)
 Verify Phase 5 is complete:
@@ -586,7 +672,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### CMP-7: Extension & Integration Friction
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Extension & Integration Friction (cross-system macro-plan template Phase 2 Extension Points)
 - For each extension point, is the cost of extension specified? (files to change, tests to add)
@@ -603,7 +692,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### CMP-8: Design Bug Prevention
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Design Bug Prevention (cross-system macro-plan template Phase 8)
 Check that the plan prevents these failure modes:
@@ -634,7 +726,10 @@ These perspectives are system-agnostic. They apply to any macro plan for any pro
 ### GMP-1: Objective Clarity
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Objective Clarity
 - Are 3-7 crisp objectives defined? Is each objective testable (you could write a pass/fail check)?
@@ -651,7 +746,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### GMP-2: Component/Concept Model Quality
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Component/Concept Model Quality
 - Is the component or concept model concise (under 80-100 lines)?
@@ -669,7 +767,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### GMP-3: PR Decomposition
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: PR Decomposition Quality
 - Is each PR independently mergeable? (No PR requires another PR's uncommitted code.)
@@ -687,7 +788,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### GMP-4: Abstraction Level
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Abstraction Level Compliance
 The macro plan describes WHAT to build and in WHAT ORDER, not HOW to implement each piece. Check:
@@ -704,7 +808,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### GMP-5: Risk Register
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Risk Register Completeness
 For each entry, verify all five columns:
@@ -726,7 +833,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### GMP-6: Cross-Cutting Infrastructure
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Cross-Cutting Infrastructure
 Verify these cross-cutting concerns are fully addressed:
@@ -745,7 +855,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### GMP-7: Extension Friction
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Extension Friction
 - For each component boundary, is the cost of adding one more variant specified? (files to change, tests to add)
@@ -762,7 +875,10 @@ Report: (1) numbered list of findings with severity, (2) total CRITICAL count, (
 ### GMP-8: Design Bug Prevention
 
 ```
-You are a macro plan reviewer. First, read the macro plan at ARTIFACT_PATH using the Read tool. Then review it.
+You are a BLIS macro-plan reviewer.
+
+DESIGN DOCUMENT:
+<paste design doc>
 
 YOUR FOCUS: Design Bug Prevention
 Check that the plan prevents these common failure modes:
