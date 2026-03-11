@@ -1,6 +1,6 @@
-# BLIS Design Guidelines: Principles for Robust Simulation Design and Modular Extension
+# sim2real Design Guidelines: Principles for Cross-System Transfer Pipeline Design
 
-**Date:** 2026-02-18
+**Date:** 2026-03-11
 **Status:** Draft (pending review)
 **Species:** System Overview
 
@@ -8,104 +8,122 @@
 
 This document serves two audiences:
 1. **Design doc authors** (human or Claude) — guidance on writing design docs that stay durable and useful across the project lifecycle
-2. **Module developers** — guidance on extending BLIS with new modules that fit the architecture and enable parallel development
+2. **Pipeline developers** — guidance on extending sim2real with new components that fit the architecture and enable parallel development
 
 **What this document IS:**
-- A target architecture specification that BLIS will be refactored toward
-- A set of principles grounded in DES methodology and project experience (12 completed PRs, 20+ issues)
-- A reference for evaluating whether a design doc or a new module meets BLIS's quality bar
+- A target architecture specification for the sim2real transfer pipeline
+- A set of principles grounded in cross-system methodology and v3 design experience
+- A reference for evaluating whether a design doc or a new component meets sim2real's quality bar
 
 **What this document is NOT:**
-- Not an implementation plan (refactoring happens in separate PRs, each following `docs/contributing/pr-workflow.md`)
+- Not an implementation plan (work happens in separate PRs, each following `docs/contributing/pr-workflow.md` [1])
 - Not a replacement for CLAUDE.md (which captures engineering rules and code-level patterns)
 - Not a replacement for the micro-plan template (which captures PR-level planning structure)
 
 ### Relationship to Existing Docs
 
 ```
-Design Guidelines (this doc)          ← Principles, target architecture, extension framework
-    ↓ informs
+Design Guidelines (this doc)          <- Principles, target architecture, extension framework
+    | informs
 
-┌─────────────────────────────────────────────────┐
-│  Design Docs  ←→  Macro Plan                    │
-│       ↓                ↓                        │
-│  Micro Plans     Micro Plans                    │
-│       ↓                ↓                        │
-│  CLAUDE.md (updated by each PR)                 │
-└─────────────────────────────────────────────────┘
++---------------------------------------------------+
+|  Design Docs  <->  Macro Plan                      |
+|       |                |                           |
+|  Micro Plans     Micro Plans                       |
+|       |                |                           |
+|  CLAUDE.md (updated by each PR)                    |
++---------------------------------------------------+
 ```
 
 | Scenario | Path |
 |---|---|
-| Large multi-PR feature | Design doc → Macro plan → Micro plans per PR |
-| Single-PR feature | Design doc → Micro plan directly |
-| Refactoring / bug fix | Issue or design doc → Micro plan directly |
-| Macro plan PR | Macro plan section → Micro plan |
+| Large multi-PR feature | Design doc -> Macro plan -> Micro plans per PR |
+| Single-PR feature | Design doc -> Micro plan directly |
+| New transfer type | Design doc -> Macro plan (6-stage pipeline per type) -> Micro plans per PR |
+| Infrastructure change | Issue or design doc -> Micro plan directly |
 
 **Key distinction:** This document describes the *target state* and *design principles*. CLAUDE.md describes the *current state* and *implementation rules*. Where they diverge, this document is aspirational and CLAUDE.md is authoritative for today's code.
 
 ---
 
-## 2. DES Design Foundations
+## 2. Cross-System Pipeline Foundations
 
-BLIS is a discrete-event simulator. Design docs for BLIS should be informed by established DES methodology (Banks et al., *Discrete-Event System Simulation*; Misra, *Distributed Discrete-Event Simulation*, 1986).
+sim2real is a 6-stage transfer pipeline (Extract -> Translate -> Generate -> Test -> Validate -> PR). Design docs for sim2real should be informed by cross-system methodology: bridging simulation models with production systems requires explicit contracts, verified mappings, and validation at every boundary.
 
-**Core Principle: Abstraction must be justified.** Every state variable, event type, and random input should be defensible in terms of the questions the simulator will answer — not fidelity for its own sake.
+**Core Principle: Cross-system boundaries are verified, not trusted.** Every mapping, schema, and submodule reference must be defensible against actual code — not cached knowledge, not documentation, not memory.
 
-### 2.1 Model Scoping (Banks et al.)
+### 2.1 Scoping
 
-Before including a component in BLIS, evaluate it against these six criteria:
+Before including a component in the pipeline, evaluate it against these six criteria:
 
-1. Will including it significantly affect the accuracy of results for the target analysis questions?
-2. What level of accuracy is actually required for the analysis to be useful?
-3. Can the component's data requirements be satisfied (alpha/beta coefficients, hardware specs, workload traces)?
-4. What is the cost of inclusion — code complexity, maintenance burden, configuration surface?
-5. What breaks if we omit it? (Sensitivity analysis — if removing it changes results by <5%, defer it)
-6. What is the simplest version that answers the same questions? (Start coarse, refine only with evidence)
+1. Does it affect the accuracy of transfer validation for the target analysis questions (Q1: Does the transferred algorithm produce equivalent decisions? Q2: Under what workload conditions does equivalence hold? Q3: What is the performance cost of the transfer?)?
+2. What accuracy level is needed for the validation to be useful?
+3. Can the component's data requirements be satisfied (submodule APIs, mapping artifact, production metrics)?
+4. What is the cost of inclusion — prompt complexity, schema surface, maintenance?
+5. What breaks if we omit it? (If removing it changes validation results by less than the noise floor, defer it)
+6. What is the simplest version that answers the same questions? (Start minimal, extend only with evidence)
 
-These criteria operationalize "YAGNI" for simulation design. Example: the PR12 pre-design chose synchronous transfer latency over event-based transfers because it answered the same questions with ~100 fewer LOC.
+These criteria operationalize "YAGNI" for cross-system transfer. Example: the v3 design chose a single mapping artifact per transfer type over a normalized database because it answered the same questions with far less schema surface.
 
-### 2.2 Event Design
+### 2.2 Inter-Stage Contract Design
 
-- Events must be **minimal and atomic** — each event corresponds to exactly one state change.
-- Classify new events as **exogenous** (arrivals, environment changes — driven by workload input) or **endogenous** (completions, scheduling decisions, scaling actions — driven by internal state transitions). This classification must appear in design docs.
-- New events must specify their **priority constant** for tie-breaking within BLIS's `(timestamp, priority, seqID)` ordering scheme.
+- Contracts are defined by JSON schemas in `tools/schemas/`
+- Each stage reads predecessor artifacts and writes its own outputs
+- No ambient state — all communication through `workspace/` artifacts
+- Schema validation at stage entry (required fields, types, non-null)
+- Every schema must have exactly one producer and at least one consumer — schemas without consumers are dead weight (see Section 6.1)
 
-### 2.3 State vs. Statistics Separation
+### 2.3 Submodule Management
 
-- **State variables** evolve the system (queues, caches, clocks, request lifecycle) — they are inputs to event handlers.
-- **Statistics** are derived from state trajectories (TTFT distributions, throughput, utilization) — they are outputs for analysis.
-- These must be decoupled. A module that mixes state mutation and metric computation in the same method is violating this principle.
+- Submodules (`llm-d-inference-scheduler`, `llm-d-benchmark`, `inference-sim`) are external dependencies
+- Code changes happen on local branches within submodules — never modify existing files on main
+- The mapping artifact pins a "last verified against" commit hash for each submodule
+- Staleness guard checks pin freshness at Stage 2 (Translate) entry
+- When a submodule advances, the mapping artifact must be reviewed against the diff between the old and new pinned commits
 
-### 2.4 Verification and Validation
+### 2.4 Validation & Verification Suites
 
-- **Verification**: the code correctly implements the conceptual model (behavioral tests, invariant tests, golden tests).
-- **Validation**: the model accurately represents real-system behavior (calibration against real servers, sensitivity analysis, comparison with published benchmarks).
-- A verified simulator can be an invalid model. (BLIS issue #183: golden tests verified the code did what it did, but an invariant test would have caught the dropped request.)
-- Design docs must specify both: how will correctness be verified (which invariants?) AND how will fidelity be validated (against what real-system data?).
+sim2real uses a hierarchy of validation suites, each building on the prior:
 
-### 2.5 Randomness as First-Class Concern
+| Suite | Purpose | What It Validates |
+|---|---|---|
+| **Suite A (Fidelity)** | Does the transferred algorithm produce equivalent decisions? | Signal mapping accuracy, generated code correctness |
+| **Suite B (Staleness)** | Are submodule API references still current? | Commit pin freshness, API signature drift |
+| **Suite C (Concurrency)** | Does equivalence hold under concurrent workloads? | Multi-request scenarios, race conditions, ordering effects |
+| **Cluster Benchmarks** | Does the transfer work in production? | End-to-end performance, real workload validation |
 
-- All randomness flows through `PartitionedRNG` with named subsystems.
-- New modules that introduce randomness must declare their subsystem name and justify that their random draws don't interfere with existing streams.
-- Design docs should consider whether the feature enables **common random numbers** experiments (paired comparison of two configurations using the same random stream).
+Design docs must specify which suites validate any new component. The validation hierarchy is: A -> B -> C -> benchmarks (each depends on prior passing).
 
-### 2.6 DES Design Review Checklist
+### 2.5 Prompt Template Design
 
-Every BLIS design doc must answer these questions:
+Prompts are the primary pipeline artifact — they control LLM behavior at each stage and are the mechanism through which transfer knowledge is applied.
+
+**Required sections for every prompt template:**
+1. **Prerequisites** — what artifacts must exist before this prompt is used?
+2. **Validation steps** — what checks does the LLM perform on inputs before proceeding?
+3. **Halt conditions** — what conditions cause the LLM to stop and report rather than produce incorrect output?
+4. **Expected outputs** — what artifacts does this prompt produce, in what format?
+
+**Template metadata:**
+- YAML front-matter with stage number, transfer type, version, and `pipeline_commit` hash
+- Template stability: `pipeline_commit` is tracked so drift between the prompt and the pipeline version that generated it can be detected
+
+### 2.6 Cross-System Design Review Checklist
+
+Every sim2real design doc must answer these questions:
 
 | Question | Principle |
 |---|---|
-| What analysis questions does this design help answer? | Model scoping |
-| What is modeled, simplified, and deliberately omitted? (Table format) | Model scoping |
-| What events are introduced or modified? Exogenous or endogenous? | Event design |
-| How do new events interact with existing tie-breaking rules? | Event design |
-| What new state is introduced? Who owns it? | State/statistics separation |
-| What new metrics are derived? Collected incrementally or on demand? | State/statistics separation |
-| How will correctness be verified? (Which invariants?) | Verification |
-| How will fidelity be validated? (Against what data?) | Validation |
-| Does this introduce new randomness? Which PartitionedRNG subsystem? | Randomness |
-| What is the simplest version that answers the same questions? | Model scoping |
+| What analysis questions does this feature help answer? | Scoping |
+| What submodule APIs does this feature depend on? | Submodule management |
+| What workspace artifacts are read/written? | Inter-stage contracts |
+| What JSON schemas need to be created or updated? | Schema-first design |
+| How will cross-system accuracy be verified? | Validation |
+| Does this introduce new prompt templates? With all 4 required sections? | Prompt template design |
+| What is the simplest version that answers the same questions? | Scoping |
+| Does this affect any existing validation suite? | V&V suites |
+| What happens when the feature is disabled? (no-op default) | Submodule isolation |
+| How will fidelity be validated in production benchmarks? | Cluster benchmarks |
 
 ---
 
@@ -117,8 +135,8 @@ Before including any content in a design doc, apply this test:
 
 > *"If the implementation changes this detail during micro-planning, will the design doc silently mislead future readers?"*
 
-- **Durable content** (include): invariants, modeling decisions, fidelity trade-offs, extension points described behaviorally, decision rationale with alternatives considered.
-- **Fragile content** (exclude): Go struct field lists, method implementations, file paths with line numbers, specific parameter names.
+- **Durable content** (include): invariants, mapping decisions, fidelity trade-offs, extension points described behaviorally, decision rationale with alternatives considered, analysis questions the component answers.
+- **Fragile content** (exclude): Python function signatures, Go struct field lists, file paths with line numbers, specific JSON field names that may be renamed, exact CLI argument names.
 
 The dividing line: **describe what crosses a boundary and why, not how the boundary is implemented.**
 
@@ -128,25 +146,25 @@ Not all design docs serve the same purpose. Choose the right species based on sc
 
 | Species | When to Use | Structure | Example |
 |---|---|---|---|
-| **Decision Record** | Single-PR architectural choices that need trade-off analysis | Numbered decisions, each with Problem / Decision / Rationale / Alternatives | PR12 pre-design (9 decisions) |
-| **Specification** | New subsystem with precise behavioral requirements | Behavioral contracts, math/formulas, input/output schemas, validation criteria | Workload generator design |
-| **Problem Analysis** | Refactoring motivated by identified friction or bugs | Extension scenario analysis, antipattern catalog with evidence, phased fix plan | Hardening design |
-| **System Overview** | Multi-PR feature spanning multiple modules | Concept model, module interactions, invariants, phased roadmap | Evolutionary policy optimization design |
+| **Decision Record** | Single-PR architectural choices that need trade-off analysis | Numbered decisions, each with Problem / Decision / Rationale / Alternatives | Mapping artifact format decision |
+| **Specification** | New component with precise behavioral requirements | Behavioral contracts, input/output schemas, validation criteria | Scorer template specification |
+| **Problem Analysis** | Refactoring motivated by identified friction or bugs | Extension scenario analysis, anti-pattern catalog with evidence, phased fix plan | Staleness guard redesign |
+| **System Overview** | Multi-PR feature spanning multiple components | Concept model, component interactions, stage contracts, phased roadmap | v3 transfer pipeline design |
 
 A design doc should declare its species at the top so readers know what to expect.
 
 ### 3.3 Required Sections (All Species)
 
-Every BLIS design doc, regardless of species, must include:
+Every sim2real design doc, regardless of species, must include:
 
 1. **Motivation** — What problem does this solve? What can't users do today? (2-5 sentences, no jargon)
 2. **Scope** — What's in, what's explicitly out, what's deferred to later
-3. **Modeling Decisions** — What is modeled, simplified, and omitted (table format per Section 2.1)
+3. **Mapping Decisions** — What submodule concepts are mapped, simplified, and deliberately omitted (table format per Section 2.1)
 4. **Invariants** — What must always hold after this design is implemented? What must never happen? (Named: INV-1, INV-2, ...)
 5. **Decisions with Trade-offs** — For each non-obvious choice: what alternatives were considered, why this one won, what breaks if it's wrong
 6. **Extension Points** — Where do future extensions plug in? What is the default behavior? What would a non-default look like?
-7. **Validation Strategy** — How will correctness be verified (invariants) and fidelity be validated (calibration, comparison)?
-8. **DES Checklist** — Completed checklist from Section 2.6
+7. **Validation Strategy** — How will correctness be verified (which suites?) and fidelity be validated (against what production data?)
+8. **Cross-System Checklist** — Completed checklist from Section 2.6
 
 ### 3.4 Prohibited Content
 
@@ -154,156 +172,106 @@ Do NOT include in design docs (with rationale from project experience):
 
 | Content | Why Not | What to Write Instead |
 |---|---|---|
-| Go struct definitions with field lists | Diverged within 2 PRs in the original design doc — "aspirational signatures" | Describe what data crosses the boundary and its semantics |
-| Method implementations | Changed during micro-planning in every PR | Describe the behavioral contract (GIVEN/WHEN/THEN) |
-| File paths with line numbers | Stale after any refactoring | Name the module and its responsibility |
-| Specific parameter/field names | Renamed during implementation | Describe the concept ("load metric combining queue depth and batch size") |
-| Interface signatures in Go syntax | Froze prematurely in original design doc; actual interfaces were simpler | Describe the interface's contract: single method? what it observes? what it returns? |
+| Python function signatures or Go struct definitions | Diverge during implementation as contracts are refined | Describe what data crosses the boundary and its semantics |
+| Method implementations or code blocks | Changed during micro-planning in every PR | Describe the behavioral contract (GIVEN/WHEN/THEN) |
+| File paths with line numbers | Stale after any refactoring | Name the component and its responsibility |
+| Specific JSON field names | Renamed during schema iteration | Describe the concept ("latency signal combining TTFT and TBT") |
+| Exact CLI argument syntax | Refined during implementation | Describe the command's purpose, inputs, and outputs |
 
-**Exception:** Decision Records (species 1) may include brief code snippets when the decision IS about a specific implementation choice (e.g., "use `math.Ceil` not integer division"). Keep these minimal.
+**Exception:** Decision Records (species 1) may include brief code snippets when the decision IS about a specific implementation choice (e.g., "use JSON Schema draft-07 not draft-2020-12 for tool compatibility"). Keep these minimal.
 
 ### 3.5 Abstraction Levels Across Document Tiers
 
 | Content Type | Design Doc | Macro Plan | Micro Plan |
 |---|---|---|---|
-| System invariants | Define (named: INV-1, ...) | Reference | Refine to GIVEN/WHEN/THEN |
-| Modeling decisions (modeled/simplified/omitted) | Define with justification | Summarize | N/A |
-| Module boundaries (behavioral) | Define contract | Reference + annotate per-PR | Implement |
-| Interface signatures (Go code) | No | Frozen post-freeze PR | Full code |
+| Analysis questions (Q1-Q3) | Define with scope | Reference | N/A |
+| Mapping decisions (mapped/simplified/omitted) | Define with justification | Summarize | N/A |
+| Component boundaries (behavioral) | Define contract | Reference + annotate per-PR | Implement |
+| JSON schemas | No (describe semantics) | Schema names + field inventory | Full schema |
 | File paths | No | Inventory + per-PR | Exact `file:line` |
-| Fidelity trade-offs | Define with alternatives | Reference | Deviation log if changed |
+| Submodule API references | Behavioral description | Pinned commit + signature | Exact code |
 
 ---
 
-## 4. Module Architecture Principles
+## 4. Pipeline Component Model
 
 ### 4.1 Two-Layer Architecture
 
-BLIS is organized as two layers:
+sim2real is organized as two layers:
 
-**Layer 1: Simulation Kernel** — domain-agnostic DES infrastructure
-- Event queue (min-heap with deterministic tie-breaking)
-- Clock management (next-event time advance)
-- Randomness (PartitionedRNG with named subsystems)
-- Statistics collection (accumulators decoupled from state)
-- Experiment control (seed, horizon, configuration)
+**Layer 1: Pipeline Infrastructure** — shared across all transfer types
+- CLI tools (`transfer_cli.py`) — mechanical pipeline tasks: extract, validate, schema-check
+- JSON schemas (`tools/schemas/`) — contract definitions for all workspace artifacts
+- Go test harness (`tools/harness/`) — equivalence testing using inference-sim
+- Workspace management — directory structure, artifact lifecycle, cleanup
 
-**Layer 2: Domain Modules** — inference-platform-specific model logic, each behind an interface
+**Layer 2: Transfer-Type Components** — specific to each transfer type (routing, admission, priority)
+- Mapping artifact — bridge between simulation and production concepts
+- Prompt templates — LLM instructions per stage
+- Scorer template — target system plugin conventions
+- Input artifact conventions — how each transfer type structures its workspace
 
-The kernel provides the execution substrate. Domain modules define *what* is being simulated. The kernel never contains inference-specific logic; domain modules never manage the event queue or clock directly.
+The infrastructure layer provides the execution substrate. Transfer-type components define *what* is being transferred. The infrastructure never contains algorithm-specific logic; transfer-type components never manage workspace structure or schema validation directly.
 
-### 4.2 Domain Module Map
+### 4.2 Component Model
 
-BLIS models an extensible distributed inference platform — not any single system. llm-d, vLLM, SGLang, Mooncake, and LMCache are all target systems whose behaviors should be expressible through BLIS's module composition.
-
-```
-                    ┌──────────────────────────────────────────────┐
-                    │            Cluster Orchestrator              │
-                    │  (shared clock, event dispatch, aggregation) │
-                    └──────┬──────────┬──────────┬────────────────┘
-                           │          │          │
-                    ┌──────▼───┐ ┌────▼────┐ ┌───▼──────┐
-                    │ Admission│ │ Router  │ │AutoScaler│
-                    │ Policy   │ │ Policy  │ │ Policy   │
-                    └──────────┘ └────┬────┘ └──────────┘
-                                      │
-              ┌───────────────────────┬┴──────────────────────┐
-              │                       │                       │
-        ┌─────▼──────┐        ┌──────▼──────┐        ┌──────▼──────┐
-        │ Instance 0  │        │ Instance 1  │        │ Instance N  │
-        │┌───────────┐│        │             │        │             │
-        ││ Scheduler  ││        │   . . .     │        │   . . .     │
-        │├───────────┤│        │             │        │             │
-        ││ Latency   ││        └─────────────┘        └─────────────┘
-        ││ Model     ││
-        │├───────────┤│
-        ││ KV Cache  ││
-        ││ Manager   ││
-        │├───────────┤│
-        ││ Batch     ││
-        ││ Formation ││
-        │└───────────┘│
-        └─────────────┘
-```
-
-| Module | Responsibility | Interface Today | Status |
+| Component | Responsibility | Language | Location |
 |---|---|---|---|
-| **Admission** | Accept/reject requests at cluster entry | `AdmissionPolicy` (single method) | Implemented, frozen |
-| **Router** | Select target instance for admitted requests | `RoutingPolicy` (single method) | Implemented, frozen |
-| **Scheduler** | Order queued requests within an instance | `InstanceScheduler` (single method) | Implemented, frozen |
-| **Priority** | Compute request priority for scheduler | `PriorityPolicy` (single method) | Implemented, frozen |
-| **KV Cache Manager** | Allocate/release/cache KV blocks | `KVStore` (11 methods) | Implemented |
-| **AutoScaler** | Add/remove instances based on load signals | `AutoScalePolicy` (planned) | Target — PR11 |
-| **Latency Model** | Estimate step execution time | `LatencyModel` (5 methods) | Implemented — `NewLatencyModel` factory |
-| **Batch Formation** | Select requests from queue for next step | `BatchFormation` (1 method: `FormBatch`) | Implemented — `NewBatchFormation` factory |
-| **Workload Generator** | Produce request streams from specs/traces | `GenerateRequests()` function | Implemented |
-| **Trace Recorder** | Record decisions for analysis | `SimulationTrace` | Implemented |
-| **Metrics Collector** | Aggregate per-request and system-level metrics | `CollectRawMetrics()` function | Implemented |
+| CLI tools | Mechanical pipeline tasks (extract, validate, schema-check) | Python | `tools/transfer_cli.py` |
+| Go test harness | Equivalence testing using inference-sim | Go | `tools/harness/` |
+| Prompt templates | LLM instructions per stage | Markdown | `prompts/` |
+| Mapping artifact | Bridge between sim and prod concepts | Markdown | `docs/transfer/<type>/` |
+| Scorer template | Target system plugin conventions | Markdown | `docs/transfer/<type>/` |
+| JSON schemas | Contract definitions for workspace artifacts | JSON Schema | `tools/schemas/` |
+| Workspace artifacts | Inter-stage data passed through the pipeline | JSON/Markdown | `workspace/` |
 
-**"Target" means:** the module exists as embedded logic today but lacks an interface boundary. Refactoring PRs will extract the interface. The guidelines define what that interface contract should look like.
+### 4.3 Component Contract Template
 
-### 4.3 Module Contract Template
+Every component (current or target) is defined by this contract:
 
-Every module (current or target) is defined by this contract:
+1. **Reads** — what artifacts/APIs does it consume?
+2. **Writes** — what artifacts does it produce?
+3. **Validates** — what checks does it perform on inputs?
+4. **Halts on** — what conditions cause it to stop and report?
+5. **Schema** — what JSON schema defines its output?
+6. **Extension friction** — how many files must change to add a new variant of this component?
 
-1. **Observes** — what state does this module read? (Its inputs)
-2. **Controls** — what decisions does this module make? (Its outputs)
-3. **Owns** — what mutable state does this module exclusively manage?
-4. **Invariants** — what must always hold for this module?
-5. **Events** — what events does this module produce or consume? (Exogenous/endogenous classification)
-6. **Extension friction** — how many files must change to add one more variant of this module?
-
-Example — Router module contract:
+Example — Stage 2 (Translate) contract:
 
 | Aspect | Contract |
 |---|---|
-| **Observes** | Request metadata (tokens, prefix, SLO class, tenant), per-instance snapshots (queue depth, batch size, KV utilization, cache hit rate, pending requests), cluster clock |
-| **Controls** | Target instance selection, priority hint for downstream scheduler |
-| **Owns** | No mutable state (stateless policy; any affinity tracking is internal to the policy instance) |
-| **Invariants** | Must select from non-empty snapshot list. Must return a valid instance ID. Selection must be deterministic given same inputs and RNG state. |
-| **Events** | Consumes: `AdmissionDecisionEvent` (admitted=true). Produces: `RoutingDecisionEvent`. |
-| **Extension friction** | 3 files to add a new routing algorithm (policy file, bundle.go registration, cmd/root.go validation message) |
+| **Reads** | Mapping artifact (`docs/transfer/<type>/mapping.md`), Stage 1 extraction output (`workspace/extract.json`), submodule source at pinned commit |
+| **Writes** | Translation artifact (`workspace/translate.json`) containing signal-by-signal mapping with code references |
+| **Validates** | Mapping artifact commit pin matches `git submodule status`, all signals in mapping have corresponding extraction entries |
+| **Halts on** | Commit pin mismatch > 10 commits behind, missing signal in extraction output, submodule API signature changed since pin |
+| **Schema** | `tools/schemas/translate.schema.json` |
+| **Extension friction** | 2 files to add a new signal (mapping artifact + schema update) |
 
 ### 4.4 Real-System Correspondence
 
-BLIS modules map to real inference system components, but the mapping is many-to-many — BLIS must be able to express behaviors from multiple real systems:
+Pipeline components map to concepts in the three submodules:
 
-| BLIS Module | llm-d | vLLM | SGLang | Mooncake |
-|---|---|---|---|---|
-| Router | Endpoint Picker | N/A (single-instance) | N/A (single-instance) | Global scheduler |
-| Scheduler | N/A (engine-internal) | `Scheduler` class | `Scheduler` class | Prefill/decode scheduler |
-| KV Cache Manager | N/A (engine-internal) | `BlockManager` | `RadixCache` | Distributed KV pool |
-| Latency Model | N/A (real latency) | N/A (real latency) | N/A (real latency) | N/A (real latency) |
-| AutoScaler | HPA / custom | N/A | N/A | N/A |
-| Batch Formation | N/A (engine-internal) | Continuous batching | Chunked prefill | Disaggregated batching |
+| Pipeline Component | inference-sim | llm-d-inference-scheduler | llm-d-benchmark |
+|---|---|---|---|
+| Mapping artifact | Signal definitions, state variables | API types and signatures | Workload configs |
+| Scorer template | N/A | Plugin conventions, scorer interface | N/A |
+| Go test harness | Simulation engine | N/A | Benchmark framework |
+| Workspace artifacts | N/A | Generated plugin code | Benchmark configs |
 
-The design implication: module interfaces must be **abstract enough** to express all these variants, but **concrete enough** to capture the behavioral differences that matter for analysis. The modeling decisions table (Section 2.1) determines where on this spectrum each module sits.
+The design implication: mapping artifacts must be **precise enough** to capture behavioral differences between submodules, but **abstract enough** that a submodule version bump doesn't invalidate the entire mapping. The scoping criteria (Section 2.1) determine where on this spectrum each mapping entry sits.
 
-### 4.5 The Touch-Point Rule
+### 4.5 Touch-Point Rule
 
-When a design doc introduces a new module boundary, it must specify the expected touch-point count for adding one more variant. The following are **reference targets** based on what works well in the current codebase:
+When a design doc introduces a new component, it must specify the expected touch-point count for adding one more variant. The following are **reference targets**:
 
-| Extension Type | Reference Target | Current Reality |
-|---|---|---|
-| New policy template | ~3 files | 3 files (meets target) |
-| New KV cache tier | ~4 files | 4-5 files (acceptable) |
-| New config parameter | ~2 files | 2 files (meets target — post-#381) |
-| New observable metric | ~3 files | 6 files (exceeds — known friction) |
-| New latency model backend | ~2 files | 2 files (meets target) |
-| New batch formation strategy | ~2 files | 2 files (meets target) |
+| Extension Type | Reference Target |
+|---|---|
+| New transfer type | ~6 files (mapping artifact, scorer template, 3 prompt templates, CLI support) |
+| New signal mapping | ~2 files (mapping artifact + schema update) |
+| New validation suite | ~3 files (harness test + schema + CLI command) |
+| New workspace artifact | ~3 files (schema + producer stage + consumer stage) |
 
-If a design exceeds the reference target, the design doc must acknowledge the friction and explain whether it's acceptable (justified complexity) or whether structural improvement should happen first or concurrently. The goal is **awareness, not rigidity** — some modules genuinely require more touch points, but that should be a conscious choice, not an accident.
-
-### 4.6 Parallel Development Enablement
-
-Module boundaries enable parallel development when:
-
-1. **Interfaces are stable** — frozen after a designated PR (as done with policy interfaces after PR8)
-2. **Contracts are testable independently** — each module can be tested with mock implementations of adjacent modules
-3. **No shared mutable state** — modules communicate through defined inputs/outputs, not through shared globals or reaching through struct fields
-4. **Bridge types at boundaries** — when two modules in different packages need shared types, bridge types live in the lower-level package (e.g., `RouterState` in `sim/` not `sim/cluster/`)
-
-A design doc for a new module must demonstrate that two developers could work on different implementations of that module's interface simultaneously, with only behavioral contract tests to keep them aligned.
+If a design exceeds the reference target, the design doc must acknowledge the friction and explain whether it's acceptable (justified complexity) or whether structural improvement should happen first. The goal is **awareness, not rigidity** — some extensions genuinely require more touch points, but that should be a conscious choice, not an accident.
 
 ---
 
@@ -311,162 +279,117 @@ A design doc for a new module must demonstrate that two developers could work on
 
 ### 5.1 Extension Taxonomy
 
-There are four fundamentally different ways to extend BLIS:
+There are four fundamentally different ways to extend sim2real:
 
 | Type | What It Is | Example | Scope |
 |---|---|---|---|
-| **Policy Template** | New algorithm behind an existing interface | New routing algorithm (e.g., power-of-two-choices) | Single file + registration |
-| **Subsystem Module** | New module with its own interface, events, and state | AutoScaler, P/D disaggregation | New interface + integration |
-| **Backend Swap** | Alternative implementation of an internal module | SGLang latency model alongside vLLM, RadixCache alongside block-based KV | New implementation behind existing interface |
-| **Tier Composition** | Layering an existing module with additional behavior | NVMe KV tier wrapping GPU+CPU tiers, network latency wrapping base latency | Decorator/delegation over existing module |
+| **New transfer type** | Full pipeline for a new algorithm category | Admission policy transfer alongside routing | New mapping + prompts + tests |
+| **New signal mapping** | Additional signal in an existing mapping artifact | Adding `cache_hit_rate` signal to routing mapping | Update mapping + schema |
+| **New validation suite** | Additional test suite beyond A/B/C | Suite D for latency sensitivity analysis | New harness test + schema |
+| **New target system** | New production system alongside llm-d | SGLang support | New mapping + scorer template + submodule |
 
 Understanding which type an extension is determines which recipe to follow.
 
-### 5.2 Recipe: Policy Template
+### 5.2 Recipe: New Transfer Type
 
-*Adding a new algorithm behind a frozen interface.*
+*Adding a full 6-stage pipeline for a new algorithm category.*
 
-This is the lightest extension type. The interface already exists, the factory already exists, the CLI integration pattern is established.
+This is the most significant extension. It requires a mapping artifact, scorer template, prompt templates for all stages, and validation test cases.
 
-**Prerequisites:** The target policy interface must exist and be stable.
+**Design doc must define:** Analysis questions (Q1-Q3 instantiated for the new type), scoping decisions, submodule API surface, all component contracts per Section 4.3.
 
-**Contract the new template must satisfy:**
-- Implements the interface (single method)
-- Deterministic given same inputs and RNG state
-- No side effects beyond its owned state (if stateful)
-- Handles edge cases defined by the interface (e.g., empty snapshot list for routing policies)
+**Reference:** See `docs/contributing/templates/extension-recipes.md` for detailed steps.
 
-**Steps:** Documented in CLAUDE.md "Adding New Policy Templates" — these guidelines don't duplicate, they reference.
+### 5.3 Recipe: New Signal Mapping
 
-**Parallel development:** Multiple policy templates for the same interface can be developed simultaneously by different contributors with zero coordination, since they share only the interface contract.
+*Adding a signal to an existing mapping artifact.*
 
-### 5.3 Recipe: Subsystem Module
+This is the lightest extension. The mapping artifact and transfer type already exist; only the signal-level mapping and its schema entry are new.
 
-*Adding an entirely new module with its own behavioral contract.*
+**Design doc must define:** Which analysis question the signal helps answer, the sim-to-prod correspondence, and validation approach.
 
-This is the most architecturally significant extension type. Examples: AutoScaler (PR11), framework adapters (PR15).
+**Reference:** See `docs/contributing/templates/extension-recipes.md` for detailed steps.
 
-**Design doc must define:**
+### 5.4 Recipe: New Validation Suite
 
-1. **Module contract** (per Section 4.3 template — observes, controls, owns, invariants, events, extension friction)
-2. **Interface design** — prefer single-method interfaces where possible. If multiple methods are needed, justify each one. The interface must be testable with a mock.
-3. **Event integration** — what new event types are added to the cluster event queue? What are their priority constants? How do they interact with existing events?
-4. **State ownership** — what new mutable state does this module introduce? Who creates it, who reads it, who mutates it? No shared mutable state across module boundaries.
-5. **Failure modes** — what happens when the module fails? (Error return? Panic? Graceful degradation?) Which error handling boundary applies? (See CLAUDE.md Engineering Principles)
-6. **Default behavior** — what does BLIS do when this module is not configured? (A no-op default must exist so existing workflows are unaffected)
-7. **Configuration surface** — what CLI flags / YAML config does this add? Validated how?
+*Adding a test suite beyond the standard A/B/C hierarchy.*
 
-**Design doc must demonstrate:**
-- The module can be tested in isolation with mocked dependencies
-- Adding the module doesn't change behavior of existing tests (no-op default)
-- The extension friction for adding a second implementation is within reference targets from Section 4.5
+This extension adds a new dimension of validation. It requires a harness test, a schema for results, and CLI integration.
 
-**Parallel development:** Once the interface is agreed and frozen, the module implementation and its integration into the cluster orchestrator can proceed independently.
+**Design doc must define:** What the suite validates that existing suites do not, where it fits in the validation hierarchy, and what its pass/fail criteria are.
 
-### 5.4 Recipe: Backend Swap
+**Reference:** See `docs/contributing/templates/extension-recipes.md` for detailed steps.
 
-*Alternative implementation of an internal module that currently has no interface.*
+### 5.5 Recipe: New Target System
 
-This is the extension type that requires refactoring first. Examples: SGLang latency model, continuous-vs-chunked batching.
+*Adding support for a production system alongside llm-d.*
 
-**Two-phase approach:**
+This is the most architecturally significant extension because it tests whether the pipeline's abstractions are truly system-independent.
 
-**Phase A — Extract interface (refactoring PR):**
-- Identify the hardcoded logic (e.g., `Step()` calling the blackbox latency estimator directly)
-- Define an interface that captures the behavioral contract of the existing implementation
-- Extract the existing implementation behind the new interface
-- Verify: all existing tests pass, no behavior change, the factory returns the existing implementation by default
+**Design doc must define:** New submodule integration, mapping artifact for the target system, scorer template reflecting the target's plugin conventions, and how validation suites generalize.
 
-**Phase B — Add alternative (extension PR):**
-- Implement the new backend behind the extracted interface
-- Add configuration to select between backends (CLI flag or YAML)
-- Add behavioral tests for the new backend
-- Verify: existing tests still pass when default backend is selected
-
-**Design doc must cover both phases.** Phase A is often the harder design challenge — getting the interface abstraction right so that it accommodates both the existing and new backends without over-generalizing.
-
-**Key principle:** The interface should capture **what** the module does (behavioral contract), not **how** one particular backend does it. If the interface has methods that only make sense for one backend, it's too specific.
-
-**Parallel development:** After Phase A merges, multiple backends can be developed simultaneously.
-
-### 5.5 Recipe: Tier Composition
-
-*Layering additional behavior onto an existing module via delegation.*
-
-This is the pattern used by `TieredKVCache` (wraps `KVCacheState`) and could be used for network latency (wraps base latency model), caching layers, or monitoring wrappers.
-
-**Design doc must define:**
-- Which existing interface is being composed
-- What new behavior the wrapper adds (offloading, caching, monitoring, latency injection)
-- How metrics aggregate across tiers (the wrapper must expose the same metrics interface as the inner module, combining results appropriately)
-- How configuration selects the composition (e.g., `--kv-cpu-blocks > 0` triggers tiered wrapping)
-
-**Key principle:** The wrapper must satisfy the same interface contract as the inner module. Any caller that works with the inner module must work identically with the wrapper (Liskov substitution).
-
-**Parallel development:** Wrappers are naturally parallelizable — different tiers or decorators can be developed independently as long as they compose through the same interface.
+**Reference:** See `docs/contributing/templates/extension-recipes.md` for detailed steps.
 
 ### 5.6 Extension Checklist
 
 Before submitting a design doc for any extension, verify:
 
-- [ ] Extension type identified (policy template / subsystem module / backend swap / tier composition)
+- [ ] Extension type identified (new transfer type / new signal mapping / new validation suite / new target system)
 - [ ] Correct recipe followed
-- [ ] Module contract defined (observes / controls / owns / invariants / events / friction)
+- [ ] Component contract defined (reads / writes / validates / halts on / schema / friction)
 - [ ] No-op default exists (existing behavior unchanged when extension not configured)
-- [ ] Interface testable with mocks (no concrete dependencies leaked through interface)
-- [ ] Parallel development path described (what can proceed independently after interface freeze?)
-- [ ] Touch-point count specified for adding one more variant
-- [ ] DES checklist from Section 2.6 completed
-- [ ] New randomness declared (PartitionedRNG subsystem name)
-- [ ] Event priority constants assigned (if new events introduced)
+- [ ] Cross-system checklist from Section 2.6 completed
+- [ ] Schema changes traced through Writer -> Reader chain
+- [ ] All affected validation suites identified
 
 ---
 
 ## 6. Anti-Patterns with Evidence
 
-Every anti-pattern in this section traces to a real bug, a real friction point, or a real design doc failure from BLIS's development history.
+Every anti-pattern in this section traces to a real risk, a known failure mode, or a design principle learned from cross-system transfer experience.
 
 ### 6.1 Design Doc Anti-Patterns
 
-| Anti-Pattern | What Happened | Lesson |
-|---|---|---|
-| **The Type Catalog** | The original design doc contained ~600 lines of Go struct definitions. Within 2 PRs, `RouterState` went from a 5-section struct to `Snapshots + Clock`. `InstanceScheduler` went from 3 methods to 1. The macro plan called these "aspirational signatures that diverged during implementation." | Describe module boundaries behaviorally, not as Go types. Types change; contracts persist. |
-| **Fidelity for Its Own Sake** | The original design doc specified `ShadowKVModel` with `PrefixHashes`, `EstimatedUtilization`, `EvictionQueue` — none of which were needed for the analysis questions BLIS answers today. | Apply Banks et al.'s six model scoping criteria. If you can't name the analysis question a component answers, defer it. |
-| **Silent Staleness** | The design doc's `RoutingDecision` struct had 8 fields. The implemented version has 4. No mechanism flagged the divergence. Meanwhile, micro-plan deviation logs caught discrepancies with the macro plan because there was an explicit comparison step. | Higher-level docs need an explicit freshness mechanism. Design docs should version their decisions and mark which are implemented (e.g., a Decision Status column: Proposed / Implemented / Superseded). |
-| **Missing Trade-off Rationale** | Several design doc decisions had no alternatives listed. When implementation revealed a better approach, there was no record of why the original choice was made. | Every non-obvious decision must list alternatives considered and why they were rejected. This is what makes the PR12 pre-design valuable — each of its 9 decisions has explicit rationale. |
+| Anti-Pattern | Lesson |
+|---|---|
+| **Schema Without Consumers** | Don't define JSON schemas that no stage reads. Every schema must have a producer and a consumer. Dead schemas accumulate silently and mislead future developers into thinking they are load-bearing. |
+| **Mapping Without Verification** | Don't describe submodule APIs from memory. Read the actual code at the pinned commit. API descriptions written from cached knowledge diverge from reality within one submodule update cycle. |
+| **Prompt Without Halt Conditions** | Don't write prompts that can silently proceed past errors. Every prompt needs explicit halt conditions. An LLM that generates code from a stale mapping without halting produces plausible but incorrect output. |
+| **Dead Artifact Accumulation** | Don't create workspace files that no subsequent stage reads. Every artifact must have an identified consumer. If a file has no consumer, it does not belong in the pipeline. |
 
-### 6.2 Module Architecture Anti-Patterns
+### 6.2 Pipeline Architecture Anti-Patterns
 
-| Anti-Pattern | What Happened | Lesson |
-|---|---|---|
-| **Shotgun Surgery** | Adding `InstanceID` to per-request metrics (#181) required changes in 4 files. Three construction sites for `RequestMetrics` existed, and one was missed initially. | Use canonical constructors. Design docs for new types must specify whether a canonical constructor is needed. |
-| **Destructive Read** | `KVStore.PendingTransferLatency()` both queried and cleared the accumulated latency. Callers couldn't distinguish "no latency" from "already consumed." Identified as blocking LMCache integration. | Query methods must be pure. If a method needs to both query and clear state, provide separate `Get()` and `Consume()` methods. |
-| **Interface Leaking Implementation** | `KVStore` interface has 11 methods, several exposing block-level semantics. A distributed KV cache like LMCache doesn't think in blocks — it thinks in tokens and layers. The interface encodes vLLM's implementation model, not the abstract behavioral contract. (#246) | Design interfaces around the behavioral contract (allocate space, check cache, release space), not around one implementation's data model. |
-| **Monolith Method** | `Simulator.Step()` was 152 lines mixing 4 concerns. Decomposed into named phase methods (`scheduleBatch`, `executeBatchStep`, `processCompletions`, `scheduleNextStep`). | Each module's logic should be callable through its interface. When a method contains logic for multiple modules, extract each into its module's interface method. |
-| **Config Mixing Concerns** | `SimConfig` combined 23 fields from 8 concerns. Decomposed into 6 embedded sub-configs with canonical constructors (`NewKVCacheConfig`, etc.). Adding a field now touches 2 files; the compiler catches all call sites. | Group configuration by module. Each module's config should be independently specifiable and validatable. |
+| Anti-Pattern | Lesson |
+|---|---|
+| **Ambient State** | Don't communicate between stages except through `workspace/` artifacts with schemas. Environment variables, global config files, or in-memory state between CLI invocations break reproducibility and make debugging impossible. |
+| **Cross-Language Coupling** | Don't import Python packages in Go or vice versa. Communicate through JSON artifacts. The pipeline deliberately uses two languages for their strengths (Python for LLM orchestration, Go for test harness); coupling them defeats the purpose. |
+| **Submodule Mutation** | Don't modify existing target system files. Only add new files on local branches. Modifying existing files creates merge conflicts on every submodule update and makes the transfer non-portable. |
+| **Unpinned Dependencies** | Don't reference submodule APIs without recording the commit hash you verified against. An unpinned reference is a mapping that may already be stale — and staleness in cross-system transfer produces silently wrong results. |
 
-### 6.3 DES-Specific Anti-Patterns
+### 6.3 sim2real-Specific Anti-Patterns
 
-| Anti-Pattern | What Happened | Lesson |
-|---|---|---|
-| **Golden Tests Without Invariant Tests** | The golden dataset test for codellama expected 499 completions. The code silently dropped one request on KV allocation failure (#183). The golden test encoded the bug as the expected value for months. | Golden tests answer "did the output change?" Invariant tests answer "is the output correct?" Both are needed (Banks et al.: verification ≠ validation). |
-| **Non-Deterministic Map Iteration** | Five sites iterated Go maps to accumulate floats or determine output ordering. Go map iteration is randomized, violating the determinism invariant. | All randomness must flow through PartitionedRNG. Map iteration is a hidden source of non-determinism. Sort keys before any iteration that affects output. |
-| **Mixing Exogenous and Endogenous** | The cluster workload generator (exogenous) was tightly coupled to the cluster simulator (endogenous). Impossible to replay the same workload through different configurations without re-generating. PR10 decoupled them. | Exogenous inputs must be separable from endogenous logic. This enables the fundamental simulation experiment: same input, different configuration, compare results. |
+| Anti-Pattern | Lesson |
+|---|---|
+| **Signal Name Drift** | A signal called `queue_depth` in the mapping but `queueDepth` in the schema breaks silently. Use exact names everywhere. Signal names must be identical across the mapping artifact, JSON schemas, prompt templates, and generated code. Grep to verify. |
+| **Staleness Denial** | Acknowledging commit pin drift without reviewing the actual diff is dangerous. The acknowledge option requires a review summary. Staleness is not a warning to dismiss — it is a signal that the mapping may have diverged from reality. |
+| **Suite Skip** | Skipping Suite B because "staleness doesn't matter for approximate scorer" is wrong — v1 may have zero staleness but future transfers won't. Every suite exists for a reason, and skipping one creates a false sense of validation coverage. |
+| **Threshold Hardcoding** | Don't hardcode validation thresholds (e.g., "equivalence if delta < 0.05"). Thresholds should come from the calibration procedure and be adjustable per transfer type. What constitutes "equivalent" depends on the algorithm and workload. |
 
 ### 6.4 The Meta-Lesson
 
-All these anti-patterns share one root cause: **the design was expressed in terms of implementation rather than behavior.** When a design doc specifies Go structs instead of behavioral contracts, the implementation becomes the specification. When a module boundary is defined by its internal data model instead of its observable behavior, the boundary can't accommodate a second implementation.
+All anti-patterns share one root cause: **treating cross-system boundaries as trusted rather than verified.** When a mapping artifact says "the API has field X", verify it against actual code. When a schema says "this field is required", verify the producer writes it. When a prompt says "the submodule uses this convention", verify it at the pinned commit.
 
-> **Describe what a module does and what it guarantees, not how it's built.**
+> **Trust but verify — across every boundary.**
 
-If a design doc follows this principle, its content stays durable, its modules stay extensible, its interfaces accommodate multiple backends, and parallel development is naturally enabled — because contributors agree on behavior, not on implementation.
+If a design doc follows this principle, its mappings stay accurate, its schemas stay connected, its prompts stay grounded in reality, and its validation catches drift before it becomes a silent failure.
 
 ---
 
 ## References
 
-1. Banks, J., Carson, J. S., Nelson, B. L., & Nicol, D. M. *Discrete-Event System Simulation* (5th ed.). Pearson. — Foundational text on DES methodology, model scoping, input modeling, output analysis, V&V.
-2. Misra, J. "Distributed Discrete-Event Simulation." *Computing Surveys*, Vol. 18, No. 1, March 1986. — Formal correctness proofs for DES, causal ordering, simulation as formal property.
-3. BLIS Issue #183 — Golden dataset encoded a silently-dropped request. Conservation invariant test would have caught it on day one.
-4. BLIS PR12 Pre-Design (`docs/plans/archive/pr12-architectural-predesign.md`) — Gold standard for decision records: 9 decisions, each with trade-off analysis.
-5. BLIS Hardening Design (`docs/plans/archive/2026-02-18-hardening-antipattern-refactoring-design.md`) — Extension scenario analysis identifying friction points for autoscaling, LMCache, heterogeneous HW, new engines.
+1. sim2real PR workflow — `docs/contributing/pr-workflow.md`
+2. sim2real v3 transfer pipeline design — `docs/plans/v3-transfer-pipeline-design.md`
+3. Macro plan template — `docs/contributing/templates/macro-plan.md`
+4. Micro plan template — `docs/contributing/templates/micro-plan.md`
+5. Extension recipes — `docs/contributing/templates/extension-recipes.md`
+6. CLAUDE.md — project-level engineering rules and code patterns

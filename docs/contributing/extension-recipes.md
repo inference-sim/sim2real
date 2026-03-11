@@ -1,133 +1,195 @@
-# BLIS Extension Recipes
+# sim2real Extension Recipes
 
-Step-by-step guides for extending BLIS. Each recipe lists the exact files to touch, the order, and examples to follow.
+Step-by-step guides for extending the sim2real transfer pipeline. Each recipe lists the exact files to touch, the order, and what to verify.
 
-## Adding New Policy Templates
+## 1. Adding a New Transfer Type
 
-To add a new policy template (e.g., a new routing algorithm):
+To add a new transfer type (e.g., admission policy transfer alongside routing):
 
-1. **Implement the interface** in the corresponding file:
-   - `AdmissionPolicy` → `sim/admission.go` (cluster-level: receives `*RouterState` with snapshots + clock)
-   - `RoutingPolicy` → `sim/routing.go` (cluster-level: receives `*RouterState` with snapshots + clock)
-   - `PriorityPolicy` → `sim/priority.go` (instance-level: receives `req` + `clock` only)
-   - `InstanceScheduler` → `sim/scheduler.go` (instance-level: receives `requests` + `clock` only)
-   - Note: `RouterState` is a bridge type in `sim/` to avoid import cycles — see `sim/router_state.go`
+1. **Create mapping artifact** in `docs/transfer/<type>/mapping-artifact.md`
+   - Signal mapping table: sim signal -> prod signal, fidelity rating, staleness window, access path
+   - API reference section: target system types, function signatures at pinned commit
+   - Overlap analysis: which existing target system components does this interact with?
 
-2. **Register in two places** (both required):
-   - Add policy name to valid names map in `sim/bundle.go` (e.g., `validRoutingPolicies`) and corresponding `IsValid*` function
-   - Add `case` to factory function in the same policy file (e.g., `NewRoutingPolicy` in `sim/routing.go`)
-   - CLI error messages auto-derive from `ValidAdmissionPolicyNames()` etc. — no manual update needed
+2. **Create scorer template** in `docs/transfer/<type>/scorer-template.md`
+   - Target system plugin conventions for this policy type
+   - Plugin interface description (what methods to implement)
+   - Config file format (enabled/disabled, weights, parameters)
+   - Required test patterns (unit test, no-op test, overlap test)
 
-3. **Add tests** following BDD naming: `TestMyPolicy_Scenario_Behavior`
-   - Test observable behavior, not internal structure
-   - Include empty-snapshots panic test for routing policies (defensive programming convention)
-   - Use `&RouterState{Snapshots: snapshots, Clock: clock}` in test setup
+3. **Create prompt templates** in `prompts/`:
+   - `prompts/<type>-stage-2-translate.md` -- signal mapping guidance for this type
+   - `prompts/<type>-stage-3-generate.md` -- code generation guidance
+   - `prompts/<type>-stage-5-validate.md` -- validation specifics (Suite A tuple design for this type)
+   - Each prompt must have: prerequisites, validation steps, halt conditions, expected outputs
 
-4. **Update documentation**: CLAUDE.md file organization, README policy lists
+4. **Add CLI support** in `tools/transfer_cli.py`:
+   - `extract` command: handle this type's input artifact format
+   - `validate-mapping`: validate this type's mapping artifact structure
+   - Update JSON schemas in `tools/schemas/` for any new artifact fields
 
-**Important:** For load-based routing, use `snap.EffectiveLoad()` — never compute `QueueDepth + BatchSize + PendingRequests` inline. This ensures all routing policies use the same formula.
+5. **Add harness support** in `tools/harness/`:
+   - Equivalence test adapter for this type's algorithm structure
+   - Suite A tuple generator for this type's signal patterns
+   - Suite B staleness injection for this type's relevant signals
 
-Examples:
-- See `RejectAll` in `sim/admission.go` for a simple admission template (constant return)
-- See `PrefixAffinity` in `sim/routing.go` for a stateful routing policy with LeastLoaded fallback. **Known limitation (#259):** hashes the full input sequence, not just the prefix — degrades to LeastLoaded for prefix-sharing workloads. PR18's prefix-affinity scorer with hierarchical block hashing addresses this.
+6. **Update documentation**:
+   - Add to `docs/contributing/index.md` workflow tables
+   - Add to mapping artifact validation in `tools/transfer_cli.py`
+   - Create `docs/transfer/<type>/README.md` with quick start
 
-## Adding New Scorers (Weighted Routing)
+**Touch points:** ~10+ files (heaviest extension type). Consider splitting across multiple PRs per the macro plan template.
 
-To add a new scoring dimension for the `weighted` routing policy (e.g., predicted-latency):
+## 2. Adding a New Signal Mapping
 
-1. **Implement the scorer function** in `sim/routing_scorers.go` (stateless) or a new file (stateful) — a `scorerFunc` that takes `(*Request, []RoutingSnapshot)` and returns `map[string]float64` with scores in [0,1] per instance. Stateful scorers also return an `observerFunc` called after each routing decision.
-2. **Register the scorer** in `sim/routing_scorers.go`: add to `validScorerNames` map + `newScorerWithObserver` factory switch
-3. **Add behavioral tests** — monotonicity, boundary values, INV-1/INV-2 conformance
-4. Extension friction: **2 touch points** (implementation + registration in `newScorerWithObserver`). Stateful scorers (like prefix-affinity) may use a separate file (e.g., `sim/routing_prefix_scorer.go`) but the registration point is the same `newScorerWithObserver` switch in `sim/routing_scorers.go`.
-5. **Stateful scorers** return an `observerFunc` alongside the `scorerFunc` from `newScorerWithObserver`. The `observerFunc` signature is `func(req *Request, targetInstance string)` and is called after each routing decision to update scorer state. The scorer and observer share state via closure.
+To add a new signal to an existing mapping artifact (e.g., adding cache_hit_rate to the routing mapping):
 
-Examples:
-- See `scoreLoadBalance` in `sim/routing_scorers.go` for a simple stateless scorer
-- See `scoreQueueDepth` for a scorer with edge case handling (uniform load)
-- See `newPrefixAffinityScorer` in `sim/routing_prefix_scorer.go` for a stateful scorer with observer and router-side cache
+1. **Update mapping artifact** in `docs/transfer/<type>/mapping-artifact.md`:
+   - Add row to signal mapping table
+   - Specify: sim_field, prod_field, prod_type, access_path, fidelity rating, staleness_window_ms, mapping_notes
+   - Verify access_path against actual target submodule code at pinned commit
 
-## Extending KV Cache Tiers
+2. **Update JSON schema** in `tools/schemas/signal_coverage.schema.json`:
+   - Add new signal to the allowed signal names if using an enum
+   - Or ensure the schema allows extensible signal lists
 
-To add a new KV tier (e.g., NVMe offloading for 3-tier GPU+CPU+NVMe):
+3. **Update prompt templates** if the signal requires special handling:
+   - Stage 2 translate prompt: add guidance for mapping this signal
+   - Stage 3 generate prompt: add guidance for accessing this signal in generated code
 
-1. **Implement the `KVStore` interface** in `sim/kv/` (11 methods: allocate, get cached, release, capacity queries, metrics, `SetClock`, `ConsumePendingTransferLatency`)
-2. **Compose existing tiers** — e.g., wrap `TieredKVCache` (GPU+CPU) with NVMe logic, following the same delegation pattern
-3. **Update `NewKVStore` factory** in `sim/kv/register.go` to instantiate your tier based on `KVCacheConfig` fields (add new fields to `KVCacheConfig` in `sim/config.go`)
-4. **Add CLI flags** in `cmd/root.go` for new parameters (e.g., `--kv-nvme-blocks`) and wire them into the `KVCacheConfig` sub-config
-5. **Aggregate metrics** — combine hit/miss/thrashing counters from all tiers; see `TieredKVCache.CacheHitRate()` for the 2-tier pattern
-6. **Add behavioral tests** in `sim/kv/*_test.go`
-7. **Preserve rollback semantics** — `KVCacheState.AllocateKVBlocks` is transactional: on mid-loop failure, `rollbackAllocation()` undoes all mutations (UsedBlockCnt, CacheMisses, CacheHits, RefCount, InUse, free list, HashToBlock, RequestMap). If your tier adds mutations beyond what delegation to `gpu.AllocateKVBlocks()` handles, you must roll those back too. See `cachedBlockMutation` and `newBlockMutation` types in `sim/kv/cache.go`.
-8. **`GetCachedBlocks` is a pure query** — it returns cached block IDs without side effects. `CacheHits` are counted by `AllocateKVBlocks` when cached blocks are committed to an allocation (and rolled back on failure). This was fixed in the Phase 3 hardening PR; the previous implementation incremented CacheHits in GetCachedBlocks, causing double-counting in tiered mode.
+4. **Add Suite A test tuples** that exercise the new signal:
+   - Include boundary values if the signal appears in algorithm conditionals
+   - Include extreme values (zero, max) to verify access path correctness
 
-Examples:
-- See `TieredKVCache` in `sim/kv/tiered.go` for 2-tier GPU+CPU composition
-- See `KVCacheState` in `sim/kv/cache.go` for single-tier baseline (also implements `KVStore`)
-- See `docs/plans/archive/pr12-architectural-predesign.md` for the design decisions behind the tiered architecture
+5. **Verify**: Run `python tools/transfer_cli.py validate-mapping` to confirm structural completeness
 
-## Adding New Trace Record Types
+**Touch points:** ~2-4 files (lightest extension type). This is the recommended "first contribution" for new contributors.
 
-To add a new trace record type (e.g., `ScaleRecord` for autoscaling events):
+## 3. Adding a New Validation Suite
 
-1. **Define the record struct** in `sim/trace/record.go` (pure data, no `sim/` dependency)
-2. **Add a slice field** to `SimulationTrace` in `sim/trace/trace.go` (e.g., `Scales []ScaleRecord`)
-3. **Add a recording method** to `SimulationTrace` (e.g., `RecordScale(ScaleRecord)`)
-4. **Hook recording** into the cluster event pipeline in `sim/cluster/cluster_event.go` (guard with `if cs.trace != nil` for zero-overhead default)
-5. **Update `Summarize()`** in `sim/trace/summary.go` to aggregate the new record type
-6. **Add behavioral tests** in `sim/trace/*_test.go`
+To add a new validation suite (e.g., Suite D for latency sensitivity testing):
 
-Examples:
-- See `AdmissionRecord` in `sim/trace/record.go` for a simple record
-- See `RoutingRecord` with `CandidateScore` for a record with nested counterfactual data
-- See `computeCounterfactual()` in `sim/cluster/counterfactual.go` for derived computation that lives in `sim/cluster/` (not `sim/trace/`) because it needs `sim.RoutingSnapshot`
+1. **Define the suite** in `docs/contributing/standards/experiments.md`:
+   - What does this suite test? (What analysis question?)
+   - What are the pass criteria?
+   - What are the input requirements?
+   - Where does it fit in the validation hierarchy (after C? parallel to B?)
 
-## Adding New Latency Model Backends
+2. **Implement the harness test** in `tools/harness/`:
+   - New test function: `TestEquivalence_SuiteD` (or similar naming)
+   - Input: tuples JSON, code under test
+   - Output: per-tuple results + aggregate verdict
+   - Must output JSON to stdout for pipeline consumption
 
-To add a new latency estimation backend (e.g., SGLang RadixAttention, TensorRT-LLM, neural surrogate):
+3. **Update JSON schema** in `tools/schemas/validation_results.schema.json`:
+   - Add `suite_d` field to validation_results.json schema
+   - Define required sub-fields (passed, per-tuple metrics, aggregate metrics)
 
-1. **Implement the `LatencyModel` interface** in `sim/latency/latency.go` (or a new file in `sim/latency/` for complex models) — 5 methods:
-   - `StepTime(batch []*Request) int64` — estimate batch step duration from request states
-   - `QueueingTime(req *Request) int64` — estimate arrival-to-queue delay
-   - `OutputTokenProcessingTime() int64` — per-token post-processing overhead
-   - `SchedulingProcessingTime() int64` — scheduling overhead per request
-   - `PreemptionProcessingTime() int64` — preemption overhead per eviction
-2. **Register in `NewLatencyModel` factory** in `sim/latency/latency.go`: add a branch based on `ModelHardwareConfig` fields (e.g., a new string field or boolean in `sim/config.go`). The factory signature is `NewLatencyModel(LatencyCoeffs, ModelHardwareConfig)`.
-3. **Add behavioral tests** in `sim/latency/` — monotonicity (more tokens → longer step time), positive output, boundary cases (empty batch)
-4. Extension friction: **2 touch points** (implementation + factory branch)
+4. **Update CLI** in `tools/transfer_cli.py`:
+   - If the suite requires CLI support (e.g., new benchmark mode), add a command
+   - Update `validate-schema` to accept the new schema
 
-Examples:
-- See `BlackboxLatencyModel` in `sim/latency/latency.go` for a simple stateless model (alpha/beta regression)
-- See `RooflineLatencyModel` in `sim/latency/latency.go` for a model that uses hardware config (FLOPs/bandwidth)
+5. **Update prompt templates**:
+   - Stage 5 validate prompt: add instructions for running the new suite
+   - Include halt conditions if the new suite fails
 
-## Adding New Batch Formation Strategies
+6. **Update transfer validation workflow** in `docs/contributing/transfer-validation.md`:
+   - Add the new suite to the appropriate step
+   - Update quality gates
 
-To add a new batch formation strategy (e.g., disaggregated prefill/decode, speculative decoding, continuous batching without preemption):
+**Touch points:** ~5-6 files.
 
-1. **Implement the `BatchFormation` interface** in `sim/batch_formation.go` (or a new file for complex strategies) — 1 method:
-   - `FormBatch(ctx BatchContext) BatchResult` — compose the running batch for the next step
-   - The implementation receives `BatchContext` with: RunningBatch, WaitQ, KVCache, token budget, batch size limit, chunked prefill threshold, simulation time, step count, and ComputedTokens map
-   - The implementation MUST update `ctx.ComputedTokens[req.ID]` for each request that receives new tokens (Phase 2 of `Step()` reads this map to advance `ProgressIndex`)
-   - The implementation may mutate `WaitQ` (dequeue/prepend) and `KVCache` (allocate/release) during batch formation
-   - The implementation MUST NOT schedule events or record metrics — return decisions in `BatchResult`, the Simulator applies them
-2. **Register in `NewBatchFormation` factory** in `sim/batch_formation.go`: add a selection branch. The factory signature is `NewBatchFormation(LatencyModel)` — a future PR will add a strategy selection parameter (e.g., a string field in `PolicyConfig` or `BatchConfig`)
-3. **Add behavioral tests** — token budget enforcement, batch size limits, KV conservation, preemption behavior (if applicable), FCFS ordering
-4. Extension friction: **2 touch points** (implementation + factory registration)
+## 4. Adding a New Target System
 
-**Note:** Currently only `VLLMBatchFormation` exists. Adding a second strategy will also require: (a) a `BatchFormation string` field in `PolicyConfig` or `BatchConfig` (in `sim/config.go`), (b) a CLI flag in `cmd/root.go`, (c) validation in `sim/bundle.go`, (d) selection logic in `NewBatchFormation`.
+To add a new target system (e.g., SGLang alongside llm-d):
 
-Examples:
-- See `VLLMBatchFormation` in `sim/batch_formation.go` for the vLLM FCFS + chunked-prefill + preemption strategy
-- See `preemptForTokens` for the KV allocation + eviction loop pattern
+1. **Add submodule**: `git submodule add <repo-url> submodules/<system-name>`
 
-## Adding New Per-Request Metric Fields
+2. **Create mapping artifact** in `docs/transfer/routing/mapping-artifact-<system>.md`:
+   - Map all signals to the new system's API types
+   - Pin the submodule commit hash
+   - Document the new system's plugin/extension mechanism
 
-To add a new field to per-request JSON output (appears in `--results-path` output):
+3. **Create scorer template** in `docs/transfer/routing/scorer-template-<system>.md`:
+   - New system's plugin conventions
+   - Config file format
+   - Required test patterns
 
-1. **Add field to `Request`** in `sim/request.go` (runtime state, zero-value safe). When constructing `Request` structs, use `RequestState` typed constants (`StateQueued`, `StateRunning`, `StateCompleted`) — never bare strings.
-2. **Add field to `RequestMetrics`** in `sim/metrics_utils.go` (JSON output struct, use `omitempty` for backward compatibility)
-3. **Update `NewRequestMetrics()` constructor** in `sim/metrics_utils.go` to propagate the new field from `Request` to `RequestMetrics`
-4. **Set the field** at the appropriate event (e.g., `RoutingDecisionEvent` for cluster-level, or completion for computed metrics)
-5. **Add behavioral tests** covering multi-instance, single-instance, and standalone boundaries
+4. **Update prompt templates** or create system-specific variants:
+   - Stage 3 generate prompt may need different guidance for the new system's conventions
+   - Stage 4 test prompt may need different build/test commands
 
-Examples:
-- See `HandledBy` (#181) — set by `RoutingDecisionEvent`, zero-value when used outside cluster pipeline (suppressed from JSON via `omitempty`)
-- See `SLOClass`/`TenantID` (PR10) — set during workload generation, propagated at injection
+5. **Update CLI** in `tools/transfer_cli.py`:
+   - Add `--target-system` flag or equivalent system selection
+   - Update path resolution for the new submodule
+
+6. **Update Go harness** if the new system requires different equivalence testing:
+   - May need a new test adapter
+   - Suite A/B/C test infrastructure should be reusable; only the harness entry point changes
+
+7. **Update documentation**:
+   - README.md with new system information
+   - docs/contributing/index.md with updated quick start commands
+
+**Touch points:** ~8-10 files. Consider a dedicated macro plan for a new target system.
+
+## 5. Adding a New Workspace Artifact
+
+To add a new inter-stage artifact (e.g., a dependency graph between generated files):
+
+1. **Define the schema** in `tools/schemas/<artifact_name>.schema.json`:
+   - All required fields with types
+   - Validation constraints (non-empty strings, allowed enum values)
+   - Document the producing stage and consuming stage(s)
+
+2. **Update the producing stage** (prompt template + CLI if applicable):
+   - Prompt: add instructions for generating the artifact
+   - CLI: add validation command if the artifact has complex validation rules
+   - Ensure the artifact is written to `workspace/<artifact_name>.json`
+
+3. **Update the consuming stage**:
+   - Add input validation: artifact exists, parses correctly, required fields present
+   - Add halt condition if artifact is missing or malformed
+
+4. **Update inter-stage contract documentation** in the macro plan or design doc:
+   - Add to the workspace artifact table (Writer stage, Reader stage, Required Fields)
+
+5. **Verify**: Trace the Writer->Reader chain completely. Every field the reader needs must be written by the producer.
+
+**Touch points:** ~3-4 files.
+
+## 6. Updating the Scorer Template After Target System Changes
+
+When the target system changes plugin conventions (e.g., new scorer interface version, different config format):
+
+1. **Update submodule**: `cd submodules/<system>; git fetch; git checkout <new-commit>`
+
+2. **Update mapping artifact** commit pin to the new commit
+
+3. **Review API changes**: `git diff <old-commit>..<new-commit> -- pkg/plugins/` (or equivalent path)
+   - Identify changed type signatures, renamed fields, new required methods
+
+4. **Update scorer template** to reflect new conventions:
+   - Update plugin interface description
+   - Update config format if changed
+   - Update required test patterns
+
+5. **Update signal access paths** in the mapping artifact if metric APIs changed
+
+6. **Run validation**: `python tools/transfer_cli.py validate-mapping` with updated artifacts
+
+7. **Update any affected prompt templates** that reference specific API patterns
+
+**Touch points:** ~3-5 files depending on scope of target system changes.
+
+---
+
+## Cross-Cutting Verification
+
+After any extension, verify:
+- `python tools/transfer_cli.py validate-mapping` passes (if mapping changed)
+- `python tools/transfer_cli.py validate-schema` passes for all modified schemas
+- `python -m pytest tests/` passes
+- `go test ./tools/harness/...` passes (if harness changed)
+- `go build ./tools/harness/...` passes (if harness changed)
+- All cross-references between artifacts are consistent (self-audit dimension 5)
