@@ -1,0 +1,62 @@
+name: Transfer Pipeline Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Checkout inference-sim submodule
+        run: git submodule update --init inference-sim
+
+      - name: Checkout llm-d-inference-scheduler submodule
+        run: git submodule update --init llm-d-inference-scheduler
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: pip install pytest
+
+      - name: Run tests
+        run: python -m pytest tools/ -v
+
+      - name: Verify extract --strict
+        if: success()
+        run: python tools/transfer_cli.py extract --strict routing/
+
+      - name: Verify mapping
+        if: success()
+        run: python tools/transfer_cli.py validate-mapping
+
+      - name: Verify mapping commit hash consistency
+        if: success()
+        run: |
+          PINNED_HASH=$(grep -o 'Pinned commit hash:\*\*[[:space:]]*[0-9a-f]\{7,40\}' docs/transfer/blis_to_llmd_mapping.md | grep -oE '[0-9a-f]{7,40}$')
+          if [ -z "$PINNED_HASH" ]; then
+            echo "ERROR: Could not extract pinned commit hash from docs/transfer/blis_to_llmd_mapping.md"
+            exit 1
+          fi
+          ACTUAL_HASH=$(cd llm-d-inference-scheduler && git rev-parse HEAD)
+          if [ ${#PINNED_HASH} -lt 40 ]; then
+            PINNED_HASH=$(cd llm-d-inference-scheduler && git rev-parse "$PINNED_HASH" 2>/dev/null) || {
+              echo "ERROR: Pinned hash is not a valid commit in llm-d-inference-scheduler"
+              exit 1
+            }
+          fi
+          if [ "$ACTUAL_HASH" != "$PINNED_HASH" ]; then
+            echo "ERROR: Mapping artifact pinned hash ($PINNED_HASH) does not match llm-d-inference-scheduler HEAD ($ACTUAL_HASH)"
+            exit 1
+          fi
+          echo "OK: Pinned hash matches submodule HEAD"

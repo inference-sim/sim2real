@@ -21,6 +21,11 @@ Thumbs.db
 # Logs
 *.log
 
+# Python
+__pycache__/
+*.pyc
+.venv/
+
 # Build artifacts
 *.o
 *.a
@@ -29,3 +34,6 @@ Thumbs.db
 
 # Binaries
 bin/
+
+# Transfer pipeline workspace (inter-stage artifacts)
+workspace/

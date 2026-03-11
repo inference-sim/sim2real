@@ -37,7 +37,7 @@ We need a **transfer pipeline** that takes a discovered algorithm and:
 
 | Stage | Input | Output | Tools |
 |---|---|---|---|
-| **Extract** | `best_program.py` + `hypothesis_ledger.json` + `baseline_metrics.json` | Algorithm summary: EVOLVE-BLOCK code, hypothesis results, metric deltas | Read, Grep |
+| **Extract** | `best_program.py` + `best_program_info.json` | Algorithm summary: EVOLVE-BLOCK code, signal list, metric deltas | Read, Grep |
 | **Translate** | Algorithm summary + mapping doc | Mapped algorithm spec: which llm-d scorers to wrap, what conditions to apply, which signals to use | Read (mapping doc + llm-d source) |
 | **Generate** | Mapped spec + scorer template + llm-d repo | New `.go` files: scorer, registration, tests, configs | Write, Edit |
 | **Validate** | Generated files in llm-d repo | Build + test results | Bash (`go build`, `go test`, `go vet`) |
@@ -77,7 +77,7 @@ BLIS and llm-d share the same *conceptual* architecture (weighted scoring across
 | **Prefix signal** | In-memory `prefixMap` hash→instance | FNV-64a block hashing matching vLLM internals over ZMQ |
 | **Weight mechanism** | Normalized `[]float64` summing to 1.0 | Per-scorer integer `weight` in EPP config YAML |
 | **P/D disaggregation** | Not present | Two-tier: decode profile + prefill decision |
-| **Session affinity** | `req.SessionID` field | `x-session-token` HTTP header |
+| **Session affinity** | `req.SessionID` field | `x-session-token` HTTP header (**SUPERSEDED** — canonical name is `x-session-id`; see `blis_to_llmd_mapping.md`) |
 | **SLO classes** | `req.SLOClass` ("realtime", "interactive", "batch") | Not a native concept — needs header/label mapping |
 
 ### Translation Pattern: Composite Scorer
@@ -135,15 +135,15 @@ This mapping is maintained as `docs/transfer/blis_to_llmd_mapping.md` and update
 | BLIS (`RoutingSnapshot`) | llm-d Equivalent | Access Pattern | Fidelity |
 |---|---|---|---|
 | `QueueDepth` | `waitingRequests` (scraped from vLLM `/metrics`) | `LoadAwareScorer` reads from endpoint metrics | High — direct equivalent |
-| `PendingRequests` | `activeRequests` (TTL cache) | `ActiveRequestScorer` tracks via `PreRequest`/`ResponseComplete` | High |
+| `InFlightRequests` | `endpoint.GetMetrics().RunningRequestCount` | `ActiveRequestScorer` tracks via `PreRequest`/`ResponseComplete` (**SUPERSEDED** — see `blis_to_llmd_mapping.md` for canonical mapping) | High |
 | `EffectiveLoad()` | `waitingRequests + activeRequests` | Combine two scorer outputs | High |
-| `KVUtilization` | Not directly exposed | Could scrape `vllm:gpu_cache_usage_perc` Prometheus metric | Medium — available but not plumbed |
+| `KVUtilization` | `endpoint.GetMetrics().KVCacheUsagePercent` | Custom scorer needed (**SUPERSEDED** — see `blis_to_llmd_mapping.md` for canonical mapping) | High — direct field available |
 | `CacheHitRate` | `kvcache.Indexer.GetPodScores()` | Per-request prefix match score (much richer than aggregate hit rate) | Upgrade — llm-d signal is strictly better |
 | `FreeKVBlocks` | Not exposed to scheduler | Could scrape from vLLM metrics | Low — would need new metric plumbing |
-| `BatchSize` | Not exposed | vLLM internal | Low |
+| `BatchSize` | `endpoint.GetMetrics().RunningQueueSize` (approximate) | `ActiveRequest` scorer (**SUPERSEDED** — see `blis_to_llmd_mapping.md` for canonical mapping) | Medium |
 | `len(req.InputTokens)` | `estimateTokenCount(req.Body)` | Parse request JSON, count tokens or estimate from char count | Medium — needs helper function |
 | `req.SLOClass` | Custom request header (e.g., `x-slo-class`) | Read from `req.Headers` | Needs convention — not native |
-| `req.SessionID` | `x-session-token` header | `SessionAffinityScorer` already handles this | High |
+| `req.SessionID` | `x-session-token` header (**SUPERSEDED** — canonical name is `x-session-id`; see `blis_to_llmd_mapping.md`) | `SessionAffinityScorer` already handles this | High |
 
 ### Interfaces
 
