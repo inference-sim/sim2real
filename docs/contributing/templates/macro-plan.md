@@ -1,38 +1,31 @@
-You are operating inside a real repository with full code access.
+You are operating with access to multiple repositories and external systems.
 
 You are tasked with producing a MACRO-LEVEL DESIGN PLAN for a:
 
-"Major Feature Expansion with Architectural Changes."
+"Cross-System Pipeline Implementation."
 
-This is a program-level plan that defines objectives, a concept model,
-architectural evolution, and an ordered PR series.
+This is a program-level plan that defines objectives, a component model,
+cross-system integration, and an ordered PR series spanning multiple repos.
 
 This is NOT implementation planning.
 This is NOT a micro-level design.
 This is NOT speculative architecture.
 
-You MUST inspect the real codebase before proposing changes.
+You MUST inspect all relevant codebases before proposing changes.
 
 ======================================================================
-PREREQUISITE — DESIGN GUIDELINES
+PREREQUISITE — DESIGN DOCUMENT
 ======================================================================
 
-Before writing a macro plan, read and internalize:
+A cross-system pipeline design doc must exist BEFORE the macro plan.
+The design doc describes WHAT the pipeline does and WHY (analysis
+questions, abstraction gaps, validation strategy). The macro plan
+describes WHAT to build and in WHAT ORDER (components, PRs, risks).
 
-- `docs/contributing/templates/design-guidelines.md` — BLIS design guidelines
-  covering DES foundations, module architecture, and extension framework.
-
-The macro plan must be consistent with these guidelines. Specifically:
-- Building blocks must use the MODULE CONTRACT TEMPLATE from Section 4.3
-  (observes / controls / owns / invariants / events / extension friction)
-- New events must be classified as EXOGENOUS or ENDOGENOUS (Section 2.2)
-- Modeling decisions must apply the SIX SCOPING CRITERIA (Section 2.1)
-- PRs must identify their EXTENSION TYPE (Section 5.1): policy template,
-  subsystem module, backend swap, or tier composition
-- Building blocks should map to REAL SYSTEM COMPONENTS (Section 4.4)
-
-If no design doc exists for the feature being planned, one must be
-created (per the guidelines) before or alongside the macro plan.
+Read and reference:
+- The design document for this pipeline
+- The target systems' documentation and API surfaces
+- Any mapping artifacts that bridge the systems
 
 ======================================================================
 ABSTRACTION LEVEL RULE (NON-NEGOTIABLE)
@@ -42,299 +35,263 @@ The macro plan describes WHAT to build and in WHAT ORDER, not HOW to
 implement each piece. Enforce these boundaries strictly:
 
 ALLOWED in macro plan:
-  - Behavioral descriptions of module contracts (prose)
-  - Frozen interface signatures (Go code ONLY for interfaces whose
-    freeze PR has already merged — these are facts, not aspirations)
+  - Behavioral descriptions of component contracts (prose)
+  - External API references that are already stable/published
   - File path inventories (which packages, which files, per PR)
   - LOC estimates per PR (sizing heuristics)
   - CLI flag names and configuration surface area
   - Brief YAML/config examples
   - Architecture diagrams (text-based)
+  - External system version requirements
 
 PROHIBITED in macro plan:
-  - Method implementations (belongs in micro plan)
-  - Struct field lists (belongs in micro plan)
-  - Pre-freeze interface signatures in Go syntax (describe behaviorally:
-    "a single-method interface that selects a target instance given
-    request metadata and per-instance snapshots")
-  - Factory function code (belongs in micro plan)
+  - Implementation code from any language (belongs in micro plan)
+  - Internal type definitions from external systems (use behavioral
+    descriptions — "the scorer plugin must implement the target
+    system's plugin interface")
+  - Pre-stabilized API signatures (describe behaviorally)
+  - Factory/constructor code (belongs in micro plan)
   - Test code (belongs in micro plan)
 
-THE TEST: Is this content a FACT about merged code, or an ASPIRATION
-about code to be written? Facts are allowed. Aspirations must be
-described behaviorally, not as Go code.
-
-WHY THIS MATTERS: The original macro plan had ~200 lines of Go code
-including full method implementations (TokenBucket.Admit(),
-PartitionedRNG.ForSubsystem()). These diverged during micro-planning
-and became misleading. Behavioral descriptions survive intact because
-they describe WHAT, not HOW.
+THE TEST: Is this content a FACT about existing/stable systems, or an
+ASPIRATION about code to be written? Facts are allowed. Aspirations
+must be described behaviorally.
 
 ======================================================================
-PHASE 0 — REPOSITORY RECON (MANDATORY)
+PHASE 0 — MULTI-SYSTEM RECON (MANDATORY)
 ======================================================================
 
-Before proposing anything:
+Before proposing anything, recon EACH system involved in the pipeline:
 
-1) Identify and summarize:
+1) For the HOST system (where pipeline code lives):
    - Top-level packages/modules and responsibilities
-   - Core data structures and interfaces
-   - Key invariants and assumptions encoded in the system
-   - CLI entrypoints and current flag surface
-   - Configuration flow
-   - Existing extension points (map to design guidelines Section 4.2)
-   - Areas of tight coupling or fragility
-   - Current module boundaries vs. target module map (guidelines 4.2)
+   - Existing extension points (skills, CLI commands, etc.)
+   - Test framework and CI pipeline
+   - Configuration patterns
 
-2) Clearly separate:
-   - Confirmed facts (from inspection — cite file:line for every claim)
+2) For EACH TARGET system (systems the pipeline integrates with):
+   - Public API surface (types, interfaces, methods the pipeline uses)
+   - Plugin/extension conventions (how to add new components)
+   - Build and test workflow (how generated code is validated)
+   - Version cadence and stability guarantees
+   - Deployment model (how changes reach production)
+
+3) For EACH supporting artifact (mapping files, templates, etc.):
+   - Purpose and ownership
+   - Schema or structure
+   - Staleness/versioning strategy
+
+4) Clearly separate:
+   - Confirmed facts (from inspection — cite file:line or doc section)
    - Inferred behavior (explicitly labeled as inference)
    - Open uncertainties
 
-3) Identify architectural constraints that must not be violated.
+5) Identify cross-system constraints:
+   - Which APIs are stable vs. evolving?
+   - Which systems can be mocked for testing?
+   - What ordering constraints exist between repos?
 
-No invented abstractions.
-No imagined extension points.
-Everything must be grounded in code inspection with source references.
-
-ANTI-HALLUCINATION RULE: For every behavioral claim about existing code,
-provide a file:line citation. If you cannot cite it, mark it as
-"UNVERIFIED" and do not rely on it in subsequent phases.
+ANTI-HALLUCINATION RULE: For every claim about an external system's
+API or behavior, cite the source (doc URL, file:line, or README section).
+If you cannot cite it, mark as "UNVERIFIED" and do not rely on it.
 
 ======================================================================
-PHASE 1 — HIGH-LEVEL OBJECTIVES AND MODEL SCOPING
+PHASE 1 — HIGH-LEVEL OBJECTIVES AND SCOPING
 ======================================================================
 
 Define:
 
 - 3-7 crisp objectives
 - Explicit non-goals
-- Compatibility constraints
-- Performance constraints
-- Backward compatibility guarantees
-- Operational/CLI stability expectations
+- External system version constraints (which versions are supported)
+- Cross-system compatibility guarantees
+- Performance constraints (pipeline runtime, resource usage)
+- Rollback/disable guarantees (can target systems recover if pipeline
+  produces bad output?)
 
-Be precise.
+PIPELINE SCOPING (required):
 
-MODEL SCOPING (required — applies Banks et al. criteria):
+For this pipeline, answer:
 
-For this feature expansion, answer:
+1) What ANALYSIS QUESTIONS does this pipeline help answer?
+   (from the design document)
 
-1) What ANALYSIS QUESTIONS does this feature help answer?
-   (e.g., "What is the optimal routing policy for heterogeneous
-   hardware?" or "How does autoscaling latency affect tail TTFT?")
+2) What must be IMPLEMENTED to answer those questions?
 
-2) What must be MODELED to answer those questions?
+3) What can be DEFERRED to later versions?
+   (e.g., "multi-algorithm transfer deferred to v2")
 
-3) What can be SIMPLIFIED without affecting the analysis?
-   (e.g., "model scaling latency as fixed delay, not warmup curve")
-
-4) What can be OMITTED entirely?
-   (e.g., "network partitions between instances — out of scope")
+4) What is explicitly OUT OF SCOPE?
+   (e.g., "bidirectional transfer — production insights back to source")
 
 Present as a table:
 
-| Component | Modeled | Simplified | Omitted | Justification |
-|-----------|---------|------------|---------|---------------|
-| (example) Scaling latency | -- | Fixed delay, not warmup curve | -- | Same steady-state throughput; warmup matters only for sub-minute scale-up |
-| (example) Network partitions | -- | -- | Yes | Not needed for routing policy comparison; add if modeling failure recovery |
-
-For each "Simplified" entry, state what real-system behavior is lost
-and under what conditions it would matter in the Justification column.
-This is the fidelity trade-off record — it prevents "fidelity for its
-own sake" and enables future refinement with clear upgrade paths.
+| Capability | v1 | Deferred | Out of Scope | Justification |
+|------------|:--:|:--------:|:------------:|---------------|
+| (example) Single algorithm transfer | X | | | Core use case |
+| (example) Multi-algorithm batch | | X | | Config merge complexity |
+| (example) Continuous integration trigger | | | X | Requires maturity first |
 
 ======================================================================
-PHASE 2 — CONCEPT MODEL
+PHASE 2 — COMPONENT MODEL
 ======================================================================
 
-Before diving into architecture, define the system at the level a human
-would explain it on a whiteboard:
+Define the pipeline at the level a human would explain it on a
+whiteboard. Components are pipeline stages, orchestration logic,
+artifacts, and integration points — NOT internal modules of external
+systems.
 
-1) Building Blocks (3-7 named components)
+1) Components (3-10 named components)
 
-   For EACH building block, provide the MODULE CONTRACT:
+   For EACH component, provide the COMPONENT CONTRACT:
    - Name and one-sentence responsibility
-   - OBSERVES: what state does this module read? (its inputs)
-   - CONTROLS: what decisions does this module make? (its outputs)
-   - OWNS: what mutable state does it exclusively manage?
-   - INVARIANTS: what must always hold for this module?
-   - EVENTS: what events does it produce or consume?
-     Classify each as EXOGENOUS (driven by external input) or
-     ENDOGENOUS (driven by internal state transitions).
-   - EXTENSION FRICTION: how many files must change to add one more
-     variant? (Reference targets from design guidelines Section 4.5)
+   - TYPE: one of:
+     - PIPELINE STAGE: a step in the pipeline execution
+     - ORCHESTRATOR: controls stage sequencing, retries, user interaction
+     - ARTIFACT: a file/document produced or consumed by stages
+     - INTEGRATION POINT: interface with an external system
+   - INPUTS: what this component reads (artifacts, API responses, user input)
+   - OUTPUTS: what this component produces (artifacts, API calls, PRs)
+   - SIDE EFFECTS: external-facing effects (files created, PRs opened,
+     deployments triggered, user prompts)
+   - INVARIANTS: what must always hold for this component
+   - FAILURE MODES: what goes wrong and what happens (halt, retry, degrade)
+   - EXTERNAL DEPENDENCIES: which external systems/APIs are called
 
-   No building block may have more than one core responsibility.
-
-2) Interaction Model
-   - Who calls whom (directional arrows)
-   - Data flow between blocks (what crosses each boundary)
-   - Ownership transfer rules (when does data change owners?)
+2) Data Flow
+   - Stage-to-stage artifact flow (what crosses each boundary)
+   - External API calls (which stages call which systems)
+   - User interaction points (where the pipeline halts for human input)
 
 3) System Invariants
-   - What must ALWAYS hold (e.g., "clock never decreases")
-   - What must NEVER happen (e.g., "no cross-instance state mutation")
-   - Causality constraints (ordering guarantees)
-   - DES-specific: state vs. statistics separation — which data is
-     simulation state (evolves the system) vs. derived statistics
-     (output for analysis)?
+   - What must ALWAYS hold (e.g., "no PR created without passing tests")
+   - What must NEVER happen (e.g., "no deployment without equivalence pass")
+   - Ordering constraints (which stages gate which)
 
 4) Extension Points
-   - Where do new behaviors plug in? (behavioral description of
-     interface contract + responsibility)
-   - What is the default behavior for each extension point?
-   - What is the FIRST non-default implementation planned?
+   - Where do new capabilities plug in? (new validation suite, new
+     target system, new signal type)
+   - What is the current behavior for each extension point?
+   - What is the cost of extension? (files to change, tests to add)
 
-5) State Ownership Map
-   - For every piece of mutable state: exactly one owner
-   - Shared state must be explicitly identified and justified
+5) External System Map
+   - Map each component to the external systems it touches:
 
-6) Real-System Correspondence
-   - Map each building block to the real inference system component(s)
-     it models. Use a table:
+   | Component | Host Repo | Target System A | Target System B | Artifacts |
+   |-----------|-----------|-----------------|-----------------|-----------|
 
-   | Building Block | llm-d | vLLM | SGLang | Other |
-   |----------------|-------|------|--------|-------|
-
-   - BLIS models an extensible distributed inference platform, not any
-     single system. The table ensures the architecture stays grounded
-     in real systems while remaining general enough to express
-     behaviors from multiple targets.
-
-THE CONCEPT MODEL MUST FIT IN UNDER 80 LINES.
-(Increased from 60 to accommodate module contracts and real-system
-correspondence. If it exceeds 80, the design is too complex —
-simplify before proceeding.)
-
-Every PR in Phase 6 must map to adding or modifying a specific building
-block from this model. If a PR cannot be described as a building block
-change, redesign the PR or the model.
+THE COMPONENT MODEL MUST FIT IN UNDER 100 LINES.
+(Larger than the single-repo template because cross-system integration
+adds inherent complexity. If it exceeds 100, simplify.)
 
 ======================================================================
-PHASE 3 — ARCHITECTURAL RISK REGISTER
+PHASE 3 — RISK REGISTER
 ======================================================================
 
-For every non-obvious architectural decision in the concept model:
+For every non-obvious decision, with special attention to cross-system
+risks:
 
 | Decision | Assumption | Validation Method | Cost if Wrong | Gate |
 |----------|------------|-------------------|---------------|------|
 
-- DECISION: The choice being made
-- ASSUMPTION: What must be true for this to work
-- VALIDATION: How to test cheaply (mock study, prototype, analysis, spike)
-- COST IF WRONG: What breaks — count the affected PRs
-- GATE: When validation must complete (before which PR)
-
-Example row:
-| Shared-clock event loop | O(N) scan per event is fast for N<=16 |
-  Benchmark N=16, 10K events | PR 3 rework | Before PR 3 merge |
+CROSS-SYSTEM RISK CATEGORIES (check each):
+- **API drift**: target system changes API between plan and implementation
+- **Version mismatch**: pipeline targets version X, cluster runs version Y
+- **Schema evolution**: artifact format changes break downstream stages
+- **External availability**: target system's test infra is down/broken
+- **Distributed rollback**: pipeline succeeds partially, needs cleanup
+- **Mock fidelity**: test mocks don't reflect real system behavior
 
 MANDATORY VALIDATION RULE:
 If cost-of-being-wrong >= 3 PRs of rework, validation is MANDATORY.
-The plan must include a spike/mock study PR or pre-PR validation step.
 
 For each validation gate, specify:
-- Exact success criteria (not "looks good" — measurable outcomes)
+- Exact success criteria (measurable)
 - Abort plan (what changes if validation fails)
 
 ======================================================================
-PHASE 4 — PROPOSED ARCHITECTURAL EVOLUTION
+PHASE 4 — IMPLEMENTATION EVOLUTION
 ======================================================================
 
-Only after the concept model and risk register:
+Describe how the pipeline is built incrementally:
 
-- Describe how the architecture evolves FROM current TO concept model.
-- Map each structural change to a concept model building block.
-- Identify refactors that are strictly enabling (no behavior change).
-- Explicitly describe what remains unchanged.
-- For each new extension point: what is the default implementation and
-  when does the first non-default implementation arrive?
+- Start from "nothing exists" (or from existing infrastructure)
+- Show the progression: which components are built first, which last
+- Identify the minimum viable pipeline (earliest point where the full
+  pipeline can execute end-to-end, even with reduced validation)
+- Explicitly describe what existing code is reused vs. new code
+- For each external integration: when is the real API first called?
+  (vs. mocked)
 
-Highlight risks and invariants.
-
-No premature generalization.
-No extension point without a concrete non-default implementation planned.
-
-ABSTRACTION LEVEL CHECK: This section describes the evolution
-BEHAVIORALLY. Do NOT include Go code here. Describe what each
-module will do and what contract it will satisfy, not how it will
-be implemented. Interface signatures appear only in the output
-sections (Section G, defined in the Output Format section below)
-and only for already-frozen interfaces.
-
-FIDELITY TRADE-OFFS: For each architectural simplification, state:
-- What real-system behavior is being approximated
-- What analysis questions the approximation still answers correctly
-- Under what conditions the approximation breaks down
-- What the upgrade path looks like (which future PR refines this)
+MILESTONE CHECKPOINTS:
+Define 2-4 meaningful milestones where the pipeline reaches a testable
+state. Example: "After PR3, the pipeline can extract + translate +
+generate code, but cannot yet run equivalence tests."
 
 ======================================================================
 PHASE 5 — CROSS-CUTTING INFRASTRUCTURE
 ======================================================================
 
-Plan ONCE for the entire PR series. Each item must be assigned to a
-specific PR (defined in Phase 6) or handled as a standalone preparatory
-PR. Phases 5 and 6 are co-developed: sketch the PR series first, then
-assign cross-cutting items, then finalize both.
+Plan ONCE for the entire PR series:
 
 1) Shared Test Infrastructure
-   - First: identify existing shared test packages in the codebase.
-     Build on them rather than duplicating or replacing them.
-   - New test helper packages, shared fixtures, golden dataset types
+   - Test helpers, shared fixtures, mock implementations of external APIs
    - Which PR creates them? Which PRs consume them?
-   - How do golden datasets evolve as the system grows?
-   - INVARIANT TESTS: which system invariants must have companion tests?
-     (Golden tests alone are insufficient — see design guidelines 6.3)
+   - External system mocking strategy: how are target systems simulated
+     in tests? (recorded responses, lightweight stubs, full mock servers)
 
 2) Documentation Maintenance
-   - CLAUDE.md update triggers: new packages, new files, changed file
-     organization, completed plan milestones, new CLI flags
-   - Who updates CLAUDE.md? (The PR that causes the change.)
-   - README update triggers and ownership
-   - Design guidelines compliance: does this feature expansion require
-     updating the target module map in the design guidelines?
+   - CLAUDE.md update triggers
+   - README and user-facing docs
+   - Artifact schema documentation
 
 3) CI Pipeline Changes
-   - New test packages to add to CI
-   - New linter rules or build steps
-   - Performance regression benchmarks
+   - New test packages
+   - Integration test requirements (do tests need external access?)
+   - Performance benchmarks
 
 4) Dependency Management
-   - New external dependencies (justify each one)
-   - Version pinning strategy
+   - New external dependencies (justify each)
+   - External system version pinning strategy
+   - Artifact version compatibility rules
 
-5) Interface Freeze Schedule
-   - Which PR freezes which interface?
-   - What must be validated before freezing?
-   - After freeze: parallel development of templates/implementations
-     can proceed independently
+5) Cross-Repo Coordination
+   - Which PRs must land in which repos in what order?
+   - How are cross-repo dependencies tested before merge?
+   - Branch naming conventions across repos
+   - Who reviews PRs in external repos?
+
+6) Artifact Lifecycle
+   - Which artifacts must exist before the first pipeline run?
+   - Who creates and maintains each artifact?
+   - Version scheme and staleness detection
 
 No item may be left as "address when needed."
-This applies to cross-cutting infrastructure (test helpers, CI, docs),
-not to feature packages which are detailed in Phase 6.
 
 ======================================================================
 PHASE 6 — ORDERED PR SERIES (PR0 ... PRN)
 ======================================================================
 
-Design an incremental, independently reviewable and mergeable PR sequence.
+Design an incremental, independently reviewable and mergeable PR
+sequence. PRs may target DIFFERENT repositories.
 
 For EACH PR, provide TWO TIERS:
 
 --- TIER 1: Human Review Summary (target 15 lines, max 25) ---
 
 - Title
-- Building Block Change: Which concept model block is added/modified?
-- Extension Type (from design guidelines Section 5.1):
-    - policy template: new algorithm behind existing interface
-    - subsystem module: new interface + new events
-    - backend swap: alternative implementation, requires interface extraction
-    - tier composition: decorator/wrapper over existing module
+- **Target Repo**: which repository this PR lands in
+- Component Change: Which component model component is added/modified?
+- PR Type (choose one):
+    - infrastructure: shared test helpers, mocks, CI setup
+    - artifact: mapping file, template, prompt, schema definition
+    - pipeline-stage: implements a pipeline stage
+    - integration: connects the pipeline to an external system
+    - validation: adds a test suite or validation capability
+    - orchestration: stage sequencing, retry logic, user interaction
 - Motivation: Why does this PR exist? (1-2 sentences)
 - Scope: In / Out (bullet points)
 - Behavioral Guarantees: What MUST hold after this PR merges?
-  (Use named contracts: BC-1, BC-2, etc.)
 - Risks: Top 1-2 risks and how they're mitigated
 - Cross-Cutting: Which shared infra does this PR create or consume?
 - Validation Gate: Does this PR depend on a risk register validation?
@@ -342,32 +299,26 @@ For EACH PR, provide TWO TIERS:
 --- TIER 2: Implementation Guide (for micro-planning) ---
 
 - Architectural Impact (what changes structurally)
-- API Surface Changes (new types, interfaces, methods — described
-  BEHAVIORALLY, not as Go code. E.g., "New single-method interface
-  for latency estimation, replacing hardcoded Step() logic")
-- CLI Changes (new flags, changed behavior)
-- Test Categories (unit, integration, regression, golden, invariant)
-- Documentation Updates (CLAUDE.md, README, design guidelines if needed)
-- Extension Friction: how many files to add one more variant of the
-  new type/interface? Compare against reference targets (guidelines 4.5)
-- Parallel Development: after this PR merges, what can proceed
-  independently? (e.g., "multiple routing policies can be developed
-  in parallel after the interface freeze in this PR")
+- API Surface Changes (described BEHAVIORALLY)
+- Test Categories (unit, integration, end-to-end, mock-based)
+- Documentation Updates
+- Extension Friction: how hard is it to add a variant of what this
+  PR introduces? (new signal type, new validation suite, new target)
+- Cross-Repo Impact: does this PR require changes in other repos?
 - Why this PR is independently reviewable
 - Why it introduces no dead code
 
 Constraints:
 
-- Each PR must deliver one cohesive building block change.
+- Each PR must deliver one cohesive component change.
 - Each PR must be exercisable immediately after merge.
   "Exercisable" means: via CLI, OR via tests that demonstrate the
-  new behavior. Internal refactors exercised by passing existing tests
-  are valid. Scaffolding exercised only by future PRs is NOT valid.
+  new behavior. Infrastructure PRs exercised by subsequent PRs are
+  valid if they include their own test coverage.
 - No speculative scaffolding.
-- No unused interfaces.
-- No flags that aren't exercised.
-- Each PR must identify its extension type and follow the corresponding
-  recipe from the design guidelines (Section 5.2-5.5).
+- PRs targeting external repos must be self-contained (no dependency
+  on unmerged PRs in the host repo, unless the external PR is a
+  test/config change that can be reviewed independently).
 
 ======================================================================
 PHASE 7 — DEPENDENCY DAG & PARALLELISM
@@ -375,16 +326,24 @@ PHASE 7 — DEPENDENCY DAG & PARALLELISM
 
 Provide:
 
-- A PR dependency graph (partial order).
-- Parallelizable workstreams.
-- Merge sequencing guidance.
-- Validation gate placement (from risk register).
-- Interface freeze points (from Phase 5, item 5: Interface Freeze
-  Schedule) — mark which PRs unlock parallel development of multiple
-  implementations.
-- Integration risk notes.
+- A PR dependency graph (partial order), annotated with target repo
+- Cross-repo ordering constraints (which external PRs gate which
+  host-repo PRs)
+- Parallelizable workstreams
+- Merge sequencing guidance
+- Validation gate placement (from risk register)
+- Integration risk notes (which merges are highest-risk)
 
-Maximize safe parallelism.
+Maximize safe parallelism. Identify the critical path.
+
+CROSS-REPO VISUALIZATION:
+Show the DAG with repo annotations:
+
+```
+[PR0 host] → [PR1 host] → [PR3 host]
+                  ↓              ↓
+           [PR2 target-A]  [PR4 target-A]
+```
 
 ======================================================================
 PHASE 8 — DESIGN BUG PREVENTION
@@ -392,116 +351,86 @@ PHASE 8 — DESIGN BUG PREVENTION
 
 Include:
 
-- Invariants that must never be broken (reference concept model).
-- Regression surfaces (which existing tests must keep passing).
-- Cross-PR state migration risks (data format changes across PRs).
-- Backward compatibility enforcement.
+- Invariants that must never be broken (reference component model)
+- Regression surfaces (which existing tests must keep passing)
+- Cross-PR state migration risks (artifact format changes across PRs)
 
-Common architectural failure modes and how this plan prevents them:
+Common cross-system failure modes and how this plan prevents them:
 
   General:
   - Scaffolding creep (dead code introduced "for later").
-    Prevention: every struct field, method, and flag must be exercised
+    Prevention: every file, function, and config must be exercised
     by the end of the PR that introduces it.
-  - Documentation drift (CLAUDE.md diverges from reality).
-    Prevention: the PR that causes the change updates CLAUDE.md in the
-    same commit. No deferred documentation.
-  - Test infrastructure duplication (helpers copied across packages).
-    Prevention: shared test packages created in an early PR, consumed
-    by all subsequent PRs (specified in Phase 5, item 1).
-  - Golden dataset staleness (regression baselines not updated).
-    Prevention: every PR that changes output format includes a golden
-    dataset regeneration step with a verification command.
-  - Interface over-specification (freezing APIs too early).
-    Prevention: interfaces are frozen only after at least one
-    non-default implementation is designed (even if not yet built).
-    The freeze PR must demonstrate the interface accommodates two
-    implementations.
+  - Documentation drift.
+    Prevention: the PR that causes the change updates docs in the
+    same commit.
+  - Test infrastructure duplication.
+    Prevention: shared test packages created in an early PR.
 
-  DES-specific (from design guidelines Section 6):
-  - The Type Catalog trap: macro plan includes Go struct definitions
-    that diverge from implementation. Prevention: describe modules
-    behaviorally, not as Go types.
-  - Fidelity for its own sake: modeling components that don't affect
-    any analysis question. Prevention: every component must trace to
-    a modeling decision in Phase 1.
-  - Golden tests without invariant tests: characterization tests that
-    encode bugs as expected values. Prevention: every subsystem with
-    golden tests must have companion invariant tests.
-  - Mixing exogenous and endogenous: tight coupling between workload
-    generation and simulation logic that prevents replay experiments.
-    Prevention: exogenous inputs must be separable from endogenous
-    simulation logic.
-  - Interface leaking implementation: interfaces that encode one
-    backend's data model instead of the abstract behavioral contract.
-    Prevention: interfaces must accommodate at least two backends
-    (even if only one is implemented initially).
-
-  Module architecture (from design guidelines Section 6.2):
-  - Shotgun surgery: multiple construction sites for the same type.
-    Prevention: canonical constructors for types constructed in >1 place.
-  - Destructive reads: methods that both query and clear state.
-    Prevention: separate Get() and Consume() methods.
-  - Monolith methods: single methods containing logic for multiple
-    modules. Prevention: each module's logic callable through its
-    own interface.
-  - Config mixing concerns: single config struct combining unrelated
-    parameters. Prevention: group configuration by module.
+  Cross-system-specific:
+  - API contract drift: external system changes API after pipeline
+    is built, breaking integration silently.
+    Prevention: version-pinned artifacts + staleness checks at
+    pipeline startup (Stage 1 prerequisites).
+  - Mock divergence: test mocks don't reflect real system behavior,
+    causing false confidence.
+    Prevention: mocks are derived from real system artifacts (not
+    hand-written); include at least one end-to-end test against
+    real systems per release.
+  - Distributed partial failure: pipeline succeeds in some repos
+    but fails in others, leaving inconsistent state.
+    Prevention: atomic multi-repo operations where possible; cleanup
+    procedures for partial failures documented per stage.
+  - Artifact staleness: mapping files or templates become outdated
+    as target systems evolve.
+    Prevention: staleness checks (compile, smoke test, version
+    distance) as pipeline prerequisites.
+  - Cross-repo merge ordering violations: PR in repo A merged before
+    prerequisite PR in repo B, breaking integration.
+    Prevention: dependency DAG includes cross-repo edges; CI checks
+    for prerequisite PRs before merge.
 
 ======================================================================
 OUTPUT FORMAT (STRICT)
 ======================================================================
 
-A) Executive Summary (under 15 lines — synthesize the elevator pitch:
-   what is being built, why, how many PRs, key milestones)
-B) Repository Recon Summary
-C) High-Level Objectives + Non-Goals + Model Scoping Table
-D) Concept Model (under 80 lines — building blocks with module
-   contracts, interactions, invariants, extension points, real-system
-   correspondence)
-E) Architectural Risk Register
-F) Architectural Evolution (current -> target, mapped to concept model,
-   described BEHAVIORALLY — no Go code)
-G) Frozen Interface Reference (ONLY for interfaces whose freeze PR
-   has already merged — Go signatures with per-PR annotations.
-   Include both interfaces frozen BY this plan's PRs and pre-existing
-   frozen interfaces that this plan depends on. Omit entirely if no
-   interfaces are frozen yet.)
+A) Executive Summary (under 15 lines — what pipeline is being built,
+   which systems it connects, how many PRs, key milestones)
+B) Multi-System Recon Summary
+C) High-Level Objectives + Non-Goals + Scoping Table
+D) Component Model (under 100 lines — components with contracts,
+   data flow, invariants, extension points, external system map)
+E) Risk Register (with cross-system risk categories)
+F) Implementation Evolution (current -> milestone 1 -> ... -> complete,
+   described BEHAVIORALLY — no implementation code)
+G) Stable API Reference (ONLY for external APIs that are already
+   stable/published and that the pipeline depends on. Describe
+   behaviorally unless a concrete signature is already frozen.
+   Omit entirely if not applicable.)
 H) Cross-Cutting Infrastructure Plan
-I) PR Plan (PR0...PRN, Tier 1 + Tier 2 per PR)
-J) Dependency DAG
+I) PR Plan (PR0...PRN, Tier 1 + Tier 2 per PR, with target repo)
+J) Dependency DAG (with cross-repo edges)
 K) Design Bug Prevention Checklist
 
 CONTEXT BUDGET RULE:
 Sections A, C, and D are the human-review core and must be concise.
 I-Tier-1 summaries should target 15 lines each (max 25).
 All other sections are reference material consulted on demand.
-The plan should be structured so a human can review the core sections
-(A + C + D + all I-Tier-1 summaries) without needing to read the rest.
-
-ABSTRACTION LEVEL CHECK (final gate):
-Before submitting, verify:
-- Section F contains ZERO lines of Go code
-- Section G contains ONLY frozen interface signatures (merged code)
-- Sections A-E and H-K contain ZERO Go code
-- All pre-freeze interfaces are described behaviorally
-- All module contracts use the template from Phase 2, not Go structs
 
 ======================================================================
 
 Quality bar:
 
-- Grounded in real code with file:line citations.
-- No hallucinated modules or behaviors.
+- Grounded in real code/docs with citations.
+- No hallucinated APIs or behaviors.
 - No dead code.
 - No bloated PRs.
 - Must withstand expert review.
 - Must be realistic and implementable.
-- Concept model must be simple enough to explain verbally in 2 minutes.
-- Consistent with design guidelines (docs/contributing/templates/design-guidelines.md).
-- Every building block has a module contract.
-- Every PR has an extension type.
-- Every modeling decision traces to an analysis question.
+- Component model must be simple enough to explain verbally in 2 minutes.
+- Every component has a contract.
+- Every PR has a target repo and PR type.
+- Every capability traces to a pipeline objective.
 
 ======================================================================
 LIVING DOCUMENT PROTOCOL
@@ -512,12 +441,11 @@ This plan will evolve. When updating:
 1) Add a dated revision note at the top explaining what changed and why.
 2) If a risk register validation fails, document the finding and the
    resulting plan changes explicitly.
-3) Never silently change a PR's behavioral guarantees — if contracts
-   change, note the old contract, new contract, and reason.
+3) Never silently change a PR's behavioral guarantees — note old
+   contract, new contract, and reason.
 4) Track completed PRs by marking their status in the PR plan section.
-5) After each PR merges, check: does the concept model still accurately
-   describe the system? If not, update it. A stale concept model is
-   worse than no concept model.
+5) After each PR merges, check: does the component model still
+   accurately describe the pipeline? If not, update it.
 
 ======================================================================
 

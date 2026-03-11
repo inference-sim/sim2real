@@ -1,10 +1,10 @@
 # Universal Convergence Protocol
 
-**Status:** Active (v1.0 — extracted 2026-02-26 from hypothesis.md)
+**Status:** Active (v1.1 — adapted for sim2real, 2026-03-11)
 
-This document defines the convergence protocol used by all review gates across BLIS workflows:
-- **PR workflow** (docs/contributing/pr-workflow.md): Plan Review (10 perspectives), Code Review (10 perspectives)
-- **Hypothesis workflow** (docs/contributing/hypothesis.md): Design Review (5 perspectives), Code Review (5 perspectives), FINDINGS Review (10 perspectives)
+This document defines the convergence protocol used by all review gates across sim2real workflows:
+- **PR workflow** (docs/contributing/pr-workflow.md): Category-appropriate review (3–5 perspectives depending on PR category)
+- **Transfer validation workflow** (docs/contributing/transfer-validation.md): Validation review (5 perspectives)
 - **Design process** (docs/contributing/design-process.md): Design Doc Review (8 perspectives)
 - **Macro-plan process** (docs/contributing/macro-planning.md): Macro Plan Review (8 perspectives)
 
@@ -31,11 +31,11 @@ This document defines the convergence protocol used by all review gates across B
 
 Each reviewer must classify every finding:
 
-- **CRITICAL**: Must fix before proceeding. Examples: missing control experiment (RCV-4), status classification contradicted by data, silent data loss in analyzer, cross-document contradiction.
-- **IMPORTANT**: Should fix before proceeding. The key test: **would proceeding with this unfixed item mislead a reader or produce incorrect conclusions?** Examples: sub-threshold effect size in one seed, stale text contradicting current results, undocumented confound.
-- **SUGGESTION**: Does not affect correctness or reader understanding. Examples: off-by-one line citation (±2 lines), cosmetic terminology, style consistency.
+- **CRITICAL**: Must fix before proceeding. Examples: missing signal in mapping artifact, schema field mismatch between stages, submodule commit pin doesn't match actual code, broken cross-reference between artifacts.
+- **IMPORTANT**: Should fix before proceeding. The key test: **would proceeding with this unfixed item mislead a reader or produce incorrect results?** Examples: incomplete prompt template (missing halt condition), inconsistent signal names across artifacts, undocumented schema field.
+- **SUGGESTION**: Does not affect correctness or reader understanding. Examples: formatting inconsistency, minor wording improvement, optional section enhancement.
 
-**When in doubt between IMPORTANT and SUGGESTION:** If fixing the item would change any conclusion, metric, or user guidance, it is IMPORTANT. If it would only improve readability without changing any conclusion, it is SUGGESTION. If multiple reviewers classify the same item at different severities, the highest severity applies.
+**When in doubt between IMPORTANT and SUGGESTION:** If fixing the item would change any pipeline behavior, artifact content, or validation result, it is IMPORTANT. If it would only improve readability without changing any outcome, it is SUGGESTION. If multiple reviewers classify the same item at different severities, the highest severity applies.
 
 ## Agent Failure Handling
 
@@ -45,17 +45,20 @@ Each reviewer must classify every finding:
 
 ## Expected Convergence Rates
 
-Gates with more perspectives (FINDINGS Review: 10) will naturally converge more slowly than gates with fewer (Design Review: 5). This is correct behavior — more eyes = higher quality bar. Typical expectations:
-- Hypothesis Design Review (5 perspectives): 1-2 rounds *(empirical, from PR #310-#433)*
-- Hypothesis Code Review (5 perspectives): 1-3 rounds *(empirical)*
-- Design Doc Review (8 perspectives): 1-2 rounds *(estimated — no empirical data yet)*
-- Macro Plan Review (8 perspectives): 1-2 rounds *(estimated)*
-- PR Plan/Code Review (10 perspectives): 1-3 rounds *(empirical, from PR #381-#433)*
-- FINDINGS Review (10 perspectives): 1-5 rounds *(empirical)*
+Gates with more perspectives will naturally converge more slowly than gates with fewer. This is correct behavior — more eyes = higher quality bar. Typical expectations:
+
+| Gate Type | Perspectives | Expected Rounds |
+|-----------|:---:|---|
+| Artifact PR review | 3 | 1 round (single pass + fix) |
+| Pipeline Stage PR review | 4 | 1–2 rounds |
+| Validation / Integration PR review | 5 | 1–3 rounds |
+| Transfer validation review | 5 | 1–3 rounds |
+| Design Doc Review | 8 | 1–2 rounds |
+| Macro Plan Review | 8 | 1–2 rounds |
 
 ## References
 
 - PR workflow: [docs/contributing/pr-workflow.md](pr-workflow.md)
-- Hypothesis workflow: [docs/contributing/hypothesis.md](hypothesis.md)
+- Transfer validation workflow: [docs/contributing/transfer-validation.md](transfer-validation.md)
 - Design process: [docs/contributing/design-process.md](design-process.md)
 - Macro-plan process: [docs/contributing/macro-planning.md](macro-planning.md)
