@@ -58,7 +58,10 @@ def _validate_node(data, schema: dict, path: str, errors: list[str]) -> None:
     expected_type = schema.get("type")
     if expected_type:
         py_types = _TYPE_MAP.get(expected_type)
-        if py_types and not isinstance(data, py_types):
+        if py_types is None:
+            errors.append(f"{path or '/'}: unknown schema type '{expected_type}'")
+            return
+        if not isinstance(data, py_types):
             errors.append(f"{path or '/'}: expected type '{expected_type}', got '{type(data).__name__}'")
             return  # Skip deeper checks if type is wrong
 

@@ -55,7 +55,7 @@ The `extract` command produces **two** JSON outputs:
 
 ## Development
 
-- Python >= 3.9, stdlib only (no external dependencies)
+- Python >= 3.10, stdlib only (no external dependencies)
 - Tests: `python -m pytest tools/ -v`
 - Lint: `ruff check tools/` (if installed)
 

@@ -315,15 +315,21 @@ def cmd_extract(args: argparse.Namespace) -> int:
 
     # Size guard
     MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
-    if program_py.stat().st_size > MAX_FILE_SIZE:
-        return _output("error", 2, errors=[
-            f"best_program.py exceeds {MAX_FILE_SIZE} bytes — refusing to read."])
-    if info_json.stat().st_size > MAX_FILE_SIZE:
-        return _output("error", 2, errors=[
-            f"best_program_info.json exceeds {MAX_FILE_SIZE} bytes — refusing to read."])
+    try:
+        if program_py.stat().st_size > MAX_FILE_SIZE:
+            return _output("error", 2, errors=[
+                f"best_program.py exceeds {MAX_FILE_SIZE} bytes — refusing to read."])
+        if info_json.stat().st_size > MAX_FILE_SIZE:
+            return _output("error", 2, errors=[
+                f"best_program_info.json exceeds {MAX_FILE_SIZE} bytes — refusing to read."])
+    except OSError as e:
+        return _output("error", 2, errors=[f"Failed to stat input files: {e}"])
 
     # Read and parse
-    source = program_py.read_text()
+    try:
+        source = program_py.read_text()
+    except OSError as e:
+        return _output("error", 2, errors=[f"Failed to read {program_py}: {e}"])
     block, line_range = _extract_evolve_block(source)
     if block is None:
         return _output("error", 2, errors=[
@@ -378,7 +384,9 @@ def cmd_extract(args: argparse.Namespace) -> int:
     if MAPPING_PATH.exists():
         try:
             _mapping_content = MAPPING_PATH.read_text()
-        except OSError:
+        except OSError as e:
+            print(f"WARNING: Failed to read mapping artifact for version parsing: {e}. "
+                  f"mapping_artifact_version will be 'unknown'.", file=sys.stderr)
             _mapping_content = ""
         ver_match = re.search(r'\*\*Version:\*\*\s*(\S+)', _mapping_content)
         if ver_match:
@@ -596,7 +604,15 @@ def cmd_validate_mapping(args: argparse.Namespace) -> int:
 
 def cmd_validate_schema(args: argparse.Namespace) -> int:
     """Validate a workspace artifact against its JSON Schema."""
-    from schema_validator import validate_artifact, load_schema
+    try:
+        from schema_validator import validate_artifact, load_schema
+    except ImportError:
+        try:
+            from tools.schema_validator import validate_artifact, load_schema
+        except ImportError as e:
+            return _output("error", 2, errors=[
+                f"Failed to import schema_validator module: {e}. "
+                f"Ensure tools/schema_validator.py exists and is valid Python."])
 
     artifact_path = Path(args.artifact_path).resolve()
     if not artifact_path.is_relative_to(REPO_ROOT):
@@ -644,8 +660,8 @@ def cmd_validate_schema(args: argparse.Namespace) -> int:
 
 
 def main():
-    if sys.version_info < (3, 9):
-        print("ERROR: transfer_cli.py requires Python >= 3.9 "
+    if sys.version_info < (3, 10):
+        print("ERROR: transfer_cli.py requires Python >= 3.10 "
               f"(running {sys.version_info.major}.{sys.version_info.minor})",
               file=sys.stderr)
         sys.exit(2)

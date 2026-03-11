@@ -281,6 +281,56 @@ class TestExtract:
             assert output["status"] == "error"
             assert any("best_program_info.json" in e for e in output.get("errors", []))
 
+    def test_extract_malformed_info_json_exits_2(self):
+        """Malformed best_program_info.json (non-JSON) should exit 2."""
+        import tempfile, shutil
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+            shutil.copy2(str(ROUTING_DIR / "best_program.py"), str(tmpdir / "best_program.py"))
+            (tmpdir / "best_program_info.json").write_text("not valid json {{")
+            env = {k: v for k, v in os.environ.items() if k != "CI"}
+            result = subprocess.run(
+                [sys.executable, str(CLI), "extract", str(tmpdir)],
+                capture_output=True, text=True, cwd=str(REPO_ROOT), env=env,
+            )
+            assert result.returncode == 2
+            stdout = json.loads(result.stdout)
+            assert stdout["status"] == "error"
+            assert any("malformed" in e.lower() or "json" in e.lower()
+                       for e in stdout.get("errors", []))
+
+    def test_extract_evolve_block_end_without_start_exits_2(self):
+        """Asymmetric markers: EVOLVE-BLOCK-END without START should exit 2."""
+        import tempfile, shutil
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+            (tmpdir / "best_program.py").write_text(
+                'func route(snap RoutingSnapshot) {\n'
+                '    x := snap.QueueDepth\n'
+                '}\n'
+                '// EVOLVE-BLOCK-END\n'
+            )
+            (tmpdir / "best_program_info.json").write_text('{"metrics": {"combined_score": -1.0}}')
+            code, output = run_cli("extract", str(tmpdir))
+            assert code == 2, f"END without START should exit 2, got {code}: {output}"
+            assert output["status"] == "error"
+
+    def test_extract_evolve_block_start_without_end_exits_2(self):
+        """Asymmetric markers: EVOLVE-BLOCK-START without END should exit 2."""
+        import tempfile, shutil
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+            (tmpdir / "best_program.py").write_text(
+                '// EVOLVE-BLOCK-START\n'
+                'func route(snap RoutingSnapshot) {\n'
+                '    x := snap.QueueDepth\n'
+                '}\n'
+            )
+            (tmpdir / "best_program_info.json").write_text('{"metrics": {"combined_score": -1.0}}')
+            code, output = run_cli("extract", str(tmpdir))
+            assert code == 2, f"START without END should exit 2, got {code}: {output}"
+            assert output["status"] == "error"
+
     def test_extract_missing_metrics_key_warns(self):
         """F-15: best_program_info.json exists but has no 'metrics' key."""
         import tempfile, shutil
@@ -320,9 +370,10 @@ class TestExtract:
 
     def test_extract_output_is_json(self):
         """BC-7: CLI outputs valid JSON to stdout."""
+        env = {k: v for k, v in os.environ.items() if k != "CI"}
         result = subprocess.run(
             [sys.executable, str(CLI), "extract", str(ROUTING_DIR)],
-            capture_output=True, text=True, cwd=str(REPO_ROOT),
+            capture_output=True, text=True, cwd=str(REPO_ROOT), env=env,
         )
         parsed = json.loads(result.stdout)
         assert "status" in parsed
@@ -952,3 +1003,43 @@ class TestCIStrictEnforcement:
             env={**os.environ, "CI": "true"},
         )
         assert "strict" not in result.stderr.lower() or result.returncode == 0
+
+
+class TestValidateMappingEdgeCases:
+    """Defense-in-depth tests for validate-mapping error paths."""
+
+    def setup_method(self):
+        WORKSPACE.mkdir(exist_ok=True)
+        # Ensure a valid summary exists for validate-mapping to consume
+        run_cli("extract", str(ROUTING_DIR))
+
+    def test_validate_mapping_malformed_no_table(self):
+        """Malformed mapping artifact with no Markdown table should exit 1."""
+        import shutil
+        mapping = REPO_ROOT / "docs" / "transfer" / "blis_to_llmd_mapping.md"
+        backup = mapping.with_suffix(".md.bak")
+        shutil.copy2(str(mapping), str(backup))
+        try:
+            mapping.write_text("This is a plain text file with no pipe-delimited table.\n")
+            code, output = run_cli("validate-mapping")
+            assert code == 1, f"Expected exit 1 for malformed mapping, got {code}: {output}"
+            assert any("malformed" in e.lower() or "no markdown table" in e.lower()
+                       for e in output.get("errors", []))
+        finally:
+            shutil.move(str(backup), str(mapping))
+
+    def test_validate_mapping_path_traversal_rejected(self):
+        """Summary path outside repo root should exit 2."""
+        code, output = run_cli("validate-mapping", "--summary", "/etc/passwd")
+        assert code == 2, f"Expected exit 2 for path traversal, got {code}: {output}"
+        assert output["status"] == "error"
+
+
+class TestValidateSchemaEdgeCases:
+    """Defense-in-depth tests for validate-schema error paths."""
+
+    def test_validate_schema_path_traversal_rejected(self):
+        """Artifact path outside repo root should exit 2."""
+        code, output = run_cli("validate-schema", "/etc/passwd")
+        assert code == 2, f"Expected exit 2 for path traversal, got {code}: {output}"
+        assert output["status"] == "error"
