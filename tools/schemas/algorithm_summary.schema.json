@@ -9,12 +9,12 @@
     "algorithm_name": {"type": "string"},
     "evolve_block_source": {
       "type": "string",
-      "pattern": "^(?!.*(?:^|/)\\.\\./)(?!.*(?:^|/)\\./)[^/].+\\.py:\\d+-\\d+$",
-      "description": "Source file path (relative to repository root) and line range, e.g., 'routing/best_program.py:171-242'. The path MUST be relative to the repository root, not absolute. The pattern rejects absolute paths, '../' and './' path components. IMPLICIT CONTRACT: The schema validator enforces start <= end on line-range values as a defense-in-depth semantic check beyond the regex pattern."
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\./)(?!.*(?:^|/)\\./).+\\.py:\\d+-\\d+$",
+      "description": "Source file path and line range, e.g., 'routing/best_program.py:171-242'. Typically relative to the repository root; may be absolute when the routing directory is outside the repo. The pattern rejects '../' and './' path components. NOTE: The regex pattern validates format only (two digit sequences separated by a dash). It does NOT enforce start <= end on line-range values — JSON Schema regex cannot perform numeric comparisons. Consumers MUST validate start <= end programmatically if required. IMPORTANT: The .py source file contains Go code embedded in a Python triple-quoted string literal (GO_ROUTING_CODE = '\"\"\"...\"\"\"'). PR3 must parse the Python file to extract the embedded Go — do NOT treat the .py file as standalone Go source."
     },
     "evolve_block_content_hash": {
       "type": "string",
-      "description": "SHA-256 hex digest of the EVOLVE-BLOCK content at extraction time. PR3 MUST recompute this hash and compare before parsing — if it differs, the source changed since extraction and the signal list may be stale.",
+      "description": "SHA-256 hex digest of the EVOLVE-BLOCK content at extraction time. Hash is computed over the raw Python file lines from EVOLVE-BLOCK-START through EVOLVE-BLOCK-END inclusive, including the marker lines themselves, without stripping embedded language markers. PR3 MUST recompute this hash over the same line range and compare before parsing — if it differs, the source changed since extraction and the signal list may be stale.",
       "pattern": "^[0-9a-f]{64}$"
     },
     "signals": {
@@ -25,6 +25,7 @@
       "items": {
         "type": "object",
         "required": ["name", "type", "access_path"],
+        "additionalProperties": false,
         "properties": {
           "name": {"type": "string"},
           "type": {
@@ -35,7 +36,8 @@
           "access_path": {"type": "string"},
           "normalization_note": {
             "type": "string",
-            "description": "Machine-readable normalization requirement for production values. Example: 'divide_by_100' for KVUtilization (sim 0.0-1.0 vs prod 0-100). PR3 MUST apply this normalization before passing values to the scorer."
+            "pattern": "^(divide_prod_by_100|verify_and_normalize|boolean_presence_check): .+$",
+            "description": "Normalization requirement for production values. Format: 'action_key: human-readable explanation'. PR3 MUST parse the action key prefix (before the colon) to determine the normalization to apply. Valid action keys: 'divide_prod_by_100' (divide production value by 100 to convert 0-100 percentage to 0.0-1.0 ratio), 'verify_and_normalize' (production metric scale is UNVERIFIED — PR3 must check source and apply divide-by-100 if 0-100 percentage, or use directly if already 0.0-1.0), 'boolean_presence_check' (compare value against empty/zero — no numeric normalization needed). PR3 action key dispatch table MUST handle all three keys; encountering an unknown action key MUST be treated as an error. The pattern field enforces that only these three action keys are valid at schema-validation time."
           },
           "fidelity_provisional": {
             "type": "boolean",
@@ -58,7 +60,8 @@
       "description": "Composite signals (method calls that expand to multiple fields). Documents how constituent signals combine, so PR3 can reconstruct the composite.",
       "items": {
         "type": "object",
-        "required": ["name", "constituents"],
+        "required": ["name", "constituents", "formula"],
+        "additionalProperties": false,
         "properties": {
           "name": {"type": "string", "description": "Method name, e.g., 'EffectiveLoad'"},
           "constituents": {
@@ -77,7 +80,7 @@
     },
     "fidelity_checked": {
       "type": "boolean",
-      "description": "Whether fidelity checks were performed during extraction. True if the mapping artifact existed at extraction time. False if the mapping artifact was absent (bootstrap phase). CI with --strict always produces fidelity_checked=true."
+      "description": "Whether fidelity checks were performed AND PASSED during extraction for ALL signals. True means the mapping artifact existed, all signal fidelity ratings were acceptable (no low-fidelity signals), AND no signals have type 'unknown'. False if: (a) the mapping artifact was absent (bootstrap phase — no checks were possible), or (b) any signal has type 'unknown' (fidelity cannot be checked for unknown signals). This guarantee holds because the CLI exits with error before writing this artifact if any fidelity check fails — therefore any produced artifact with fidelity_checked=true implies checks passed for every signal. CI with --strict always produces fidelity_checked=true."
     }
   }
 }

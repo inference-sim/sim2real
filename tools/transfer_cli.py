@@ -76,8 +76,12 @@ def _output(status: str, exit_code: int, **kwargs) -> int:
     return exit_code
 
 
-def _extract_evolve_block(source: str) -> tuple[str | None, str | None]:
+def _extract_evolve_block(source: str) -> tuple[str | None, str | None, str | None]:
     """Extract EVOLVE-BLOCK region and line range from Go source embedded in Python.
+
+    Returns (block_text, line_range, error_detail). On success, error_detail is None.
+    On failure, block_text and line_range are None, and error_detail describes the
+    specific failure mode for structured JSON output.
 
     Detects multiple EVOLVE-BLOCK pairs and emits a warning if more than
     one is found. Only the first pair is extracted.
@@ -86,6 +90,7 @@ def _extract_evolve_block(source: str) -> tuple[str | None, str | None]:
     start_idx = None
     end_idx = None
     block_count = 0
+    end_count = 0
     for i, line in enumerate(lines):
         if "EVOLVE-BLOCK-START" in line:
             if start_idx is None:
@@ -94,16 +99,27 @@ def _extract_evolve_block(source: str) -> tuple[str | None, str | None]:
         if "EVOLVE-BLOCK-END" in line:
             if end_idx is None:
                 end_idx = i
+            end_count += 1
     if start_idx is None and end_idx is None:
-        return None, None
+        return None, None, "no_markers"
     if start_idx is None:
         print("WARNING: EVOLVE-BLOCK-END found without EVOLVE-BLOCK-START", file=sys.stderr)
-        return None, None
+        return None, None, "end_without_start"
     if end_idx is None:
         print(f"WARNING: EVOLVE-BLOCK-START found at line "
               f"{start_idx + 1} but no EVOLVE-BLOCK-END", file=sys.stderr)
-        return None, None
-    if block_count > 1:
+        return None, None, "start_without_end"
+    if end_idx < start_idx:
+        print(f"WARNING: EVOLVE-BLOCK-END (line {end_idx + 1}) appears before "
+              f"EVOLVE-BLOCK-START (line {start_idx + 1}) — inverted markers.",
+              file=sys.stderr)
+        return None, None, "inverted_markers"
+    if block_count != end_count:
+        print(f"WARNING: Mismatched markers: {block_count} EVOLVE-BLOCK-START vs "
+              f"{end_count} EVOLVE-BLOCK-END. Extracting first matched pair "
+              f"(lines {start_idx + 1}-{end_idx + 1}).",
+              file=sys.stderr)
+    elif block_count > 1:
         print(f"WARNING: Found {block_count} EVOLVE-BLOCK-START markers but only "
               f"extracting the first block (lines {start_idx + 1}-{end_idx + 1}). "
               f"Additional blocks are silently ignored. If multiple blocks are "
@@ -111,7 +127,7 @@ def _extract_evolve_block(source: str) -> tuple[str | None, str | None]:
               file=sys.stderr)
     block = "\n".join(lines[start_idx:end_idx + 1])
     line_range = f"{start_idx + 1}-{end_idx + 1}"
-    return block, line_range
+    return block, line_range, None
 
 
 def _extract_signals(block: str) -> list[dict]:
@@ -142,9 +158,11 @@ def _extract_signals(block: str) -> list[dict]:
 
     # Match method calls that expand to multiple fields
     _IGNORE_METHODS = {"String", "Error", "Format", "GoString", "Reset", "ProtoMessage"}
+    _matched_methods_with_parens: set[str] = set()
     for match in re.finditer(r'\.\b(\w+)\(\)', block):
         method = match.group(1)
         if method in METHOD_EXPANSIONS:
+            _matched_methods_with_parens.add(method)
             for field in METHOD_EXPANSIONS[method]:
                 if field not in found:
                     found[field] = f"snap.{method}() -> {field}"
@@ -159,6 +177,18 @@ def _extract_signals(block: str) -> list[dict]:
         field = match.group(1)
         if field in REQUEST_LEVEL_FIELDS:
             found[field] = f"req.{field}"
+
+    # Detect method-value access (known method without parentheses)
+    for match in re.finditer(
+        r'(?:snap(?:shots?\[\w+\])?|target|(?<![a-zA-Z0-9_])[a-z])\.(\w+)(?!\s*\()', block
+    ):
+        field = match.group(1)
+        if field in METHOD_EXPANSIONS and field not in _matched_methods_with_parens:
+            print(f"WARNING: '{field}' accessed as a method value (without parentheses) in "
+                  f"EVOLVE-BLOCK — this is a known composite method. If this is a method call, "
+                  f"ensure it uses '{field}()' with parentheses. Constituent signals will NOT "
+                  f"be extracted from method-value access.",
+                  file=sys.stderr)
 
     # Detect unrecognized field accesses and include them with type 'unknown'
     all_known = set(ROUTING_SNAPSHOT_FIELDS.keys()) | set(REQUEST_LEVEL_FIELDS.keys()) | set(METHOD_EXPANSIONS.keys())
@@ -176,6 +206,7 @@ def _extract_signals(block: str) -> list[dict]:
     # Normalization notes for signals with known unit mismatches
     NORMALIZATION_NOTES = {
         "KVUtilization": "divide_prod_by_100: production value (0-100 percentage) must be divided by 100 to match sim's 0.0-1.0 ratio (i.e., normalized = prod_kv / 100.0)",
+        "CacheHitRate": "verify_and_normalize: EVOLVE-BLOCK threshold 0.35 assumes 0.0-1.0 range. PR3 MUST verify production PrecisePrefixCache metric scale — if 0-100 percentage, divide by 100 (same as KVUtilization); if already 0.0-1.0 ratio, use directly. UNVERIFIED until PR3 confirms against llm-d-inference-scheduler source",
         "SessionID": "boolean_presence_check: compare against empty string (req.SessionID != empty)",
     }
 
@@ -238,8 +269,10 @@ def _check_fidelity(signals: list[dict], *, strict: bool = False) -> tuple[bool,
 
     MAX_MAPPING_SIZE = 10 * 1024 * 1024  # 10 MB
     if MAPPING_PATH.stat().st_size > MAX_MAPPING_SIZE:
+        # Return a distinguishable error so callers can map to the correct exit code.
+        # Oversized file is an infrastructure issue (exit 2), not a fidelity failure.
         return False, [
-            f"Mapping artifact exceeds {MAX_MAPPING_SIZE} bytes — refusing to read."
+            f"INFRA: Mapping artifact exceeds {MAX_MAPPING_SIZE} bytes — refusing to read."
         ]
 
     if not strict:
@@ -251,7 +284,7 @@ def _check_fidelity(signals: list[dict], *, strict: bool = False) -> tuple[bool,
     try:
         content = MAPPING_PATH.read_text()
     except OSError as e:
-        return False, [f"Failed to read mapping artifact: {e}"]
+        return False, [f"INFRA: Failed to read mapping artifact: {e}"]
 
     errors = []
     # Column skip counts for fidelity extraction
@@ -259,6 +292,8 @@ def _check_fidelity(signals: list[dict], *, strict: bool = False) -> tuple[bool,
     ADDITIONAL_TABLE_FIDELITY_COL_OFFSET = 2
 
     for sig in signals:
+        if sig["type"] == "unknown":
+            continue  # Already flagged for downstream resolution via type='unknown'
         pattern = rf'\|\s*{re.escape(sig["name"])}(?:\s*\([^)]*\))?\s*\|(?:[^|]*\|){{{MAIN_TABLE_FIDELITY_COL_OFFSET}}}\s*(low|medium|high)\s*(?:\*\(provisional\)\*)?\s*\|'
         match = re.search(pattern, content, re.IGNORECASE)
         if not match:
@@ -283,6 +318,18 @@ def _check_fidelity(signals: list[dict], *, strict: bool = False) -> tuple[bool,
                 f"unknown fidelity treated as unsafe (add signal to mapping table)"
             )
     return len(errors) == 0, errors
+
+
+def _relative_source_path(routing_dir: Path) -> str:
+    """Return routing_dir as a repo-relative path prefix (with trailing slash).
+
+    Falls back to the absolute path if routing_dir is outside the repo root.
+    """
+    try:
+        rel = routing_dir.relative_to(REPO_ROOT)
+        return f"{rel}/"
+    except ValueError:
+        return f"{routing_dir}/"
 
 
 def cmd_extract(args: argparse.Namespace) -> int:
@@ -330,11 +377,17 @@ def cmd_extract(args: argparse.Namespace) -> int:
         source = program_py.read_text()
     except OSError as e:
         return _output("error", 2, errors=[f"Failed to read {program_py}: {e}"])
-    block, line_range = _extract_evolve_block(source)
+    block, line_range, block_error = _extract_evolve_block(source)
     if block is None:
-        return _output("error", 2, errors=[
-            "EVOLVE-BLOCK markers not found or malformed in best_program.py. "
-            "Check stderr for specific diagnostic (e.g., START without END)."])
+        _ERROR_MESSAGES = {
+            "no_markers": "Neither EVOLVE-BLOCK-START nor EVOLVE-BLOCK-END markers found in best_program.py.",
+            "end_without_start": "EVOLVE-BLOCK-END found without EVOLVE-BLOCK-START in best_program.py.",
+            "start_without_end": "EVOLVE-BLOCK-START found but no EVOLVE-BLOCK-END in best_program.py.",
+            "inverted_markers": "EVOLVE-BLOCK-END appears before EVOLVE-BLOCK-START in best_program.py (inverted markers).",
+        }
+        error_msg = _ERROR_MESSAGES.get(block_error,
+            "EVOLVE-BLOCK markers not found or malformed in best_program.py.")
+        return _output("error", 2, errors=[error_msg], error_detail=block_error)
 
     # Extract signals
     signals = _extract_signals(block)
@@ -356,15 +409,23 @@ def cmd_extract(args: argparse.Namespace) -> int:
     # Fidelity check
     fidelity_ok, fidelity_errors = _check_fidelity(signals, strict=getattr(args, 'strict', False))
     if not fidelity_ok:
-        return _output("error", 1, errors=fidelity_errors)
+        # Infrastructure errors (e.g., oversized file) use exit code 2;
+        # fidelity validation failures use exit code 1.
+        exit_code = 2 if any(e.startswith("INFRA:") for e in fidelity_errors) else 1
+        return _output("error", exit_code, errors=fidelity_errors)
 
     # Read metrics
     try:
         info = json.loads(info_json.read_text())
+    except OSError as e:
+        return _output("error", 2, errors=[f"Failed to read {info_json}: {e}"])
     except json.JSONDecodeError as e:
         return _output("error", 2, errors=[f"Malformed JSON in {info_json}: {e}"])
+    if not isinstance(info, dict):
+        return _output("error", 2, errors=[
+            f"Expected JSON object in {info_json}, got {type(info).__name__}"])
     metrics = info.get("metrics", {})
-    if not metrics or "combined_score" not in metrics:
+    if not isinstance(metrics, dict) or not metrics or "combined_score" not in metrics:
         msg = ("WARNING: No 'metrics' key or missing 'combined_score' in "
                "best_program_info.json — algorithm_summary.json will have "
                "empty/incomplete metrics and WILL FAIL schema validation. "
@@ -414,11 +475,12 @@ def cmd_extract(args: argparse.Namespace) -> int:
                 "formula": "sum",
             })
 
-    fidelity_checked = MAPPING_PATH.exists()
+    has_unknown_signals = any(s["type"] == "unknown" for s in signals)
+    fidelity_checked = MAPPING_PATH.exists() and not has_unknown_signals
 
     summary = {
         "algorithm_name": "blis_weighted_scoring",
-        "evolve_block_source": f"routing/best_program.py:{line_range}",
+        "evolve_block_source": f"{_relative_source_path(routing_dir)}best_program.py:{line_range}",
         "evolve_block_content_hash": block_hash,
         "signals": signals,
         "composite_signals": composites,
@@ -437,28 +499,31 @@ def cmd_extract(args: argparse.Namespace) -> int:
         return _output("error", 2, errors=[
             f"Failed to write {summary_path}: {e}."])
 
-    all_errors = scope_errors + fidelity_errors
+    # Note: fidelity_errors is always [] here (non-empty fidelity_errors
+    # caused an early return at line 360), so only scope_errors remain.
     if not scope_ok:
         return _output("error", 1,
                         output_type="operational_report",
                         artifact_path=str(summary_path),
                         algorithm_name=summary["algorithm_name"],
                         signal_count=len(signals),
-                        errors=all_errors)
+                        errors=scope_errors)
 
     return _output("ok", 0,
                     output_type="operational_report",
                     artifact_path=str(summary_path),
                     algorithm_name=summary["algorithm_name"],
                     signal_count=len(signals),
-                    errors=all_errors)
+                    errors=scope_errors)
 
 
 def cmd_validate_mapping(args: argparse.Namespace) -> int:
     """Validate mapping artifact completeness against algorithm summary."""
     if not MAPPING_PATH.exists():
         return _output("error", 2, errors=[f"Mapping artifact not found: {MAPPING_PATH}"],
-                        mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=False)
+                        output_type="mapping_validation",
+                        mapping_complete=False, missing_signals=[], extra_signals=[],
+                        duplicate_signals=[], double_counting_risks=[], stale_commit=False)
 
     summary_path = args.summary if hasattr(args, "summary") and args.summary else (
         WORKSPACE / "algorithm_summary.json"
@@ -468,37 +533,49 @@ def cmd_validate_mapping(args: argparse.Namespace) -> int:
     if not summary_path.is_relative_to(REPO_ROOT):
         return _output("error", 2, errors=[
             f"Summary path '{summary_path}' is outside repository root '{REPO_ROOT}'."],
-                        mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=False)
+                        output_type="mapping_validation",
+                        mapping_complete=False, missing_signals=[], extra_signals=[],
+                        duplicate_signals=[], double_counting_risks=[], stale_commit=False)
 
     if not summary_path.exists():
         return _output("error", 2,
                         errors=[f"Algorithm summary not found: {summary_path}. Run 'extract' first."],
-                        mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=False)
+                        output_type="mapping_validation",
+                        mapping_complete=False, missing_signals=[], extra_signals=[],
+                        duplicate_signals=[], double_counting_risks=[], stale_commit=False)
 
     MAX_SUMMARY_SIZE = 10 * 1024 * 1024
     try:
         if summary_path.stat().st_size > MAX_SUMMARY_SIZE:
             return _output("error", 2,
                             errors=[f"Algorithm summary exceeds {MAX_SUMMARY_SIZE} bytes — refusing to read."],
-                            mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=False)
+                            output_type="mapping_validation",
+                            mapping_complete=False, missing_signals=[], extra_signals=[],
+                        duplicate_signals=[], double_counting_risks=[], stale_commit=False)
     except OSError as e:
         return _output("error", 2,
                         errors=[f"Failed to stat algorithm summary: {e}"],
-                        mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=False)
+                        output_type="mapping_validation",
+                        mapping_complete=False, missing_signals=[], extra_signals=[],
+                        duplicate_signals=[], double_counting_risks=[], stale_commit=False)
 
     try:
         summary = json.loads(summary_path.read_text())
     except (json.JSONDecodeError, OSError) as e:
         return _output("error", 2,
                         errors=[f"Failed to read/parse algorithm summary: {e}"],
-                        mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=False)
+                        output_type="mapping_validation",
+                        mapping_complete=False, missing_signals=[], extra_signals=[],
+                        duplicate_signals=[], double_counting_risks=[], stale_commit=False)
 
     try:
         extracted_names = {sig['name'] for sig in summary.get('signals', [])}
     except (TypeError, KeyError) as e:
         return _output("error", 2,
                         errors=[f"Malformed algorithm summary — 'signals' is not a valid list of dicts: {e}"],
-                        mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=False)
+                        output_type="mapping_validation",
+                        mapping_complete=False, missing_signals=[], extra_signals=[],
+                        duplicate_signals=[], double_counting_risks=[], stale_commit=False)
 
     MAX_MAPPING_SIZE = 10 * 1024 * 1024
     try:
@@ -506,25 +583,40 @@ def cmd_validate_mapping(args: argparse.Namespace) -> int:
     except OSError as e:
         return _output("error", 2,
                         errors=[f"Failed to stat mapping artifact: {e}"],
-                        mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=False)
+                        output_type="mapping_validation",
+                        mapping_complete=False, missing_signals=[], extra_signals=[],
+                        duplicate_signals=[], double_counting_risks=[], stale_commit=False)
     if _mapping_size > MAX_MAPPING_SIZE:
         return _output("error", 2,
                         errors=[f"Mapping artifact exceeds {MAX_MAPPING_SIZE} bytes — refusing to read."],
-                        mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=False)
+                        output_type="mapping_validation",
+                        mapping_complete=False, missing_signals=[], extra_signals=[],
+                        duplicate_signals=[], double_counting_risks=[], stale_commit=False)
 
     try:
         content = MAPPING_PATH.read_text()
     except OSError as e:
         return _output("error", 2,
                         errors=[f"Failed to read mapping artifact: {e}"],
-                        mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=False)
+                        output_type="mapping_validation",
+                        mapping_complete=False, missing_signals=[], extra_signals=[],
+                        duplicate_signals=[], double_counting_risks=[], stale_commit=False)
 
     # Detect malformed mapping artifact
     if '|' not in content or not re.search(r'^\|.*\|.*\|', content, re.MULTILINE):
+        # Check commit hash even in malformed-table case so stale_commit
+        # reflects actual hash presence, not a side effect of table parsing.
+        has_commit_in_malformed = bool(re.search(
+            r'(?:commit[_ ]hash|pinned[_ ]commit[_ ]hash)[:\s*]*([0-9a-f]{7,40})',
+            content, re.IGNORECASE,
+        ))
         return _output("error", 1,
                         errors=["Malformed mapping artifact: no Markdown table found. "
                                 "Expected pipe-delimited table rows."],
-                        mapping_complete=False, missing_signals=[], extra_signals=[], stale_commit=True)
+                        output_type="mapping_validation",
+                        mapping_complete=False, missing_signals=[], extra_signals=[],
+                        duplicate_signals=[], double_counting_risks=[],
+                        stale_commit=not has_commit_in_malformed)
 
     # Check each extracted signal has a mapping entry (allow optional parenthetical annotation)
     missing = [name for name in sorted(extracted_names)
@@ -574,17 +666,33 @@ def cmd_validate_mapping(args: argparse.Namespace) -> int:
         errors.append("No commit hash found in mapping artifact")
 
     # Detect production metric overlap (double-counting risk)
+    # Main Signal Mapping Table: Signal | Go Type | Sim Access Path | Production Equivalent | ...
+    #   -> skip 2 columns (Go Type, Sim Access Path) to reach Production Equivalent
+    # Additional Signals Table: Signal | Context | Production Mapping | Fidelity | Notes
+    #   -> skip 1 column (Context) to reach Production Mapping
+    MAIN_TABLE_PROD_COL_OFFSET = 2
+    ADDITIONAL_TABLE_PROD_COL_OFFSET = 1
     prod_metric_signals: dict[str, list[str]] = {}
     for sig_name in extracted_names:
         prod_match = re.search(
-            rf'\|\s*{re.escape(sig_name)}(?:\s*\([^)]*\))?\s*\|(?:[^|]*\|){{2}}([^|]+)\|',
+            rf'\|\s*{re.escape(sig_name)}(?:\s*\([^)]*\))?\s*\|(?:[^|]*\|){{{MAIN_TABLE_PROD_COL_OFFSET}}}([^|]+)\|',
             content, re.IGNORECASE,
         )
+        if not prod_match:
+            prod_match = re.search(
+                rf'\|\s*{re.escape(sig_name)}(?:\s*\([^)]*\))?\s*\|(?:[^|]*\|){{{ADDITIONAL_TABLE_PROD_COL_OFFSET}}}([^|]+)\|',
+                content, re.IGNORECASE,
+            )
         if prod_match:
             prod_metric = prod_match.group(1).strip()
             prod_metric_signals.setdefault(prod_metric, []).append(sig_name)
+    double_counting_risks = []
     for prod_metric, sigs in prod_metric_signals.items():
         if len(sigs) > 1:
+            double_counting_risks.append({
+                "production_metric": prod_metric,
+                "signals": sigs,
+            })
             print(
                 f"WARNING: Double-counting risk — signals {', '.join(sigs)} "
                 f"both map to production metric '{prod_metric}'.",
@@ -598,6 +706,8 @@ def cmd_validate_mapping(args: argparse.Namespace) -> int:
                     mapping_complete=mapping_complete,
                     missing_signals=missing,
                     extra_signals=extra,
+                    duplicate_signals=duplicates,
+                    double_counting_risks=double_counting_risks,
                     stale_commit=not has_commit,
                     errors=errors)
 
@@ -612,32 +722,39 @@ def cmd_validate_schema(args: argparse.Namespace) -> int:
         except ImportError as e:
             return _output("error", 2, errors=[
                 f"Failed to import schema_validator module: {e}. "
-                f"Ensure tools/schema_validator.py exists and is valid Python."])
+                f"Ensure tools/schema_validator.py exists and is valid Python."],
+                output_type="schema_validation", violations=[])
 
     artifact_path = Path(args.artifact_path).resolve()
     if not artifact_path.is_relative_to(REPO_ROOT):
         return _output("error", 2, errors=[
-            f"Artifact path '{artifact_path}' is outside repository root '{REPO_ROOT}'."])
+            f"Artifact path '{artifact_path}' is outside repository root '{REPO_ROOT}'."],
+                        output_type="schema_validation", violations=[])
     if not artifact_path.exists():
-        return _output("error", 2, errors=[f"Artifact not found: {artifact_path}"])
+        return _output("error", 2, errors=[f"Artifact not found: {artifact_path}"],
+                        output_type="schema_validation", violations=[])
 
     stem = artifact_path.stem
     schema_path = (SCHEMAS_DIR / f"{stem}.schema.json").resolve()
     if not schema_path.is_relative_to(SCHEMAS_DIR):
         return _output("error", 2, errors=[
-            f"Schema path '{schema_path}' resolves outside schemas directory '{SCHEMAS_DIR}'."])
+            f"Schema path '{schema_path}' resolves outside schemas directory '{SCHEMAS_DIR}'."],
+                        output_type="schema_validation", violations=[])
     if not schema_path.exists():
-        return _output("error", 2, errors=[f"Schema not found: {schema_path}"])
+        return _output("error", 2, errors=[f"Schema not found: {schema_path}"],
+                        output_type="schema_validation", violations=[])
 
     try:
         schema = load_schema(schema_path)
     except (json.JSONDecodeError, OSError) as e:
-        return _output("error", 2, errors=[f"Failed to load schema: {e}"])
+        return _output("error", 2, errors=[f"Failed to load schema: {e}"],
+                        output_type="schema_validation", violations=[])
 
     try:
         data = json.loads(artifact_path.read_text())
     except (json.JSONDecodeError, OSError) as e:
         return _output("error", 2, errors=[f"Failed to load artifact: {e}"],
+                        output_type="schema_validation",
                         schema_path=str(schema_path), artifact_path=str(artifact_path),
                         violations=[])
 
@@ -680,7 +797,10 @@ def main():
     p_extract.set_defaults(func=cmd_extract)
 
     # validate-mapping
-    p_mapping = subparsers.add_parser("validate-mapping", help="Check mapping artifact completeness")
+    p_mapping = subparsers.add_parser("validate-mapping",
+        help="Check mapping artifact completeness (NOTE: commit hash check only "
+             "verifies presence of a hex string, not currency against submodule HEAD; "
+             "CI workflow performs the real hash comparison)")
     p_mapping.add_argument("--summary", help="Path to algorithm_summary.json (default: workspace/)")
     p_mapping.set_defaults(func=cmd_validate_mapping)
 

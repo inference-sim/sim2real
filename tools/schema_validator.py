@@ -61,6 +61,11 @@ def _validate_node(data, schema: dict, path: str, errors: list[str]) -> None:
         if py_types is None:
             errors.append(f"{path or '/'}: unknown schema type '{expected_type}'")
             return
+        # JSON Schema: boolean is NOT a subtype of number/integer, but Python's
+        # bool is a subclass of int. Explicitly reject booleans for numeric types.
+        if expected_type in ("number", "integer") and isinstance(data, bool):
+            errors.append(f"{path or '/'}: expected type '{expected_type}', got 'bool'")
+            return
         if not isinstance(data, py_types):
             errors.append(f"{path or '/'}: expected type '{expected_type}', got '{type(data).__name__}'")
             return  # Skip deeper checks if type is wrong

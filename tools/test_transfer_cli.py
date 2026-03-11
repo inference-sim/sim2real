@@ -133,7 +133,10 @@ class TestExtract:
         code, output = run_cli("extract", "/nonexistent/path")
         assert code == 2
         assert output["status"] == "error"
-        assert len(output["errors"]) > 0
+        assert any("not found" in e.lower() or "routing directory" in e.lower()
+                    for e in output.get("errors", [])), (
+            f"Expected 'directory not found' error, got: {output.get('errors', [])}"
+        )
 
     def test_extract_no_signals_exits_1(self):
         """F-15: EVOLVE-BLOCK found but no recognizable signals -> exit 1."""
@@ -198,6 +201,9 @@ class TestExtract:
     def test_extract_few_signals_strict_exits_1(self):
         """F-9: 1-2 signals in --strict mode should exit 1."""
         import tempfile, shutil
+        summary_path = WORKSPACE / "algorithm_summary.json"
+        if summary_path.exists():
+            summary_path.unlink()
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = Path(tmpdir)
             shutil.copy2(str(ROUTING_DIR / "best_program_info.json"), str(tmpdir / "best_program_info.json"))
@@ -216,10 +222,14 @@ class TestExtract:
             assert output["status"] == "error"
             error_text = " ".join(output.get("errors", []))
             assert "signal" in error_text.lower() and ("expected" in error_text.lower() or "minimum" in error_text.lower())
+            assert not summary_path.exists(), "Strict-mode minimum-signal failure must not write artifact"
 
     def test_extract_few_signals_boundary_2_fails(self):
         """R3-F-15: Exactly 2 signals (< MINIMUM_EXPECTED_SIGNALS=3) should exit 1 in --strict."""
         import tempfile, shutil
+        summary_path = WORKSPACE / "algorithm_summary.json"
+        if summary_path.exists():
+            summary_path.unlink()
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = Path(tmpdir)
             shutil.copy2(str(ROUTING_DIR / "best_program_info.json"), str(tmpdir / "best_program_info.json"))
@@ -236,6 +246,7 @@ class TestExtract:
                 f"--strict with 2 signals (< MINIMUM_EXPECTED_SIGNALS=3) "
                 f"should exit 1, got {code}: {output}"
             )
+            assert not summary_path.exists(), "Strict-mode minimum-signal failure must not write artifact"
 
     @pytest.mark.skipif(
         not (Path(__file__).parent.parent / "docs" / "transfer" / "blis_to_llmd_mapping.md").exists(),
@@ -314,6 +325,9 @@ class TestExtract:
             code, output = run_cli("extract", str(tmpdir))
             assert code == 2, f"END without START should exit 2, got {code}: {output}"
             assert output["status"] == "error"
+            assert output.get("error_detail") == "end_without_start", (
+                f"error_detail should be 'end_without_start', got: {output.get('error_detail')}"
+            )
 
     def test_extract_evolve_block_start_without_end_exits_2(self):
         """Asymmetric markers: EVOLVE-BLOCK-START without END should exit 2."""
@@ -330,6 +344,31 @@ class TestExtract:
             code, output = run_cli("extract", str(tmpdir))
             assert code == 2, f"START without END should exit 2, got {code}: {output}"
             assert output["status"] == "error"
+            assert output.get("error_detail") == "start_without_end", (
+                f"error_detail should be 'start_without_end', got: {output.get('error_detail')}"
+            )
+
+    def test_extract_inverted_markers_exits_2(self):
+        """R8-F-2: EVOLVE-BLOCK-END before EVOLVE-BLOCK-START should exit 2."""
+        import tempfile, shutil
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+            (tmpdir / "best_program.py").write_text(
+                'func route(snap RoutingSnapshot) {\n'
+                '    x := snap.QueueDepth\n'
+                '// EVOLVE-BLOCK-END\n'
+                '    y := snap.BatchSize\n'
+                '// EVOLVE-BLOCK-START\n'
+                '    z := snap.InFlightRequests\n'
+                '}\n'
+            )
+            (tmpdir / "best_program_info.json").write_text('{"metrics": {"combined_score": -1.0}}')
+            code, output = run_cli("extract", str(tmpdir))
+            assert code == 2, f"Inverted markers should exit 2, got {code}: {output}"
+            assert output["status"] == "error"
+            assert output.get("error_detail") == "inverted_markers", (
+                f"error_detail should be 'inverted_markers', got: {output.get('error_detail')}"
+            )
 
     def test_extract_missing_metrics_key_warns(self):
         """F-15: best_program_info.json exists but has no 'metrics' key."""
@@ -701,6 +740,9 @@ class TestValidateMapping:
             code, output = run_cli("validate-mapping")
             assert code == 1, f"Expected failure for duplicate signal, got: {output}"
             assert any("duplicate" in e.lower() for e in output.get("errors", []))
+            assert "QueueDepth" in output.get("duplicate_signals", []), (
+                f"duplicate_signals structured field should contain 'QueueDepth': {output}"
+            )
         finally:
             if backup.exists():
                 shutil.move(str(backup), str(mapping))
@@ -1002,7 +1044,10 @@ class TestCIStrictEnforcement:
             capture_output=True, text=True, cwd=str(REPO_ROOT),
             env={**os.environ, "CI": "true"},
         )
-        assert "strict" not in result.stderr.lower() or result.returncode == 0
+        assert result.returncode == 0
+        assert "strict" not in result.stderr.lower(), (
+            f"Unexpected 'strict' warning in stderr on successful --strict run: {result.stderr}"
+        )
 
 
 class TestValidateMappingEdgeCases:
@@ -1013,6 +1058,10 @@ class TestValidateMappingEdgeCases:
         # Ensure a valid summary exists for validate-mapping to consume
         run_cli("extract", str(ROUTING_DIR))
 
+    @pytest.mark.skipif(
+        not (Path(__file__).parent.parent / "docs" / "transfer" / "blis_to_llmd_mapping.md").exists(),
+        reason="Mapping artifact not present (pre-Task 5)"
+    )
     def test_validate_mapping_malformed_no_table(self):
         """Malformed mapping artifact with no Markdown table should exit 1."""
         import shutil
@@ -1043,3 +1092,117 @@ class TestValidateSchemaEdgeCases:
         code, output = run_cli("validate-schema", "/etc/passwd")
         assert code == 2, f"Expected exit 2 for path traversal, got {code}: {output}"
         assert output["status"] == "error"
+
+
+class TestInfraFidelityPaths:
+    """F-3: Test INFRA exit-code-2 paths in _check_fidelity and INFRA: prefix dispatch."""
+
+    def setup_method(self):
+        WORKSPACE.mkdir(exist_ok=True)
+        summary = WORKSPACE / "algorithm_summary.json"
+        if summary.exists():
+            summary.unlink()
+
+    @pytest.mark.skipif(
+        not (Path(__file__).parent.parent / "docs" / "transfer" / "blis_to_llmd_mapping.md").exists(),
+        reason="Mapping artifact not present (pre-Task 5)"
+    )
+    def test_oversized_mapping_file_exits_2(self):
+        """INFRA: Oversized mapping file triggers exit code 2 via INFRA: prefix."""
+        import shutil
+        mapping = REPO_ROOT / "docs" / "transfer" / "blis_to_llmd_mapping.md"
+        backup = mapping.with_suffix(".md.bak")
+        shutil.copy2(str(mapping), str(backup))
+        try:
+            # Write a file > 10 MB to trigger the size guard
+            mapping.write_text("x" * (10 * 1024 * 1024 + 1))
+            code, output = run_cli("extract", str(ROUTING_DIR))
+            assert code == 2, f"Oversized mapping should exit 2, got {code}: {output}"
+            assert output["status"] == "error"
+            assert any("INFRA" in e or "exceeds" in e.lower() for e in output.get("errors", []))
+        finally:
+            shutil.move(str(backup), str(mapping))
+
+    @pytest.mark.skipif(
+        not (Path(__file__).parent.parent / "docs" / "transfer" / "blis_to_llmd_mapping.md").exists(),
+        reason="Mapping artifact not present (pre-Task 5)"
+    )
+    def test_unreadable_mapping_file_exits_2(self):
+        """INFRA: Unreadable mapping file triggers exit code 2 via INFRA: prefix."""
+        import shutil, stat
+        mapping = REPO_ROOT / "docs" / "transfer" / "blis_to_llmd_mapping.md"
+        backup = mapping.with_suffix(".md.bak")
+        shutil.copy2(str(mapping), str(backup))
+        original_mode = mapping.stat().st_mode
+        try:
+            # Remove read permissions
+            mapping.chmod(0o000)
+            code, output = run_cli("extract", str(ROUTING_DIR))
+            assert code == 2, f"Unreadable mapping should exit 2, got {code}: {output}"
+            assert output["status"] == "error"
+            assert any("INFRA" in e or "failed to read" in e.lower() for e in output.get("errors", []))
+        finally:
+            mapping.chmod(original_mode)
+            shutil.move(str(backup), str(mapping))
+
+    def test_infra_prefix_produces_exit_code_2(self):
+        """Verify the INFRA: prefix dispatch logic at line 414 produces exit 2."""
+        from tools.transfer_cli import _check_fidelity, MAPPING_PATH
+        import shutil
+        if not MAPPING_PATH.exists():
+            pytest.skip("Mapping artifact not present")
+        backup = MAPPING_PATH.with_suffix(".md.bak")
+        shutil.copy2(str(MAPPING_PATH), str(backup))
+        try:
+            # Write oversized file to trigger INFRA: error
+            MAPPING_PATH.write_text("x" * (10 * 1024 * 1024 + 1))
+            ok, errors = _check_fidelity([{"name": "QueueDepth", "type": "int"}])
+            assert not ok
+            assert any(e.startswith("INFRA:") for e in errors), (
+                f"Expected INFRA: prefix in errors, got: {errors}"
+            )
+        finally:
+            shutil.move(str(backup), str(MAPPING_PATH))
+
+
+class TestMetricsTypeGuard:
+    """F-1: Verify non-dict metrics value does not crash the CLI."""
+
+    def setup_method(self):
+        WORKSPACE.mkdir(exist_ok=True)
+        summary = WORKSPACE / "algorithm_summary.json"
+        if summary.exists():
+            summary.unlink()
+
+    def test_metrics_integer_value_does_not_crash(self):
+        """F-1: metrics=42 in best_program_info.json should not raise TypeError."""
+        import tempfile, shutil
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+            shutil.copy2(str(ROUTING_DIR / "best_program.py"), str(tmpdir / "best_program.py"))
+            (tmpdir / "best_program_info.json").write_text('{"metrics": 42}')
+            env = {k: v for k, v in os.environ.items() if k != "CI"}
+            result = subprocess.run(
+                [sys.executable, str(CLI), "extract", str(tmpdir)],
+                capture_output=True, text=True, cwd=str(REPO_ROOT), env=env,
+            )
+            # Should produce valid JSON (not crash with TypeError)
+            stdout = json.loads(result.stdout)
+            assert "status" in stdout, f"CLI should produce JSON output, got: {result.stdout}"
+            # Should warn about missing combined_score
+            assert "metrics" in result.stderr.lower() or "warning" in result.stderr.lower()
+
+    def test_metrics_list_value_does_not_crash(self):
+        """F-1: metrics=[1,2,3] in best_program_info.json should not raise TypeError."""
+        import tempfile, shutil
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+            shutil.copy2(str(ROUTING_DIR / "best_program.py"), str(tmpdir / "best_program.py"))
+            (tmpdir / "best_program_info.json").write_text('{"metrics": [1, 2, 3]}')
+            env = {k: v for k, v in os.environ.items() if k != "CI"}
+            result = subprocess.run(
+                [sys.executable, str(CLI), "extract", str(tmpdir)],
+                capture_output=True, text=True, cwd=str(REPO_ROOT), env=env,
+            )
+            stdout = json.loads(result.stdout)
+            assert "status" in stdout

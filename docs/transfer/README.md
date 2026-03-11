@@ -26,7 +26,7 @@ of inference-sim changes.
 
 **Rationale:** The evolved algorithm's EVOLVE-BLOCK modifies the `Route()` method body
 of `WeightedScoring`. A shim can reconstruct this by:
-1. Parsing the evolved scoring/penalty logic from the EVOLVE-BLOCK
+1. Parsing the evolved scoring/penalty logic from the EVOLVE-BLOCK (**Note:** The source file `routing/best_program.py` is a Python file containing Go code embedded in a triple-quoted string literal `GO_ROUTING_CODE = """..."""`. PR3 must parse the Python file to extract the embedded Go, not treat the `.py` file as standalone Go.)
 2. Creating a `WeightedScoring` instance with standard scorers
 3. Wrapping it with the evolved penalty logic as a post-scoring step
 
@@ -48,6 +48,8 @@ PR3 MUST implement and pass these gates before merging:
 1. **`test_stale_hash_aborts_parsing`** — CRITICAL. PR3 must include a test that runs extract, modifies the EVOLVE-BLOCK source, attempts to parse using the stale summary, and asserts parsing aborts with a drift detection error. (See BC-11.)
 2. **KVUtilization normalization test** — CRITICAL. PR3 must include a unit test verifying that production `KVCacheUsagePercent` values (0-100) are divided by 100 before being passed to the scorer.
 3. **Unknown-type signal rejection** — IMPORTANT. PR3 must verify that signals with type `"unknown"` are rejected or handled explicitly, not silently passed through to the scorer.
+4. **F-10 InFlightRequests double-counting guard** — IMPORTANT. If `RunningRequestCount` is unavailable and InFlightRequests falls back to `RunningQueueSize`, the EffectiveLoad composite becomes `WaitingQueueSize + 2*RunningQueueSize`, double-counting that metric. PR3 MUST detect this case and either use a different proxy or adjust the composite computation. (See `blis_to_llmd_mapping.md` InFlightRequests row.)
+5. **CacheHitRate production access path verification** — IMPORTANT. The mapping artifact marks CacheHitRate's production access path as UNVERIFIED (`endpoint.GetMetrics()` field not yet identified). PR3 MUST derive the concrete access path from the `PrecisePrefixCache` scorer implementation in `llm-d-inference-scheduler` at the pinned commit. (See `blis_to_llmd_mapping.md` CacheHitRate row.)
 
 ## Prompt Template Contract (PR3)
 
