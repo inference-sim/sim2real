@@ -57,13 +57,15 @@ llm-d-inference-scheduler/
 
 The `scheduling.Scorer` interface is defined in the `gateway-api-inference-extension` framework. All scorers MUST implement these three methods.
 
+> **Note:** The import block below covers all sections of this template (Sections 2, 4, 7). When assembling the final file, use this single import block — do not duplicate imports per section. `"encoding/json"` is used in Section 4 (factory); `"fmt"` is used in Section 7 (test helper).
+
 ```go
 package scorer
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
+	"encoding/json"  // Used in Section 4 (factory unmarshalling)
+	"fmt"            // Used in Section 7 (test helper error formatting)
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/util/logging"
@@ -218,6 +220,9 @@ func (s *EvolvedScorer) Score(ctx context.Context, _ *scheduling.CycleState, req
 		// effectiveLoad := waitingQueueSize + runningQueueSize + runningRequestCount
 
 		scoredEndpoints[endpoint] = score
+		// logutil verbosity levels:
+		// - logutil.DEFAULT (0): operational messages visible at normal log levels (config defaults, startup)
+		// - logutil.DEBUG (4): per-request debug output, high-volume (score calculations, metric values)
 		_ = logger // suppress unused warning; use logger.V(logutil.DEBUG).Info(...) for debug output
 	}
 

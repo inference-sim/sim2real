@@ -6,6 +6,7 @@ additionalProperties: false, and string pattern validation.
 Does NOT support $ref, allOf, patternProperties, or other advanced JSON Schema features.
 """
 import json
+import math
 import re
 from pathlib import Path
 
@@ -107,12 +108,16 @@ def _validate_node(data, schema: dict, path: str, errors: list[str]) -> None:
 
     # Numeric: check minimum and maximum constraints
     if expected_type in ("integer", "number") and isinstance(data, (int, float)) and not isinstance(data, bool):
-        minimum = schema.get("minimum")
-        if minimum is not None and data < minimum:
-            errors.append(f"{path or '/'}: value {data} is less than minimum {minimum}")
-        maximum = schema.get("maximum")
-        if maximum is not None and data > maximum:
-            errors.append(f"{path or '/'}: value {data} is greater than maximum {maximum}")
+        # Guard against NaN/infinity — IEEE 754 comparisons silently pass for NaN
+        if isinstance(data, float) and (math.isnan(data) or math.isinf(data)):
+            errors.append(f"{path or '/'}: value {data} is not a finite number")
+        else:
+            minimum = schema.get("minimum")
+            if minimum is not None and data < minimum:
+                errors.append(f"{path or '/'}: value {data} is less than minimum {minimum}")
+            maximum = schema.get("maximum")
+            if maximum is not None and data > maximum:
+                errors.append(f"{path or '/'}: value {data} is greater than maximum {maximum}")
 
     # Array: check minItems, maxItems, and item schemas
     if expected_type == "array" and isinstance(data, list):

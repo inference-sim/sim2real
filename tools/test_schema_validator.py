@@ -250,6 +250,79 @@ class TestEscalationSchema:
         errors = validate_artifact(data, escalation_schema)
         assert any("unexpected" in e for e in errors)
 
+    def test_stage_at_minimum_boundary_passes(self, escalation_schema):
+        """Boundary test: stage=1 (exact minimum) should pass."""
+        data = _valid_escalation()
+        data["stage"] = 1
+        errors = validate_artifact(data, escalation_schema)
+        assert errors == []
+
+    def test_stage_at_maximum_boundary_passes(self, escalation_schema):
+        """Boundary test: stage=6 (exact maximum) should pass."""
+        data = _valid_escalation()
+        data["stage"] = 6
+        errors = validate_artifact(data, escalation_schema)
+        assert errors == []
+
+
+# --- Synthetic min/max unit tests (decoupled from escalation schema) ---
+
+class TestMinMaxValidation:
+    """Unit tests for minimum/maximum validation using hand-crafted schemas."""
+
+    _SCHEMA = {
+        "type": "object",
+        "required": ["value"],
+        "properties": {
+            "value": {"type": "integer", "minimum": 1, "maximum": 10}
+        },
+    }
+
+    _FLOAT_SCHEMA = {
+        "type": "object",
+        "required": ["value"],
+        "properties": {
+            "value": {"type": "number", "minimum": 0.0, "maximum": 1.0}
+        },
+    }
+
+    def test_value_at_minimum_passes(self):
+        errors = validate_artifact({"value": 1}, self._SCHEMA)
+        assert errors == []
+
+    def test_value_at_maximum_passes(self):
+        errors = validate_artifact({"value": 10}, self._SCHEMA)
+        assert errors == []
+
+    def test_value_below_minimum_fails(self):
+        errors = validate_artifact({"value": 0}, self._SCHEMA)
+        assert any("minimum" in e for e in errors)
+
+    def test_value_above_maximum_fails(self):
+        errors = validate_artifact({"value": 11}, self._SCHEMA)
+        assert any("maximum" in e for e in errors)
+
+    def test_nan_rejected(self):
+        """NaN must not silently pass minimum/maximum validation."""
+        errors = validate_artifact({"value": float('nan')}, self._FLOAT_SCHEMA)
+        assert any("not a finite number" in e for e in errors)
+
+    def test_positive_infinity_rejected(self):
+        errors = validate_artifact({"value": float('inf')}, self._FLOAT_SCHEMA)
+        assert any("not a finite number" in e for e in errors)
+
+    def test_negative_infinity_rejected(self):
+        errors = validate_artifact({"value": float('-inf')}, self._FLOAT_SCHEMA)
+        assert any("not a finite number" in e for e in errors)
+
+    def test_float_at_boundaries_passes(self):
+        assert validate_artifact({"value": 0.0}, self._FLOAT_SCHEMA) == []
+        assert validate_artifact({"value": 1.0}, self._FLOAT_SCHEMA) == []
+
+    def test_float_outside_boundaries_fails(self):
+        errors = validate_artifact({"value": 1.1}, self._FLOAT_SCHEMA)
+        assert any("maximum" in e for e in errors)
+
 
 # --- Stage 3 output schema tests ---
 
