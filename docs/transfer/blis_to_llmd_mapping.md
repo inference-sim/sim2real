@@ -1,7 +1,7 @@
 # BLIS-to-llm-d Signal Mapping Artifact
 
 **Version:** 1.0
-**Target submodule:** llm-d-inference-scheduler (UNVERIFIED — submodule not initialized; field names and interface signatures in this document are based on design knowledge, not source verification)
+**Target submodule:** llm-d-inference-scheduler (PARTIALLY VERIFIED — Scorer Interface Reference section verified against submodule at commit 091312c, PR2 Task 1. Signal Mapping Table field names and other sections remain UNVERIFIED pending PR3 submodule initialization.)
 **Pinned commit hash:** 091312c333a50e94f5e60a2ca2926e8442eeffa9 (PR3 MUST initialize the submodule at this commit and verify all claims)
 
 ## Signal Mapping Table
@@ -40,16 +40,47 @@
 
 ## Scorer Interface Reference
 
-> **R3-F-7 WARNING — UNVERIFIED:** This section was documented from design knowledge, not verified against the actual `llm-d-inference-scheduler` source at the pinned commit.
+> **Verified against** llm-d-inference-scheduler at commit `091312c` (2026-03-09) — signatures confirmed indirectly via LoadAware's `var _ scheduling.Scorer = &LoadAware{}` type assertion and matching method signatures.
+> **Interface source:** The `scheduling.Scorer` interface is defined in the external dependency `sigs.k8s.io/gateway-api-inference-extension v0.0.0-20260128235548-fd30cb97714a`, not in the llm-d-inference-scheduler repository itself. Verification reads LoadAware's implementation of the interface as the ground truth.
 
 Target system: `llm-d-inference-scheduler` (gateway-api-inference-extension framework)
 
-- **Interface:** `scheduling.Scorer` with `Score(ctx, request, endpoints) map[Endpoint]float64`
-- **Factory pattern:** `plugin.Register(typeName, factoryFunc)` in `pkg/plugins/register.go`
-- **Existing scorers:** LoadAware, ActiveRequest, SessionAffinity, PrecisePrefixCache, NoHitLRU
-- **Config:** YAML-based with scorer name, type, weight, and optional parameters.
+**Interface (VERIFIED):** `scheduling.Scorer` from `sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling`
 
-> **Note for PR3:** This section provides a high-level reference for context only. PR3 MUST derive the full interface specification directly from the `llm-d-inference-scheduler` codebase at the pinned commit hash above.
+```go
+type Scorer interface {
+    Score(ctx context.Context, cycleState *CycleState, request *LLMRequest, endpoints []Endpoint) map[Endpoint]float64
+    TypedName() plugin.TypedName
+    Category() ScorerCategory
+}
+```
+
+**Factory pattern (VERIFIED):** `pkg/plugins/scorer/load_aware.go:30`
+```go
+func LoadAwareFactory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error)
+```
+> **Note:** Each scorer has its own factory function (e.g., `LoadAwareFactory`, `SessionAffinityFactory`). The PR3 evolved scorer should use `EvolvedScorerFactory` following this same signature pattern.
+
+**Registration (VERIFIED):** `pkg/plugins/register.go`
+```go
+plugin.Register(scorer.LoadAwareType, scorer.LoadAwareFactory)
+```
+
+**Scorer categories (VERIFIED):**
+- `scheduling.Distribution` — used by LoadAware, ActiveRequest, NoHitLRU
+- `scheduling.Affinity` — used by SessionAffinity, PrecisePrefixCache
+
+**Existing scorers (VERIFIED):** LoadAware, ActiveRequest, SessionAffinity, PrecisePrefixCache, NoHitLRU
+
+**Metric access (PARTIALLY VERIFIED):**
+- `endpoint.GetMetrics().WaitingQueueSize` — **VERIFIED** (load_aware.go:87)
+- `endpoint.GetMetrics().RunningQueueSize` — **UNVERIFIED** (not used in submodule; assumed in external Metrics struct)
+- `endpoint.GetMetrics().RunningRequestCount` — **UNVERIFIED** (not used in submodule; assumed in external Metrics struct)
+- `endpoint.GetMetrics().KVCacheUsagePercent` — **UNVERIFIED** (not used in submodule; PrecisePrefixCache uses ZMQ-based indexer instead)
+
+**Config:** YAML-based with scorer name, type, weight, and optional parameters (JSON blob parsed by factory).
+
+> **Note for PR3:** This section is now partially verified. PR3 MUST initialize the submodule, run `go mod download`, and inspect the `fwkdl.Metrics` struct definition to confirm UNVERIFIED field names before generating scorer code.
 
 ## Notes
 
