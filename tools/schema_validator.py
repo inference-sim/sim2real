@@ -20,7 +20,10 @@ _TYPE_MAP = {
 }
 
 
-_UNSUPPORTED_KEYWORDS = {"$ref", "allOf", "anyOf", "oneOf", "patternProperties", "if", "then", "else"}
+_UNSUPPORTED_KEYWORDS = {
+    "$ref", "allOf", "anyOf", "oneOf", "patternProperties", "if", "then", "else",
+    "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+}
 
 
 def validate_artifact(data: dict, schema: dict) -> list[str]:

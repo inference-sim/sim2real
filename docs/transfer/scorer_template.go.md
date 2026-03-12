@@ -79,8 +79,9 @@ const (
 
 // Compile-time type assertion — ensure EvolvedScorer implements the Scorer interface.
 // If the interface changes, this line produces a compile error (not a runtime panic).
-// Convention: scorers assert only the interfaces they implement. LoadAware and
-// ActiveRequest assert scheduling.Scorer only; SessionAffinity additionally asserts
+// Convention: scorers assert only the interfaces they implement. LoadAware asserts
+// scheduling.Scorer only. ActiveRequest and NoHitLRU additionally assert
+// requestcontrol.PreRequest; ActiveRequest and SessionAffinity additionally assert
 // requestcontrol.ResponseComplete. Do NOT add var _ plugin.Plugin — no existing scorer uses it.
 var _ scheduling.Scorer = &EvolvedScorer{}
 
