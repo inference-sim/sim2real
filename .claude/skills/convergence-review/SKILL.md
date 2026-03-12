@@ -42,9 +42,9 @@ python .claude/skills/convergence-review/orchestrator.py $0 $1 [flags]
 ```
 
 **Available flags:**
-- `--reviewer-model MODEL` — LiteLLM model for API-based reviewers (default: haiku, resolved via model-aliases.json). Also: `CONVERGENCE_REVIEWER_MODEL` env var.
-- `--fixer-model MODEL` — LiteLLM model for API-based assessment and fix phases (default: opus). Also: `CONVERGENCE_FIXER_MODEL` env var.
-- `--subprocess-model MODEL` — Claude model for `claude -p` subprocess reviewers and assessor on code gates (default: sonnet). Uses Claude model short names, not LiteLLM names. Also: `CONVERGENCE_SUBPROCESS_MODEL` env var.
+- `--reviewer-model MODEL` — LiteLLM model for fallback extraction (default: haiku, resolved via model-aliases.json). Also: `CONVERGENCE_REVIEWER_MODEL` env var.
+- `--fixer-model MODEL` — LiteLLM model for assessment fallback and fix summary extraction (default: opus). Also: `CONVERGENCE_FIXER_MODEL` env var.
+- `--subprocess-model MODEL` — Claude model for `claude -p` subprocess reviewers and assessor (default: sonnet). Uses Claude model short names, not LiteLLM names. Also: `CONVERGENCE_SUBPROCESS_MODEL` env var.
 - `--max-rounds N` — Maximum convergence rounds (default: 10)
 - `--base-url URL` — LiteLLM proxy endpoint (default: from `LITELLM_BASE_URL` or `ANTHROPIC_BASE_URL` env)
 - `--state-dir PATH` — State directory (default: `.claude/convergence-state/<gate>-<path>`)
@@ -101,8 +101,8 @@ Round 2/10: 10 reviewers dispatched... 3 raw findings → assessment: 0 CRITICAL
 
 Each round executes three phases:
 
-1. **REVIEW** — Perspectives dispatched in parallel. For code gates (`pr-code`, `x-pr-code`), each reviewer launches as a `claude -p` subprocess with codebase access (Read, Glob, Grep, Bash). For all other gates, reviewers use parallel async API calls (OpenAI-compatible via LiteLLM).
-2. **ASSESS** — For code gates, a `claude -p` subprocess with codebase access that can verify reviewer claims against the actual code. For other gates, a single API call to a strong model. Both deduplicate, validate, re-prioritize, and dismiss findings. Convergence decided on assessed counts, not raw. If the subprocess assessor fails, it falls back to the API path.
+1. **REVIEW** — Perspectives dispatched as parallel `claude -p` subprocesses with codebase access (Read, Glob, Grep, Bash). For code gates, reviewers run `git diff`; for all other gates, reviewers read the artifact file and explore surrounding code to verify claims.
+2. **ASSESS** — A `claude -p` subprocess with codebase access that can verify reviewer claims against the actual code. Deduplicates, validates, re-prioritizes, and dismisses findings. Convergence decided on assessed counts, not raw. If the subprocess assessor fails, it falls back to an API call.
 3. **FIX** — `claude -p` subprocess for sequential, context-aware file edits using only assessed CRITICAL + IMPORTANT findings.
 
 The round loop is a deterministic Python `for` loop — structurally immune to LLM completion bias.
@@ -192,6 +192,6 @@ Runtime state is stored at `.claude/convergence-state/<gate>-<sanitized-path>/` 
 ## Dependencies
 
 - Python 3.11+
-- `openai` pip package (async client)
-- `claude` CLI (code gate reviewers + assessor, and fix phase for all gates)
-- LiteLLM proxy endpoint (configurable, required for non-code gates)
+- `claude` CLI (reviewers, assessor, and fixer for all gates)
+- `openai` pip package (assessment fallback + parse-failure extraction only)
+- LiteLLM proxy endpoint (configurable, used for assessment fallback only)
