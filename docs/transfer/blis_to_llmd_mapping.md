@@ -26,7 +26,7 @@
 
 | Signal | Context | Production Mapping | Fidelity | Notes |
 |--------|---------|-------------------|----------|-------|
-| SessionID (boolean check) | `req.SessionID != ""` | Request header `x-session-id` | high | Boolean presence check — identical semantics. |
+| SessionID (boolean check) | `req.SessionID != ""` | Request header `x-session-token` | high | Boolean presence check — identical semantics. **VERIFIED** (session_affinity.go:20 defines `sessionTokenHeader = "x-session-token"`). |
 
 ## Fidelity Rating Scale
 
