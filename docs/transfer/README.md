@@ -64,6 +64,10 @@ The scorer template is an annotated example showing llm-d-inference-scheduler pl
 2. **Metric field verification:** Before generating code, PR3 MUST initialize the llm-d-inference-scheduler submodule, locate the `fwkdl.Metrics` struct definition, and confirm that UNVERIFIED fields (`RunningQueueSize`, `RunningRequestCount`, `KVCacheUsagePercent`) exist. If any field does not exist, PR3 must update both the mapping artifact and the scorer template with the correct field names.
 3. **CacheHitRate access path:** The PrecisePrefixCache scorer uses a ZMQ-based KV cache indexer, not a simple `GetMetrics()` field. PR3 must determine the correct access path for cache hit rate information by reading the PrecisePrefixCache implementation.
 4. **Placeholder replacement validation:** The template's `Score()` body contains a `PLACEHOLDER` comment marking the example scoring logic. After code generation, PR3 MUST verify that no `PLACEHOLDER` markers remain in the generated scorer code. If any remain, the generation is incomplete.
+5. **Nil-score framework behavior verification (BC-4):** PR3 must verify nil-score handling in the framework's aggregation logic. The template's `Score()` returns `nil` when the scorer is disabled (feature-flag opt-out). PR3 must confirm that the scheduler skips a scorer returning nil scores and routes using remaining active scorers only. See scorer_template.go.md Section 5.
+
+**PR4 obligations for scorer template:**
+1. **Stage 3 output artifact consumption:** PR4 MUST read `workspace/stage3_output.json` (written by Stage 3) to locate the generated scorer file, test file, registration file, and scorer type for build and test. See scorer_template.go.md, Stage 3 Output Validation section (after Section 8), items 5-6.
 
 ## Prompt Template Contract (PR3)
 

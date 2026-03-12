@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pipeline Escalation",
+  "description": "Escalation artifact written when a pipeline stage encounters a blocking condition that requires human operator intervention. Variants are discriminated by halt_reason: 'unverified_fields' (requires resolved_fields + unresolved_fields), 'cache_hit_rate_unavailable' (requires signal + evolve_block_references), and prerequisite halt reasons ('missing_algorithm_summary', 'out_of_scope_patterns', 'missing_mapping_artifact', 'evolve_block_hash_mismatch') which require only the base fields (stage, halt_reason, details). The validator does not support oneOf; variant constraints are documented here and enforced by the pipeline orchestrator.",
+  "type": "object",
+  "required": ["stage", "halt_reason", "details"],
+  "additionalProperties": false,
+  "properties": {
+    "stage": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 6,
+      "description": "Pipeline stage number that produced the escalation."
+    },
+    "halt_reason": {
+      "type": "string",
+      "enum": ["unverified_fields", "cache_hit_rate_unavailable", "missing_algorithm_summary", "out_of_scope_patterns", "missing_mapping_artifact", "evolve_block_hash_mismatch"],
+      "description": "Discriminator for the escalation variant. When 'unverified_fields': resolved_fields and unresolved_fields are required. When 'cache_hit_rate_unavailable': signal and evolve_block_references are required. Prerequisite halt reasons ('missing_algorithm_summary', 'out_of_scope_patterns', 'missing_mapping_artifact', 'evolve_block_hash_mismatch') require only the base fields (stage, halt_reason, details)."
+    },
+    "details": {
+      "type": "string",
+      "description": "Human-readable description of the blocking condition."
+    },
+    "resolved_fields": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Variant: unverified_fields. Metric field names that were successfully confirmed or mapped to alternatives."
+    },
+    "unresolved_fields": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Variant: unverified_fields. Metric field names that could not be confirmed or mapped."
+    },
+    "signal": {
+      "type": "string",
+      "description": "Variant: cache_hit_rate_unavailable. The signal that triggered the escalation (expected value: 'CacheHitRate')."
+    },
+    "evolve_block_references": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Variant: cache_hit_rate_unavailable. References to where CacheHitRate is used in the EVOLVE-BLOCK scoring logic (e.g., penalty terms, composite signals)."
+    }
+  }
+}

@@ -1,8 +1,8 @@
 """Lightweight JSON Schema validator using stdlib only.
 
 Supports a restricted subset: required fields, type checks, enum values,
-nested objects, arrays with item schemas, minItems, maxItems, additionalProperties: false,
-and string pattern validation.
+nested objects, arrays with item schemas, minItems, maxItems, minimum, maximum,
+additionalProperties: false, and string pattern validation.
 Does NOT support $ref, allOf, patternProperties, or other advanced JSON Schema features.
 """
 import json
@@ -101,6 +101,15 @@ def _validate_node(data, schema: dict, path: str, errors: list[str]) -> None:
             for key in data:
                 if key not in allowed:
                     errors.append(f"{path}/{key}: unexpected additional property")
+
+    # Numeric: check minimum and maximum constraints
+    if expected_type in ("integer", "number") and isinstance(data, (int, float)) and not isinstance(data, bool):
+        minimum = schema.get("minimum")
+        if minimum is not None and data < minimum:
+            errors.append(f"{path or '/'}: value {data} is less than minimum {minimum}")
+        maximum = schema.get("maximum")
+        if maximum is not None and data > maximum:
+            errors.append(f"{path or '/'}: value {data} is greater than maximum {maximum}")
 
     # Array: check minItems, maxItems, and item schemas
     if expected_type == "array" and isinstance(data, list):

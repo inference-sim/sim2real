@@ -83,7 +83,7 @@ The macro plan listed 5 candidate signals; the actual EVOLVE-BLOCK uses 6:
 | InFlightRequests | `endpoint.GetMetrics().RunningRequestCount` (approximate) | medium |
 | KVUtilization | `endpoint.GetMetrics().KVCacheUsagePercent` (needs /100 normalization) | high |
 | CacheHitRate | Prefix cache hit ratio from engine metrics | medium *(provisional)* |
-| SessionID | Request header `x-session-id` | high |
+| SessionID | Request header `x-session-token` (**VERIFIED** — see `blis_to_llmd_mapping.md`) | high |
 
 **Fidelity scale:** high (same computation, R^2 >= 0.99), medium (equivalent but different source, R^2 >= 0.80), low (proxy signal, pipeline halts).
 

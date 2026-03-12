@@ -2926,7 +2926,7 @@ Context: This documents the correspondence between inference-sim routing signals
 
 | Signal | Context | Production Mapping | Fidelity | Notes |
 |--------|---------|-------------------|----------|-------|
-| SessionID (boolean check) | `req.SessionID != ""` | Request header `x-session-id` | high | Boolean presence check — identical semantics. |
+| SessionID (boolean check) | `req.SessionID != ""` | Request header `x-session-token` | high | Boolean presence check — identical semantics. |
 
 ## Fidelity Rating Scale
 

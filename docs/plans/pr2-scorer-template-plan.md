@@ -457,7 +457,7 @@ Expected: All existing PR1 tests pass (PR2 is artifact-only, no code changes). T
 
 | Contract | Task | Test Type | Verification |
 |----------|------|-----------|-------------|
-| BC-1 (8 sections) | Task 3, 5 | Structural check | Manual: verify 8 headings present |
+| BC-1 (8 sections) | Task 3, 5 | Structural check | Manual: verify all 8 required section topics present (9 headings acceptable — Section 4b is a lifecycle supplement to Section 4) |
 | BC-2 (API accuracy) | Task 1, 3 | Cross-system audit | Source comparison: template vs load_aware.go |
 | BC-3 (factory pattern) | Task 1, 3 | Cross-system audit | Source comparison: template vs load_aware.go |
 | BC-4 (feature flag) | Task 3 | Structural check | Template includes Enabled field + early-return + test |
