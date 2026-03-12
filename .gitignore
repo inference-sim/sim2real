@@ -1,3 +1,6 @@
+# Worktrees
+.worktrees/
+
 # Project-specific
 docs/plans/scratch/
 tmp/
