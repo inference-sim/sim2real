@@ -73,7 +73,7 @@ Downstream stages MUST use the exit code (not file existence) as the success sig
 | PR | Description | Status |
 |----|-------------|--------|
 | PR1 | Mapping artifact + scaffolding + CLI extract | In progress |
-| PR2 | Scorer template artifact | Not started |
+| PR2 | Scorer template artifact | In progress |
 | PR3 | Prompt templates (Stages 1-3) + Go harness | Not started |
 | PR4 | Stage 4 prompt + test retry logic | Not started |
 | PR5 | Validation pipeline (Stage 5) | Not started |

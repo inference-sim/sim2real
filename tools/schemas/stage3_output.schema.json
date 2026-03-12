@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Stage 3 Output",
+  "description": "Output artifact of Stage 3 (code generation). Records the generated file paths relative to the repository root. Stage 4 reads this artifact to locate files for build and test.",
+  "type": "object",
+  "required": ["scorer_file", "test_file", "register_file", "scorer_type"],
+  "additionalProperties": false,
+  "properties": {
+    "scorer_file": {
+      "type": "string",
+      "pattern": "^llm-d-inference-scheduler/pkg/plugins/scorer/[a-z][a-z0-9_]*(?<!_test)\\.go$",
+      "description": "Path to the generated scorer file, relative to the repository root. Must be a snake_case .go file (not _test.go) in the scorer package directory."
+    },
+    "test_file": {
+      "type": "string",
+      "pattern": "^llm-d-inference-scheduler/pkg/plugins/scorer/[a-z][a-z0-9_]*_test\\.go$",
+      "description": "Path to the generated test file, relative to the repository root. Must be a _test.go file in the scorer package directory."
+    },
+    "register_file": {
+      "type": "string",
+      "pattern": "^llm-d-inference-scheduler/pkg/plugins/register\\.go$",
+      "description": "Path to the register.go file where the plugin.Register() call was added."
+    },
+    "scorer_type": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*-scorer$",
+      "description": "The EvolvedScorerType constant value. Convention: lowercase-hyphenated, suffixed with '-scorer'."
+    }
+  }
+}

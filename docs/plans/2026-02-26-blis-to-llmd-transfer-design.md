@@ -77,7 +77,7 @@ BLIS and llm-d share the same *conceptual* architecture (weighted scoring across
 | **Prefix signal** | In-memory `prefixMap` hash→instance | FNV-64a block hashing matching vLLM internals over ZMQ |
 | **Weight mechanism** | Normalized `[]float64` summing to 1.0 | Per-scorer integer `weight` in EPP config YAML |
 | **P/D disaggregation** | Not present | Two-tier: decode profile + prefill decision |
-| **Session affinity** | `req.SessionID` field | `x-session-token` HTTP header (**SUPERSEDED** — canonical name is `x-session-id`; see `blis_to_llmd_mapping.md`) |
+| **Session affinity** | `req.SessionID` field | `x-session-token` HTTP header (**VERIFIED** — see `blis_to_llmd_mapping.md`) |
 | **SLO classes** | `req.SLOClass` ("realtime", "interactive", "batch") | Not a native concept — needs header/label mapping |
 
 ### Translation Pattern: Composite Scorer
@@ -143,7 +143,7 @@ This mapping is maintained as `docs/transfer/blis_to_llmd_mapping.md` and update
 | `BatchSize` | `endpoint.GetMetrics().RunningQueueSize` (approximate) | `ActiveRequest` scorer (**SUPERSEDED** — see `blis_to_llmd_mapping.md` for canonical mapping) | Medium |
 | `len(req.InputTokens)` | `estimateTokenCount(req.Body)` | Parse request JSON, count tokens or estimate from char count | Medium — needs helper function |
 | `req.SLOClass` | Custom request header (e.g., `x-slo-class`) | Read from `req.Headers` | Needs convention — not native |
-| `req.SessionID` | `x-session-token` header (**SUPERSEDED** — canonical name is `x-session-id`; see `blis_to_llmd_mapping.md`) | `SessionAffinityScorer` already handles this | High |
+| `req.SessionID` | `x-session-token` header (**VERIFIED** — see `blis_to_llmd_mapping.md`) | `SessionAffinityScorer` already handles this | High |
 
 ### Interfaces
 

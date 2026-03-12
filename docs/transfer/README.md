@@ -51,6 +51,24 @@ PR3 MUST implement and pass these gates before merging:
 4. **F-10 InFlightRequests double-counting guard** — IMPORTANT. If `RunningRequestCount` is unavailable and InFlightRequests falls back to `RunningQueueSize`, the EffectiveLoad composite becomes `WaitingQueueSize + 2*RunningQueueSize`, double-counting that metric. PR3 MUST detect this case and either use a different proxy or adjust the composite computation. (See `blis_to_llmd_mapping.md` InFlightRequests row.)
 5. **CacheHitRate production access path verification** — IMPORTANT. The mapping artifact marks CacheHitRate's production access path as UNVERIFIED (`endpoint.GetMetrics()` field not yet identified). PR3 MUST derive the concrete access path from the `PrecisePrefixCache` scorer implementation in `llm-d-inference-scheduler` at the pinned commit. (See `blis_to_llmd_mapping.md` CacheHitRate row.)
 
+## Scorer Template (PR2)
+
+**Location:** `docs/transfer/scorer_template.go.md`
+**Version:** 1.0
+**Pinned commit:** `091312c333a50e94f5e60a2ca2926e8442eeffa9`
+
+The scorer template is an annotated example showing llm-d-inference-scheduler plugin conventions. Stage 3's LLM uses it as the structural reference for generating production scorer code.
+
+**PR3 obligations for scorer template:**
+1. **Compilation check:** PR3 adds `tools/check_scorer_template.sh` that extracts Go code blocks from the template, compiles them against the current submodule HEAD, and fails if compilation fails. This provides automated staleness detection.
+2. **Metric field verification:** Before generating code, PR3 MUST initialize the llm-d-inference-scheduler submodule, locate the `fwkdl.Metrics` struct definition, and confirm that UNVERIFIED fields (`RunningQueueSize`, `RunningRequestCount`, `KVCacheUsagePercent`) exist. If any field does not exist, PR3 must update both the mapping artifact and the scorer template with the correct field names.
+3. **CacheHitRate access path:** The PrecisePrefixCache scorer uses a ZMQ-based KV cache indexer, not a simple `GetMetrics()` field. PR3 must determine the correct access path for cache hit rate information by reading the PrecisePrefixCache implementation.
+4. **Placeholder replacement validation:** The template's `Score()` body contains a `PLACEHOLDER` comment marking the example scoring logic. After code generation, PR3 MUST verify that no `PLACEHOLDER` markers remain in the generated scorer code. If any remain, the generation is incomplete.
+5. **Nil-score framework behavior verification (BC-4):** PR3 must verify nil-score handling in the framework's aggregation logic. The template's `Score()` returns `nil` when the scorer is disabled (feature-flag opt-out). PR3 must confirm that the scheduler skips a scorer returning nil scores and routes using remaining active scorers only. See scorer_template.go.md Section 5.
+
+**PR4 obligations for scorer template:**
+1. **Stage 3 output artifact consumption:** PR4 MUST read `workspace/stage3_output.json` (written by Stage 3) to locate the generated scorer file, test file, registration file, and scorer type for build and test. See scorer_template.go.md, Stage 3 Output Validation section (after Section 8), items 5-6.
+
 ## Prompt Template Contract (PR3)
 
 PR3 prompt templates MUST consume these PR1 artifacts:
