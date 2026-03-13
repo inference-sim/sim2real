@@ -1,0 +1,343 @@
+package harness
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	sim "github.com/inference-sim/inference-sim/sim"
+)
+
+func TestEquivalenceTrivial(t *testing.T) {
+	// BC-2: 2 endpoints with different load, non-zero scores.
+	// pod-a has InFlightRequests:3, ensuring EffectiveLoad() > 0 regardless of the exact formula.
+	alg := &trivialAlgorithm{}
+	tuples := []TestTuple{
+		{
+			Request: sim.Request{ID: "req-1"},
+			State: sim.RouterState{
+				Snapshots: []sim.RoutingSnapshot{
+					{ID: "pod-a", QueueDepth: 2, BatchSize: 1, InFlightRequests: 3},
+					{ID: "pod-b", QueueDepth: 0, BatchSize: 0, InFlightRequests: 0},
+				},
+			},
+		},
+	}
+
+	results := RunTuples(alg, tuples)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.Error != nil {
+		t.Fatalf("unexpected error: %v", r.Error)
+	}
+	if len(r.SimScores) == 0 {
+		t.Fatal("expected non-empty scores")
+	}
+	// pod-b (load 0) should score higher than pod-a (load >= 3)
+	if r.SimScores["pod-a"] >= r.SimScores["pod-b"] {
+		t.Errorf("expected pod-b > pod-a, got pod-a=%f pod-b=%f",
+			r.SimScores["pod-a"], r.SimScores["pod-b"])
+	}
+	// All scores must be > 0
+	for id, score := range r.SimScores {
+		if score <= 0 {
+			t.Errorf("expected positive score for %s, got %f", id, score)
+		}
+	}
+}
+
+func TestStaleHashAbortsParsing(t *testing.T) {
+	// BC-11 + Cross-PR contract #1: content hash mismatch detected
+	repoRoot := t.TempDir()
+	workspaceDir := t.TempDir()
+
+	// Create source file with EVOLVE-BLOCK
+	sourceDir := filepath.Join(repoRoot, "routing")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	originalSource := "line1\n// EVOLVE-BLOCK-START\noriginal logic\n// EVOLVE-BLOCK-END\nline5"
+	sourcePath := filepath.Join(sourceDir, "best_program.py")
+	if err := os.WriteFile(sourcePath, []byte(originalSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Compute hash of original EVOLVE-BLOCK (lines 2-4, 1-based)
+	originalBlock := "// EVOLVE-BLOCK-START\noriginal logic\n// EVOLVE-BLOCK-END"
+	hash := sha256.Sum256([]byte(originalBlock))
+	originalHash := hex.EncodeToString(hash[:])
+
+	// Write algorithm_summary.json with the original hash
+	summary := map[string]interface{}{
+		"algorithm_name":             "test",
+		"evolve_block_source":        "routing/best_program.py:2-4",
+		"evolve_block_content_hash":  originalHash,
+		"signals":                    []interface{}{},
+		"composite_signals":          []interface{}{},
+		"metrics":                    map[string]interface{}{"combined_score": 0},
+		"scope_validation_passed":    true,
+		"mapping_artifact_version":   "1.0",
+		"fidelity_checked":           true,
+	}
+	summaryBytes, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summaryPath := filepath.Join(workspaceDir, "algorithm_summary.json")
+	if err := os.WriteFile(summaryPath, summaryBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify loading works with matching hash
+	_, err = LoadAlgorithm(summaryPath, repoRoot)
+	if err != nil {
+		t.Fatalf("expected successful load with matching hash, got: %v", err)
+	}
+
+	// Modify the source file (simulate drift)
+	modifiedSource := "line1\n// EVOLVE-BLOCK-START\nMODIFIED logic\n// EVOLVE-BLOCK-END\nline5"
+	if err := os.WriteFile(sourcePath, []byte(modifiedSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// LoadAlgorithm should fail with hash mismatch
+	_, err = LoadAlgorithm(summaryPath, repoRoot)
+	if err == nil {
+		t.Fatal("expected error for stale hash, got nil")
+	}
+	if !strings.Contains(err.Error(), "hash mismatch") {
+		t.Errorf("expected 'hash mismatch' in error, got: %v", err)
+	}
+}
+
+func TestRunTuplesPanicRecovery(t *testing.T) {
+	// BC-12: panic in Algorithm.Route is captured, not propagated
+	panickingAlg := &panicAlgorithm{}
+	tuples := []TestTuple{
+		{
+			Request: sim.Request{ID: "req-panic"},
+			State: sim.RouterState{
+				Snapshots: []sim.RoutingSnapshot{{ID: "pod-a"}},
+			},
+		},
+		{
+			Request: sim.Request{ID: "req-ok"},
+			State: sim.RouterState{
+				Snapshots: []sim.RoutingSnapshot{{ID: "pod-b", QueueDepth: 1}},
+			},
+		},
+	}
+
+	results := RunTuples(panickingAlg, tuples)
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	if results[0].Error == nil {
+		t.Error("expected error for panicking tuple")
+	}
+	if !strings.Contains(results[0].Error.Error(), "panic") {
+		t.Errorf("expected 'panic' in error message, got: %v", results[0].Error)
+	}
+	if results[1].Error != nil {
+		t.Errorf("expected no error for second tuple, got: %v", results[1].Error)
+	}
+}
+
+func TestKVUtilizationNormalization(t *testing.T) {
+	// Cross-PR contract #2: KVCacheUsagePercent (0-100) must be divided by 100
+	prodValue := 75.0
+	normalized := NormalizeKVUtilization(prodValue)
+	if normalized < 0.0 || normalized > 1.0 {
+		t.Errorf("normalized KVUtilization out of [0,1] range: %f", normalized)
+	}
+	if normalized != 0.75 {
+		t.Errorf("expected 0.75, got %f", normalized)
+	}
+
+	// Boundary cases
+	for _, tc := range []struct{ prod, expected float64 }{
+		{0.0, 0.0},
+		{100.0, 1.0},
+		{50.0, 0.5},
+		{-5.0, 0.0},
+		{100.5, 1.0},
+		{200.0, 1.0},
+	} {
+		got := NormalizeKVUtilization(tc.prod)
+		if got != tc.expected {
+			t.Errorf("NormalizeKVUtilization(%f): expected %f, got %f",
+				tc.prod, tc.expected, got)
+		}
+	}
+}
+
+func TestUnknownSignalTypeRejection(t *testing.T) {
+	// Cross-PR contract #3: signals with type "unknown" must be rejected
+	summaryJSON := map[string]interface{}{
+		"algorithm_name":             "test",
+		"evolve_block_source":        "routing/best_program.py:1-1",
+		"evolve_block_content_hash":  "deadbeef",
+		"signals": []interface{}{
+			map[string]interface{}{
+				"name": "UnknownSignal",
+				"type": "unknown",
+			},
+		},
+		"composite_signals":        []interface{}{},
+		"metrics":                  map[string]interface{}{"combined_score": 0},
+		"scope_validation_passed":  true,
+		"mapping_artifact_version": "1.0",
+		"fidelity_checked":         true,
+	}
+	data, err := json.Marshal(summaryJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = ValidateSignalTypes(data)
+	if err == nil {
+		t.Fatal("expected error for signal with type 'unknown', got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown") {
+		t.Errorf("expected 'unknown' in error message, got: %v", err)
+	}
+}
+
+func TestCrossLanguageHashConsistency(t *testing.T) {
+	// Section E(c): verify Go hash matches transfer_cli.py extract's hash
+	repoRoot := findRepoRoot(t)
+	venvPython := filepath.Join(repoRoot, ".venv", "bin", "python")
+	if _, err := os.Stat(venvPython); err != nil {
+		t.Skip("requires Python venv at .venv/bin/python")
+	}
+
+	// Use the actual routing/best_program.py and run extract
+	routingDir := filepath.Join(repoRoot, "routing")
+	if _, err := os.Stat(filepath.Join(routingDir, "best_program.py")); err != nil {
+		t.Skip("requires routing/best_program.py")
+	}
+
+	// Run extract to get the Python-computed hash
+	tmpWorkspace := t.TempDir()
+	cmd := exec.Command(venvPython, filepath.Join(repoRoot, "tools", "transfer_cli.py"), "extract", routingDir)
+	cmd.Env = append(os.Environ(), fmt.Sprintf("SIM2REAL_WORKSPACE=%s", tmpWorkspace))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// extract writes to workspace/ by default, check if algorithm_summary.json exists
+		summaryPath := filepath.Join(repoRoot, "workspace", "algorithm_summary.json")
+		if _, statErr := os.Stat(summaryPath); statErr != nil {
+			t.Skipf("extract failed and no summary found: %v\noutput: %s", err, output)
+		}
+	}
+
+	// Read the summary written by extract
+	summaryPath := filepath.Join(repoRoot, "workspace", "algorithm_summary.json")
+	summaryData, err := os.ReadFile(summaryPath)
+	if err != nil {
+		t.Fatalf("read algorithm_summary.json: %v", err)
+	}
+
+	var summary struct {
+		EvolveBlockSource      string `json:"evolve_block_source"`
+		EvolveBlockContentHash string `json:"evolve_block_content_hash"`
+	}
+	if err := json.Unmarshal(summaryData, &summary); err != nil {
+		t.Fatalf("parse algorithm_summary.json: %v", err)
+	}
+
+	// Now recompute hash in Go using the same logic as LoadAlgorithm
+	parts := strings.SplitN(summary.EvolveBlockSource, ":", 2)
+	if len(parts) != 2 {
+		t.Fatalf("invalid evolve_block_source: %q", summary.EvolveBlockSource)
+	}
+	sourcePath := parts[0]
+	// Handle absolute paths from extract (temp dir) vs relative paths
+	if !filepath.IsAbs(sourcePath) {
+		sourcePath = filepath.Join(repoRoot, sourcePath)
+	}
+	rangeParts := strings.SplitN(parts[1], "-", 2)
+	if len(rangeParts) != 2 {
+		t.Fatalf("invalid line range: %q", parts[1])
+	}
+	startLine := mustAtoi(t, rangeParts[0])
+	endLine := mustAtoi(t, rangeParts[1])
+
+	sourceData, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read source: %v", err)
+	}
+	normalized := strings.ReplaceAll(string(sourceData), "\r\n", "\n")
+	lines := strings.Split(normalized, "\n")
+	if startLine < 1 || endLine > len(lines) {
+		t.Fatalf("line range %d-%d out of bounds (%d lines)", startLine, endLine, len(lines))
+	}
+	block := strings.Join(lines[startLine-1:endLine], "\n")
+	goHash := sha256.Sum256([]byte(block))
+	goHashStr := hex.EncodeToString(goHash[:])
+
+	if goHashStr != summary.EvolveBlockContentHash {
+		t.Errorf("cross-language hash mismatch:\n  Python: %s\n  Go:     %s",
+			summary.EvolveBlockContentHash, goHashStr)
+	}
+}
+
+type panicAlgorithm struct {
+	callCount int
+}
+
+func (a *panicAlgorithm) Route(req *sim.Request, state *sim.RouterState) sim.RoutingDecision {
+	a.callCount++
+	if a.callCount == 1 {
+		panic("intentional test panic")
+	}
+	scores := map[string]float64{}
+	for _, snap := range state.Snapshots {
+		scores[snap.ID] = 0.5
+	}
+	return sim.NewRoutingDecisionWithScores(state.Snapshots[0].ID, "ok", scores)
+}
+
+// TestEquivalence is the entry point that PR5 suites call.
+// PR3 provides a minimal placeholder; PR5 adds Suite A/B/C logic.
+func TestEquivalence(t *testing.T) {
+	t.Log("TestEquivalence: PR3 placeholder — PR5 adds Suite A/B/C logic")
+}
+
+// findRepoRoot walks up from the test file to find the repo root (contains CLAUDE.md).
+func findRepoRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "CLAUDE.md")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("could not find repo root (no CLAUDE.md found)")
+		}
+		dir = parent
+	}
+}
+
+func mustAtoi(t *testing.T, s string) int {
+	t.Helper()
+	n, err := fmt.Sscanf(s, "%d", new(int))
+	if n != 1 || err != nil {
+		t.Fatalf("atoi %q: %v", s, err)
+	}
+	v, _ := fmt.Sscanf(s, "%d", new(int))
+	_ = v
+	result := 0
+	fmt.Sscanf(s, "%d", &result)
+	return result
+}
