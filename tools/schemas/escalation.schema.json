@@ -14,8 +14,8 @@
     },
     "halt_reason": {
       "type": "string",
-      "enum": ["unverified_fields", "cache_hit_rate_unavailable", "missing_algorithm_summary", "out_of_scope_patterns", "missing_mapping_artifact", "evolve_block_hash_mismatch"],
-      "description": "Discriminator for the escalation variant. When 'unverified_fields': resolved_fields and unresolved_fields are required. When 'cache_hit_rate_unavailable': signal and evolve_block_references are required. Prerequisite halt reasons ('missing_algorithm_summary', 'out_of_scope_patterns', 'missing_mapping_artifact', 'evolve_block_hash_mismatch') require only the base fields (stage, halt_reason, details)."
+      "enum": ["unverified_fields", "cache_hit_rate_unavailable", "missing_algorithm_summary", "out_of_scope_patterns", "missing_mapping_artifact", "evolve_block_hash_mismatch", "stale_submodule_commit", "unmappable_signal", "coverage_incomplete", "unknown_signal_unresolved", "pre_write_validation_failure"],
+      "description": "Discriminator for the escalation variant. When 'unverified_fields': resolved_fields and unresolved_fields are required. When 'cache_hit_rate_unavailable': signal and evolve_block_references are required. Prerequisite halt reasons ('missing_algorithm_summary', 'out_of_scope_patterns', 'missing_mapping_artifact', 'evolve_block_hash_mismatch') require only the base fields (stage, halt_reason, details). Stage 2 halt reasons: 'stale_submodule_commit' (submodule HEAD differs from mapping artifact pin), 'unmappable_signal' (no production equivalent found), 'coverage_incomplete' (unmapped signals remain), 'unknown_signal_unresolved' (signal type 'unknown' not resolved), 'pre_write_validation_failure' (artifact failed schema validation before write)."
     },
     "details": {
       "type": "string",
