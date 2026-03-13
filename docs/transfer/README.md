@@ -7,6 +7,14 @@ llm-d-inference-scheduler scorer plugins.
 
 Under construction. See `docs/plans/2026-03-06-sim2real-transfer-macro-plan-v3.md`.
 
+### PR3 Deliverables
+
+- **Go test harness:** `tools/harness/` — imports inference-sim, validates algorithm loading and EVOLVE-BLOCK content hash. Types: `Algorithm`, `TestTuple`, `Result`. Functions: `LoadAlgorithm`, `RunTuples`, `NormalizeKVUtilization`, `ValidateSignalTypes`.
+- **Evolved scorer shim:** `tools/harness/evolved_scorer.go` — implements `scheduling.Scorer` interface (R6). PR3 returns placeholder scores; PR5 wires actual logic.
+- **Prompt templates:** `prompts/transfer.md` (orchestrator), `prompts/extract.md` (Stage 1), `prompts/translate.md` (Stage 2), `prompts/generate.md` (Stage 3).
+- **Signal coverage schema:** `tools/schemas/signal_coverage.schema.json` — validates Stage 2 output.
+- **CI script:** `tools/check_scorer_template.sh` — compiles scorer template Go blocks against submodule HEAD.
+
 ## Directory Layout
 
 - `docs/transfer/` — Mapping artifacts, scorer template, calibration log
@@ -33,11 +41,13 @@ of `WeightedScoring`. A shim can reconstruct this by:
 This avoids requiring an inference-sim API PR (option b) which would block PR3.
 
 **Shim acceptance criteria (PR3):** The shim in `tools/harness/evolved_scorer.go` MUST:
-1. Implement `scheduling.Scorer` interface (Score method with correct signature)
-2. Accept all signals from `algorithm_summary.json` `signals[]` as input
-3. Reproduce the scoring/penalty logic from the EVOLVE-BLOCK
-4. Verify `evolve_block_content_hash` before parsing (BC-11)
-5. Pass unit tests comparing shim output against simulation output for reference inputs
+1. Implement `scheduling.Scorer` interface (Score method with correct signature) ✅ PR3
+2. Accept all signals from `algorithm_summary.json` `signals[]` as input — *deferred to PR5*
+3. Reproduce the scoring/penalty logic from the EVOLVE-BLOCK — *deferred to PR5*
+4. Verify `evolve_block_content_hash` before parsing (BC-11) ✅ PR3 (in `LoadAlgorithm`)
+5. Pass unit tests comparing shim output against simulation output for reference inputs — *deferred to PR5*
+
+**PR3 scope note:** PR3's `evolved_scorer.go` returns uniform 0.5 placeholder scores. Criteria #2, #3, and #5 are deferred to PR5, which wires `Algorithm.Route()` into the production scorer path.
 
 ## Cross-PR Contracts (PR3 Obligations)
 
