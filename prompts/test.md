@@ -105,7 +105,10 @@ If `BUILD_EXIT != 0`, classify the error:
 
 ```bash
 cat /tmp/stage4_build_output.txt | .venv/bin/python tools/transfer_cli.py test-status | tee /tmp/stage4_build_status.json
+TEST_STATUS_EXIT=${PIPESTATUS[1]:-${pipestatus[2]}}
 ```
+
+If `TEST_STATUS_EXIT == 2`: **HALT immediately** (CLI infrastructure error — stdin too large, invalid UTF-8, or read failure). Write escalation.json with `halt_reason: "infrastructure_error_stage4"`.
 
 Read the JSON output from `/tmp/stage4_build_status.json`:
 - If `error_class == "infrastructure"`: **HALT immediately** (do not retry). Write escalation.json with `halt_reason: "infrastructure_error_stage4"`.
@@ -129,7 +132,10 @@ If `VET_EXIT != 0`, classify the error:
 
 ```bash
 cat /tmp/stage4_vet_output.txt | .venv/bin/python tools/transfer_cli.py test-status | tee /tmp/stage4_vet_status.json
+TEST_STATUS_EXIT=${PIPESTATUS[1]:-${pipestatus[2]}}
 ```
+
+If `TEST_STATUS_EXIT == 2`: **HALT immediately** (CLI infrastructure error). Write escalation.json with `halt_reason: "infrastructure_error_stage4"`.
 
 Read the JSON output from `/tmp/stage4_vet_status.json`:
 - If `error_class == "infrastructure"`: **HALT immediately**. Write escalation.json with `halt_reason: "infrastructure_error_stage4"`.
@@ -154,7 +160,10 @@ If `TEST_EXIT != 0`, classify the error:
 
 ```bash
 cat /tmp/stage4_test_output.txt | .venv/bin/python tools/transfer_cli.py test-status | tee /tmp/stage4_test_status.json
+TEST_STATUS_EXIT=${PIPESTATUS[1]:-${pipestatus[2]}}
 ```
+
+If `TEST_STATUS_EXIT == 2`: **HALT immediately** (CLI infrastructure error). Write escalation.json with `halt_reason: "infrastructure_error_stage4"`.
 
 Read the JSON output from `/tmp/stage4_test_status.json`:
 - If `error_class == "infrastructure"`: **HALT immediately**. Write escalation.json with `halt_reason: "infrastructure_error_stage4"`.
@@ -215,15 +224,18 @@ with `halt_reason: "total_retry_limit_exceeded"`.
 If all checks pass:
 
 1. Update `last_error_signature` with the current signature.
-2. Read the full error output from `/tmp/stage4_build_output.txt`,
+2. Re-read `workspace/stage3_output.json` to get the current file paths
+   (`scorer_file`, `test_file`, `register_file`). Do not rely on shell variables
+   set earlier — they are not preserved across tool calls in an LLM agent session.
+3. Read the full error output from `/tmp/stage4_build_output.txt`,
    `/tmp/stage4_vet_output.txt`, or `/tmp/stage4_test_output.txt`
    (whichever corresponds to the failing step).
-3. Identify which file(s) need changes from the error output (file paths are
+4. Identify which file(s) need changes from the error output (file paths are
    included in compilation errors; test names map to test files).
-4. Apply the fix to the generated code. **Only modify files listed in
-   `stage3_output.json`** (`scorer_file`, `test_file`, `register_file`).
+5. Apply the fix to the generated code. **Only modify files listed in
+   `workspace/stage3_output.json`** (`scorer_file`, `test_file`, `register_file`).
    Do NOT modify other submodule files.
-5. Return to **Step 1** (full rebuild — do NOT skip ahead to Step 3 even if
+6. Return to **Step 1** (full rebuild — do NOT skip ahead to Step 3 even if
    only test files were changed, since compilation must be re-verified).
 
 ## Step 5: Completion
@@ -234,7 +246,8 @@ Stage 4 passes when:
 - `go test -timeout 10m ./pkg/plugins/scorer/... -v` exits 0
 
 No output artifact is written. Stage 4 success is verified by the orchestrator's
-between-stage validation (re-runs `go build` after Stage 4).
+between-stage validation (re-runs `go build ./...`, `go vet ./...`, and
+`go test ./pkg/plugins/scorer/... -v` after Stage 4).
 
 ## Halt Conditions
 

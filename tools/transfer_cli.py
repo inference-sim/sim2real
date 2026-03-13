@@ -888,7 +888,19 @@ def cmd_test_status(args: argparse.Namespace) -> int:
                        error_count=0)
 
     # Precedence: infrastructure > compilation > test_failure
-    if "infrastructure" in classes_found:
+    # Exception: [build failed] summary-only (BC-3) is infrastructure when there are no
+    # individual compilation errors. When both co-occur (e.g. test-file compilation
+    # failure from 'go test' Step 3), prefer compilation so the retry loop is entered
+    # rather than halting — the [build failed] line is just a summary in that case.
+    infra_is_build_failed_only = (
+        "infrastructure" in classes_found
+        and all(
+            e.get("sub_class") == "build_failed"
+            for e in errors_found
+            if e["class"] == "infrastructure"
+        )
+    )
+    if "infrastructure" in classes_found and not (infra_is_build_failed_only and "compilation" in classes_found):
         primary_class = "infrastructure"
     elif "compilation" in classes_found:
         primary_class = "compilation"

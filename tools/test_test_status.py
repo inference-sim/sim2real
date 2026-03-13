@@ -178,6 +178,19 @@ class TestTestStatusInfrastructure:
         assert output["error_count"] == 1
         assert all(e["class"] == "infrastructure" for e in output["errors"])
 
+    def test_build_failed_with_compilation_errors_classifies_as_compilation(self):
+        """BC-3: '[build failed]' co-present with individual compilation errors (typical
+        test-file compilation failure from 'go test') is classified as 'compilation',
+        not 'infrastructure', so the retry loop is entered instead of halting."""
+        go_output = (
+            "pkg/plugins/scorer/evolved.go:42:15: undefined: scheduling.InvalidType\n"
+            "FAIL\tgithub.com/llm-d/llm-d-inference-scheduler/pkg/plugins/scorer [build failed]\n"
+        )
+        code, output = run_test_status(go_output)
+        assert code == 1
+        assert output["error_class"] == "compilation"
+        assert all(e["class"] == "compilation" for e in output["errors"])
+
 
 class TestTestStatusCleanOutput:
     """BC-4: test-status handles clean output and edge cases."""

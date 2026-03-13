@@ -18,7 +18,7 @@ Stages 1 through 6, verifying prerequisite artifacts between each stage.
 | 2     | Translate | `prompts/translate.md`| `workspace/algorithm_summary.json`, `docs/transfer/blis_to_llmd_mapping.md` | `workspace/signal_coverage.json` |
 | 3     | Generate  | `prompts/generate.md` | `workspace/algorithm_summary.json`, `workspace/signal_coverage.json`, `docs/transfer/scorer_template.go.md` | scorer files + `workspace/stage3_output.json` |
 | 4     | Test      | `prompts/test.md`     | `workspace/stage3_output.json`               | build + test pass (no artifact)    |
-| 5     | Validate  | *Defined in PR5*      | test results, harness output                 | validation report                  |
+| 5     | Validate  | *Defined in PR5*      | `workspace/stage3_output.json` (generated scorer files) | validation report     |
 | 6     | PR        | *Defined in PR6*      | all artifacts                                | PRs in target repos                |
 
 ## Prerequisites
@@ -140,7 +140,7 @@ SCORER_FILE=$(.venv/bin/python -c "import json; print(json.load(open('workspace/
 test -f "$SCORER_FILE" || { echo "HALT: generated scorer file missing: $SCORER_FILE"; exit 1; }
 
 # Final build + vet verification
-cd llm-d-inference-scheduler && go build ./... && go vet ./... && cd .. || { echo "HALT: Stage 4 build/vet verification failed"; exit 1; }
+cd llm-d-inference-scheduler && go build ./... && go vet ./... && go test -timeout 10m ./pkg/plugins/scorer/... -v && cd .. || { echo "HALT: Stage 4 build/vet/test verification failed"; exit 1; }
 ```
 
 **HALT if any validation fails.** Do not proceed to Stage 5.
