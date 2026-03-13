@@ -799,24 +799,38 @@ def cmd_test_status(args: argparse.Namespace) -> int:
                            output_type="test_status",
                            error_class="none",
                            error_count=0,
-                           message="stdin exceeds 10 MB limit")
-    except Exception as exc:
+                           errors=[{"class": "cli_error", "message": "stdin exceeds 10 MB limit", "file": ""}])
+    except UnicodeDecodeError as exc:
         return _output("error", 2,
                        output_type="test_status",
                        error_class="none",
                        error_count=0,
-                       message=f"Failed to read stdin: {exc}")
+                       errors=[{"class": "cli_error", "message": f"stdin contains invalid UTF-8: {exc}", "file": ""}])
+    except OSError as exc:
+        return _output("error", 2,
+                       output_type="test_status",
+                       error_class="none",
+                       error_count=0,
+                       errors=[{"class": "cli_error", "message": f"Failed to read stdin: {exc}", "file": ""}])
 
     errors_found: list[dict] = []
     classes_found: set[str] = set()
 
-    # Infrastructure patterns (checked first — highest precedence)
+    # Infrastructure patterns (checked first — highest precedence).
+    # Note: patterns are ordered from most specific to most general.
+    # Known gap: toolchain-internal .go file paths (e.g. internal/buildcfg/) can
+    # be misclassified as compilation errors; the Stage 4 prompt handles this by
+    # checking whether error file paths appear in stage3_output.json.
     infra_patterns = [
-        (r'go:\s+.*(?:reading|downloading).*(?:410 Gone|404 Not Found|connection refused)', 'module_fetch_failure'),
+        (r'go:\s+.*(?:reading|downloading|Get\s+").*(?:410 Gone|404 Not Found|connection refused|i/o timeout)', 'module_fetch_failure'),
         (r'cannot find module providing package', 'missing_module'),
         (r'context deadline exceeded', 'timeout'),
+        (r'dial tcp.*(?:connection refused|i/o timeout)', 'network_timeout'),
         (r'go: (?:finding|downloading|extracting)\s+\S+.*(?:error|failed)', 'module_error'),
         (r'no required module provides package', 'missing_module'),
+        (r'go: no Go toolchain found', 'missing_toolchain'),
+        (r'signal:\s+killed', 'process_killed'),
+        (r'\[build failed\]', 'build_failed'),
     ]
     for pattern, sub_class in infra_patterns:
         for match in re.finditer(pattern, input_text, re.MULTILINE):
