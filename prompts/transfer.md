@@ -28,14 +28,14 @@ Before starting the pipeline, verify all required artifacts and submodules exist
 
 ```bash
 # Verify required artifacts
-test -f docs/transfer/blis_to_llmd_mapping.md || echo "HALT: missing mapping artifact"
-test -f docs/transfer/scorer_template.go.md || echo "HALT: missing scorer template"
-test -f routing/best_program.py || echo "HALT: missing routing input best_program.py"
-test -f routing/best_program_info.json || echo "HALT: missing routing input best_program_info.json"
+test -f docs/transfer/blis_to_llmd_mapping.md || { echo "HALT: missing mapping artifact"; exit 1; }
+test -f docs/transfer/scorer_template.go.md || { echo "HALT: missing scorer template"; exit 1; }
+test -f routing/best_program.py || { echo "HALT: missing routing input best_program.py"; exit 1; }
+test -f routing/best_program_info.json || { echo "HALT: missing routing input best_program_info.json"; exit 1; }
 
 # Verify submodules initialized
-test -d inference-sim/sim || echo "HALT: inference-sim submodule not initialized — run git submodule update --init inference-sim"
-test -d llm-d-inference-scheduler/pkg || echo "HALT: llm-d-inference-scheduler submodule not initialized — run git submodule update --init llm-d-inference-scheduler"
+test -d inference-sim/sim || { echo "HALT: inference-sim submodule not initialized — run git submodule update --init inference-sim"; exit 1; }
+test -d llm-d-inference-scheduler/pkg || { echo "HALT: llm-d-inference-scheduler submodule not initialized — run git submodule update --init llm-d-inference-scheduler"; exit 1; }
 
 # Verify submodule status (no leading '-' indicating uninitialized)
 git submodule status inference-sim llm-d-inference-scheduler
@@ -63,13 +63,13 @@ Follow the Stage 1 prompt to extract algorithm metadata from routing artifacts.
 
 ```bash
 # Verify output exists
-test -f workspace/algorithm_summary.json || echo "HALT: Stage 1 output missing"
+test -f workspace/algorithm_summary.json || { echo "HALT: Stage 1 output missing"; exit 1; }
 
 # Schema validation
-.venv/bin/python tools/transfer_cli.py validate-schema workspace/algorithm_summary.json
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/algorithm_summary.json || { echo "HALT: Stage 1 schema validation failed"; exit 1; }
 
 # Semantic check: scope_validation_passed must be true
-.venv/bin/python -c "import json,sys; d=json.load(open('workspace/algorithm_summary.json')); sys.exit(0 if d.get('scope_validation_passed') is True else 1)"
+.venv/bin/python -c "import json,sys; d=json.load(open('workspace/algorithm_summary.json')); sys.exit(0 if d.get('scope_validation_passed') is True else 1)" || { echo "HALT: scope_validation_passed is false"; exit 1; }
 ```
 
 **HALT if any validation fails.** Do not proceed to Stage 2.
@@ -86,13 +86,13 @@ Follow the Stage 2 prompt to map simulation signals to production equivalents.
 
 ```bash
 # Verify output exists
-test -f workspace/signal_coverage.json || echo "HALT: Stage 2 output missing"
+test -f workspace/signal_coverage.json || { echo "HALT: Stage 2 output missing"; exit 1; }
 
 # Schema validation
-.venv/bin/python tools/transfer_cli.py validate-schema workspace/signal_coverage.json
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/signal_coverage.json || { echo "HALT: Stage 2 schema validation failed"; exit 1; }
 
 # Semantic check: coverage must be complete
-.venv/bin/python -c "import json,sys; d=json.load(open('workspace/signal_coverage.json')); sys.exit(0 if d.get('coverage_complete') is True and len(d.get('unmapped_signals',[])) == 0 else 1)"
+.venv/bin/python -c "import json,sys; d=json.load(open('workspace/signal_coverage.json')); sys.exit(0 if d.get('coverage_complete') is True and len(d.get('unmapped_signals',[])) == 0 else 1)" || { echo "HALT: coverage incomplete"; exit 1; }
 ```
 
 **HALT if any validation fails.** Do not proceed to Stage 3.
@@ -109,13 +109,13 @@ Follow the Stage 3 prompt to generate the production scorer plugin.
 
 ```bash
 # Verify output exists
-test -f workspace/stage3_output.json || echo "HALT: Stage 3 output missing"
+test -f workspace/stage3_output.json || { echo "HALT: Stage 3 output missing"; exit 1; }
 
 # Schema validation
-.venv/bin/python tools/transfer_cli.py validate-schema workspace/stage3_output.json
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/stage3_output.json || { echo "HALT: Stage 3 schema validation failed"; exit 1; }
 
 # Semantic check: scorer file exists and has no PLACEHOLDER markers
-.venv/bin/python -c "import json,sys,os; d=json.load(open('workspace/stage3_output.json')); scorer=d.get('scorer_file',''); sys.exit(0 if os.path.isfile(scorer) and 'PLACEHOLDER' not in open(scorer).read() else 1)"
+.venv/bin/python -c "import json,sys,os; d=json.load(open('workspace/stage3_output.json')); scorer=d.get('scorer_file',''); sys.exit(0 if os.path.isfile(scorer) and 'PLACEHOLDER' not in open(scorer).read() else 1)" || { echo "HALT: scorer file missing or contains PLACEHOLDER"; exit 1; }
 ```
 
 **HALT if any validation fails.** Do not proceed to Stage 4.

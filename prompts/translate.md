@@ -16,20 +16,20 @@ Verify all required input artifacts exist and are valid. **HALT if any check fai
 
 ```bash
 # Verify algorithm_summary.json exists and is schema-valid
-test -f workspace/algorithm_summary.json || echo "HALT: missing algorithm_summary.json"
-.venv/bin/python tools/transfer_cli.py validate-schema workspace/algorithm_summary.json
+test -f workspace/algorithm_summary.json || { echo "HALT: missing algorithm_summary.json"; exit 1; }
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/algorithm_summary.json || { echo "HALT: schema validation failed"; exit 1; }
 
 # Verify scope validation passed (schema permits false, so check explicitly)
-.venv/bin/python -c "import json,sys; d=json.load(open('workspace/algorithm_summary.json')); sys.exit(0 if d.get('scope_validation_passed') is True else 1)"
+.venv/bin/python -c "import json,sys; d=json.load(open('workspace/algorithm_summary.json')); sys.exit(0 if d.get('scope_validation_passed') is True else 1)" || { echo "HALT: scope validation not passed"; exit 1; }
 
 # Verify mapping artifact exists
-test -f docs/transfer/blis_to_llmd_mapping.md || echo "HALT: missing mapping artifact"
+test -f docs/transfer/blis_to_llmd_mapping.md || { echo "HALT: missing mapping artifact"; exit 1; }
 
 # Verify submodule initialized
-test -d llm-d-inference-scheduler/pkg || echo "HALT: llm-d-inference-scheduler submodule not initialized — run git submodule update --init llm-d-inference-scheduler"
+test -d llm-d-inference-scheduler/pkg || { echo "HALT: llm-d-inference-scheduler submodule not initialized — run git submodule update --init llm-d-inference-scheduler"; exit 1; }
 
 # Verify PrecisePrefixCache scorer exists (needed for CacheHitRate investigation)
-test -f llm-d-inference-scheduler/pkg/plugins/scorer/precise_prefix_cache.go || echo "HALT: PrecisePrefixCache scorer not found — verify submodule is initialized"
+test -f llm-d-inference-scheduler/pkg/plugins/scorer/precise_prefix_cache.go || { echo "HALT: PrecisePrefixCache scorer not found — verify submodule is initialized"; exit 1; }
 ```
 
 ## Stale Artifact Guard

@@ -20,7 +20,11 @@ type EvolvedScorer struct {
 }
 
 // NewEvolvedScorer creates an EvolvedScorer wrapping the given Algorithm.
+// Panics if alg is nil — callers must provide a valid Algorithm.
 func NewEvolvedScorer(alg Algorithm) *EvolvedScorer {
+	if alg == nil {
+		panic("NewEvolvedScorer: alg must not be nil")
+	}
 	return &EvolvedScorer{
 		typedName: plugin.TypedName{Type: EvolvedScorerType},
 		alg:       alg,

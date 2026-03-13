@@ -16,8 +16,8 @@ EVOLVE-BLOCK location, and content hash.
 Verify all required input files exist before proceeding. **HALT if any check fails.**
 
 ```bash
-test -f routing/best_program.py || echo "HALT: missing routing/best_program.py"
-test -f routing/best_program_info.json || echo "HALT: missing routing/best_program_info.json"
+test -f routing/best_program.py || { echo "HALT: missing routing/best_program.py"; exit 1; }
+test -f routing/best_program_info.json || { echo "HALT: missing routing/best_program_info.json"; exit 1; }
 ```
 
 ## Stale Artifact Guard
@@ -33,7 +33,9 @@ rm -f workspace/algorithm_summary.json
 
 ```bash
 mkdir -p workspace
-.venv/bin/python tools/transfer_cli.py extract routing/
+# Use --strict in CI environments (enforces minimum signal count).
+# transfer_cli.py auto-detects CI via the CI env var and will fail without --strict.
+.venv/bin/python tools/transfer_cli.py extract ${CI:+--strict} routing/
 ```
 
 **Exit code handling:**

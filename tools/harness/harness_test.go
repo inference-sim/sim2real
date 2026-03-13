@@ -233,7 +233,7 @@ func TestCrossLanguageHashConsistency(t *testing.T) {
 	cmd.Dir = repoRoot
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Skipf("extract command failed: %v\noutput: %s", err, output)
+		t.Fatalf("extract command failed: %v\noutput: %s", err, output)
 	}
 
 	// Read the summary written by extract
@@ -382,6 +382,97 @@ func TestEvolvedScorerContract(t *testing.T) {
 	}
 	if len(emptyScores) != 0 {
 		t.Errorf("Score(nil endpoints) returned %d entries, want 0", len(emptyScores))
+	}
+}
+
+func TestNewEvolvedScorerNilPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for nil Algorithm, got none")
+		}
+	}()
+	NewEvolvedScorer(nil)
+}
+
+func TestLoadAlgorithmErrorPaths(t *testing.T) {
+	repoRoot := t.TempDir()
+	workspaceDir := t.TempDir()
+
+	// Create a valid source file for cases that need it
+	sourceDir := filepath.Join(repoRoot, "routing")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sourceContent := "line1\n// EVOLVE-BLOCK-START\nlogic\n// EVOLVE-BLOCK-END\nline5"
+	if err := os.WriteFile(filepath.Join(sourceDir, "best_program.py"), []byte(sourceContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name      string
+		summary   map[string]interface{}
+		wantErr   string
+	}{
+		{
+			name:    "missing content hash",
+			summary: map[string]interface{}{"evolve_block_source": "routing/best_program.py:2-4", "evolve_block_content_hash": "", "signals": []interface{}{}},
+			wantErr: "missing required field 'evolve_block_content_hash'",
+		},
+		{
+			name:    "missing source",
+			summary: map[string]interface{}{"evolve_block_source": "", "evolve_block_content_hash": "abc123", "signals": []interface{}{}},
+			wantErr: "missing required field 'evolve_block_source'",
+		},
+		{
+			name:    "invalid source format (no colon)",
+			summary: map[string]interface{}{"evolve_block_source": "routing/best_program.py", "evolve_block_content_hash": "abc123", "signals": []interface{}{}},
+			wantErr: "invalid evolve_block_source format",
+		},
+		{
+			name:    "path traversal",
+			summary: map[string]interface{}{"evolve_block_source": "../../../etc/passwd:1-1", "evolve_block_content_hash": "abc123", "signals": []interface{}{}},
+			wantErr: "escapes repo root",
+		},
+		{
+			name:    "invalid line range format",
+			summary: map[string]interface{}{"evolve_block_source": "routing/best_program.py:2", "evolve_block_content_hash": "abc123", "signals": []interface{}{}},
+			wantErr: "invalid line range format",
+		},
+		{
+			name:    "invalid start line",
+			summary: map[string]interface{}{"evolve_block_source": "routing/best_program.py:abc-4", "evolve_block_content_hash": "abc123", "signals": []interface{}{}},
+			wantErr: "invalid start line",
+		},
+		{
+			name:    "invalid end line",
+			summary: map[string]interface{}{"evolve_block_source": "routing/best_program.py:2-xyz", "evolve_block_content_hash": "abc123", "signals": []interface{}{}},
+			wantErr: "invalid end line",
+		},
+		{
+			name:    "line range out of bounds",
+			summary: map[string]interface{}{"evolve_block_source": "routing/best_program.py:1-999", "evolve_block_content_hash": "abc123", "signals": []interface{}{}},
+			wantErr: "line range 1-999 out of bounds",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := json.Marshal(tc.summary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			summaryPath := filepath.Join(workspaceDir, tc.name+".json")
+			if err := os.WriteFile(summaryPath, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err = LoadAlgorithm(summaryPath, repoRoot)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("expected error containing %q, got: %v", tc.wantErr, err)
+			}
+		})
 	}
 }
 

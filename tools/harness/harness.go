@@ -15,7 +15,7 @@ import (
 )
 
 // Algorithm is an opaque handle to a loaded evolved algorithm.
-// Matches inference-sim's RoutingPolicy interface signature.
+// Mirrors the Route(Request, RouterState) → RoutingDecision signature from inference-sim.
 type Algorithm interface {
 	Route(req *sim.Request, state *sim.RouterState) sim.RoutingDecision
 }
@@ -85,7 +85,8 @@ func LoadAlgorithm(summaryPath, repoRoot string) (Algorithm, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve absolute path for repo root %q: %w", repoRoot, err)
 	}
-	if !strings.HasPrefix(absSource, absRoot+string(filepath.Separator)) {
+	rel, err := filepath.Rel(absRoot, absSource)
+	if err != nil || strings.HasPrefix(rel, "..") {
 		return nil, fmt.Errorf("evolve_block_source path %q escapes repo root", parts[0])
 	}
 	rangeParts := strings.SplitN(parts[1], "-", 2)
@@ -129,7 +130,7 @@ func LoadAlgorithm(summaryPath, repoRoot string) (Algorithm, error) {
 	return &trivialAlgorithm{}, nil
 }
 
-// trivialAlgorithm is a placeholder that scores by inverse effective load.
+// trivialAlgorithm is a placeholder that scores by 1/(1+EffectiveLoad).
 // PR5 replaces this with the actual evolved algorithm scorer.
 type trivialAlgorithm struct{}
 
@@ -164,7 +165,8 @@ func RunTuples(alg Algorithm, tuples []TestTuple) []Result {
 
 // NormalizeKVUtilization converts production KVCacheUsagePercent (0-100 scale)
 // to simulation KVUtilization (0.0-1.0 scale) by dividing by 100.
-// Values outside [0, 100] are clamped to the boundary.
+// Values outside [0, 100] are silently clamped to the boundary; this is intentional
+// because upstream metrics may briefly exceed nominal bounds during bursts.
 // Cross-PR contract #2: Stage 3 generated code MUST apply this normalization.
 func NormalizeKVUtilization(prodPercent float64) float64 {
 	if prodPercent < 0 {
