@@ -95,9 +95,10 @@ if go build ./pkg/plugins/scorer/ 2>"$TMPDIR_WORK/build_errors.txt"; then
     echo "PASS: Scorer template code compiles against submodule HEAD"
     exit 0
 else
-    # Check if all errors are just "imported and not used" (benign merge artifact
-    # from concatenating multiple template blocks). API-breaking errors are real failures.
-    REAL_ERRORS=$(grep 'template_check_temp.go' "$TMPDIR_WORK/build_errors.txt" | grep -v 'imported.*and not used' || true)
+    # Filter out "imported and not used" errors from the template file (benign — expected
+    # when concatenating multiple Go code blocks) and the Go package header line.
+    # All other errors (including in other files caused by the template) are real failures.
+    REAL_ERRORS=$(grep -v -e 'template_check_temp.go.*imported.*and not used' -e '^# ' "$TMPDIR_WORK/build_errors.txt" || true)
     if [ -n "$REAL_ERRORS" ]; then
         echo "FAIL: Scorer template code does not compile:" >&2
         cat "$TMPDIR_WORK/build_errors.txt" >&2

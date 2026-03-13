@@ -1,17 +1,20 @@
 package harness
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	sim "github.com/inference-sim/inference-sim/sim"
+	fwkdl "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/datalayer"
+	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 )
 
 func TestEquivalenceTrivial(t *testing.T) {
@@ -224,17 +227,13 @@ func TestCrossLanguageHashConsistency(t *testing.T) {
 		t.Skip("requires routing/best_program.py")
 	}
 
-	// Run extract to get the Python-computed hash
-	tmpWorkspace := t.TempDir()
+	// Run extract to get the Python-computed hash.
+	// extract always writes to workspace/ relative to the repo root.
 	cmd := exec.Command(venvPython, filepath.Join(repoRoot, "tools", "transfer_cli.py"), "extract", routingDir)
-	cmd.Env = append(os.Environ(), fmt.Sprintf("SIM2REAL_WORKSPACE=%s", tmpWorkspace))
+	cmd.Dir = repoRoot
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		// extract writes to workspace/ by default, check if algorithm_summary.json exists
-		summaryPath := filepath.Join(repoRoot, "workspace", "algorithm_summary.json")
-		if _, statErr := os.Stat(summaryPath); statErr != nil {
-			t.Skipf("extract failed and no summary found: %v\noutput: %s", err, output)
-		}
+		t.Skipf("extract command failed: %v\noutput: %s", err, output)
 	}
 
 	// Read the summary written by extract
@@ -310,7 +309,7 @@ func TestEquivalence(t *testing.T) {
 	t.Log("TestEquivalence: PR3 placeholder — PR5 adds Suite A/B/C logic")
 }
 
-// findRepoRoot walks up from the test file to find the repo root (contains CLAUDE.md).
+// findRepoRoot walks up from the working directory to find the repo root (contains CLAUDE.md).
 func findRepoRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()
@@ -331,13 +330,69 @@ func findRepoRoot(t *testing.T) string {
 
 func mustAtoi(t *testing.T, s string) int {
 	t.Helper()
-	n, err := fmt.Sscanf(s, "%d", new(int))
-	if n != 1 || err != nil {
+	result, err := strconv.Atoi(s)
+	if err != nil {
 		t.Fatalf("atoi %q: %v", s, err)
 	}
-	v, _ := fmt.Sscanf(s, "%d", new(int))
-	_ = v
-	result := 0
-	fmt.Sscanf(s, "%d", &result)
 	return result
 }
+
+func TestEvolvedScorerContract(t *testing.T) {
+	alg := &trivialAlgorithm{}
+	scorer := NewEvolvedScorer(alg).WithName("test-scorer")
+
+	// TypedName
+	tn := scorer.TypedName()
+	if tn.Type != EvolvedScorerType {
+		t.Errorf("TypedName.Type = %q, want %q", tn.Type, EvolvedScorerType)
+	}
+	if tn.Name != "test-scorer" {
+		t.Errorf("TypedName.Name = %q, want %q", tn.Name, "test-scorer")
+	}
+
+	// Category
+	if scorer.Category() != scheduling.Distribution {
+		t.Errorf("Category() = %v, want Distribution", scorer.Category())
+	}
+
+	// Score returns 0.5 for each endpoint (PR3 placeholder contract)
+	endpoints := []scheduling.Endpoint{
+		&mockEndpoint{name: "ep-a"},
+		&mockEndpoint{name: "ep-b"},
+	}
+	scores := scorer.Score(context.Background(), nil, nil, endpoints)
+	if len(scores) != len(endpoints) {
+		t.Fatalf("Score returned %d entries, want %d", len(scores), len(endpoints))
+	}
+	for _, ep := range endpoints {
+		score, ok := scores[ep]
+		if !ok {
+			t.Errorf("missing score for endpoint")
+			continue
+		}
+		if score != 0.5 {
+			t.Errorf("score = %f, want 0.5", score)
+		}
+	}
+
+	// Empty endpoints returns empty map (not nil)
+	emptyScores := scorer.Score(context.Background(), nil, nil, nil)
+	if emptyScores == nil {
+		t.Error("Score(nil endpoints) returned nil, want empty map")
+	}
+	if len(emptyScores) != 0 {
+		t.Errorf("Score(nil endpoints) returned %d entries, want 0", len(emptyScores))
+	}
+}
+
+// mockEndpoint satisfies scheduling.Endpoint for testing.
+type mockEndpoint struct {
+	name string
+}
+
+func (m *mockEndpoint) GetMetadata() *fwkdl.EndpointMetadata { return &fwkdl.EndpointMetadata{} }
+func (m *mockEndpoint) GetMetrics() *fwkdl.Metrics           { return &fwkdl.Metrics{} }
+func (m *mockEndpoint) String() string                       { return m.name }
+func (m *mockEndpoint) Get(string) (fwkdl.Cloneable, bool)   { return nil, false }
+func (m *mockEndpoint) Put(string, fwkdl.Cloneable)          {}
+func (m *mockEndpoint) Keys() []string                       { return nil }

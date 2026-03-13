@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 
@@ -163,6 +164,7 @@ func RunTuples(alg Algorithm, tuples []TestTuple) []Result {
 
 // NormalizeKVUtilization converts production KVCacheUsagePercent (0-100 scale)
 // to simulation KVUtilization (0.0-1.0 scale) by dividing by 100.
+// Values outside [0, 100] are clamped to the boundary.
 // Cross-PR contract #2: Stage 3 generated code MUST apply this normalization.
 func NormalizeKVUtilization(prodPercent float64) float64 {
 	if prodPercent < 0 {
@@ -197,7 +199,7 @@ func runOneTuple(alg Algorithm, tuple TestTuple) (result Result) {
 	result.Tuple = tuple
 	defer func() {
 		if r := recover(); r != nil {
-			result.Error = fmt.Errorf("panic during Route: %v", r)
+			result.Error = fmt.Errorf("panic during Route: %v\n%s", r, debug.Stack())
 		}
 	}()
 	decision := alg.Route(&tuple.Request, &tuple.State)
@@ -205,8 +207,11 @@ func runOneTuple(alg Algorithm, tuple TestTuple) (result Result) {
 	if len(result.SimScores) == 0 && decision.Reason == "no-endpoints" {
 		result.NoEndpoints = true
 		result.Passed = true
+	} else if len(result.SimScores) == 0 {
+		result.Passed = false
+		result.Error = fmt.Errorf("algorithm returned empty scores with reason %q", decision.Reason)
 	} else {
-		result.Passed = len(result.SimScores) > 0
+		result.Passed = true
 	}
 	return result
 }

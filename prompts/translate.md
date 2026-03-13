@@ -121,14 +121,15 @@ Derive the concrete access path from PrecisePrefixCache:
 Before writing the final artifact, validate the JSON against the schema:
 
 ```bash
-# Write to temp file first
-TMPFILE=$(mktemp)
-cat > "$TMPFILE" << 'ARTIFACT_EOF'
+# Write directly to the final location (validate-schema auto-discovers the schema
+# from the filename stem, so the file must be named signal_coverage.json)
+mkdir -p workspace
+cat > workspace/signal_coverage.json << 'ARTIFACT_EOF'
 {JSON content here}
 ARTIFACT_EOF
 
-# Validate before moving to final location
-.venv/bin/python tools/transfer_cli.py validate-schema "$TMPFILE" --schema tools/schemas/signal_coverage.schema.json && mv "$TMPFILE" workspace/signal_coverage.json || { echo "HALT: pre-write validation failed"; rm -f "$TMPFILE"; }
+# Validate the written artifact
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/signal_coverage.json || { echo "HALT: pre-write validation failed"; rm -f workspace/signal_coverage.json; }
 ```
 
 **HALT if pre-write validation fails** with `halt_reason: "pre_write_validation_failure"`.

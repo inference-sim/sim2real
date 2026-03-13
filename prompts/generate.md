@@ -52,7 +52,7 @@ Delete any existing output artifacts to prevent stale files from a prior run.
 ```bash
 rm -f workspace/stage3_output.json
 # Also remove any previously generated scorer files (read algorithm_name from summary)
-ALGO_NAME=$(python3 -c "import json; print(json.load(open('workspace/algorithm_summary.json'))['algorithm_name'])" 2>/dev/null || true)
+ALGO_NAME=$(.venv/bin/python -c "import json; print(json.load(open('workspace/algorithm_summary.json'))['algorithm_name'])" 2>/dev/null || true)
 if [ -n "$ALGO_NAME" ]; then
     SANITIZED=$(echo "$ALGO_NAME" | tr ' .-' '_' | tr -s '_' | tr '[:upper:]' '[:lower:]' | sed 's/^_//;s/_$//')
     rm -f "llm-d-inference-scheduler/pkg/plugins/scorer/${SANITIZED}.go"
