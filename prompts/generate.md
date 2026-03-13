@@ -136,7 +136,7 @@ Generate `<name>_test.go` following Section 6 patterns from the scorer template.
 
 ### 3f: Add Registration
 
-Add the scorer factory registration to `llm-d-inference-scheduler/pkg/plugins/scorer/register.go`.
+Add the scorer factory registration to `llm-d-inference-scheduler/pkg/plugins/register.go`.
 
 ## Step 4: CacheHitRate Handling
 
@@ -194,11 +194,9 @@ On any halt, write `workspace/escalation.json` per the escalation schema with `"
 
 - `llm-d-inference-scheduler/pkg/plugins/scorer/<name>.go` — generated scorer plugin
 - `llm-d-inference-scheduler/pkg/plugins/scorer/<name>_test.go` — generated tests
-- `llm-d-inference-scheduler/pkg/plugins/scorer/register.go` — modified with new registration
+- `llm-d-inference-scheduler/pkg/plugins/register.go` — modified with new registration
 - `workspace/stage3_output.json` — stage output artifact with:
   - `scorer_file`: path to generated scorer
   - `test_file`: path to generated test file
-  - `registration_file`: path to register.go
+  - `register_file`: path to register.go
   - `scorer_type`: the TypedName type string
-  - `algorithm_name`: from algorithm_summary.json
-  - `signals_used`: list of signal names consumed by the scorer
