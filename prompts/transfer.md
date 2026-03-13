@@ -17,7 +17,7 @@ Stages 1 through 6, verifying prerequisite artifacts between each stage.
 | 1     | Extract   | `prompts/extract.md`  | `routing/best_program.py`, `routing/best_program_info.json` | `workspace/algorithm_summary.json` |
 | 2     | Translate | `prompts/translate.md`| `workspace/algorithm_summary.json`, `docs/transfer/blis_to_llmd_mapping.md` | `workspace/signal_coverage.json` |
 | 3     | Generate  | `prompts/generate.md` | `workspace/algorithm_summary.json`, `workspace/signal_coverage.json`, `docs/transfer/scorer_template.go.md` | scorer files + `workspace/stage3_output.json` |
-| 4     | Test      | *Defined in PR4*      | `workspace/stage3_output.json`               | test results                       |
+| 4     | Test      | `prompts/test.md`     | `workspace/stage3_output.json`               | build + test pass (no artifact)    |
 | 5     | Validate  | *Defined in PR5*      | test results, harness output                 | validation report                  |
 | 6     | PR        | *Defined in PR6*      | all artifacts                                | PRs in target repos                |
 
@@ -124,7 +124,26 @@ test -f workspace/stage3_output.json || { echo "HALT: Stage 3 output missing"; e
 
 ### Stage 4: Test
 
-*Defined in PR4.* Stage 4 drives build + test with retry logic.
+**Prompt:** `prompts/test.md`
+
+Follow the Stage 4 prompt to build and test the generated scorer plugin with retry logic.
+
+**Between-stage validation:**
+
+```bash
+# Verify Stage 3 output is still present and schema-valid
+test -f workspace/stage3_output.json || { echo "HALT: Stage 3 output missing"; exit 1; }
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/stage3_output.json || { echo "HALT: Stage 3 schema validation failed"; exit 1; }
+
+# Verify generated scorer file exists and builds
+SCORER_FILE=$(.venv/bin/python -c "import json; print(json.load(open('workspace/stage3_output.json'))['scorer_file'])")
+test -f "$SCORER_FILE" || { echo "HALT: generated scorer file missing: $SCORER_FILE"; exit 1; }
+
+# Final build + vet verification
+cd llm-d-inference-scheduler && go build ./... && go vet ./... && cd .. || { echo "HALT: Stage 4 build/vet verification failed"; exit 1; }
+```
+
+**HALT if any validation fails.** Do not proceed to Stage 5.
 
 ---
 
