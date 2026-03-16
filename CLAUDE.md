@@ -47,6 +47,10 @@ python tools/transfer_cli.py validate-mapping
 
 # Validate workspace artifact against JSON Schema
 python tools/transfer_cli.py validate-schema workspace/algorithm_summary.json
+
+# Classify go build/test output into error classes (stdin)
+# Exit 0 = clean, 1 = error found, 2 = CLI infrastructure error
+echo "<go build/test output>" | python tools/transfer_cli.py test-status
 ```
 
 ## Important: Artifact Consumption

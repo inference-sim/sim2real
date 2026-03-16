@@ -178,6 +178,34 @@ class TestTestStatusInfrastructure:
         assert output["error_count"] == 1
         assert all(e["class"] == "infrastructure" for e in output["errors"])
 
+    def test_compilation_takes_precedence_over_test_failure(self):
+        """BC-3: When both compilation errors and test failures are present,
+        compilation takes precedence (determines retry targets code fixes)."""
+        go_output = (
+            "pkg/plugins/scorer/evolved.go:42:15: undefined: scheduling.InvalidType\n"
+            "--- FAIL: TestEvolvedScorer (0.01s)\n"
+            "    evolved_scorer_test.go:25: expected 0.5, got 0.0\n"
+            "FAIL\n"
+        )
+        code, output = run_test_status(go_output)
+        assert code == 1
+        assert output["error_class"] == "compilation"
+        assert all(e["class"] == "compilation" for e in output["errors"])
+
+    def test_build_failed_with_test_failure_classifies_as_test_failure(self):
+        """BC-3: '[build failed]' co-present with test failures (but no individual
+        compilation errors) is classified as 'test_failure', not 'infrastructure',
+        so the retry loop is entered instead of halting."""
+        go_output = (
+            "--- FAIL: TestEvolvedScorer (0.01s)\n"
+            "    evolved_scorer_test.go:25: expected 0.5, got 0.0\n"
+            "FAIL\tgithub.com/llm-d/llm-d-inference-scheduler/pkg/plugins/scorer [build failed]\n"
+        )
+        code, output = run_test_status(go_output)
+        assert code == 1
+        assert output["error_class"] == "test_failure"
+        assert all(e["class"] == "test_failure" for e in output["errors"])
+
     def test_build_failed_with_compilation_errors_classifies_as_compilation(self):
         """BC-3: '[build failed]' co-present with individual compilation errors (typical
         test-file compilation failure from 'go test') is classified as 'compilation',

@@ -5,6 +5,7 @@ Commands:
     extract <routing_dir>    Parse EVOLVE-BLOCK, produce algorithm_summary.json
     validate-mapping         Check mapping artifact completeness
     validate-schema <path>   Validate workspace artifact against JSON Schema
+    test-status              Classify go build/test output (stdin) into error classes
 
 Exit codes: 0 = success, 1 = validation failure, 2 = infrastructure error
 All commands output JSON to stdout.
@@ -900,7 +901,7 @@ def cmd_test_status(args: argparse.Namespace) -> int:
             if e["class"] == "infrastructure"
         )
     )
-    if "infrastructure" in classes_found and not (infra_is_build_failed_only and "compilation" in classes_found):
+    if "infrastructure" in classes_found and not (infra_is_build_failed_only and ("compilation" in classes_found or "test_failure" in classes_found)):
         primary_class = "infrastructure"
     elif "compilation" in classes_found:
         primary_class = "compilation"
