@@ -92,6 +92,16 @@ PR3 prompt templates MUST consume these PR1 artifacts:
 3. Each prompt MUST reference `evolve_block_source` to locate the algorithm logic
 4. Generated code MUST be validated by `validate-schema` before downstream consumption
 
+### PR4 Deliverables
+
+- **Stage 4 prompt:** `prompts/test.md` — build + test with structured retry logic, error classification, halt conditions
+- **test-status CLI command:** `tools/transfer_cli.py test-status` — classifies `go build`/`go test` output into compilation, test_failure, infrastructure error classes
+- **Escalation schema update:** Stage 4 halt reasons added to `tools/schemas/escalation.schema.json`
+
+**PR4 obligations for downstream PRs:**
+1. **Stage 4 success state:** Stage 4 success means `go build ./...`, `go vet ./...`, and `go test ./pkg/plugins/scorer/... -v` all pass in the llm-d-inference-scheduler submodule. There is no `stage4_output.json` — PR5 reads generated code paths from `stage3_output.json`.
+2. **Retry state not persisted:** Retry counters live only in the interactive session. If Stage 4 halts and the operator restarts, counters reset to zero.
+
 ## Algorithm Logic Boundary
 
 PR1 captures *what signals the algorithm reads* (signal metadata: names, types, access paths, normalization). PR3 captures *what the algorithm does with those signals* (behavioral logic). Concretely, "algorithm logic" means:

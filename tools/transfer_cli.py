@@ -5,6 +5,7 @@ Commands:
     extract <routing_dir>    Parse EVOLVE-BLOCK, produce algorithm_summary.json
     validate-mapping         Check mapping artifact completeness
     validate-schema <path>   Validate workspace artifact against JSON Schema
+    test-status              Classify go build/test output (stdin) into error classes
 
 Exit codes: 0 = success, 1 = validation failure, 2 = infrastructure error
 All commands output JSON to stdout.
@@ -776,6 +777,147 @@ def cmd_validate_schema(args: argparse.Namespace) -> int:
                     violations=[])
 
 
+def cmd_test_status(args: argparse.Namespace) -> int:
+    """Classify errors from go build/test output (reads from stdin).
+
+    Error classes:
+      - compilation: Go compiler errors (file:line:col: message)
+      - test_failure: Go test failures (--- FAIL: TestName)
+      - infrastructure: Module resolution, timeouts, missing packages
+      - none: No errors detected
+
+    Precedence: infrastructure > compilation > test_failure
+    (infrastructure errors mask other errors since they indicate
+    the build environment is broken, not the generated code).
+
+    Exit codes: 0 = no errors found, 1 = errors classified, 2 = CLI infrastructure error
+    """
+    MAX_INPUT_SIZE = 10 * 1024 * 1024  # 10 MB
+    try:
+        input_text = sys.stdin.read(MAX_INPUT_SIZE + 1)
+        if len(input_text) > MAX_INPUT_SIZE:
+            return _output("error", 2,
+                           output_type="test_status",
+                           error_class="none",
+                           error_count=0,
+                           errors=[{"class": "cli_error", "message": "stdin exceeds 10 MB limit", "file": ""}])
+    except UnicodeDecodeError as exc:
+        return _output("error", 2,
+                       output_type="test_status",
+                       error_class="none",
+                       error_count=0,
+                       errors=[{"class": "cli_error", "message": f"stdin contains invalid UTF-8: {exc}", "file": ""}])
+    except OSError as exc:
+        return _output("error", 2,
+                       output_type="test_status",
+                       error_class="none",
+                       error_count=0,
+                       errors=[{"class": "cli_error", "message": f"Failed to read stdin: {exc}", "file": ""}])
+
+    errors_found: list[dict] = []
+    classes_found: set[str] = set()
+
+    # Infrastructure patterns (checked first — highest precedence).
+    # Note: patterns are ordered from most specific to most general.
+    # Known gap: toolchain-internal .go file paths (e.g. internal/buildcfg/) can
+    # be misclassified as compilation errors; the Stage 4 prompt handles this by
+    # checking whether error file paths appear in stage3_output.json.
+    infra_patterns = [
+        (r'go:\s+.*(?:reading|downloading|Get\s+").*(?:410 Gone|404 Not Found|connection refused|i/o timeout)', 'module_fetch_failure'),
+        (r'cannot find module providing package', 'missing_module'),
+        (r'context deadline exceeded', 'timeout'),
+        (r'dial tcp.*(?:connection refused|i/o timeout)', 'network_timeout'),
+        (r'go: (?:finding|downloading|extracting)\s+\S+.*(?:error|failed)', 'module_error'),
+        (r'no required module provides package', 'missing_module'),
+        (r'go: no Go toolchain found', 'missing_toolchain'),
+        (r'signal:\s+killed', 'process_killed'),
+        (r'\[build failed\]', 'build_failed'),
+    ]
+    for pattern, sub_class in infra_patterns:
+        for match in re.finditer(pattern, input_text, re.MULTILINE):
+            classes_found.add("infrastructure")
+            errors_found.append({
+                "class": "infrastructure",
+                "sub_class": sub_class,
+                "message": match.group(0).strip(),
+                "file": "",
+            })
+
+    # Compilation errors: file.go:line:col: message OR file.go:line: message
+    for match in re.finditer(
+        r'^(?:#\s+\S+\n)?(\S+\.go):(\d+):(?:(\d+):)?\s+(.+)$',
+        input_text, re.MULTILINE
+    ):
+        classes_found.add("compilation")
+        errors_found.append({
+            "class": "compilation",
+            "message": match.group(4).strip(),
+            "file": match.group(1),
+            "line": int(match.group(2)),
+            "column": int(match.group(3)) if match.group(3) else None,
+        })
+
+    # Test failures: --- FAIL: TestName
+    for match in re.finditer(
+        r'^--- FAIL:\s+(\S+)\s+\([\d.]+s\)',
+        input_text, re.MULTILINE
+    ):
+        classes_found.add("test_failure")
+        errors_found.append({
+            "class": "test_failure",
+            "message": f"Test failed: {match.group(1)}",
+            "file": "",
+            "test_name": match.group(1),
+        })
+
+    # Also detect panics in tests
+    for match in re.finditer(
+        r'^panic:\s+(.+)$',
+        input_text, re.MULTILINE
+    ):
+        classes_found.add("test_failure")
+        errors_found.append({
+            "class": "test_failure",
+            "message": f"Panic: {match.group(1).strip()}",
+            "file": "",
+        })
+
+    if not errors_found:
+        return _output("ok", 0,
+                       output_type="test_status",
+                       error_class="none",
+                       error_count=0)
+
+    # Precedence: infrastructure > compilation > test_failure
+    # Exception: [build failed] summary-only (BC-3) is infrastructure when there are no
+    # individual compilation errors. When both co-occur (e.g. test-file compilation
+    # failure from 'go test' Step 3), prefer compilation so the retry loop is entered
+    # rather than halting — the [build failed] line is just a summary in that case.
+    infra_is_build_failed_only = (
+        "infrastructure" in classes_found
+        and all(
+            e.get("sub_class") == "build_failed"
+            for e in errors_found
+            if e["class"] == "infrastructure"
+        )
+    )
+    if "infrastructure" in classes_found and not (infra_is_build_failed_only and ("compilation" in classes_found or "test_failure" in classes_found)):
+        primary_class = "infrastructure"
+    elif "compilation" in classes_found:
+        primary_class = "compilation"
+    else:
+        primary_class = "test_failure"
+
+    # Filter to only primary-class errors
+    primary_errors = [e for e in errors_found if e["class"] == primary_class]
+
+    return _output("error", 1,
+                   output_type="test_status",
+                   error_class=primary_class,
+                   error_count=len(primary_errors),
+                   errors=primary_errors)
+
+
 def main():
     if sys.version_info < (3, 10):
         print("ERROR: transfer_cli.py requires Python >= 3.10 "
@@ -808,6 +950,11 @@ def main():
     p_schema = subparsers.add_parser("validate-schema", help="Validate workspace artifact against schema")
     p_schema.add_argument("artifact_path", help="Path to workspace JSON artifact")
     p_schema.set_defaults(func=cmd_validate_schema)
+
+    # test-status
+    p_test_status = subparsers.add_parser("test-status",
+        help="Classify errors from go build/test output (reads stdin)")
+    p_test_status.set_defaults(func=cmd_test_status)
 
     args = parser.parse_args()
     exit_code = args.func(args)
