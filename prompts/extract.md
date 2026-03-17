@@ -16,8 +16,8 @@ EVOLVE-BLOCK location, and content hash.
 Verify all required input files exist before proceeding. **HALT if any check fails.**
 
 ```bash
-test -f routing/best_program.py || { echo "HALT: missing routing/best_program.py"; exit 1; }
-test -f routing/best_program_info.json || { echo "HALT: missing routing/best_program_info.json"; exit 1; }
+test -f blis_router/best/best_program.go || { echo "HALT: missing blis_router/best/best_program.go"; exit 1; }
+test -f blis_router/best/best_program_info.json || { echo "HALT: missing blis_router/best/best_program_info.json"; exit 1; }
 ```
 
 ## Stale Artifact Guard
@@ -35,7 +35,7 @@ rm -f workspace/algorithm_summary.json
 mkdir -p workspace
 # Use --strict in CI environments (enforces minimum signal count).
 # transfer_cli.py auto-detects CI via the CI env var and will fail without --strict.
-.venv/bin/python tools/transfer_cli.py extract ${CI:+--strict} routing/
+.venv/bin/python tools/transfer_cli.py extract ${CI:+--strict} blis_router/best/
 ```
 
 **Exit code handling:**
@@ -90,8 +90,7 @@ print('Content hash:', d.get('evolve_block_content_hash'))
 **Review checklist:**
 - Verify KVUtilization has `normalization_note` with `divide_prod_by_100` action.
 - Verify CacheHitRate has `fidelity_provisional: true` if present.
-- Verify all expected signals are present (QueueDepth, BatchSize, InFlightRequests,
-  KVUtilization, CacheHitRate, SessionID for the current evolved algorithm).
+- Verify that the extracted signals match those actually referenced in the EVOLVE-BLOCK being processed. For the current blis_router EVOLVE-BLOCK, the expected signals are `InFlightRequests` and `KVUtilization`. Do **not** flag absence of `QueueDepth`, `BatchSize`, `CacheHitRate`, or `SessionID` as a bug — these signals are not present in the current EVOLVE-BLOCK. If the algorithm changes, re-verify against the new EVOLVE-BLOCK source.
 
 ## Halt Conditions
 
@@ -106,7 +105,7 @@ print('Content hash:', d.get('evolve_block_content_hash'))
 
 - `workspace/algorithm_summary.json` — contains:
   - `algorithm_name`: string
-  - `evolve_block_source`: path with line range (e.g., `routing/best_program.py:171-242`)
+  - `evolve_block_source`: path with line range (e.g., `blis_router/best/best_program.go:177-258`)
   - `evolve_block_content_hash`: SHA-256 hex string
   - `signals[]`: array of signal objects with name, type, access_path, normalization_note
   - `composite_signals[]`: array of composite signal definitions

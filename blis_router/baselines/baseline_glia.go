@@ -1,17 +1,8 @@
-"""
-Initial Program: BLIS Router Weight Optimization
-
-This contains the full routing.go file (synced with inference-sim HEAD)
-with EVOLVE-BLOCK markers around the WeightedScoring logic.
-
-Goal: Evolve the routing policy to minimize end-to-end latency across workloads.
-"""
-
-# Full routing.go file with EVOLVE-BLOCK markers (synced with inference-sim HEAD)
-GO_ROUTING_CODE = """package sim
+package sim
 
 import (
 	"fmt"
+	"math/rand"
 )
 
 // RoutingSnapshot is a lightweight view of instance state for policy decisions.
@@ -113,8 +104,10 @@ func (rr *RoundRobin) Route(req *Request, state *RouterState) RoutingDecision {
 // LeastLoaded routes requests to the instance with minimum (QueueDepth + BatchSize + InFlightRequests).
 // InFlightRequests prevents pile-on at high request rates where multiple routing decisions
 // occur at the same timestamp before instance events process (#175).
-// Ties are broken by first occurrence in snapshot order (lowest index).
-type LeastLoaded struct{}
+// Ties are broken randomly when rng is non-nil; by first occurrence (lowest index) when rng is nil.
+type LeastLoaded struct {
+	rng *rand.Rand
+}
 
 // Route implements RoutingPolicy for LeastLoaded.
 func (ll *LeastLoaded) Route(req *Request, state *RouterState) RoutingDecision {
@@ -123,18 +116,29 @@ func (ll *LeastLoaded) Route(req *Request, state *RouterState) RoutingDecision {
 		panic("LeastLoaded.Route: empty snapshots")
 	}
 
+	// Pass 1: find minimum load
 	minLoad := snapshots[0].EffectiveLoad()
-	target := snapshots[0]
-
 	for i := 1; i < len(snapshots); i++ {
-		load := snapshots[i].EffectiveLoad()
-		if load < minLoad {
+		if load := snapshots[i].EffectiveLoad(); load < minLoad {
 			minLoad = load
-			target = snapshots[i]
 		}
 	}
 
-	return NewRoutingDecision(target.ID, fmt.Sprintf("least-loaded (load=%d)", minLoad))
+	// Pass 2: collect all instances tied at minimum load
+	var tied []int
+	for i, snap := range snapshots {
+		if snap.EffectiveLoad() == minLoad {
+			tied = append(tied, i)
+		}
+	}
+
+	// Random tie-breaking when rng is non-nil; positional (first) when nil.
+	idx := tied[0]
+	if len(tied) > 1 && ll.rng != nil {
+		idx = tied[ll.rng.Intn(len(tied))]
+	}
+
+	return NewRoutingDecision(snapshots[idx].ID, fmt.Sprintf("least-loaded (load=%d)", minLoad))
 }
 
 // observerFunc is called after each routing decision to update stateful scorer state.
@@ -154,11 +158,13 @@ type observerFunc func(req *Request, targetInstance string)
 // Stateful scorers (prefix-affinity) register observers that update internal
 // state after each routing decision. Observers are called after argmax selection.
 //
-// Higher scores are preferred. Ties broken by first occurrence in snapshot order.
+// Higher scores are preferred. Ties broken randomly when rng is non-nil;
+// by first occurrence (lowest index) when rng is nil.
 type WeightedScoring struct {
 	scorers   []scorerFunc
 	weights   []float64 // normalized to sum to 1.0
 	observers []observerFunc
+	rng       *rand.Rand
 }
 
 // Route implements RoutingPolicy for WeightedScoring.
@@ -169,79 +175,58 @@ func (ws *WeightedScoring) Route(req *Request, state *RouterState) RoutingDecisi
 	}
 
 	// EVOLVE-BLOCK-START
-	// Compute composite scores from all scorers
+	// Glia HRA (Head-Room Allocator) adapted for BLIS per-request routing.
+	decodeToPromptRatio := 0.6
+	safetyFraction := 0.03
+	blockSize := 16.0
+
+	inputTokens := float64(len(req.InputTokens))
+	reqBlocks := (inputTokens*(1.0+decodeToPromptRatio) + blockSize - 1.0) / blockSize
+
 	scores := make(map[string]float64, len(snapshots))
-	for i, scorer := range ws.scorers {
-		dimScores := scorer(req, snapshots)
-		for _, snap := range snapshots {
-			s := dimScores[snap.ID]
-			// Clamp to [0,1] per scorer contract
-			if s < 0 {
-				s = 0
-			}
-			if s > 1 {
-				s = 1
-			}
-			scores[snap.ID] += s * ws.weights[i]
-		}
-	}
-
-	// Find min effective load for load-based penalties
-	minLoad := float64(snapshots[0].EffectiveLoad())
-	for _, snap := range snapshots[1:] {
-		l := float64(snap.EffectiveLoad())
-		if l < minLoad {
-			minLoad = l
-		}
-	}
-
-	hasSession := req.SessionID != ""
-
-	for _, snap := range snapshots {
-		load := float64(snap.EffectiveLoad())
-
-		// Strong load penalty: cubic scaling strongly prefers least loaded
-		loadDelta := load - minLoad
-		if loadDelta > 0.2 {
-			loadPenalty := 1.0 / (1.0 + loadDelta*loadDelta*loadDelta*5.0)
-			scores[snap.ID] *= loadPenalty
-		}
-
-		// Cache affinity for multi-turn sessions
-		if hasSession && snap.CacheHitRate > 0.35 {
-			scores[snap.ID] *= (1.0 + snap.CacheHitRate*0.3)
-		}
-
-		// Memory pressure penalty
-		if snap.KVUtilization > 0.82 {
-			kvPenalty := 1.0 - (snap.KVUtilization-0.82)*2.0
-			if kvPenalty < 0.3 {
-				kvPenalty = 0.3
-			}
-			scores[snap.ID] *= kvPenalty
-		}
-
-		// Hard penalty for overloaded instances
-		if load > 7.0 {
-			scores[snap.ID] *= 0.4
-		} else if load > 4.5 {
-			scores[snap.ID] *= (1.0 - (load-4.5)*0.12)
-		}
-	}
-
-	// Argmax: select instance with highest composite score.
-	// Ties broken by first occurrence in snapshot order (strict >).
-	bestScore := -1.0
 	bestIdx := 0
+	bestScore := -1e18
+
 	for i, snap := range snapshots {
-		if scores[snap.ID] > bestScore {
-			bestScore = scores[snap.ID]
+		freeBlocks := float64(snap.FreeKVBlocks)
+		kvUtil := snap.KVUtilization
+
+		var totalBlocks float64
+		if kvUtil > 0.001 && kvUtil < 0.999 {
+			totalBlocks = freeBlocks / (1.0 - kvUtil)
+		} else if kvUtil <= 0.001 {
+			totalBlocks = freeBlocks
+		} else {
+			totalBlocks = freeBlocks * 1000.0
+		}
+		if totalBlocks < 1.0 {
+			totalBlocks = 1.0
+		}
+
+		minFreeBlocks := totalBlocks * safetyFraction
+		allocatedBlocks := totalBlocks - freeBlocks
+		projectedUsage := allocatedBlocks + reqBlocks
+		freeAfter := totalBlocks - projectedUsage
+		admissible := freeAfter >= minFreeBlocks
+		queueLoad := float64(snap.QueueDepth + snap.BatchSize + snap.InFlightRequests)
+
+		var score float64
+		if admissible {
+			score = -projectedUsage/totalBlocks - 0.001*queueLoad
+		} else {
+			score = -10.0 - projectedUsage/totalBlocks - 0.001*queueLoad
+		}
+
+		scores[snap.ID] = score
+		if score > bestScore {
+			bestScore = score
 			bestIdx = i
 		}
 	}
 	// EVOLVE-BLOCK-END
 
-	// Notify observers of routing decision (stateful scorers update their state)
+	// Notify observers of routing decision (stateful scorers update their state).
+	// Uses post-tie-breaking bestIdx so prefix-affinity records the actual target.
 	for _, obs := range ws.observers {
 		obs(req, snapshots[bestIdx].ID)
 	}
@@ -285,8 +270,10 @@ func (ab *AlwaysBusiest) Route(_ *Request, state *RouterState) RoutingDecision {
 // For weighted scoring, scorerConfigs configures the scorer pipeline.
 // If scorerConfigs is nil/empty for "weighted", DefaultScorerConfigs() is used.
 // Non-weighted policies ignore scorerConfigs.
+// The rng parameter enables random tie-breaking for least-loaded and weighted policies;
+// nil preserves positional tie-breaking. Ignored by round-robin and always-busiest.
 // Panics on unrecognized names.
-func NewRoutingPolicy(name string, scorerConfigs []ScorerConfig, blockSize int64) RoutingPolicy {
+func NewRoutingPolicy(name string, scorerConfigs []ScorerConfig, blockSize int64, rng *rand.Rand) RoutingPolicy {
 	if !IsValidRoutingPolicy(name) {
 		panic(fmt.Sprintf("unknown routing policy %q", name))
 	}
@@ -294,7 +281,7 @@ func NewRoutingPolicy(name string, scorerConfigs []ScorerConfig, blockSize int64
 	case "", "round-robin":
 		return &RoundRobin{}
 	case "least-loaded":
-		return &LeastLoaded{}
+		return &LeastLoaded{rng: rng}
 	case "weighted":
 		if len(scorerConfigs) == 0 {
 			scorerConfigs = DefaultScorerConfigs()
@@ -309,15 +296,10 @@ func NewRoutingPolicy(name string, scorerConfigs []ScorerConfig, blockSize int64
 			}
 		}
 		weights := normalizeScorerWeights(scorerConfigs)
-		return &WeightedScoring{scorers: scorers, weights: weights, observers: observers}
+		return &WeightedScoring{scorers: scorers, weights: weights, observers: observers, rng: rng}
 	case "always-busiest":
 		return &AlwaysBusiest{}
 	default:
 		panic(fmt.Sprintf("unhandled routing policy %q", name))
 	}
 }
-"""
-
-# This will be used as the initial program for SkyDiscover
-if __name__ == "__main__":
-    print(GO_ROUTING_CODE)

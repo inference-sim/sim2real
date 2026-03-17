@@ -14,11 +14,11 @@ Stages 1 through 6, verifying prerequisite artifacts between each stage.
 
 | Stage | Name      | Prompt File           | Input Artifacts                              | Output Artifacts                   |
 |-------|-----------|-----------------------|----------------------------------------------|------------------------------------|
-| 1     | Extract   | `prompts/extract.md`  | `routing/best_program.py`, `routing/best_program_info.json` | `workspace/algorithm_summary.json` |
+| 1     | Extract   | `prompts/extract.md`  | `blis_router/best/best_program.go`, `blis_router/best/best_program_info.json` | `workspace/algorithm_summary.json` |
 | 2     | Translate | `prompts/translate.md`| `workspace/algorithm_summary.json`, `docs/transfer/blis_to_llmd_mapping.md` | `workspace/signal_coverage.json` |
 | 3     | Generate  | `prompts/generate.md` | `workspace/algorithm_summary.json`, `workspace/signal_coverage.json`, `docs/transfer/scorer_template.go.md` | scorer files + `workspace/stage3_output.json` |
 | 4     | Test      | `prompts/test.md`     | `workspace/stage3_output.json`               | build + test pass (no artifact)    |
-| 5     | Validate  | *Defined in PR5*      | `workspace/stage3_output.json` (generated scorer files) | validation report     |
+| 5     | Validate  | `prompts/validate.md` | `workspace/stage3_output.json` (generated scorer files) | `workspace/validation_results.json` |
 | 6     | PR        | *Defined in PR6*      | all artifacts                                | PRs in target repos                |
 
 ## Prerequisites
@@ -30,8 +30,8 @@ Before starting the pipeline, verify all required artifacts and submodules exist
 # Verify required artifacts
 test -f docs/transfer/blis_to_llmd_mapping.md || { echo "HALT: missing mapping artifact"; exit 1; }
 test -f docs/transfer/scorer_template.go.md || { echo "HALT: missing scorer template"; exit 1; }
-test -f routing/best_program.py || { echo "HALT: missing routing input best_program.py"; exit 1; }
-test -f routing/best_program_info.json || { echo "HALT: missing routing input best_program_info.json"; exit 1; }
+test -f blis_router/best/best_program.go || { echo "HALT: missing blis_router/best/best_program.go"; exit 1; }
+test -f blis_router/best/best_program_info.json || { echo "HALT: missing blis_router/best/best_program_info.json"; exit 1; }
 
 # Verify submodules initialized
 test -d inference-sim/sim || { echo "HALT: inference-sim submodule not initialized — run git submodule update --init inference-sim"; exit 1; }
@@ -149,7 +149,24 @@ cd llm-d-inference-scheduler && go build ./... && go vet ./... && go test -timeo
 
 ### Stage 5: Validate
 
-*Defined in PR5.* Stage 5 runs 3-suite equivalence validation + cluster benchmarks.
+**Prompt:** `prompts/validate.md`
+
+Follow the Stage 5 prompt to run 3-suite equivalence validation + cluster benchmarks.
+
+**Between-stage validation:**
+
+```bash
+# Verify output exists
+test -f workspace/validation_results.json || { echo "HALT: Stage 5 output missing"; exit 1; }
+
+# Schema validation
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/validation_results.json || { echo "HALT: Stage 5 schema validation failed"; exit 1; }
+
+# Semantic check: overall_verdict must be PASS (or INCONCLUSIVE with operator sign-off)
+.venv/bin/python -c "import json,sys; d=json.load(open('workspace/validation_results.json')); v=d.get('overall_verdict',''); sys.exit(0 if v in ('PASS','INCONCLUSIVE') else 1)" || { echo "HALT: Stage 5 overall_verdict is not PASS or INCONCLUSIVE"; exit 1; }
+```
+
+**HALT if any validation fails.** Do not proceed to Stage 6.
 
 ---
 

@@ -11,12 +11,7 @@ import (
 	sim "github.com/inference-sim/inference-sim/sim"
 )
 
-const (
-	EvolvedScorerType = "evolved-scorer"
-	// sessionTokenHeader is the request header key for session affinity.
-	// Matches session_affinity.go in llm-d-inference-scheduler.
-	sessionTokenHeader = "x-session-token"
-)
+const EvolvedScorerType = "evolved-scorer"
 
 // compile-time interface assertion
 var _ scheduling.Scorer = &EvolvedScorer{}
@@ -27,11 +22,11 @@ var _ scheduling.Scorer = &EvolvedScorer{}
 //
 // Signal translation (from workspace/signal_coverage.json and mapping artifact):
 //   - endpoint.GetMetrics().WaitingQueueSize    → sim.RoutingSnapshot.QueueDepth
+//     (used by base WeightedScoring via EffectiveLoad; not in EVOLVE-BLOCK directly)
 //   - endpoint.GetMetrics().RunningRequestsSize → sim.RoutingSnapshot.InFlightRequests
-//     (F-10 single-count: BatchSize intentionally omitted — defaults to 0; only InFlightRequests maps to RunningRequestsSize)
+//     (F-10 single-count: BatchSize intentionally omitted — defaults to 0)
 //   - NormalizeKVUtilization(KVCacheUsagePercent) → sim.RoutingSnapshot.KVUtilization
-//   - CacheHitRate: 0.0 (zero fallback — no production field available)
-//   - request.Headers["x-session-token"] → sim.Request.SessionID
+//   Note: CacheHitRate and SessionID are not used by the new EVOLVE-BLOCK.
 type EvolvedScorer struct {
 	typedName plugin.TypedName
 	alg       Algorithm
@@ -66,7 +61,14 @@ func (s *EvolvedScorer) Category() scheduling.ScorerCategory {
 }
 
 // Score translates production endpoint metrics to sim types, runs the evolved algorithm,
-// and returns per-endpoint scores in [0, 1].
+// and returns per-endpoint scores from the evolved algorithm; values are not clamped to [0, 1] and may be negative when KV utilization is high (KV penalty is subtractive).
+//
+// WARNING — scheduler clamping under full-cluster KV saturation:
+// The production scheduler framework (enforceScoreRange in scheduler_profile.go) clamps
+// all scores to [0, 1] before accumulation. When all endpoints simultaneously exceed 0.9
+// KV utilization, the subtractive penalty can drive all scores below 0.0 — after clamping,
+// every endpoint receives score 0.0, losing all differentiation. Operators should monitor
+// for this condition under sustained cluster-wide KV pressure.
 //
 // Endpoints with nil metrics receive score 0.0 (defensive nil guard, matches BLISWeightedScorer).
 // Empty endpoint list returns an empty (non-nil) map.
@@ -110,9 +112,6 @@ func (s *EvolvedScorer) Score(_ context.Context, _ *scheduling.CycleState, req *
 	if req != nil {
 		if req.RequestId != "" {
 			simReq.ID = req.RequestId
-		}
-		if req.Headers != nil {
-			simReq.SessionID = req.Headers[sessionTokenHeader]
 		}
 	}
 

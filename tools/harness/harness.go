@@ -53,7 +53,7 @@ type summarySignal struct {
 // LoadAlgorithm loads an evolved algorithm by verifying the EVOLVE-BLOCK content hash.
 // summaryPath: path to workspace/algorithm_summary.json
 // repoRoot: repository root for resolving relative source paths
-// Returns: Algorithm interface wrapping a trivial scorer (PR3); PR5 extends with full evolved logic.
+// Returns: Algorithm interface wrapping evolvedAlgorithm, which implements the full EVOLVE-BLOCK logic (KV penalty + inflight tiebreaker) from blis_router/best/best_program.go.
 func LoadAlgorithm(summaryPath, repoRoot string) (Algorithm, error) {
 	data, err := os.ReadFile(summaryPath)
 	if err != nil {
@@ -70,12 +70,19 @@ func LoadAlgorithm(summaryPath, repoRoot string) (Algorithm, error) {
 		return nil, fmt.Errorf("algorithm_summary.json missing required field 'evolve_block_source'")
 	}
 
-	// Parse source path and line range (format: "path/to/file.py:START-END")
+	// Parse source path and line range (format: "path/to/file.go:START-END")
 	parts := strings.SplitN(summary.EvolveBlockSource, ":", 2)
 	if len(parts) != 2 {
 		return nil, fmt.Errorf("invalid evolve_block_source format: %q", summary.EvolveBlockSource)
 	}
-	sourcePath := filepath.Join(repoRoot, parts[0])
+	var sourcePath string
+	if filepath.IsAbs(parts[0]) {
+		// Defensive: schema pattern rejects absolute paths, so schema-validated artifacts
+		// never reach this branch. Retained for callers that bypass schema validation.
+		sourcePath = parts[0]
+	} else {
+		sourcePath = filepath.Join(repoRoot, parts[0])
+	}
 	// Guard against path traversal
 	absSource, err := filepath.Abs(sourcePath)
 	if err != nil {
@@ -130,8 +137,7 @@ func LoadAlgorithm(summaryPath, repoRoot string) (Algorithm, error) {
 	return newEvolvedAlgorithm(), nil
 }
 
-// trivialAlgorithm is a placeholder that scores by 1/(1+EffectiveLoad).
-// PR5 replaces this with the actual evolved algorithm scorer.
+// trivialAlgorithm is a retained reference implementation. It is no longer used by LoadAlgorithm (replaced by evolvedAlgorithm in this PR).
 type trivialAlgorithm struct{}
 
 func (a *trivialAlgorithm) Route(req *sim.Request, state *sim.RouterState) sim.RoutingDecision {
