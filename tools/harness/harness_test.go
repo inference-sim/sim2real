@@ -303,10 +303,15 @@ func (a *panicAlgorithm) Route(req *sim.Request, state *sim.RouterState) sim.Rou
 	return sim.NewRoutingDecisionWithScores(state.Snapshots[0].ID, "ok", scores)
 }
 
-// TestEquivalence is the entry point that PR5 suites call.
-// PR3 provides a minimal placeholder; PR5 adds Suite A/B/C logic.
+// TestEquivalence is a convenience dispatcher for local development.
+// NOTE: validate.md (K.10) runs suites independently via separate go test -run commands.
+// Suite A requires the suitea build tag and pipeline artifacts:
+//
+//	go test -tags suitea -run TestSuiteA_KendallTau ./tools/harness/...
 func TestEquivalence(t *testing.T) {
-	t.Log("TestEquivalence: PR3 placeholder — PR5 adds Suite A/B/C logic")
+	t.Run("SuiteB", TestSuiteB_StalenessStability)
+	t.Run("SuiteC_Concurrent", TestSuiteC_ConcurrentDeterminism)
+	t.Run("SuiteC_PileOn", TestSuiteC_PileOn)
 }
 
 // findRepoRoot walks up from the working directory to find the repo root (contains CLAUDE.md).
@@ -325,6 +330,98 @@ func findRepoRoot(t *testing.T) string {
 			t.Fatal("could not find repo root (no CLAUDE.md found)")
 		}
 		dir = parent
+	}
+}
+
+func TestLoadAlgorithmReturnsEvolved(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	summaryPath := filepath.Join(repoRoot, "workspace", "algorithm_summary.json")
+	if _, err := os.Stat(summaryPath); err != nil {
+		t.Skip("requires workspace/algorithm_summary.json (run extract first)")
+	}
+
+	alg, err := LoadAlgorithm(summaryPath, repoRoot)
+	if err != nil {
+		t.Skipf("workspace/algorithm_summary.json exists but LoadAlgorithm failed (stale artifact? re-run extract): %v", err)
+	}
+
+	// High-load vs low-load: evolved algorithm should prefer lower load
+	highLoad := sim.RouterState{
+		Snapshots: []sim.RoutingSnapshot{
+			{ID: "heavy", QueueDepth: 6, InFlightRequests: 2}, // load=8 → hard penalty
+			{ID: "light", QueueDepth: 0, InFlightRequests: 1}, // load=1
+		},
+	}
+	decision := alg.Route(&sim.Request{ID: "r1"}, &highLoad)
+	if decision.TargetInstance != "light" {
+		t.Errorf("expected 'light' (lower load), got %q", decision.TargetInstance)
+	}
+
+	// BC-3: KV pressure penalty fires when KVUtilization > 0.82
+	kvState := sim.RouterState{
+		Snapshots: []sim.RoutingSnapshot{
+			{ID: "high-kv", QueueDepth: 0, KVUtilization: 0.90},
+			{ID: "low-kv",  QueueDepth: 0, KVUtilization: 0.50},
+		},
+	}
+	kvDecision := alg.Route(&sim.Request{ID: "r2"}, &kvState)
+	if kvDecision.TargetInstance != "low-kv" {
+		t.Errorf("expected 'low-kv' (lower KV), got %q", kvDecision.TargetInstance)
+	}
+	if kvDecision.Scores["high-kv"] >= kvDecision.Scores["low-kv"] {
+		t.Errorf("expected high-kv score < low-kv score; got high=%f low=%f",
+			kvDecision.Scores["high-kv"], kvDecision.Scores["low-kv"])
+	}
+}
+
+// TestEvolvedAlgorithmSingleEndpoint verifies that a single endpoint still receives
+// a non-zero score and that the KV penalty fires correctly when KVUtilization > 0.82.
+// BC-I11: single-endpoint edge case.
+func TestEvolvedAlgorithmSingleEndpoint(t *testing.T) {
+	alg := newEvolvedAlgorithm()
+
+	state := sim.RouterState{
+		Snapshots: []sim.RoutingSnapshot{
+			{ID: "solo", QueueDepth: 0, InFlightRequests: 0, KVUtilization: 0.90},
+		},
+	}
+	decision := alg.Route(&sim.Request{ID: "r-single"}, &state)
+
+	score, ok := decision.Scores["solo"]
+	if !ok {
+		t.Fatal("expected score for 'solo' endpoint, got none")
+	}
+	if score <= 0.0 {
+		t.Errorf("expected positive score for sole endpoint, got %f", score)
+	}
+	// KV penalty fires: max(0.3, 1-(0.90-0.82)*2) = max(0.3, 0.84) = 0.84
+	// Base score may vary but the KV penalty multiplies it down from 1.0.
+	if score >= 1.0 {
+		t.Errorf("expected score < 1.0 (KV penalty applied), got %f", score)
+	}
+}
+
+// TestEvolvedAlgorithmKVPenaltyBoundary verifies that the KV penalty does NOT fire
+// at exactly KVUtilization=0.82 (condition is strictly > 0.82).
+// BC-I12: penalty boundary condition.
+func TestEvolvedAlgorithmKVPenaltyBoundary(t *testing.T) {
+	alg := newEvolvedAlgorithm()
+
+	state := sim.RouterState{
+		Snapshots: []sim.RoutingSnapshot{
+			{ID: "ep-0", QueueDepth: 0, InFlightRequests: 0, KVUtilization: 0.82},
+			{ID: "ep-1", QueueDepth: 0, InFlightRequests: 0, KVUtilization: 0.82},
+		},
+	}
+	decision := alg.Route(&sim.Request{ID: "r-boundary"}, &state)
+
+	score0, ok0 := decision.Scores["ep-0"]
+	score1, ok1 := decision.Scores["ep-1"]
+	if !ok0 || !ok1 {
+		t.Fatalf("expected scores for both endpoints; ep-0 ok=%v ep-1 ok=%v", ok0, ok1)
+	}
+	if score0 != score1 {
+		t.Errorf("expected equal scores at KV=0.82 (penalty does not fire); got ep-0=%f ep-1=%f", score0, score1)
 	}
 }
 
@@ -355,7 +452,7 @@ func TestEvolvedScorerContract(t *testing.T) {
 		t.Errorf("Category() = %v, want Distribution", scorer.Category())
 	}
 
-	// Score returns 0.5 for each endpoint (PR3 placeholder contract)
+	// Score returns 1.0 for each endpoint (trivialAlgorithm with zero-load mockEndpoint)
 	endpoints := []scheduling.Endpoint{
 		&mockEndpoint{name: "ep-a"},
 		&mockEndpoint{name: "ep-b"},
@@ -370,8 +467,8 @@ func TestEvolvedScorerContract(t *testing.T) {
 			t.Errorf("missing score for endpoint")
 			continue
 		}
-		if score != 0.5 {
-			t.Errorf("score = %f, want 0.5", score)
+		if score != 1.0 {
+			t.Errorf("score = %f, want 1.0", score)
 		}
 	}
 
@@ -382,6 +479,47 @@ func TestEvolvedScorerContract(t *testing.T) {
 	}
 	if len(emptyScores) != 0 {
 		t.Errorf("Score(nil endpoints) returned %d entries, want 0", len(emptyScores))
+	}
+}
+
+func TestEvolvedScorerScoresCorrectly(t *testing.T) {
+	// BC-4: metric translation; BC-5: session header.
+	alg := newEvolvedAlgorithm()
+	scorer := NewEvolvedScorer(alg).WithName("test")
+
+	heavy := &testEndpointForScorer{
+		id: "heavy",
+		metrics: &fwkdl.Metrics{
+			WaitingQueueSize:    5,
+			RunningRequestsSize: 3, // EffectiveLoad=8 → hard penalty (load>7)
+			KVCacheUsagePercent: 50.0,
+		},
+	}
+	light := &testEndpointForScorer{
+		id: "light",
+		metrics: &fwkdl.Metrics{
+			WaitingQueueSize:    0,
+			RunningRequestsSize: 1, // EffectiveLoad=1
+			KVCacheUsagePercent: 30.0,
+		},
+	}
+
+	scores := scorer.Score(context.Background(), nil, nil, []scheduling.Endpoint{heavy, light})
+	if len(scores) != 2 {
+		t.Fatalf("expected 2 scores, got %d", len(scores))
+	}
+	if scores[heavy] >= scores[light] {
+		t.Errorf("expected light > heavy; got heavy=%f light=%f", scores[heavy], scores[light])
+	}
+
+	// BC-5: session header extraction
+	req := &scheduling.LLMRequest{
+		RequestId: "req-sess",
+		Headers:   map[string]string{"x-session-token": "sess-abc"},
+	}
+	scoresWithSess := scorer.Score(context.Background(), nil, req, []scheduling.Endpoint{heavy, light})
+	if len(scoresWithSess) != 2 {
+		t.Fatalf("session request: expected 2 scores, got %d", len(scoresWithSess))
 	}
 }
 

@@ -6,6 +6,8 @@ Commands:
     validate-mapping         Check mapping artifact completeness
     validate-schema <path>   Validate workspace artifact against JSON Schema
     test-status              Classify go build/test output (stdin) into error classes
+    noise-characterize       Compute per-metric CV and T_eff from baseline latency runs
+    benchmark                Compute mechanism check from benchmark results
 
 Exit codes: 0 = success, 1 = validation failure, 2 = infrastructure error
 All commands output JSON to stdout.
@@ -13,6 +15,7 @@ All commands output JSON to stdout.
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -21,6 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE = REPO_ROOT / "workspace"
 SCHEMAS_DIR = Path(__file__).resolve().parent / "schemas"
 MAPPING_PATH = REPO_ROOT / "docs" / "transfer" / "blis_to_llmd_mapping.md"
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 # RoutingSnapshot fields and their Go types (from inference-sim/sim/routing.go)
 # SYNC NOTE: This dict is derived from the struct at the pinned submodule commit.
@@ -295,20 +299,27 @@ def _check_fidelity(signals: list[dict], *, strict: bool = False) -> tuple[bool,
     for sig in signals:
         if sig["type"] == "unknown":
             continue  # Already flagged for downstream resolution via type='unknown'
-        pattern = rf'\|\s*{re.escape(sig["name"])}(?:\s*\([^)]*\))?\s*\|(?:[^|]*\|){{{MAIN_TABLE_FIDELITY_COL_OFFSET}}}\s*(low|medium|high)\s*(?:\*\(provisional\)\*)?\s*\|'
+        pattern = rf'\|\s*{re.escape(sig["name"])}(?:\s*\([^)]*\))?\s*\|(?:[^|]*\|){{{MAIN_TABLE_FIDELITY_COL_OFFSET}}}\s*(low|medium|high)\s*(?:\*\([^)]*\)\*)?\s*\|'
         match = re.search(pattern, content, re.IGNORECASE)
         if not match:
-            pattern_alt = rf'\|\s*{re.escape(sig["name"])}(?:\s*\([^)]*\))?\s*\|(?:[^|]*\|){{{ADDITIONAL_TABLE_FIDELITY_COL_OFFSET}}}\s*(low|medium|high)\s*(?:\*\(provisional\)\*)?\s*\|'
+            pattern_alt = rf'\|\s*{re.escape(sig["name"])}(?:\s*\([^)]*\))?\s*\|(?:[^|]*\|){{{ADDITIONAL_TABLE_FIDELITY_COL_OFFSET}}}\s*(low|medium|high)\s*(?:\*\([^)]*\)\*)?\s*\|'
             match = re.search(pattern_alt, content, re.IGNORECASE)
         if match:
             rating = match.group(1).lower()
-            is_provisional = "*(provisional)*" in match.group(0)
+            match_text = match.group(0)
+            is_provisional = "*(provisional)*" in match_text
+            is_zeroed = "*(zeroed" in match_text
             if is_provisional:
                 print(f"WARNING: Signal '{sig['name']}' has provisional {rating} fidelity rating. "
                       f"No empirical data supports this rating — PR5 must validate.",
                       file=sys.stderr)
                 sig["fidelity_provisional"] = True
-            if rating == "low":
+            if is_zeroed:
+                print(f"NOTICE: Signal '{sig['name']}' has {rating} fidelity but is zeroed in "
+                      f"production scorer — pipeline continues.",
+                      file=sys.stderr)
+                sig["fidelity_zeroed"] = True
+            elif rating == "low":
                 errors.append(
                     f"Signal '{sig['name']}' has low fidelity rating — "
                     f"pipeline halted (low-fidelity signals not supported in v1)"
@@ -342,9 +353,8 @@ def cmd_extract(args: argparse.Namespace) -> int:
         return _output("error", 2, errors=[f"Routing directory not found: {routing_dir}"])
 
     # CI auto-detection — FAIL if --strict not used in CI environment
-    import os as _os
-    _ci_val = _os.environ.get("CI", "").lower()
-    if _ci_val in ("true", "1", "yes") and not getattr(args, 'strict', False):
+    ci_val = os.environ.get("CI", "").lower()
+    if ci_val in ("true", "1", "yes") and not getattr(args, 'strict', False):
         return _output("error", 1, errors=[
             "CI environment detected (CI env var is set) but --strict flag not set. "
             "CI pipelines MUST use --strict to ensure deterministic fidelity checks. "
@@ -526,6 +536,51 @@ def cmd_validate_mapping(args: argparse.Namespace) -> int:
                         mapping_complete=False, missing_signals=[], extra_signals=[],
                         duplicate_signals=[], double_counting_risks=[], stale_commit=False)
 
+    # Read and validate mapping format before loading the algorithm summary.
+    # Malformed table check (exit 1) must precede summary checks (exit 2) so
+    # tests that write a malformed mapping see exit 1 regardless of summary state.
+    MAX_MAPPING_SIZE = 10 * 1024 * 1024
+    try:
+        _mapping_size = MAPPING_PATH.stat().st_size
+    except OSError as e:
+        return _output("error", 2,
+                        errors=[f"Failed to stat mapping artifact: {e}"],
+                        output_type="mapping_validation",
+                        mapping_complete=False, missing_signals=[], extra_signals=[],
+                        duplicate_signals=[], double_counting_risks=[], stale_commit=False)
+    if _mapping_size > MAX_MAPPING_SIZE:
+        return _output("error", 2,
+                        errors=[f"Mapping artifact exceeds {MAX_MAPPING_SIZE} bytes — refusing to read."],
+                        output_type="mapping_validation",
+                        mapping_complete=False, missing_signals=[], extra_signals=[],
+                        duplicate_signals=[], double_counting_risks=[], stale_commit=False)
+
+    try:
+        content = MAPPING_PATH.read_text()
+    except OSError as e:
+        return _output("error", 2,
+                        errors=[f"Failed to read mapping artifact: {e}"],
+                        output_type="mapping_validation",
+                        mapping_complete=False, missing_signals=[], extra_signals=[],
+                        duplicate_signals=[], double_counting_risks=[], stale_commit=False)
+
+    # Detect malformed mapping artifact
+    if '|' not in content or not re.search(r'^\|.*\|.*\|', content, re.MULTILINE):
+        # Check commit hash even in malformed-table case so stale_commit
+        # reflects actual hash presence, not a side effect of table parsing.
+        has_commit_in_malformed = bool(re.search(
+            r'(?:commit[_ ]hash|pinned[_ ]commit[_ ]hash)[:\s*]*([0-9a-f]{7,40})',
+            content, re.IGNORECASE,
+        ))
+        return _output("error", 1,
+                        errors=["Malformed mapping artifact: no Markdown table found. "
+                                "Expected pipe-delimited table rows."],
+                        output_type="mapping_validation",
+                        mapping_complete=False, missing_signals=[], extra_signals=[],
+                        duplicate_signals=[], double_counting_risks=[],
+                        stale_commit=not has_commit_in_malformed)
+
+    # Load algorithm summary after mapping format is validated.
     summary_path = args.summary if hasattr(args, "summary") and args.summary else (
         WORKSPACE / "algorithm_summary.json"
     )
@@ -577,47 +632,6 @@ def cmd_validate_mapping(args: argparse.Namespace) -> int:
                         output_type="mapping_validation",
                         mapping_complete=False, missing_signals=[], extra_signals=[],
                         duplicate_signals=[], double_counting_risks=[], stale_commit=False)
-
-    MAX_MAPPING_SIZE = 10 * 1024 * 1024
-    try:
-        _mapping_size = MAPPING_PATH.stat().st_size
-    except OSError as e:
-        return _output("error", 2,
-                        errors=[f"Failed to stat mapping artifact: {e}"],
-                        output_type="mapping_validation",
-                        mapping_complete=False, missing_signals=[], extra_signals=[],
-                        duplicate_signals=[], double_counting_risks=[], stale_commit=False)
-    if _mapping_size > MAX_MAPPING_SIZE:
-        return _output("error", 2,
-                        errors=[f"Mapping artifact exceeds {MAX_MAPPING_SIZE} bytes — refusing to read."],
-                        output_type="mapping_validation",
-                        mapping_complete=False, missing_signals=[], extra_signals=[],
-                        duplicate_signals=[], double_counting_risks=[], stale_commit=False)
-
-    try:
-        content = MAPPING_PATH.read_text()
-    except OSError as e:
-        return _output("error", 2,
-                        errors=[f"Failed to read mapping artifact: {e}"],
-                        output_type="mapping_validation",
-                        mapping_complete=False, missing_signals=[], extra_signals=[],
-                        duplicate_signals=[], double_counting_risks=[], stale_commit=False)
-
-    # Detect malformed mapping artifact
-    if '|' not in content or not re.search(r'^\|.*\|.*\|', content, re.MULTILINE):
-        # Check commit hash even in malformed-table case so stale_commit
-        # reflects actual hash presence, not a side effect of table parsing.
-        has_commit_in_malformed = bool(re.search(
-            r'(?:commit[_ ]hash|pinned[_ ]commit[_ ]hash)[:\s*]*([0-9a-f]{7,40})',
-            content, re.IGNORECASE,
-        ))
-        return _output("error", 1,
-                        errors=["Malformed mapping artifact: no Markdown table found. "
-                                "Expected pipe-delimited table rows."],
-                        output_type="mapping_validation",
-                        mapping_complete=False, missing_signals=[], extra_signals=[],
-                        duplicate_signals=[], double_counting_risks=[],
-                        stale_commit=not has_commit_in_malformed)
 
     # Check each extracted signal has a mapping entry (allow optional parenthetical annotation)
     missing = [name for name in sorted(extracted_names)
@@ -918,6 +932,250 @@ def cmd_test_status(args: argparse.Namespace) -> int:
                    errors=primary_errors)
 
 
+# ─── noise-characterize ───────────────────────────────────────────────────────
+
+def _cmd_noise_characterize(args: argparse.Namespace) -> int:
+    """Compute per-metric CV and T_eff from baseline latency runs.
+
+    Input JSON format:
+        {"runs": [{"p50": float, "p95": float, "p99": float}, ...]}
+
+    Exit codes:
+        0 = success (halt=false)
+        1 = validation failure (halt=true, CV > 15%)
+        2 = infrastructure error (file missing or invalid JSON)
+    """
+    import math
+
+    runs_path = Path(args.runs).resolve()
+    allowed_root = Path(os.environ["_SIM2REAL_ALLOWED_ROOT"]).resolve() if "_SIM2REAL_ALLOWED_ROOT" in os.environ else REPO_ROOT
+    if not runs_path.is_relative_to(allowed_root):
+        return _output("error", 2,
+                       errors=[f"Runs path '{runs_path}' is outside allowed root '{allowed_root}'."],
+                       per_metric_cv={}, t_eff=0.0, halt=False)
+    if not runs_path.exists():
+        return _output("error", 2, errors=[f"runs file not found: {args.runs}"],
+                       per_metric_cv={}, t_eff=0.0, halt=False)
+
+    try:
+        if runs_path.stat().st_size > MAX_FILE_SIZE:
+            return _output("error", 2,
+                           errors=[f"runs file exceeds {MAX_FILE_SIZE} bytes: {args.runs}"],
+                           per_metric_cv={}, t_eff=0.0, halt=False)
+    except OSError as e:
+        return _output("error", 2,
+                       errors=[f"cannot stat runs file '{args.runs}': {e}"],
+                       per_metric_cv={}, t_eff=0.0, halt=False)
+
+    try:
+        data = json.loads(runs_path.read_text())
+    except OSError as e:
+        return _output("error", 2, errors=[f"cannot read runs file '{args.runs}': {e}"],
+                       per_metric_cv={}, t_eff=0.0, halt=False)
+    except json.JSONDecodeError as e:
+        return _output("error", 2, errors=[f"invalid JSON in {args.runs}: {e}"],
+                       per_metric_cv={}, t_eff=0.0, halt=False)
+
+    if not isinstance(data, dict) or "runs" not in data:
+        return _output("error", 2,
+                       errors=["missing 'runs' key in input JSON"],
+                       per_metric_cv={}, t_eff=0.0, halt=False)
+
+    runs = data["runs"]
+    if not isinstance(runs, list) or len(runs) == 0:
+        return _output("error", 2,
+                       errors=["'runs' must be a non-empty list (BC-16: malformed input → exit 2)"],
+                       per_metric_cv={}, t_eff=0.0, halt=False)
+
+    metrics = ["p50", "p95", "p99"]
+    per_metric_cv: dict[str, float] = {}
+
+    for metric in metrics:
+        raw_values = [r[metric] for r in runs if isinstance(r, dict) and metric in r
+                      and isinstance(r[metric], (int, float))]
+        values = [v for v in raw_values if v > 0]
+        excluded = len(raw_values) - len(values)
+        if excluded > 0:
+            print(
+                f"WARNING: metric '{metric}': {excluded} of {len(raw_values)} run(s) excluded "
+                f"(zero or non-positive values) — CV computed from {len(values)} run(s)",
+                file=sys.stderr,
+            )
+        if len(values) < 2:
+            print(f"WARNING: metric '{metric}' has {len(values)} valid data point(s) (need ≥2), skipping from CV computation", file=sys.stderr)
+            continue
+
+        mean = sum(values) / len(values)
+        # Sample variance (Bessel's correction: n-1)
+        variance = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
+        std = math.sqrt(variance)
+        per_metric_cv[metric] = std / mean
+
+    if not per_metric_cv:
+        n_runs = len([r for r in runs if isinstance(r, dict)])
+        return _output("error", 2,
+                       errors=[f"insufficient runs for CV computation: need ≥2 data points per metric, got {n_runs} run(s) with valid latency values"],
+                       per_metric_cv={}, t_eff=0.0, halt=False)
+
+    max_cv = max(per_metric_cv.values())
+    t_eff = max(0.05, 2.0 * max_cv)
+    halt = max_cv > 0.15
+
+    if halt:
+        return _output("error", 1, per_metric_cv=per_metric_cv, t_eff=t_eff, halt=True,
+                       errors=[f"noise too high: max CV={max_cv:.4f} > 0.15 threshold"])
+
+    return _output("ok", 0, per_metric_cv=per_metric_cv, t_eff=t_eff, halt=False)
+
+
+# ─── benchmark ────────────────────────────────────────────────────────────────
+
+def _cmd_benchmark(args: argparse.Namespace) -> int:
+    """Compute mechanism check from benchmark results.
+
+    Input JSON format:
+        {"workloads": [
+            {"name": str, "classification": "matched"|"unmatched",
+             "baseline_p99": float, "transfer_p99": float},
+            ...
+        ]}
+
+    Exit codes:
+        0 = success (PASS or INCONCLUSIVE — operator must check mechanism_check_verdict)
+        1 = validation failure (FAIL verdict)
+        2 = infrastructure error (file missing, invalid JSON, or missing --t-eff)
+    """
+    if args.t_eff is None:
+        return _output("error", 2,
+                       errors=["--t-eff required: run noise-characterize first"],
+                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
+
+    t_eff = args.t_eff
+    if t_eff <= 0:
+        return _output("error", 2,
+                       errors=[f"--t-eff must be > 0, got {t_eff}. "
+                               "noise-characterize guarantees T_eff >= 0.05; "
+                               "a non-positive value indicates manual override error."],
+                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
+
+    results_path = Path(args.results).resolve()
+    allowed_root = Path(os.environ["_SIM2REAL_ALLOWED_ROOT"]).resolve() if "_SIM2REAL_ALLOWED_ROOT" in os.environ else REPO_ROOT
+    if not results_path.is_relative_to(allowed_root):
+        return _output("error", 2,
+                       errors=[f"Results path '{results_path}' is outside allowed root '{allowed_root}'."],
+                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
+    if not results_path.exists():
+        return _output("error", 2,
+                       errors=[f"results file not found: {args.results}"],
+                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
+
+    try:
+        if results_path.stat().st_size > MAX_FILE_SIZE:
+            return _output("error", 2,
+                           errors=[f"results file exceeds {MAX_FILE_SIZE} bytes: {args.results}"],
+                           mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
+    except OSError as e:
+        return _output("error", 2,
+                       errors=[f"cannot stat results file '{args.results}': {e}"],
+                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
+
+    try:
+        data = json.loads(results_path.read_text())
+    except OSError as e:
+        return _output("error", 2,
+                       errors=[f"cannot read results file '{args.results}': {e}"],
+                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
+    except json.JSONDecodeError as e:
+        return _output("error", 2,
+                       errors=[f"invalid JSON in {args.results}: {e}"],
+                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
+
+    if not isinstance(data, dict) or "workloads" not in data:
+        return _output("error", 2,
+                       errors=["missing 'workloads' key in input JSON"],
+                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
+
+    workloads = data["workloads"]
+    if not isinstance(workloads, list):
+        return _output("error", 2,
+                       errors=["'workloads' must be a list"],
+                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
+
+    results = []
+    matched_improvements = []
+    specificity_failures = []
+    errors = []
+    format_errors = []
+
+    for idx, w in enumerate(workloads):
+        if not isinstance(w, dict):
+            format_errors.append(f"workloads[{idx}] is not an object (got {type(w).__name__!r}); skipped")
+            continue
+        name = w.get("name", "unknown")
+        classification = w.get("classification", "unmatched")
+        baseline_p99 = w.get("baseline_p99", None)
+        transfer_p99 = w.get("transfer_p99", None)
+
+        if baseline_p99 is None or transfer_p99 is None:
+            missing = [k for k in ["baseline_p99", "transfer_p99"]
+                       if k not in w or w[k] is None]
+            results.append({"workload": name, "classification": classification,
+                             "improvement": 0.0, "error": f"missing required field(s): {', '.join(missing)}"})
+            continue
+
+        if baseline_p99 <= 0:
+            results.append({"workload": name, "classification": classification,
+                             "improvement": 0.0, "error": "baseline_p99 must be > 0"})
+            continue
+
+        if transfer_p99 < 0:
+            results.append({"workload": name, "classification": classification,
+                             "improvement": 0.0, "error": "transfer_p99 must be >= 0"})
+            continue
+
+        improvement = (baseline_p99 - transfer_p99) / baseline_p99
+        results.append({"workload": name, "classification": classification,
+                         "improvement": round(improvement, 6)})
+
+        if classification == "matched":
+            matched_improvements.append(improvement)
+        elif classification == "unmatched":
+            if abs(baseline_p99 - transfer_p99) / baseline_p99 >= t_eff:
+                specificity_failures.append({
+                    "workload": name,
+                    "change_ratio": round(abs(baseline_p99 - transfer_p99) / baseline_p99, 6)
+                })
+        else:
+            errors.append(f"unrecognized classification value: {classification!r} for workload {name!r}")
+
+    if not matched_improvements:
+        return _output("error", 2,
+                       errors=format_errors + ["no matched workloads found — cannot compute mechanism check (configuration error: check workload classification)"],
+                       mechanism_check_verdict="ERROR", passed=False,
+                       workload_classification=results,
+                       t_eff=t_eff, specificity_failures=specificity_failures)
+
+    # Mechanism check
+    if any(imp >= t_eff for imp in matched_improvements):
+        verdict = "PASS"
+    elif any(imp > 0 for imp in matched_improvements):
+        verdict = "INCONCLUSIVE"
+    else:
+        verdict = "FAIL"
+
+    exit_code = 1 if verdict == "FAIL" else 0
+    status = "error" if verdict == "FAIL" else ("inconclusive" if verdict == "INCONCLUSIVE" else "ok")
+    if verdict == "FAIL":
+        errors.append("mechanism check FAIL: no matched workload improvement >= T_eff")
+    if specificity_failures:
+        errors.append(f"specificity check failed for {len(specificity_failures)} unmatched workload(s)")
+
+    passed = verdict == "PASS"
+    return _output(status, exit_code, mechanism_check_verdict=verdict, passed=passed,
+                   workload_classification=results, t_eff=t_eff, specificity_failures=specificity_failures,
+                   errors=format_errors + errors)
+
+
 def main():
     if sys.version_info < (3, 10):
         print("ERROR: transfer_cli.py requires Python >= 3.10 "
@@ -955,6 +1213,22 @@ def main():
     p_test_status = subparsers.add_parser("test-status",
         help="Classify errors from go build/test output (reads stdin)")
     p_test_status.set_defaults(func=cmd_test_status)
+
+    # noise-characterize subcommand
+    p_noise = subparsers.add_parser("noise-characterize",
+        help="Compute per-metric CV and T_eff from baseline latency runs")
+    p_noise.add_argument("--runs", required=True,
+        help="Path to JSON file with baseline latency runs: {runs: [{p50, p95, p99}]}")
+    p_noise.set_defaults(func=_cmd_noise_characterize)
+
+    # benchmark subcommand
+    p_bench = subparsers.add_parser("benchmark",
+        help="Compute mechanism check from benchmark results")
+    p_bench.add_argument("--results", required=True,
+        help="Path to JSON file with workload results")
+    p_bench.add_argument("--t-eff", type=float, default=None,
+        help="Effective threshold from noise-characterize")
+    p_bench.set_defaults(func=_cmd_benchmark)
 
     args = parser.parse_args()
     exit_code = args.func(args)

@@ -58,8 +58,8 @@ PR3 MUST implement and pass these gates before merging:
 1. **`test_stale_hash_aborts_parsing`** — CRITICAL. PR3 must include a test that runs extract, modifies the EVOLVE-BLOCK source, attempts to parse using the stale summary, and asserts parsing aborts with a drift detection error. (See BC-11.)
 2. **KVUtilization normalization test** — CRITICAL. PR3 must include a unit test verifying that production `KVCacheUsagePercent` values (0-100) are divided by 100 before being passed to the scorer.
 3. **Unknown-type signal rejection** — IMPORTANT. PR3 must verify that signals with type `"unknown"` are rejected or handled explicitly, not silently passed through to the scorer.
-4. **F-10 InFlightRequests double-counting guard** — IMPORTANT. If `RunningRequestCount` is unavailable and InFlightRequests falls back to `RunningQueueSize`, the EffectiveLoad composite becomes `WaitingQueueSize + 2*RunningQueueSize`, double-counting that metric. PR3 MUST detect this case and either use a different proxy or adjust the composite computation. (See `blis_to_llmd_mapping.md` InFlightRequests row.)
-5. **CacheHitRate production access path verification** — IMPORTANT. The mapping artifact marks CacheHitRate's production access path as UNVERIFIED (`endpoint.GetMetrics()` field not yet identified). PR3 MUST derive the concrete access path from the `PrecisePrefixCache` scorer implementation in `llm-d-inference-scheduler` at the pinned commit. (See `blis_to_llmd_mapping.md` CacheHitRate row.)
+4. **F-10 InFlightRequests double-counting guard** — ~~IMPORTANT~~ RESOLVED in PR5. `RunningQueueSize` and `RunningRequestCount` do not exist in `fwkdl.Metrics`; the correct field is `RunningRequestsSize`. PR5 resolved F-10 by zeroing BatchSize in the production scorer, so EffectiveLoad = `WaitingQueueSize + RunningRequestsSize` (single-count). PR3 need only use `RunningRequestsSize` for InFlightRequests. (See `blis_to_llmd_mapping.md` InFlightRequests row.)
+5. **CacheHitRate production access path verification** — ~~IMPORTANT~~ RESOLVED in PR5. No production `GetMetrics()` field was identified for CacheHitRate. PR5 zeroed the signal (`CacheHitRate = 0.0`) in the production scorer and downgraded fidelity to low. PR3 need not derive an access path. (See `blis_to_llmd_mapping.md` CacheHitRate row.)
 
 ## Scorer Template (PR2)
 
@@ -71,8 +71,8 @@ The scorer template is an annotated example showing llm-d-inference-scheduler pl
 
 **PR3 obligations for scorer template:**
 1. **Compilation check:** PR3 adds `tools/check_scorer_template.sh` that extracts Go code blocks from the template, compiles them against the current submodule HEAD, and fails if compilation fails. This provides automated staleness detection.
-2. **Metric field verification:** Before generating code, PR3 MUST initialize the llm-d-inference-scheduler submodule, locate the `fwkdl.Metrics` struct definition, and confirm that UNVERIFIED fields (`RunningQueueSize`, `RunningRequestCount`, `KVCacheUsagePercent`) exist. If any field does not exist, PR3 must update both the mapping artifact and the scorer template with the correct field names.
-3. **CacheHitRate access path:** The PrecisePrefixCache scorer uses a ZMQ-based KV cache indexer, not a simple `GetMetrics()` field. PR3 must determine the correct access path for cache hit rate information by reading the PrecisePrefixCache implementation.
+2. **Metric field verification:** ~~PR3 MUST confirm UNVERIFIED fields (`RunningQueueSize`, `RunningRequestCount`, `KVCacheUsagePercent`)~~ RESOLVED in PR5: `RunningQueueSize` and `RunningRequestCount` do not exist — the correct field is `RunningRequestsSize`. `KVCacheUsagePercent` is verified. Both the mapping artifact and scorer template have been updated in PR5. PR3 should still initialize the submodule and confirm fields as a safety check.
+3. **CacheHitRate access path:** ~~PR3 must determine the correct access path for cache hit rate information~~ RESOLVED in PR5. No production `GetMetrics()` field was identified for CacheHitRate. PR5 zeroed the signal and downgraded fidelity to low. PR3 need not derive an access path. (See gate check item 5 above and `blis_to_llmd_mapping.md` CacheHitRate row.)
 4. **Placeholder replacement validation:** The template's `Score()` body contains a `PLACEHOLDER` comment marking the example scoring logic. After code generation, PR3 MUST verify that no `PLACEHOLDER` markers remain in the generated scorer code. If any remain, the generation is incomplete.
 5. **Nil-score framework behavior verification (BC-4):** PR3 must verify nil-score handling in the framework's aggregation logic. The template's `Score()` returns `nil` when the scorer is disabled (feature-flag opt-out). PR3 must confirm that the scheduler skips a scorer returning nil scores and routes using remaining active scorers only. See scorer_template.go.md Section 5.
 
@@ -101,6 +101,22 @@ PR3 prompt templates MUST consume these PR1 artifacts:
 **PR4 obligations for downstream PRs:**
 1. **Stage 4 success state:** Stage 4 success means `go build ./...`, `go vet ./...`, and `go test ./pkg/plugins/scorer/... -v` all pass in the llm-d-inference-scheduler submodule. There is no `stage4_output.json` — PR5 reads generated code paths from `stage3_output.json`.
 2. **Retry state not persisted:** Retry counters live only in the interactive session. If Stage 4 halts and the operator restarts, counters reset to zero.
+
+### PR5 Deliverables
+
+- `tools/harness/evolved_algorithm.go` — EVOLVE-BLOCK penalty logic (replaces trivialAlgorithm in LoadAlgorithm)
+- `tools/harness/evolved_scorer.go` — Wired EvolvedScorer.Score() with production metric translation
+- `tools/harness/stats.go` — Kendall-tau rank correlation utility
+- `tools/harness/suite_a_test.go` — Suite A: 200-tuple rank correlation equivalence (BC-6, BC-7)
+- `tools/harness/suite_b_test.go` — Suite B: staleness rank stability, v1 informational (BC-8)
+- `tools/harness/suite_c_test.go` — Suite C: concurrent safety + pile-on check (BC-9, BC-10)
+- `tools/schemas/validation_results.schema.json` — Schema for Stage 5 output artifact
+- `prompts/validate.md` — Stage 5 prompt template
+- `docs/transfer/noise_characterization.md` — Noise characterization procedure
+- `docs/transfer/calibration_log.md` — Per-transfer calibration log template
+- CLI commands: `noise-characterize`, `benchmark` in `tools/transfer_cli.py`
+
+**Key contracts:** Suite A Kendall-tau > 0.8, Suite C determinism + pile-on ≤ 2.0, noise CV ≤ 15%
 
 ## Algorithm Logic Boundary
 

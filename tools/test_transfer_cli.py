@@ -971,18 +971,21 @@ class TestFidelityHalt:
         reason="Mapping artifact not present (pre-Task 5)"
     )
     def test_provisional_detection_matches_mapping_format(self):
-        """R2-F-13: Verify *(provisional)* detection works against actual mapping."""
+        """R2-F-13: Verify *(zeroed ...)* annotation detection works against actual mapping."""
         mapping = REPO_ROOT / "docs" / "transfer" / "blis_to_llmd_mapping.md"
         if not mapping.exists():
             pytest.skip("Mapping artifact not present")
         content = mapping.read_text()
-        assert "*(provisional)*" in content
+        assert "*(zeroed" in content, (
+            "Mapping should contain at least one *(zeroed ...)* annotation "
+            "(CacheHitRate and BatchSize are zeroed in PR5)"
+        )
         code, output = run_cli("extract", str(ROUTING_DIR))
         assert code == 0
         summary = json.loads((WORKSPACE / "algorithm_summary.json").read_text())
         cache_hit = [s for s in summary["signals"] if s["name"] == "CacheHitRate"]
         assert len(cache_hit) == 1
-        assert cache_hit[0].get("fidelity_provisional") is True
+        assert cache_hit[0].get("fidelity_zeroed") is True
 
     @pytest.mark.skipif(
         not (Path(__file__).parent.parent / "docs" / "transfer" / "blis_to_llmd_mapping.md").exists(),
@@ -1206,3 +1209,277 @@ class TestMetricsTypeGuard:
             )
             stdout = json.loads(result.stdout)
             assert "status" in stdout
+
+
+def test_noise_characterize_halts_on_high_cv(tmp_path):
+    """BC-11: CV > 15% causes halt=true and exit code 1."""
+    runs = {"runs": [{"p99": v} for v in [0.40, 0.80, 0.20, 0.60, 0.30]]}  # CV ≈ 0.47
+    runs_file = tmp_path / "baseline_runs.json"
+    runs_file.write_text(json.dumps(runs))
+
+    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "tools/transfer_cli.py", "noise-characterize", "--runs", str(runs_file)],
+        capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 1, f"Expected exit 1, got {result.returncode}"
+    output = json.loads(result.stdout)
+    assert output["halt"] is True
+    assert output["status"] == "error"
+
+
+def test_noise_characterize_malformed_input(tmp_path):
+    """BC-16: malformed JSON input causes exit code 2 (infrastructure error)."""
+    runs_file = tmp_path / "bad_runs.json"
+    runs_file.write_text("{invalid json")
+
+    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "tools/transfer_cli.py", "noise-characterize", "--runs", str(runs_file)],
+        capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 2, f"Expected exit 2, got {result.returncode}"
+    output = json.loads(result.stdout)
+    assert output["status"] == "error"
+
+
+def test_noise_characterize_empty_runs(tmp_path):
+    """BC-16: empty runs list is infrastructure error (no data to compute CV) — exit code 2."""
+    runs_file = tmp_path / "empty_runs.json"
+    runs_file.write_text('{"runs": []}')
+
+    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "tools/transfer_cli.py", "noise-characterize", "--runs", str(runs_file)],
+        capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 2, f"Expected exit 2, got {result.returncode}"
+    output = json.loads(result.stdout)
+    assert output["status"] == "error"
+
+
+def test_noise_characterize_t_eff_computation(tmp_path):
+    """BC-12: T_eff = max(0.05, 2*max_cv) using sample std (Bessel's correction)."""
+    runs = {"runs": [{"p99": v} for v in [0.40, 0.42, 0.41, 0.39, 0.41]]}
+    runs_file = tmp_path / "baseline_runs.json"
+    runs_file.write_text(json.dumps(runs))
+
+    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "tools/transfer_cli.py", "noise-characterize", "--runs", str(runs_file)],
+        capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 0, f"Expected exit 0, got {result.returncode}: {result.stdout}"
+    output = json.loads(result.stdout)
+    assert output["halt"] is False
+    assert output["status"] == "ok"
+    assert "per_metric_cv" in output, "missing per_metric_cv in output"
+    assert "p99" in output["per_metric_cv"], "missing p99 in per_metric_cv"
+    expected_cv = 0.02809
+    assert abs(output["per_metric_cv"]["p99"] - expected_cv) < 0.002, \
+        f"Expected p99 CV ≈ {expected_cv}, got {output['per_metric_cv']['p99']}"
+    expected_t_eff = max(0.05, 2 * expected_cv)
+    assert abs(output["t_eff"] - expected_t_eff) < 0.002, \
+        f"Expected T_eff ≈ {expected_t_eff}, got {output['t_eff']}"
+
+
+def test_benchmark_mechanism_check_pass(tmp_path):
+    """BC-13: improvement >= T_eff for matched workload → PASS."""
+    results = {
+        "workloads": [
+            {"name": "chatbot", "classification": "matched",
+             "baseline_p99": 0.45, "transfer_p99": 0.38},  # improvement ≈ 15.6%
+            {"name": "batch",   "classification": "unmatched",
+             "baseline_p99": 0.30, "transfer_p99": 0.31},  # change ≈ -3.3%
+        ]
+    }
+    results_file = tmp_path / "results.json"
+    results_file.write_text(json.dumps(results))
+
+    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "tools/transfer_cli.py", "benchmark",
+         "--results", str(results_file), "--t-eff", "0.10"],
+        capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 0
+    output = json.loads(result.stdout)
+    assert output["mechanism_check_verdict"] == "PASS"
+    assert output["status"] == "ok"
+
+
+def test_benchmark_mechanism_check_inconclusive(tmp_path):
+    """Improvement > 0 but < T_eff for all matched workloads → INCONCLUSIVE (exit 0)."""
+    results = {
+        "workloads": [
+            {"name": "chatbot", "classification": "matched",
+             "baseline_p99": 0.45, "transfer_p99": 0.44},  # improvement ≈ 2.2% < T_eff=0.10
+        ]
+    }
+    results_file = tmp_path / "results.json"
+    results_file.write_text(json.dumps(results))
+
+    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "tools/transfer_cli.py", "benchmark",
+         "--results", str(results_file), "--t-eff", "0.10"],
+        capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 0, f"INCONCLUSIVE should exit 0, got {result.returncode}"
+    output = json.loads(result.stdout)
+    assert output["mechanism_check_verdict"] == "INCONCLUSIVE"
+    assert output["status"] == "inconclusive", \
+        f"INCONCLUSIVE should have status='inconclusive', got '{output['status']}'"
+
+
+def test_benchmark_mechanism_check_fail(tmp_path):
+    """All matched workload improvements <= 0 → FAIL (exit 1)."""
+    results = {
+        "workloads": [
+            {"name": "chatbot", "classification": "matched",
+             "baseline_p99": 0.45, "transfer_p99": 0.50},  # regression
+        ]
+    }
+    results_file = tmp_path / "results.json"
+    results_file.write_text(json.dumps(results))
+
+    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "tools/transfer_cli.py", "benchmark",
+         "--results", str(results_file), "--t-eff", "0.10"],
+        capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 1, f"FAIL should exit 1, got {result.returncode}"
+    output = json.loads(result.stdout)
+    assert output["mechanism_check_verdict"] == "FAIL"
+
+
+def test_benchmark_requires_t_eff(tmp_path):
+    """BC-17: missing --t-eff → exit 2 (infrastructure error, not FAIL verdict)."""
+    results_file = tmp_path / "results.json"
+    results_file.write_text('{"workloads": []}')
+
+    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "tools/transfer_cli.py", "benchmark",
+         "--results", str(results_file)],  # no --t-eff
+        capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 2
+    output = json.loads(result.stdout)
+    assert "t-eff" in output["errors"][0].lower()
+
+
+def test_benchmark_malformed_input(tmp_path):
+    """BC-18: malformed JSON input causes exit code 2 (infrastructure error)."""
+    results_file = tmp_path / "bad_results.json"
+    results_file.write_text("{invalid json")
+
+    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "tools/transfer_cli.py", "benchmark",
+         "--results", str(results_file), "--t-eff", "0.10"],
+        capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 2, f"Expected exit 2, got {result.returncode}"
+    output = json.loads(result.stdout)
+    assert output["status"] == "error"
+
+
+def test_benchmark_missing_workloads_key(tmp_path):
+    """BC-18: valid JSON missing 'workloads' key causes exit code 2."""
+    results_file = tmp_path / "no_workloads.json"
+    results_file.write_text('{"other_key": 123}')
+
+    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "tools/transfer_cli.py", "benchmark",
+         "--results", str(results_file), "--t-eff", "0.10"],
+        capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 2, f"Expected exit 2, got {result.returncode}"
+    output = json.loads(result.stdout)
+    assert output["status"] == "error"
+
+
+def test_benchmark_no_matched_workloads(tmp_path):
+    """S5: all workloads have classification='unmatched' (key present) → exit 2, 'no matched workloads'."""
+    results = {
+        "workloads": [
+            {"name": "batch1", "classification": "unmatched",
+             "baseline_p99": 0.40, "transfer_p99": 0.41},
+            {"name": "batch2", "classification": "unmatched",
+             "baseline_p99": 0.35, "transfer_p99": 0.34},
+        ]
+    }
+    results_file = tmp_path / "results.json"
+    results_file.write_text(json.dumps(results))
+
+    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "tools/transfer_cli.py", "benchmark",
+         "--results", str(results_file), "--t-eff", "0.10"],
+        capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 2, f"Expected exit 2, got {result.returncode}"
+    output = json.loads(result.stdout)
+    assert any("no matched workloads" in e.lower() for e in output.get("errors", [])), \
+        f"Expected 'no matched workloads' in errors, got: {output.get('errors')}"
+
+
+class TestValidateSchemaValidationResults:
+    """BC-1 schema roundtrip tests for validation_results.json."""
+
+    def _make_valid_fixture(self):
+        return {
+            "suite_a": {
+                "passed": True,
+                "kendall_tau": 0.85,
+                "max_abs_error": 0.02,
+                "tuple_count": 100
+            },
+            "suite_b": {
+                "passed": True,
+                "rank_stability_tau": 0.90,
+                "threshold_crossing_pct": 5.0,
+                "informational_only": True
+            },
+            "suite_c": {
+                "passed": True,
+                "deterministic": True,
+                "max_pile_on_ratio": 1.2
+            },
+            "benchmark": {
+                "passed": True,
+                "mechanism_check_verdict": "PASS",
+                "t_eff": 0.10
+            },
+            "overall_verdict": "PASS",
+            "noise_cv": 0.05
+        }
+
+    def test_valid_validation_results_passes(self):
+        """BC-1: minimal valid validation_results.json passes schema validation (exit 0)."""
+        WORKSPACE.mkdir(exist_ok=True)
+        artifact_path = WORKSPACE / "validation_results.json"
+        try:
+            artifact_path.write_text(json.dumps(self._make_valid_fixture()))
+            code, output = run_cli("validate-schema", str(artifact_path))
+            assert code == 0, f"Expected exit 0, got {code}: {output}"
+        finally:
+            if artifact_path.exists():
+                artifact_path.unlink()
+
+    def test_missing_required_field_fails(self):
+        """BC-1: validation_results.json missing 'overall_verdict' fails schema validation (exit 1)."""
+        WORKSPACE.mkdir(exist_ok=True)
+        artifact_path = WORKSPACE / "validation_results.json"
+        try:
+            fixture = self._make_valid_fixture()
+            del fixture["overall_verdict"]
+            artifact_path.write_text(json.dumps(fixture))
+            code, output = run_cli("validate-schema", str(artifact_path))
+            assert code == 1, f"Expected exit 1, got {code}: {output}"
+        finally:
+            if artifact_path.exists():
+                artifact_path.unlink()
