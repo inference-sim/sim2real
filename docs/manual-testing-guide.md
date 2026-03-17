@@ -1,6 +1,6 @@
 # Manual Testing Guide — sim2real Transfer Pipeline
 
-**Date:** 2026-03-13
+**Date:** 2026-03-17
 **Purpose:** What to manually test after each PR lands, and how.
 
 All commands assume you are in the repo root (`sim2real/`).
@@ -39,7 +39,7 @@ All commands assume you are in the repo root (`sim2real/`).
 ### 1.4 Extract — tampered input (negative test)
 
 ```bash
-# Copy routing dir, corrupt best_program.py by removing EVOLVE-BLOCK markers
+# Copy routing dir, corrupt best_program.go by removing EVOLVE-BLOCK markers
 cp -r blis_router/best/ /tmp/routing_broken/
 sed -i '' 's/EVOLVE-BLOCK-START/BROKEN/' /tmp/routing_broken/best_program.go
 .venv/bin/python tools/transfer_cli.py extract /tmp/routing_broken/
@@ -197,8 +197,9 @@ go test ./tools/harness/... -v
 - `TestNewEvolvedScorerNilPanics` — nil Algorithm rejected at construction
 - `TestLoadAlgorithmErrorPaths` — table-driven error path coverage (path traversal, missing fields, etc.)
 - `TestEquivalence` — dispatches Suite B + Suite C
-- `TestEvolvedAlgorithmSingleEndpoint` — single endpoint gets positive score, KV penalty applied
-- `TestEvolvedAlgorithmKVPenaltyBoundary` — equal scores at exactly KV=0.82 (boundary)
+- `TestEvolvedAlgorithmSingleEndpoint` — single endpoint score < 0.3 (KV penalty fires at KVUtil=0.95)
+- `TestEvolvedAlgorithmKVPenaltyBoundary` — equal scores at exactly KV=0.9 (boundary, penalty does not fire)
+- `TestEvolvedAlgorithmInflightTiebreaker` — idle (InFlight=0) scores higher than busy (InFlight=5)
 - `TestEvolvedScorerScoresCorrectly` — metric translation correct, evolved algorithm scores returned
 - `TestKendallTau` — rank correlation utility verified
 - `TestMaxAbsDiff` — max absolute difference utility verified
@@ -417,8 +418,9 @@ go test ./tools/harness/... -race -timeout 120s -v
 - `TestSuiteB_StalenessStability` — passes (tau=1.0, informational_only=true for v1)
 - `TestSuiteC_ConcurrentDeterminism` — 20 goroutines produce identical score vectors
 - `TestSuiteC_PileOn` — no endpoint receives > 2× fair share across 100 decisions
-- `TestEvolvedAlgorithmSingleEndpoint` — single endpoint gets positive score, KV penalty applied
-- `TestEvolvedAlgorithmKVPenaltyBoundary` — equal scores at exactly KV=0.82 (boundary)
+- `TestEvolvedAlgorithmSingleEndpoint` — single endpoint score < 0.3 (KV penalty fires at KVUtil=0.95)
+- `TestEvolvedAlgorithmKVPenaltyBoundary` — equal scores at exactly KV=0.9 (boundary, penalty does not fire)
+- `TestEvolvedAlgorithmInflightTiebreaker` — idle (InFlight=0) scores higher than busy (InFlight=5)
 - `TestEvolvedScorerScoresCorrectly` — metric translation correct, heavy < light
 - All other unit tests pass
 
