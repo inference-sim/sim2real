@@ -25,6 +25,23 @@
       "type": "string",
       "pattern": "^[a-z][a-z0-9-]*-scorer$",
       "description": "The EvolvedScorerType constant value. Convention: lowercase-hyphenated, suffixed with '-scorer'."
+    },
+    "tekton_artifacts": {
+      "type": "object",
+      "description": "Optional. Tekton pipeline artifacts generated alongside the scorer plugin. Presence is NOT enforced by schema validation — the enforcement gate is the 'preflight --values workspace/tekton/values.yaml' call in Stage 5 Step 5b, which fails if the file is absent.",
+      "required": ["values_yaml"],
+      "additionalProperties": false,
+      "properties": {
+        "values_yaml": {
+          "type": "string",
+          "description": "Path to the generated Helm-style values.yaml for tektonc pipeline compilation (e.g., workspace/tekton/values.yaml)"
+        },
+        "pipeline_stubs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Paths to generated PipelineRun stub files"
+        }
+      }
     }
   }
 }

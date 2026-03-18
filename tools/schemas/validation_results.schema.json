@@ -43,7 +43,7 @@
     },
     "benchmark": {
       "type": "object",
-      "required": ["passed", "mechanism_check_verdict", "t_eff"],
+      "required": ["passed", "mechanism_check_verdict", "t_eff", "workload_classification", "specificity_notes"],
       "additionalProperties": false,
       "description": "Cluster benchmark mechanism check results.",
       "properties": {
@@ -54,7 +54,7 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["workload", "classification"],
+            "required": ["workload", "classification", "improvement", "matched_signals"],
             "properties": {
               "workload":       {"type": "string"},
               "classification": {"type": "string", "enum": ["matched", "unmatched"]},

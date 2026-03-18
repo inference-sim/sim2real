@@ -1102,7 +1102,7 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
 
     results = []
     matched_improvements = []
-    specificity_failures = []
+    specificity_notes = []
     errors = []
     format_errors = []
 
@@ -1139,11 +1139,11 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
         if classification == "matched":
             matched_improvements.append(improvement)
         elif classification == "unmatched":
-            if abs(baseline_p99 - transfer_p99) / baseline_p99 >= t_eff:
-                specificity_failures.append({
-                    "workload": name,
-                    "change_ratio": round(abs(baseline_p99 - transfer_p99) / baseline_p99, 6)
-                })
+            change_ratio = round(abs(baseline_p99 - transfer_p99) / baseline_p99, 6)
+            if change_ratio >= t_eff:
+                specificity_notes.append(
+                    f"workload {name}: |change|/baseline = {change_ratio} >= T_eff"
+                )
         else:
             errors.append(f"unrecognized classification value: {classification!r} for workload {name!r}")
 
@@ -1152,7 +1152,7 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
                        errors=format_errors + ["no matched workloads found — cannot compute mechanism check (configuration error: check workload classification)"],
                        mechanism_check_verdict="ERROR", passed=False,
                        workload_classification=results,
-                       t_eff=t_eff, specificity_failures=specificity_failures)
+                       t_eff=t_eff, specificity_notes=specificity_notes)
 
     # Mechanism check
     if any(imp >= t_eff for imp in matched_improvements):
@@ -1166,12 +1166,12 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     status = "error" if verdict == "FAIL" else ("inconclusive" if verdict == "INCONCLUSIVE" else "ok")
     if verdict == "FAIL":
         errors.append("mechanism check FAIL: no matched workload improvement >= T_eff")
-    if specificity_failures:
-        errors.append(f"specificity check failed for {len(specificity_failures)} unmatched workload(s)")
+    if specificity_notes:
+        errors.append(f"specificity check failed for {len(specificity_notes)} unmatched workload(s)")
 
     passed = verdict == "PASS"
     return _output(status, exit_code, mechanism_check_verdict=verdict, passed=passed,
-                   workload_classification=results, t_eff=t_eff, specificity_failures=specificity_failures,
+                   workload_classification=results, t_eff=t_eff, specificity_notes=specificity_notes,
                    errors=format_errors + errors)
 
 
