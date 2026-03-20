@@ -243,6 +243,9 @@ This is the key integration test. Run Claude Code interactively:
 | 1 (Extract) | `workspace/algorithm_summary.json` created | Valid JSON, all required fields |
 | 2 (Translate) | `workspace/signal_coverage.json` created | All signals mapped, `unmapped_signals` empty |
 | 3 (Generate) | Branch `transfer/<name>` in submodule | Plugin, tests, config files committed |
+| 3 (Generate) | `workspace/stage3_output.json` contains `tekton_artifacts` | `values_yaml` and `pipeline_stubs` paths present |
+| 3 (Generate) | `workspace/tekton/values.yaml` created | Valid YAML with `stack`, `observe.image`, `observe.workloads`, `observe.noise_runs` |
+| 3 (Generate) | `workspace/tekton/pipelinerun-{noise,baseline,treatment}.yaml` created | Three PipelineRun stubs present |
 
 ### 3.9 Automated tests (full suite)
 
@@ -390,7 +393,7 @@ cat workspace/escalation.json | jq .
 cat workspace/stage3_output.json | jq .
 ```
 
-Contains `scorer_file`, `test_file`, `register_file`, `scorer_type`. This file is not updated by Stage 4.
+Contains `scorer_file`, `test_file`, `register_file`, `scorer_type`, and (as of PR5) `tekton_artifacts` with `values_yaml` and `pipeline_stubs`. This file is not updated by Stage 4.
 
 ---
 
