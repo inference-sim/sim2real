@@ -996,6 +996,13 @@ def cmd_benchmark_state(args: "argparse.Namespace") -> int:
             print("ERROR: --namespace required on first invocation.", file=sys.stderr)
             return 2
         ctx = _kubectl_current_context()
+        if not ctx:
+            print(
+                "WARNING: kubectl context could not be determined — "
+                "cluster context guard will be disabled for this state file. "
+                "Ensure kubectl is configured before continuing.",
+                file=sys.stderr,
+            )
         state = _default_benchmark_state(alg_name, args.namespace, ctx)
         state_path.write_text(json.dumps(state, indent=2))
     else:
@@ -1269,20 +1276,27 @@ def cmd_compile_pipeline(args: "argparse.Namespace") -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / f"{phase}-pipeline.yaml"
 
-    tektonc = Path("tektonc-data-collection/tektonc/tektonc.py")
+    tektonc = Path(__file__).resolve().parent.parent / "tektonc-data-collection" / "tektonc" / "tektonc.py"
     if not tektonc.exists():
-        print(f"ERROR: tektonc not found at '{tektonc}'.", file=sys.stderr)
+        print(f"ERROR: tektonc not found at '{tektonc.resolve()}'.", file=sys.stderr)
         return 2
 
-    result = subprocess.run(
-        [sys.executable, str(tektonc),
-         "-t", str(template_file),
-         "-f", str(values_file),
-         "-o", str(out_file)],
-        capture_output=True, text=True, shell=False, timeout=120
-    )
-    if result.returncode != 0:
-        print(f"ERROR: tektonc compilation failed:\n{result.stderr}", file=sys.stderr)
+    try:
+        r = subprocess.run(
+            [sys.executable, str(tektonc),
+             "-t", str(template_file),
+             "-f", str(values_file),
+             "-o", str(out_file)],
+            capture_output=True, text=True, shell=False, timeout=120
+        )
+    except subprocess.TimeoutExpired:
+        print("ERROR: tektonc timed out after 120s.", file=sys.stderr)
+        return 2
+    except OSError as e:
+        print(f"ERROR: failed to launch tektonc: {e}", file=sys.stderr)
+        return 2
+    if r.returncode != 0:
+        print(f"ERROR: tektonc compilation failed:\n{r.stderr}", file=sys.stderr)
         return 1
 
     return 0
@@ -1438,9 +1452,16 @@ def _classify_workloads(workloads_dir: "Path", signal_coverage_path: "Path",
             "ensure Task 1 (Step 1.8) was completed to create this file"
         )
     try:
-        mapping = json.loads(mapping_path.read_text())["mappings"]
+        parsed = json.loads(mapping_path.read_text())
     except json.JSONDecodeError as e:
         raise ValueError(f"workload signal mapping '{mapping_path}' is malformed JSON: {e}") from e
+    try:
+        mapping = parsed["mappings"]
+    except KeyError:
+        raise ValueError(
+            f"workload signal mapping '{mapping_path}' is missing required top-level "
+            f"'mappings' key"
+        )
     try:
         sc = json.loads(signal_coverage_path.read_text())
     except json.JSONDecodeError as e:
@@ -1449,7 +1470,7 @@ def _classify_workloads(workloads_dir: "Path", signal_coverage_path: "Path",
 
     result = {}
     for wf in sorted(workloads_dir.iterdir()):
-        if not wf.suffix in (".yaml", ".yml"):
+        if wf.suffix not in (".yaml", ".yml"):
             continue
         # Normalize underscores to hyphens: workload_glia_40qps.yaml → glia-40qps
         wl_name = wf.stem.removeprefix("workload_").replace("_", "-")
@@ -1636,6 +1657,7 @@ def cmd_benchmark_new(args: "argparse.Namespace") -> int:
     else:
         print(json.dumps(output, indent=2))
 
+    # INCONCLUSIVE exits 0 — pipeline should proceed with operator review (see validate.md)
     return 2 if verdict == "ERROR" else (1 if verdict == "FAIL" else 0)
 
 
