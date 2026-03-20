@@ -1483,11 +1483,13 @@ def _classify_workloads(workloads_dir: "Path", signal_coverage_path: "Path",
         # Normalize underscores to hyphens: workload_glia_40qps.yaml → glia-40qps
         wl_name = wf.stem.removeprefix("workload_").replace("_", "-")
         try:
-            wl_data = yaml.safe_load(wf.read_text()) or {}
-        except Exception as e:
-            print(f"WARNING: failed to parse workload file {wf}: {e}", file=sys.stderr)
-            result[wl_name] = {"classification": "unmatched", "matched_signals": []}
-            continue
+            raw = wf.read_text()
+        except OSError as e:
+            raise ValueError(f"cannot read workload file {wf}: {e}") from e
+        try:
+            wl_data = yaml.safe_load(raw) or {}
+        except yaml.YAMLError as e:
+            raise ValueError(f"cannot parse workload file {wf}: {e}") from e
         # Collect all keys at top level AND within clients[] items
         all_keys = set(wl_data.keys())
         for client in wl_data.get("clients", []):
@@ -1585,7 +1587,7 @@ def cmd_benchmark_new(args: "argparse.Namespace") -> int:
     # Classify workloads
     try:
         classification = _classify_workloads(wd_path, sc_path, mapping_path)
-    except Exception as e:
+    except (FileNotFoundError, ValueError) as e:
         print(f"ERROR: workload classification failed: {e}", file=sys.stderr)
         return 2
 

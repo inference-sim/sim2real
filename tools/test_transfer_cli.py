@@ -1952,6 +1952,28 @@ class TestBenchmarkNew:
         assert any("completely-different" in note or "skipped" in note.lower()
                    for note in result["specificity_notes"])
 
+    def test_malformed_workload_yaml_exits_2(self, tmp_path):
+        """benchmark exits 2 when a workload YAML file is malformed (not silently unmatched)."""
+        import json, argparse
+        noise = self._make_noise(tmp_path, cv=0.05)
+        bl, tr = self._make_baseline_treatment(tmp_path)
+        sc = self._make_signal_coverage(tmp_path)
+        wd = tmp_path / "workloads_bad"
+        wd.mkdir()
+        # Write outright invalid YAML to trigger YAMLError
+        (wd / "workload_glia-40qps.yaml").write_text(": {bad yaml: [unclosed")
+        out = tmp_path / "bench_out.json"
+        from tools.transfer_cli import cmd_benchmark_new
+        args = argparse.Namespace(noise=str(noise), baseline=str(bl), treatment=str(tr),
+                                  signal_coverage=str(sc), workloads_dir=str(wd),
+                                  out=str(out))
+        rc = cmd_benchmark_new(args)
+        assert rc == 2, (
+            f"Malformed workload YAML should exit 2 (infrastructure error), got {rc}. "
+            "Silent reclassification to 'unmatched' is not acceptable — "
+            "it would produce a wrong benchmark verdict."
+        )
+
     def test_error_path_output_conforms_to_schema(self, tmp_path):
         """Error-path output (all workloads skipped) must not have extra keys
         beyond what benchmark_output.schema.json declares."""
