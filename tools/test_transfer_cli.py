@@ -1800,3 +1800,68 @@ class TestCompilePipeline:
             mock_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
             rc = cmd_compile_pipeline(args)
         assert rc == 0
+
+
+class TestPreflight:
+    def _values(self, tmp_path):
+        import yaml
+        v = {
+            "stack": {
+                "model": {
+                    "helmValues": {
+                        "decode": {
+                            "replicas": 2,
+                            "acceleratorTypes": {
+                                "labelKey": "nvidia.com/gpu.product",
+                                "labelValues": ["NVIDIA-H100-80GB-HBM3"],
+                            }
+                        }
+                    }
+                },
+                "scorer": {
+                    "baseline": {"configContent": "apiVersion: v1"},
+                    "treatment": {"configContent": "apiVersion: v1"},
+                }
+            },
+            "observe": {
+                "image": "ghcr.io/inference-sim/blis:v1.0.0",
+                "workloads": [{"name": "glia-40qps"}],
+                "noise_runs": 5,
+            }
+        }
+        ws = tmp_path / "workspace" / "tekton"
+        ws.mkdir(parents=True)
+        vf = ws / "values.yaml"
+        vf.write_text(yaml.dump(v))
+        return vf
+
+    def test_unresolved_tag_fails(self, tmp_path):
+        import yaml
+        vf = self._values(tmp_path)
+        data = yaml.safe_load(vf.read_text())
+        data["observe"]["image"] = "ghcr.io/inference-sim/blis:<TAG>"
+        vf.write_text(yaml.dump(data))
+        from tools.transfer_cli import _preflight_check_values
+        errors = _preflight_check_values(vf, "test-ns", "noise")
+        assert any("<TAG>" in e for e in errors)
+
+    def test_missing_treatment_config_fails_for_treatment(self, tmp_path):
+        import yaml
+        vf = self._values(tmp_path)
+        data = yaml.safe_load(vf.read_text())
+        data["stack"]["scorer"]["treatment"]["configContent"] = ""
+        vf.write_text(yaml.dump(data))
+        from tools.transfer_cli import _preflight_check_values
+        errors = _preflight_check_values(vf, "test-ns", "treatment")
+        assert any("treatment" in e.lower() for e in errors)
+
+    def test_noise_phase_skips_treatment_check(self, tmp_path):
+        import yaml
+        vf = self._values(tmp_path)
+        data = yaml.safe_load(vf.read_text())
+        data["stack"]["scorer"]["treatment"]["configContent"] = ""
+        vf.write_text(yaml.dump(data))
+        from tools.transfer_cli import _preflight_check_values
+        errors = _preflight_check_values(vf, "test-ns", "noise")
+        # treatment check not run for noise phase
+        assert not any("treatment" in e.lower() for e in errors)
