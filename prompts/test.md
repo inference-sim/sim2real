@@ -90,6 +90,8 @@ sentinel string `"<unclassified>"`.
 
 ## Step 1: Run Go Build
 
+**CRITICAL: Use the EXACT command below. Do NOT substitute package paths.**
+
 ```bash
 cd llm-d-inference-scheduler
 set -o pipefail
@@ -98,6 +100,10 @@ go build ./... 2>&1 | tee /tmp/stage4_build_output.txt
 BUILD_EXIT=${PIPESTATUS[0]:-${pipestatus[1]}}
 cd ..
 ```
+
+**Why `./...` and not a specific package:** This command MUST build the entire
+submodule to catch registration errors in `pkg/plugins/register.go`. Building only
+`pkg/plugins/scorer` will NOT detect these errors.
 
 If `BUILD_EXIT == 0`, proceed to Step 2.
 
@@ -117,6 +123,8 @@ Read the JSON output from `/tmp/stage4_build_status.json`:
 
 ## Step 2: Run Go Vet
 
+**CRITICAL: Use the EXACT command below. Do NOT substitute package paths.**
+
 ```bash
 cd llm-d-inference-scheduler
 set -o pipefail
@@ -125,6 +133,10 @@ go vet ./... 2>&1 | tee /tmp/stage4_vet_output.txt
 VET_EXIT=${PIPESTATUS[0]:-${pipestatus[1]}}
 cd ..
 ```
+
+**Why `./...` and not a specific package:** This command MUST vet the entire
+submodule to catch issues in `pkg/plugins/register.go`. Vetting only
+`pkg/plugins/scorer` will NOT detect these errors.
 
 If `VET_EXIT == 0`, proceed to Step 3.
 
@@ -142,6 +154,8 @@ Read the JSON output from `/tmp/stage4_vet_status.json`:
 - Otherwise: classify as compilation error and proceed to **Step 4: Retry**.
 
 ## Step 3: Run Go Test
+
+**CRITICAL: Use the EXACT command below. Do NOT modify the package path or timeout.**
 
 Run only the scorer package tests (not the entire repo — to avoid unrelated failures):
 

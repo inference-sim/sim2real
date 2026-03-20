@@ -405,6 +405,13 @@ import (
 // - metadata: endpoint identity (pod name)
 // - metrics: current endpoint metrics (populate fields relevant to your scorer)
 // - attributes: usually nil for scorer tests (used by filter plugins)
+//
+// CRITICAL: Declare ALL test endpoints as named variables here, above the test table.
+// Use those same variables as both elements of `input` and keys of `wantScores`.
+// scheduling.Endpoint is an interface — map lookup uses pointer identity.
+// Two separate NewEndpoint calls with identical arguments produce DIFFERENT keys
+// and will cause cmp.Diff to report a spurious mismatch even if the scores are correct.
+// Never construct endpoints inline inside the test case struct.
 
 func TestEvolvedScorer(t *testing.T) {
 	// --- Test endpoint creation ---

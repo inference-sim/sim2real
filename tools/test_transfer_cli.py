@@ -1477,7 +1477,16 @@ class TestValidateSchemaValidationResults:
             "benchmark": {
                 "passed": True,
                 "mechanism_check_verdict": "PASS",
-                "t_eff": 0.10
+                "t_eff": 0.10,
+                "workload_classification": [
+                    {
+                        "workload": "test_workload",
+                        "classification": "matched",
+                        "improvement": 0.05,
+                        "matched_signals": ["signal1"]
+                    }
+                ],
+                "specificity_notes": []
             },
             "overall_verdict": "PASS",
             "noise_cv": 0.05

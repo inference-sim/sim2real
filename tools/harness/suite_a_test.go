@@ -83,8 +83,8 @@ func TestSuiteA_KendallTau(t *testing.T) {
 		t.Fatalf("LoadAlgorithm: %v", err)
 	}
 
-	params := blis.BLISWeightedScorerParameters{Enabled: true}
-	prodScorer := blis.NewBLISWeightedScorer(context.Background(), params).WithName("suite-a")
+	params := blis.BLISWeightedScoringParameters{Enabled: true}
+	prodScorer := blis.NewBLISWeightedScoring(context.Background(), params).WithName("suite-a")
 
 	tuples := generateCanonicalTuples(200)
 	tauSum := 0.0

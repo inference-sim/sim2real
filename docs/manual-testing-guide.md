@@ -117,7 +117,7 @@ Open `docs/transfer/scorer_template.go.md` and confirm these methods are documen
 ```bash
 # Extract Go code blocks from template, attempt build
 cd llm-d-inference-scheduler
-go build ./...
+GOWORK=off go build ./...
 cd ..
 ```
 
@@ -269,7 +269,7 @@ After running Stages 1–3 (prerequisite):
 ```bash
 cd llm-d-inference-scheduler
 git checkout transfer/<algorithm_name>
-go build ./...
+GOWORK=off go build ./...
 cd ..
 ```
 
@@ -279,7 +279,7 @@ cd ..
 
 ```bash
 cd llm-d-inference-scheduler
-go test ./pkg/plugins/<algorithm_name>/... -v
+go test ./pkg/plugins/scorer/<algorithm_name>_test.go -v
 cd ..
 ```
 
@@ -298,7 +298,7 @@ cd ..
 
 **DO NOT REMOVE NOTES**
 
-_Notes_ Several tests did not work out of the box. I had to:
+Several tests did not work out of the box. I had to:
 - modify `test/config/prefix_cache_mode_test.go` to SKIP when 
 - ensure these images were already present: 
     - `llm-d-inference-scheduler:dev` (created by `make image-build`)
@@ -319,7 +319,7 @@ _Notes_ Several tests did not work out of the box. I had to:
 
 ```bash
 cd llm-d-inference-scheduler
-golangci-lint run ./...
+GOWORK=off golangci-lint run ./...
 cd ..
 ```
 
@@ -331,9 +331,8 @@ Introduce a deliberate compilation error in the generated plugin (e.g., typo in 
 
 **DO NOT REMOVE NOTES**
 
-_Notes_: 
 - Use prompt: `Read prompts/test.md and execute Stage 4`
-- there is no evidence that the retry counter is incremented except in the output; the `prompts/test.md` explicityly says not to any success artifacts.
+- _claude_: there is no evidence that the retry counter is incremented except in the output; the `prompts/test.md` explicityly says not to any success artifacts.
 
 **END NOTES**
 
@@ -349,7 +348,6 @@ Introduce an error the LLM cannot fix (e.g., reference a non-existent API). Run 
 
 **DO NOT REMOVE NOTES**
 
-_Notes_: 
 - Claude suggests a change to an unrelated files such as `active_request.go`.
 
 **END NOTES**
