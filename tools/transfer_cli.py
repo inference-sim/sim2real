@@ -1593,6 +1593,10 @@ def cmd_benchmark_new(args: "argparse.Namespace") -> int:
             "passed": False,
             "error": "all workloads skipped due to name mismatch between workloads_dir and result files",
             "skipped_workloads": skipped_workloads,
+            "t_eff": round(t_eff, 4),
+            "noise_cv": round(noise_cv, 4),
+            "workload_classification": [],
+            "specificity_notes": [],
         }
         if getattr(args, "out", None):
             out_path = Path(args.out)
