@@ -931,250 +931,6 @@ def cmd_test_status(args: argparse.Namespace) -> int:
                    errors=primary_errors)
 
 
-# ─── noise-characterize ───────────────────────────────────────────────────────
-
-def _cmd_noise_characterize(args: argparse.Namespace) -> int:
-    """Compute per-metric CV and T_eff from baseline latency runs.
-
-    Input JSON format:
-        {"runs": [{"p50": float, "p95": float, "p99": float}, ...]}
-
-    Exit codes:
-        0 = success (halt=false)
-        1 = validation failure (halt=true, CV > 15%)
-        2 = infrastructure error (file missing or invalid JSON)
-    """
-    import math
-
-    runs_path = Path(args.runs).resolve()
-    allowed_root = Path(os.environ["_SIM2REAL_ALLOWED_ROOT"]).resolve() if "_SIM2REAL_ALLOWED_ROOT" in os.environ else REPO_ROOT
-    if not runs_path.is_relative_to(allowed_root):
-        return _output("error", 2,
-                       errors=[f"Runs path '{runs_path}' is outside allowed root '{allowed_root}'."],
-                       per_metric_cv={}, t_eff=0.0, halt=False)
-    if not runs_path.exists():
-        return _output("error", 2, errors=[f"runs file not found: {args.runs}"],
-                       per_metric_cv={}, t_eff=0.0, halt=False)
-
-    try:
-        if runs_path.stat().st_size > MAX_FILE_SIZE:
-            return _output("error", 2,
-                           errors=[f"runs file exceeds {MAX_FILE_SIZE} bytes: {args.runs}"],
-                           per_metric_cv={}, t_eff=0.0, halt=False)
-    except OSError as e:
-        return _output("error", 2,
-                       errors=[f"cannot stat runs file '{args.runs}': {e}"],
-                       per_metric_cv={}, t_eff=0.0, halt=False)
-
-    try:
-        data = json.loads(runs_path.read_text())
-    except OSError as e:
-        return _output("error", 2, errors=[f"cannot read runs file '{args.runs}': {e}"],
-                       per_metric_cv={}, t_eff=0.0, halt=False)
-    except json.JSONDecodeError as e:
-        return _output("error", 2, errors=[f"invalid JSON in {args.runs}: {e}"],
-                       per_metric_cv={}, t_eff=0.0, halt=False)
-
-    if not isinstance(data, dict) or "runs" not in data:
-        return _output("error", 2,
-                       errors=["missing 'runs' key in input JSON"],
-                       per_metric_cv={}, t_eff=0.0, halt=False)
-
-    runs = data["runs"]
-    if not isinstance(runs, list) or len(runs) == 0:
-        return _output("error", 2,
-                       errors=["'runs' must be a non-empty list (BC-16: malformed input → exit 2)"],
-                       per_metric_cv={}, t_eff=0.0, halt=False)
-
-    metrics = ["p50", "p95", "p99"]
-    per_metric_cv: dict[str, float] = {}
-
-    for metric in metrics:
-        raw_values = [r[metric] for r in runs if isinstance(r, dict) and metric in r
-                      and isinstance(r[metric], (int, float))]
-        values = [v for v in raw_values if v > 0]
-        excluded = len(raw_values) - len(values)
-        if excluded > 0:
-            print(
-                f"WARNING: metric '{metric}': {excluded} of {len(raw_values)} run(s) excluded "
-                f"(zero or non-positive values) — CV computed from {len(values)} run(s)",
-                file=sys.stderr,
-            )
-        if len(values) < 2:
-            print(f"WARNING: metric '{metric}' has {len(values)} valid data point(s) (need ≥2), skipping from CV computation", file=sys.stderr)
-            continue
-
-        mean = sum(values) / len(values)
-        # Sample variance (Bessel's correction: n-1)
-        variance = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
-        std = math.sqrt(variance)
-        per_metric_cv[metric] = std / mean
-
-    if not per_metric_cv:
-        n_runs = len([r for r in runs if isinstance(r, dict)])
-        return _output("error", 2,
-                       errors=[f"insufficient runs for CV computation: need ≥2 data points per metric, got {n_runs} run(s) with valid latency values"],
-                       per_metric_cv={}, t_eff=0.0, halt=False)
-
-    max_cv = max(per_metric_cv.values())
-    t_eff = max(0.05, 2.0 * max_cv)
-    halt = max_cv > 0.15
-
-    if halt:
-        return _output("error", 1, per_metric_cv=per_metric_cv, t_eff=t_eff, halt=True,
-                       errors=[f"noise too high: max CV={max_cv:.4f} > 0.15 threshold"])
-
-    return _output("ok", 0, per_metric_cv=per_metric_cv, t_eff=t_eff, halt=False)
-
-
-# ─── benchmark ────────────────────────────────────────────────────────────────
-
-def _cmd_benchmark(args: argparse.Namespace) -> int:
-    """Compute mechanism check from benchmark results.
-
-    Input JSON format:
-        {"workloads": [
-            {"name": str, "classification": "matched"|"unmatched",
-             "baseline_p99": float, "transfer_p99": float},
-            ...
-        ]}
-
-    Exit codes:
-        0 = success (PASS or INCONCLUSIVE — operator must check mechanism_check_verdict)
-        1 = validation failure (FAIL verdict)
-        2 = infrastructure error (file missing, invalid JSON, or missing --t-eff)
-    """
-    if args.t_eff is None:
-        return _output("error", 2,
-                       errors=["--t-eff required: run noise-characterize first"],
-                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
-
-    t_eff = args.t_eff
-    if t_eff <= 0:
-        return _output("error", 2,
-                       errors=[f"--t-eff must be > 0, got {t_eff}. "
-                               "noise-characterize guarantees T_eff >= 0.05; "
-                               "a non-positive value indicates manual override error."],
-                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
-
-    results_path = Path(args.results).resolve()
-    allowed_root = Path(os.environ["_SIM2REAL_ALLOWED_ROOT"]).resolve() if "_SIM2REAL_ALLOWED_ROOT" in os.environ else REPO_ROOT
-    if not results_path.is_relative_to(allowed_root):
-        return _output("error", 2,
-                       errors=[f"Results path '{results_path}' is outside allowed root '{allowed_root}'."],
-                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
-    if not results_path.exists():
-        return _output("error", 2,
-                       errors=[f"results file not found: {args.results}"],
-                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
-
-    try:
-        if results_path.stat().st_size > MAX_FILE_SIZE:
-            return _output("error", 2,
-                           errors=[f"results file exceeds {MAX_FILE_SIZE} bytes: {args.results}"],
-                           mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
-    except OSError as e:
-        return _output("error", 2,
-                       errors=[f"cannot stat results file '{args.results}': {e}"],
-                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
-
-    try:
-        data = json.loads(results_path.read_text())
-    except OSError as e:
-        return _output("error", 2,
-                       errors=[f"cannot read results file '{args.results}': {e}"],
-                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
-    except json.JSONDecodeError as e:
-        return _output("error", 2,
-                       errors=[f"invalid JSON in {args.results}: {e}"],
-                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
-
-    if not isinstance(data, dict) or "workloads" not in data:
-        return _output("error", 2,
-                       errors=["missing 'workloads' key in input JSON"],
-                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
-
-    workloads = data["workloads"]
-    if not isinstance(workloads, list):
-        return _output("error", 2,
-                       errors=["'workloads' must be a list"],
-                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
-
-    results = []
-    matched_improvements = []
-    specificity_notes = []
-    errors = []
-    format_errors = []
-
-    for idx, w in enumerate(workloads):
-        if not isinstance(w, dict):
-            format_errors.append(f"workloads[{idx}] is not an object (got {type(w).__name__!r}); skipped")
-            continue
-        name = w.get("name", "unknown")
-        classification = w.get("classification", "unmatched")
-        baseline_p99 = w.get("baseline_p99", None)
-        transfer_p99 = w.get("transfer_p99", None)
-
-        if baseline_p99 is None or transfer_p99 is None:
-            missing = [k for k in ["baseline_p99", "transfer_p99"]
-                       if k not in w or w[k] is None]
-            results.append({"workload": name, "classification": classification,
-                             "improvement": 0.0, "error": f"missing required field(s): {', '.join(missing)}"})
-            continue
-
-        if baseline_p99 <= 0:
-            results.append({"workload": name, "classification": classification,
-                             "improvement": 0.0, "error": "baseline_p99 must be > 0"})
-            continue
-
-        if transfer_p99 < 0:
-            results.append({"workload": name, "classification": classification,
-                             "improvement": 0.0, "error": "transfer_p99 must be >= 0"})
-            continue
-
-        improvement = (baseline_p99 - transfer_p99) / baseline_p99
-        results.append({"workload": name, "classification": classification,
-                         "improvement": round(improvement, 6)})
-
-        if classification == "matched":
-            matched_improvements.append(improvement)
-        elif classification == "unmatched":
-            change_ratio = round(abs(baseline_p99 - transfer_p99) / baseline_p99, 6)
-            if change_ratio >= t_eff:
-                specificity_notes.append(
-                    f"workload {name}: |change|/baseline = {change_ratio} >= T_eff"
-                )
-        else:
-            errors.append(f"unrecognized classification value: {classification!r} for workload {name!r}")
-
-    if not matched_improvements:
-        return _output("error", 2,
-                       errors=format_errors + ["no matched workloads found — cannot compute mechanism check (configuration error: check workload classification)"],
-                       mechanism_check_verdict="ERROR", passed=False,
-                       workload_classification=results,
-                       t_eff=t_eff, specificity_notes=specificity_notes)
-
-    # Mechanism check
-    if any(imp >= t_eff for imp in matched_improvements):
-        verdict = "PASS"
-    elif any(imp > 0 for imp in matched_improvements):
-        verdict = "INCONCLUSIVE"
-    else:
-        verdict = "FAIL"
-
-    exit_code = 1 if verdict == "FAIL" else 0
-    status = "error" if verdict == "FAIL" else ("inconclusive" if verdict == "INCONCLUSIVE" else "ok")
-    if verdict == "FAIL":
-        errors.append("mechanism check FAIL: no matched workload improvement >= T_eff")
-    if specificity_notes:
-        errors.append(f"specificity check failed for {len(specificity_notes)} unmatched workload(s)")
-
-    passed = verdict == "PASS"
-    return _output(status, exit_code, mechanism_check_verdict=verdict, passed=passed,
-                   workload_classification=results, t_eff=t_eff, specificity_notes=specificity_notes,
-                   errors=format_errors + errors)
-
-
 def _kubectl_current_context() -> str:
     """Return current kubectl context, or empty string on error."""
     import subprocess
@@ -1184,7 +940,8 @@ def _kubectl_current_context() -> str:
             capture_output=True, text=True, timeout=10
         )
         return r.stdout.strip() if r.returncode == 0 else ""
-    except Exception:
+    except Exception as e:
+        print(f"WARNING: kubectl context check failed: {e}", file=sys.stderr)
         return ""
 
 
@@ -1573,13 +1330,15 @@ def cmd_preflight(args: "argparse.Namespace") -> int:
     checks = []  # list of (label, passed, detail)
 
     def run(label: str, cmd: list) -> bool:
+        err_reason = ""
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
                                 shell=False)
             ok = r.returncode == 0
         except Exception as e:
             ok = False
-        checks.append((label, ok, ""))
+            err_reason = f"check failed: {e}"
+        checks.append((label, ok, err_reason))
         return ok
 
     # --- values-only checks (no kubectl) ---
@@ -1615,19 +1374,17 @@ def cmd_preflight(args: "argparse.Namespace") -> int:
         if label_key and label_vals:
             selector = f"{label_key}={label_vals[0]}"
             r = subprocess.run(
-                ["kubectl", "get", "nodes", "-l", selector,
-                 "--field-selector=status.conditions[?(@.type==\"Ready\")].status=True",
-                 "-o", "name"],
+                ["kubectl", "get", "nodes", "-l", selector, "-o", "name"],
                 capture_output=True, text=True, timeout=30, shell=False
             )
-            count = len([l for l in r.stdout.strip().splitlines() if l])
-            ok = count >= replicas
+            count = len([l for l in r.stdout.strip().splitlines() if l]) if r.returncode == 0 else 0
+            ok = r.returncode == 0 and count >= replicas
             checks.append((
                 f"GPU nodes (≥{replicas} with {selector})", ok,
                 f"found {count}"
             ))
-    except Exception:
-        checks.append(("GPU nodes check", False, "error reading values.yaml"))
+    except Exception as e:
+        checks.append(("GPU nodes check", False, f"error: {e}"))
 
     if phase == "treatment":
         import os
@@ -1698,8 +1455,10 @@ def _classify_workloads(workloads_dir: "Path", signal_coverage_path: "Path",
         wl_name = wf.stem.removeprefix("workload_").replace("_", "-")
         try:
             wl_data = yaml.safe_load(wf.read_text()) or {}
-        except Exception:
-            wl_data = {}
+        except Exception as e:
+            print(f"WARNING: failed to parse workload file {wf}: {e}", file=sys.stderr)
+            result[wl_name] = {"classification": "unmatched", "matched_signals": []}
+            continue
         # Collect all keys at top level AND within clients[] items
         all_keys = set(wl_data.keys())
         for client in wl_data.get("clients", []):
@@ -1829,7 +1588,19 @@ def cmd_benchmark_new(args: "argparse.Namespace") -> int:
             f"Baseline result names: {sorted(bl_map.keys())}."
         )
         print(msg, file=sys.stderr)
-        print(msg)
+        error_output = {
+            "mechanism_check_verdict": "ERROR",
+            "passed": False,
+            "error": "all workloads skipped due to name mismatch between workloads_dir and result files",
+            "skipped_workloads": skipped_workloads,
+        }
+        if getattr(args, "out", None):
+            out_path = Path(args.out)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(json.dumps(error_output, indent=2))
+        else:
+            print(json.dumps(error_output, indent=2))
+        return 2
 
     # Mechanism check
     if not matched_improvements:
@@ -1883,8 +1654,15 @@ def cmd_generate_evidence(args: "argparse.Namespace") -> int:
                   f"{label} not found.", file=sys.stderr)
             return 1
 
-    alg = json.loads(alg_path.read_text())
-    val = json.loads(val_path.read_text())
+    try:
+        alg = json.loads(alg_path.read_text())
+        val = json.loads(val_path.read_text())
+    except json.JSONDecodeError as e:
+        print(f"ERROR: cannot parse JSON from workspace artifact: {e}", file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f"ERROR: cannot read workspace artifact: {e}", file=sys.stderr)
+        return 1
 
     bench = val.get("benchmark", {})
     if not bench:
