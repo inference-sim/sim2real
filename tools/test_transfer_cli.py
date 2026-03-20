@@ -1912,7 +1912,37 @@ class TestBenchmarkNew:
         assert rc == 2, f"Name mismatch ERROR should exit 2, got {rc}"
         result = json.loads(out.read_text())
         assert result["mechanism_check_verdict"] == "ERROR"
-        assert "skipped_workloads" in result
+        assert "skipped_workloads" not in result, (
+            "skipped_workloads key is not in benchmark_output.schema.json — "
+            "use specificity_notes instead"
+        )
+        assert result["specificity_notes"], "name-mismatch error details should appear in specificity_notes"
+        assert any("completely-different" in note or "skipped" in note.lower()
+                   for note in result["specificity_notes"])
+
+    def test_error_path_output_conforms_to_schema(self, tmp_path):
+        """Error-path output (all workloads skipped) must not have extra keys
+        beyond what benchmark_output.schema.json declares."""
+        import json, argparse, yaml
+        noise = self._make_noise(tmp_path, cv=0.02)
+        bl, tr = self._make_baseline_treatment(tmp_path, 100.0, 80.0)
+        sc = self._make_signal_coverage(tmp_path)
+        wd = tmp_path / "workloads_mismatch"
+        wd.mkdir()
+        (wd / "workload_completely-different.yaml").write_text(
+            yaml.dump({"version": "1", "kv_utilization": 0.5})
+        )
+        out = tmp_path / "bench_out.json"
+        from tools.transfer_cli import cmd_benchmark_new
+        args = argparse.Namespace(noise=str(noise), baseline=str(bl), treatment=str(tr),
+                                  signal_coverage=str(sc), workloads_dir=str(wd),
+                                  out=str(out))
+        cmd_benchmark_new(args)
+        result = json.loads(out.read_text())
+        allowed_keys = {"t_eff", "noise_cv", "mechanism_check_verdict", "passed",
+                        "workload_classification", "specificity_notes"}
+        extra_keys = set(result.keys()) - allowed_keys
+        assert not extra_keys, f"Output has extra keys not in schema: {extra_keys}"
 
 
 class TestGenerateEvidence:

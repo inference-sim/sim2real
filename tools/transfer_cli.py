@@ -1623,12 +1623,15 @@ def cmd_benchmark_new(args: "argparse.Namespace") -> int:
         error_output = {
             "mechanism_check_verdict": "ERROR",
             "passed": False,
-            "error": "all workloads skipped due to name mismatch between workloads_dir and result files",
-            "skipped_workloads": skipped_workloads,
             "t_eff": round(t_eff, 4),
             "noise_cv": round(noise_cv, 4),
             "workload_classification": [],
-            "specificity_notes": [],
+            "specificity_notes": [
+                f"all {len(skipped_workloads)} workload(s) skipped due to name mismatch "
+                f"between workloads_dir and result files; "
+                f"skipped={skipped_workloads}; "
+                f"baseline names={sorted(bl_map.keys())}"
+            ],
         }
         if getattr(args, "out", None):
             out_path = Path(args.out)
