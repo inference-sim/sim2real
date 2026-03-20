@@ -126,3 +126,16 @@ PR1 captures *what signals the algorithm reads* (signal metadata: names, types, 
 3. Decision thresholds (e.g., score cutoffs)
 4. Composite signal computations (e.g., EffectiveLoad formula)
 5. Conditional branching logic (e.g., SessionID affinity check)
+
+### PR6 Deliverables
+
+- **Stage 6 prompt:** `prompts/pr.md` — prerequisites check, branch push, `gh pr create` for llm-d repos, `append-calibration-log`.
+- **append-calibration-log CLI:** `tools/transfer_cli.py append-calibration-log` — atomic append with corruption detection.
+- **Known-answer test:** `tools/harness/known_answer_test.go::TestKnownAnswer` — synthetic algorithm (score = QueueDepth/100.0) against fixture `tools/harness/testdata/known_answer_expected.json`.
+
+**Stage 6 invocation (after Stage 5 PASS):**
+```bash
+# Open prompts/pr.md and follow the steps.
+# The prompt will call:
+.venv/bin/python tools/transfer_cli.py append-calibration-log
+```
