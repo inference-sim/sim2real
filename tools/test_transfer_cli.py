@@ -1742,6 +1742,21 @@ class TestPreflight:
         # treatment check not run for noise phase
         assert not any("treatment" in e.lower() for e in errors)
 
+    def test_missing_values_file_returns_oserror_message(self, tmp_path):
+        """_preflight_check_values returns an OS-level error message for a missing file,
+        not a YAML parse error."""
+        from tools.transfer_cli import _preflight_check_values
+        from pathlib import Path
+        errors = _preflight_check_values(Path(tmp_path / "nonexistent.yaml"), "ns", "noise")
+        assert errors, "Missing file should produce at least one error"
+        assert any("read" in e.lower() or "no such" in e.lower() or "errno" in e.lower()
+                   for e in errors), (
+            f"Expected an OS/read error message for missing file, got: {errors}"
+        )
+        assert not any("parse" in e.lower() for e in errors), (
+            f"Should NOT say 'parse' for a missing file — that implies a YAML syntax problem: {errors}"
+        )
+
 
     def test_treatment_scorer_build_timeout_marks_failed(self, tmp_path):
         """preflight exits 1 (not hangs) when go build times out.

@@ -1335,8 +1335,12 @@ def _preflight_check_values(values_path: "Path", namespace: str, phase: str) -> 
     import yaml
     errors = []
     try:
-        data = yaml.safe_load(values_path.read_text())
-    except Exception as e:
+        raw = values_path.read_text()
+    except OSError as e:
+        return [f"Cannot read values.yaml: {e}"]
+    try:
+        data = yaml.safe_load(raw)
+    except yaml.YAMLError as e:
         return [f"Cannot parse values.yaml: {e}"]
 
     if not isinstance(data, dict):
