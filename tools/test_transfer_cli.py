@@ -1698,6 +1698,38 @@ class TestPreflight:
         assert not any("treatment" in e.lower() for e in errors)
 
 
+    def test_treatment_scorer_build_timeout_marks_failed(self, tmp_path):
+        """preflight exits 1 (not hangs) when go build times out.
+        subprocess is imported locally in cmd_preflight, so mock subprocess.run globally."""
+        import argparse, unittest.mock as mock, subprocess as subprocess_mod
+        vf = self._values(tmp_path)
+        # Create fake scheduler submodule dir so the go build branch is entered
+        scheduler_dir = tmp_path / "llm-d-inference-scheduler"
+        scheduler_dir.mkdir()
+
+        def fake_run(cmd, **kwargs):
+            # Raise TimeoutExpired for go commands; succeed for everything else (kubectl etc.)
+            if cmd and "go" in str(cmd[0]):
+                raise subprocess_mod.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout", 120))
+            result = mock.Mock()
+            result.returncode = 0
+            result.stdout = "ok"
+            result.stderr = ""
+            return result
+
+        with mock.patch("tools.transfer_cli.REPO_ROOT", tmp_path), \
+             mock.patch("subprocess.run", side_effect=fake_run):
+            from tools.transfer_cli import cmd_preflight
+            args = argparse.Namespace(phase="treatment", values=str(vf),
+                                      namespace="test-ns")
+            rc = cmd_preflight(args)
+        # preflight must still return (not hang), and some check must have failed
+        assert rc == 1, (
+            f"preflight should exit 1 when go build times out, got {rc}. "
+            "If it hangs, timeout is not being set on the go build subprocess call."
+        )
+
+
 class TestBenchmarkNew:
     def _make_noise(self, tmp_path, cv=0.05):
         """noise_results.json with controllable CV."""

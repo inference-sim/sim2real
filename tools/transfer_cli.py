@@ -1400,17 +1400,26 @@ def cmd_preflight(args: "argparse.Namespace") -> int:
         checks.append(("GPU nodes check", False, f"error: {e}"))
 
     if phase == "treatment":
-        import os
-        scheduler_dir = "llm-d-inference-scheduler"
-        if os.path.isdir(scheduler_dir):
-            r = subprocess.run(
-                ["go", "build", "./pkg/plugins/scorer/..."],
-                capture_output=True, text=True, cwd=scheduler_dir, shell=False
-            )
-            ok = r.returncode == 0
+        scheduler_dir = REPO_ROOT / "llm-d-inference-scheduler"
+        if scheduler_dir.is_dir():
+            try:
+                r = subprocess.run(
+                    ["go", "build", "./pkg/plugins/scorer/..."],
+                    capture_output=True, text=True, cwd=str(scheduler_dir),
+                    shell=False, timeout=120
+                )
+                ok = r.returncode == 0
+                detail = r.stderr.strip() if not ok else ""
+            except subprocess.TimeoutExpired:
+                ok = False
+                detail = "go build timed out after 120s"
+            except OSError as e:
+                ok = False
+                detail = f"failed to launch go: {e}"
         else:
             ok = False
-        checks.append(("Stage 4 scorer builds", ok, ""))
+            detail = f"scheduler submodule not found at {scheduler_dir}"
+        checks.append(("Stage 4 scorer builds", ok, detail))
 
     # Print checklist to stderr; output JSON to stdout per module contract
     any_fail = False
