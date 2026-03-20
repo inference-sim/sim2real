@@ -52,11 +52,16 @@ python tools/transfer_cli.py validate-schema workspace/algorithm_summary.json
 # Exit 0 = clean, 1 = error found, 2 = CLI infrastructure error
 echo "<go build/test output>" | python tools/transfer_cli.py test-status
 
-# Compute per-metric CV and T_eff from baseline latency runs
-python tools/transfer_cli.py noise-characterize --runs workspace/baseline_runs.json
+# noise-characterize removed — superseded by noise pipeline in Stage 5
 
-# Compute mechanism check from benchmark results
-python tools/transfer_cli.py benchmark --results workspace/benchmark_results.json --t-eff <float>
+# Compute mechanism check from noise/baseline/treatment results
+python tools/transfer_cli.py benchmark \
+  --noise workspace/noise_results.json \
+  --baseline workspace/baseline_results.json \
+  --treatment workspace/treatment_results.json \
+  --signal-coverage workspace/signal_coverage.json \
+  --workloads-dir blis_router/workloads/ \
+  --out workspace/benchmark_output.json
 ```
 
 ## Important: Artifact Consumption
@@ -74,9 +79,22 @@ Downstream stages MUST use the exit code (not file existence) as the success sig
 
 ## Development
 
-- Python >= 3.10, stdlib only (no external dependencies)
+- Python >= 3.10, stdlib only (no external dependencies for most subcommands)
 - Tests: `python -m pytest tools/ -v`
 - Lint: `ruff check tools/` (if installed)
+
+## Notes
+
+- `preflight` and `benchmark` import PyYAML directly and require it to be installed.
+  `compile-pipeline` invokes `tektonc-data-collection/tektonc/tektonc.py` via subprocess; that tool requires `jinja2` and `PyYAML`.
+  All of these are installed via `pip install -r requirements.txt`.
+  The stdlib-only constraint does not apply to these subcommands.
+- `benchmark` exit codes: 0 = PASS or INCONCLUSIVE (pipeline should proceed); 1 = FAIL (no matched improvement ≥ T_eff); 2 = ERROR (all workloads skipped due to name mismatch or no matched classifications) or infrastructure failure (missing/malformed input files). Operators must always parse `mechanism_check_verdict` from the output JSON to distinguish PASS from INCONCLUSIVE.
+- Stage 5 validate.md exit codes (shell script level, not CLI):
+  - `0` = complete (all phases done, all suites passed)
+  - `1` = error/halt (context mismatch, ordering violation, suite failure)
+  - `2` = infrastructure error (missing artifact, parse failure)
+  - `3` = REENTER (noise phase not yet done; operator must jump to Step 5 and re-enter validate.md after noise completes). Automated harnesses must NOT treat exit 3 as a generic failure — it is a planned re-entry pause.
 
 ## Pipeline Status
 
@@ -86,7 +104,7 @@ Downstream stages MUST use the exit code (not file existence) as the success sig
 | PR2 | Scorer template artifact | Complete |
 | PR3 | Prompt templates (Stages 1-3) + Go harness | Complete |
 | PR4 | Stage 4 prompt + test retry logic | Complete |
-| PR5 | Validation pipeline (Stage 5) | Not started |
+| PR5 | Validation pipeline (Stage 5) | In progress |
 | PR6 | Stage 6 + self-verification + calibration | Not started |
 
 ## Cross-PR Notes

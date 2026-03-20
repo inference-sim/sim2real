@@ -82,3 +82,28 @@ The following signals are NOT part of the EVOLVE-BLOCK signal set and therefore 
 - All v1 signals have `staleness_window_ms = 0` (approximate-scorer class).
 - **Temporal semantics assumption:** Temporal semantics verified in PR5: production `endpoint.GetMetrics()` provides point-in-time snapshot metrics, consistent with sim RoutingSnapshot assumptions.
 - **Missing/default value assumption:** All production metrics are assumed to be always available from `endpoint.GetMetrics()`. If a metric field is missing, the PR3 scorer should return score 0.0 for that endpoint.
+
+## Submodule Prerequisites
+
+### inference-sim: minimum commit for `blis observe` (PR #704)
+
+Stage 5 cluster benchmarking requires `blis observe` CLI to be present in the
+inference-sim submodule. This command is added by PR #704
+(`feat(cmd): add blis observe command for real-server latency collection`).
+
+**Minimum commit hash:** `<fill in after PR #704 merges>`
+
+**How to verify:** `grep -q "AddCommand(observeCmd)" inference-sim/cmd/root.go`
+
+**How to bump the submodule:**
+
+~~~bash
+cd inference-sim
+git fetch origin
+git checkout <minimum_commit_hash>
+cd ..
+git add inference-sim
+git commit -m "chore: bump inference-sim to include blis observe (#704)"
+~~~
+
+After bumping, rebuild the blis container image and update `observe.image` in `values.yaml`.

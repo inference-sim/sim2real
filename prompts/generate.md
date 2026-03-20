@@ -181,6 +181,114 @@ Construct and validate the output artifact:
 
 **HALT if validation fails** with `halt_reason: "post_write_validation_failure_stage3"`.
 
+## Step 8: Generate tekton artifacts
+
+After writing `workspace/stage3_output.json`, generate the Tekton benchmarking artifacts for Stage 5.
+
+**Prerequisites check:**
+```bash
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/algorithm_summary.json
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/signal_coverage.json
+```
+**HALT if either exits non-zero.**
+
+**Resolve inference-sim image tag:**
+```bash
+BLIS_IMAGE_TAG=$(cd inference-sim && git describe --tags 2>/dev/null)
+if [ -z "$BLIS_IMAGE_TAG" ]; then
+  echo "HALT: git describe --tags returned empty — no tags on inference-sim submodule"; exit 1
+fi
+if echo "$BLIS_IMAGE_TAG" | grep -qE -- '-g[0-9a-f]+$'; then
+  echo "HALT: '$BLIS_IMAGE_TAG' is an un-tagged commit (contains -g suffix). Bump the submodule to a release tag first."; exit 1
+fi
+if ! echo "$BLIS_IMAGE_TAG" | grep -qE '^v?[0-9]+\.[0-9]+'; then
+  echo "HALT: '$BLIS_IMAGE_TAG' does not match expected release-tag pattern v?N.N"; exit 1
+fi
+echo "Resolved tag: $BLIS_IMAGE_TAG"
+```
+Record `$BLIS_IMAGE_TAG` for use in `observe.image` below.
+
+**Generate `workspace/tekton/values.yaml`:**
+
+Using the translation rules document (`docs/transfer/blis_to_llmd_mapping.md` and
+`blis_router/llm_config.yaml` + `blis_router/hardware_config.json`), generate
+`workspace/tekton/values.yaml` following the schema in the design spec. Key required fields:
+- `stack.model.helmValues` — from `blis_router/llm_config.yaml` via translation rules
+- `stack.scorer.baseline.configContent` — from `docs/transfer/blis_to_llmd_mapping.md` baseline scorer config
+- `stack.scorer.treatment.configContent` — the generated plugin's scorer config (from Stage 3 scorer output)
+- `observe.image` — `"ghcr.io/inference-sim/blis:$BLIS_IMAGE_TAG"` (resolved above)
+- `observe.workloads` — embed full content of `blis_router/workloads/workload_*.yaml` files
+- `observe.noise_runs: 5`
+
+**Validate generated values.yaml required keys:**
+```bash
+.venv/bin/python -c "
+import yaml
+v = yaml.safe_load(open('workspace/tekton/values.yaml'))
+required = ['stack', 'observe']
+for k in required:
+    assert k in v, f'missing key: {k}'
+assert 'image' in v['observe'], 'missing observe.image'
+assert '<TAG>' not in v['observe']['image'], 'unresolved <TAG> in observe.image'
+assert v['observe'].get('noise_runs'), 'missing observe.noise_runs'
+wl = v['observe'].get('workloads', [])
+assert len(wl) > 0, 'observe.workloads must be non-empty (no workload files found in blis_router/workloads/)'
+print('OK')
+"
+```
+**HALT if any assertion fails.**
+
+**Generate PipelineRun stubs** (`workspace/tekton/pipelinerun-{noise,baseline,treatment}.yaml`):
+
+Each stub must include:
+```yaml
+metadata:
+  name: $PIPELINERUN_NAME
+  namespace: $NAMESPACE
+  labels:
+    sim2real-phase: $PHASE
+spec:
+  pipelineRef:
+    name: sim2real-<phase>
+  params:
+    - name: experimentId
+      value: $PIPELINERUN_NAME
+    - name: namespace
+      value: $NAMESPACE
+  workspaces:
+    - name: model-cache
+      persistentVolumeClaim:
+        claimName: model-pvc
+    - name: hf-credentials
+      secret:
+        secretName: hf-secret
+    - name: data-storage
+      persistentVolumeClaim:
+        claimName: data-pvc
+```
+
+**Update `workspace/stage3_output.json`** to include `tekton_artifacts` key:
+```json
+{
+  "tekton_artifacts": {
+    "values_yaml": "workspace/tekton/values.yaml",
+    "pipeline_stubs": [
+      "workspace/tekton/pipelinerun-noise.yaml",
+      "workspace/tekton/pipelinerun-baseline.yaml",
+      "workspace/tekton/pipelinerun-treatment.yaml"
+    ]
+  }
+}
+```
+
+Note: `stage3_output.schema.json` defines `tekton_artifacts` with `additionalProperties: false` and only allows `values_yaml` (string) and `pipeline_stubs` (array). Individual keys per phase are not permitted — use `pipeline_stubs` array. Stage 5 reads the stub paths from this array in phase order (noise, baseline, treatment). Within `tekton_artifacts`, `values_yaml` is required; `pipeline_stubs` is optional per the schema, though Stage 5 expects it to be present.
+
+**Validate stage3_output.json after updating:**
+```bash
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/stage3_output.json \
+  || { echo "HALT: stage3_output.json failed schema validation after tekton_artifacts update"; exit 1; }
+```
+
 ## Halt Conditions
 
 | Condition | halt_reason | Action |
@@ -192,6 +300,8 @@ Construct and validate the output artifact:
 | CacheHitRate unavailable (multiplier) | `cache_hit_rate_unavailable_stage3` | Write escalation.json, HALT |
 | Pre-write validation failure | `pre_write_validation_failure_stage3` | Write escalation.json, HALT |
 | Post-write validation failure | `post_write_validation_failure_stage3` | Write escalation.json, HALT |
+| inference-sim tag unresolved | `inference_sim_tag_unresolved_stage3` | HALT (Stage 8): write `workspace/escalation.json` with `"stage": 3` and this halt_reason |
+| tekton_artifacts schema validation | `tekton_artifacts_validation_failure_stage3` | HALT (Stage 8): write `workspace/escalation.json` with `"stage": 3` and this halt_reason |
 
 On any halt, write `workspace/escalation.json` per the escalation schema with `"stage": 3` and the appropriate `halt_reason`.
 
@@ -205,3 +315,6 @@ On any halt, write `workspace/escalation.json` per the escalation schema with `"
   - `test_file`: path to generated test file
   - `register_file`: path to register.go
   - `scorer_type`: the TypedName type string
+  - `tekton_artifacts`: `values_yaml` path and `pipeline_stubs` array
+- `workspace/tekton/values.yaml` — Tekton pipeline values
+- `workspace/tekton/pipelinerun-{noise,baseline,treatment}.yaml` — PipelineRun stubs

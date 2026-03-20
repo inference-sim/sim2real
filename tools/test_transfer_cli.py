@@ -1236,222 +1236,6 @@ class TestMetricsTypeGuard:
             assert "status" in stdout
 
 
-def test_noise_characterize_halts_on_high_cv(tmp_path):
-    """BC-11: CV > 15% causes halt=true and exit code 1."""
-    runs = {"runs": [{"p99": v} for v in [0.40, 0.80, 0.20, 0.60, 0.30]]}  # CV ≈ 0.47
-    runs_file = tmp_path / "baseline_runs.json"
-    runs_file.write_text(json.dumps(runs))
-
-    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
-    result = subprocess.run(
-        [sys.executable, "tools/transfer_cli.py", "noise-characterize", "--runs", str(runs_file)],
-        capture_output=True, text=True, env=env
-    )
-    assert result.returncode == 1, f"Expected exit 1, got {result.returncode}"
-    output = json.loads(result.stdout)
-    assert output["halt"] is True
-    assert output["status"] == "error"
-
-
-def test_noise_characterize_malformed_input(tmp_path):
-    """BC-16: malformed JSON input causes exit code 2 (infrastructure error)."""
-    runs_file = tmp_path / "bad_runs.json"
-    runs_file.write_text("{invalid json")
-
-    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
-    result = subprocess.run(
-        [sys.executable, "tools/transfer_cli.py", "noise-characterize", "--runs", str(runs_file)],
-        capture_output=True, text=True, env=env
-    )
-    assert result.returncode == 2, f"Expected exit 2, got {result.returncode}"
-    output = json.loads(result.stdout)
-    assert output["status"] == "error"
-
-
-def test_noise_characterize_empty_runs(tmp_path):
-    """BC-16: empty runs list is infrastructure error (no data to compute CV) — exit code 2."""
-    runs_file = tmp_path / "empty_runs.json"
-    runs_file.write_text('{"runs": []}')
-
-    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
-    result = subprocess.run(
-        [sys.executable, "tools/transfer_cli.py", "noise-characterize", "--runs", str(runs_file)],
-        capture_output=True, text=True, env=env
-    )
-    assert result.returncode == 2, f"Expected exit 2, got {result.returncode}"
-    output = json.loads(result.stdout)
-    assert output["status"] == "error"
-
-
-def test_noise_characterize_t_eff_computation(tmp_path):
-    """BC-12: T_eff = max(0.05, 2*max_cv) using sample std (Bessel's correction)."""
-    runs = {"runs": [{"p99": v} for v in [0.40, 0.42, 0.41, 0.39, 0.41]]}
-    runs_file = tmp_path / "baseline_runs.json"
-    runs_file.write_text(json.dumps(runs))
-
-    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
-    result = subprocess.run(
-        [sys.executable, "tools/transfer_cli.py", "noise-characterize", "--runs", str(runs_file)],
-        capture_output=True, text=True, env=env
-    )
-    assert result.returncode == 0, f"Expected exit 0, got {result.returncode}: {result.stdout}"
-    output = json.loads(result.stdout)
-    assert output["halt"] is False
-    assert output["status"] == "ok"
-    assert "per_metric_cv" in output, "missing per_metric_cv in output"
-    assert "p99" in output["per_metric_cv"], "missing p99 in per_metric_cv"
-    expected_cv = 0.02809
-    assert abs(output["per_metric_cv"]["p99"] - expected_cv) < 0.002, \
-        f"Expected p99 CV ≈ {expected_cv}, got {output['per_metric_cv']['p99']}"
-    expected_t_eff = max(0.05, 2 * expected_cv)
-    assert abs(output["t_eff"] - expected_t_eff) < 0.002, \
-        f"Expected T_eff ≈ {expected_t_eff}, got {output['t_eff']}"
-
-
-def test_benchmark_mechanism_check_pass(tmp_path):
-    """BC-13: improvement >= T_eff for matched workload → PASS."""
-    results = {
-        "workloads": [
-            {"name": "chatbot", "classification": "matched",
-             "baseline_p99": 0.45, "transfer_p99": 0.38},  # improvement ≈ 15.6%
-            {"name": "batch",   "classification": "unmatched",
-             "baseline_p99": 0.30, "transfer_p99": 0.31},  # change ≈ -3.3%
-        ]
-    }
-    results_file = tmp_path / "results.json"
-    results_file.write_text(json.dumps(results))
-
-    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
-    result = subprocess.run(
-        [sys.executable, "tools/transfer_cli.py", "benchmark",
-         "--results", str(results_file), "--t-eff", "0.10"],
-        capture_output=True, text=True, env=env
-    )
-    assert result.returncode == 0
-    output = json.loads(result.stdout)
-    assert output["mechanism_check_verdict"] == "PASS"
-    assert output["status"] == "ok"
-
-
-def test_benchmark_mechanism_check_inconclusive(tmp_path):
-    """Improvement > 0 but < T_eff for all matched workloads → INCONCLUSIVE (exit 0)."""
-    results = {
-        "workloads": [
-            {"name": "chatbot", "classification": "matched",
-             "baseline_p99": 0.45, "transfer_p99": 0.44},  # improvement ≈ 2.2% < T_eff=0.10
-        ]
-    }
-    results_file = tmp_path / "results.json"
-    results_file.write_text(json.dumps(results))
-
-    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
-    result = subprocess.run(
-        [sys.executable, "tools/transfer_cli.py", "benchmark",
-         "--results", str(results_file), "--t-eff", "0.10"],
-        capture_output=True, text=True, env=env
-    )
-    assert result.returncode == 0, f"INCONCLUSIVE should exit 0, got {result.returncode}"
-    output = json.loads(result.stdout)
-    assert output["mechanism_check_verdict"] == "INCONCLUSIVE"
-    assert output["status"] == "inconclusive", \
-        f"INCONCLUSIVE should have status='inconclusive', got '{output['status']}'"
-
-
-def test_benchmark_mechanism_check_fail(tmp_path):
-    """All matched workload improvements <= 0 → FAIL (exit 1)."""
-    results = {
-        "workloads": [
-            {"name": "chatbot", "classification": "matched",
-             "baseline_p99": 0.45, "transfer_p99": 0.50},  # regression
-        ]
-    }
-    results_file = tmp_path / "results.json"
-    results_file.write_text(json.dumps(results))
-
-    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
-    result = subprocess.run(
-        [sys.executable, "tools/transfer_cli.py", "benchmark",
-         "--results", str(results_file), "--t-eff", "0.10"],
-        capture_output=True, text=True, env=env
-    )
-    assert result.returncode == 1, f"FAIL should exit 1, got {result.returncode}"
-    output = json.loads(result.stdout)
-    assert output["mechanism_check_verdict"] == "FAIL"
-
-
-def test_benchmark_requires_t_eff(tmp_path):
-    """BC-17: missing --t-eff → exit 2 (infrastructure error, not FAIL verdict)."""
-    results_file = tmp_path / "results.json"
-    results_file.write_text('{"workloads": []}')
-
-    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
-    result = subprocess.run(
-        [sys.executable, "tools/transfer_cli.py", "benchmark",
-         "--results", str(results_file)],  # no --t-eff
-        capture_output=True, text=True, env=env
-    )
-    assert result.returncode == 2
-    output = json.loads(result.stdout)
-    assert "t-eff" in output["errors"][0].lower()
-
-
-def test_benchmark_malformed_input(tmp_path):
-    """BC-18: malformed JSON input causes exit code 2 (infrastructure error)."""
-    results_file = tmp_path / "bad_results.json"
-    results_file.write_text("{invalid json")
-
-    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
-    result = subprocess.run(
-        [sys.executable, "tools/transfer_cli.py", "benchmark",
-         "--results", str(results_file), "--t-eff", "0.10"],
-        capture_output=True, text=True, env=env
-    )
-    assert result.returncode == 2, f"Expected exit 2, got {result.returncode}"
-    output = json.loads(result.stdout)
-    assert output["status"] == "error"
-
-
-def test_benchmark_missing_workloads_key(tmp_path):
-    """BC-18: valid JSON missing 'workloads' key causes exit code 2."""
-    results_file = tmp_path / "no_workloads.json"
-    results_file.write_text('{"other_key": 123}')
-
-    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
-    result = subprocess.run(
-        [sys.executable, "tools/transfer_cli.py", "benchmark",
-         "--results", str(results_file), "--t-eff", "0.10"],
-        capture_output=True, text=True, env=env
-    )
-    assert result.returncode == 2, f"Expected exit 2, got {result.returncode}"
-    output = json.loads(result.stdout)
-    assert output["status"] == "error"
-
-
-def test_benchmark_no_matched_workloads(tmp_path):
-    """S5: all workloads have classification='unmatched' (key present) → exit 2, 'no matched workloads'."""
-    results = {
-        "workloads": [
-            {"name": "batch1", "classification": "unmatched",
-             "baseline_p99": 0.40, "transfer_p99": 0.41},
-            {"name": "batch2", "classification": "unmatched",
-             "baseline_p99": 0.35, "transfer_p99": 0.34},
-        ]
-    }
-    results_file = tmp_path / "results.json"
-    results_file.write_text(json.dumps(results))
-
-    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
-    result = subprocess.run(
-        [sys.executable, "tools/transfer_cli.py", "benchmark",
-         "--results", str(results_file), "--t-eff", "0.10"],
-        capture_output=True, text=True, env=env
-    )
-    assert result.returncode == 2, f"Expected exit 2, got {result.returncode}"
-    output = json.loads(result.stdout)
-    assert any("no matched workloads" in e.lower() for e in output.get("errors", [])), \
-        f"Expected 'no matched workloads' in errors, got: {output.get('errors')}"
-
-
 class TestValidateSchemaValidationResults:
     """BC-1 schema roundtrip tests for validation_results.json."""
 
@@ -1517,3 +1301,1160 @@ class TestValidateSchemaValidationResults:
         finally:
             if artifact_path.exists():
                 artifact_path.unlink()
+
+
+class TestBenchmarkState:
+    def _alg_summary(self, tmp_path):
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        (ws / "algorithm_summary.json").write_text(
+            '{"algorithm_name": "test-algo", "scope_validation_passed": true,'
+            ' "fidelity_checked": true, "evolve_block_source": "blis_router/best/best_program.go:1-10",'
+            ' "evolve_block_content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
+            ' "signals": [{"name": "KVUtilization", "type": "float64", "access_path": "kv"}],'
+            ' "composite_signals": [], "metrics": {"combined_score": 1.5},'
+            ' "mapping_artifact_version": "1.0"}'
+        )
+        return ws
+
+    def test_creates_state_file_when_absent(self, tmp_path):
+        ws = self._alg_summary(tmp_path)
+        from tools.transfer_cli import cmd_benchmark_state
+        import argparse
+        args = argparse.Namespace(workspace=str(ws), namespace="test-ns",
+                                  set_phase=None, force=False)
+        rc = cmd_benchmark_state(args)
+        assert rc == 0
+        import json
+        state = json.loads((ws / "benchmark_state.json").read_text())
+        assert state["algorithm_name"] == "test-algo"
+        assert state["namespace"] == "test-ns"
+        assert state["phases"]["noise"]["status"] == "pending"
+        assert state["phases"]["baseline"]["status"] == "pending"
+        assert state["phases"]["treatment"]["status"] == "pending"
+
+    def test_context_guard_warns_on_mismatch(self, tmp_path, monkeypatch):
+        ws = self._alg_summary(tmp_path)
+        import json
+        state = {
+            "schema_version": 1, "algorithm_name": "test-algo",
+            "created_at": "2026-01-01T00:00:00Z",
+            "cluster_context": "original-cluster", "namespace": "test-ns",
+            "phases": {
+                "noise":     {"status": "pending", "pipelinerun_name": None,
+                              "submitted_at": None, "completed_at": None,
+                              "results_pvc_path": "noise/", "results_local_path": None,
+                              "failure_reason": None},
+                "baseline":  {"status": "pending", "pipelinerun_name": None,
+                              "submitted_at": None, "completed_at": None,
+                              "results_pvc_path": "baseline/", "results_local_path": None,
+                              "failure_reason": None},
+                "treatment": {"status": "pending", "pipelinerun_name": None,
+                              "submitted_at": None, "completed_at": None,
+                              "results_pvc_path": "treatment/", "results_local_path": None,
+                              "failure_reason": None},
+            }
+        }
+        (ws / "benchmark_state.json").write_text(json.dumps(state))
+        monkeypatch.setattr("tools.transfer_cli._kubectl_current_context",
+                            lambda: "different-cluster")
+        from tools.transfer_cli import cmd_benchmark_state
+        import argparse
+        args = argparse.Namespace(workspace=str(ws), namespace=None,
+                                  set_phase=None, force=False)
+        rc = cmd_benchmark_state(args)
+        assert rc == 1
+
+    def test_set_phase_updates_status(self, tmp_path):
+        ws = self._alg_summary(tmp_path)
+        import json, argparse
+        from tools.transfer_cli import cmd_benchmark_state
+        # create
+        args = argparse.Namespace(workspace=str(ws), namespace="ns",
+                                  set_phase=None, force=False)
+        cmd_benchmark_state(args)
+        # set noise to done
+        args2 = argparse.Namespace(workspace=str(ws), namespace=None,
+                                   set_phase="noise", status="done",
+                                   pipelinerun=None, results=None,
+                                   failure_reason=None, force=False)
+        rc = cmd_benchmark_state(args2)
+        assert rc == 0
+        state = json.loads((ws / "benchmark_state.json").read_text())
+        assert state["phases"]["noise"]["status"] == "done"
+
+    def test_ordering_guard_blocks_baseline_before_noise(self, tmp_path):
+        ws = self._alg_summary(tmp_path)
+        import argparse
+        from tools.transfer_cli import cmd_benchmark_state
+        cmd_benchmark_state(argparse.Namespace(workspace=str(ws), namespace="ns",
+                                               set_phase=None, force=False))
+        args = argparse.Namespace(workspace=str(ws), namespace=None,
+                                  set_phase="baseline", status="running",
+                                  pipelinerun="pr-1", results=None,
+                                  failure_reason=None, force=False)
+        rc = cmd_benchmark_state(args)
+        assert rc == 1  # ordering violation
+
+    def test_missing_algorithm_summary_exits_2(self, tmp_path):
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        import argparse
+        from tools.transfer_cli import cmd_benchmark_state
+        args = argparse.Namespace(workspace=str(ws), namespace="ns",
+                                  set_phase=None, force=False)
+        rc = cmd_benchmark_state(args)
+        assert rc == 2
+
+    def test_regression_guard_blocks_done_to_pending_without_force(self, tmp_path):
+        """Regression guard: reverting 'done' phase to 'pending' without --force exits 2."""
+        ws = self._alg_summary(tmp_path)
+        import json, argparse
+        from tools.transfer_cli import cmd_benchmark_state
+        # Create state
+        cmd_benchmark_state(argparse.Namespace(workspace=str(ws), namespace="ns",
+                                               set_phase=None, force=False))
+        # Advance noise to done
+        rc_done = cmd_benchmark_state(argparse.Namespace(
+            workspace=str(ws), namespace=None,
+            set_phase="noise", status="done",
+            pipelinerun=None, results=None, failure_reason=None, force=False,
+        ))
+        assert rc_done == 0
+        # Attempt regression without --force
+        rc = cmd_benchmark_state(argparse.Namespace(
+            workspace=str(ws), namespace=None,
+            set_phase="noise", status="pending",
+            pipelinerun=None, results=None, failure_reason=None, force=False,
+        ))
+        assert rc == 2, f"Regression from done→pending without --force should be rc=2, got {rc}"
+
+    def test_regression_guard_force_bypass(self, tmp_path):
+        """--force bypasses regression guard; noise reverts from done to pending."""
+        ws = self._alg_summary(tmp_path)
+        import json, argparse
+        from tools.transfer_cli import cmd_benchmark_state
+        # Create state
+        cmd_benchmark_state(argparse.Namespace(workspace=str(ws), namespace="ns",
+                                               set_phase=None, force=False))
+        # Advance noise to done
+        cmd_benchmark_state(argparse.Namespace(
+            workspace=str(ws), namespace=None,
+            set_phase="noise", status="done",
+            pipelinerun=None, results=None, failure_reason=None, force=False,
+        ))
+        # Revert with --force
+        rc = cmd_benchmark_state(argparse.Namespace(
+            workspace=str(ws), namespace=None,
+            set_phase="noise", status="pending",
+            pipelinerun=None, results=None, failure_reason=None, force=True,
+        ))
+        assert rc == 0, f"--force bypass should exit 0, got {rc}"
+        state = json.loads((ws / "benchmark_state.json").read_text())
+        assert state["phases"]["noise"]["status"] == "pending"
+
+    def test_missing_namespace_on_first_invocation_exits_2(self, tmp_path):
+        """First invocation without --namespace must exit 2 (not create a broken state file)."""
+        ws = self._alg_summary(tmp_path)
+        import argparse
+        from tools.transfer_cli import cmd_benchmark_state
+        args = argparse.Namespace(workspace=str(ws), namespace=None,
+                                  set_phase=None, force=False)
+        rc = cmd_benchmark_state(args)
+        assert rc == 2, f"Missing --namespace on first invocation should exit 2, got {rc}"
+        assert not (ws / "benchmark_state.json").exists(), (
+            "No state file should be created when --namespace is absent"
+        )
+
+    def test_set_phase_failed_persists_failure_reason(self, tmp_path):
+        """--status failed with --failure-reason persists reason in state file."""
+        ws = self._alg_summary(tmp_path)
+        import json, argparse
+        from tools.transfer_cli import cmd_benchmark_state
+        # Create state
+        cmd_benchmark_state(argparse.Namespace(workspace=str(ws), namespace="ns",
+                                               set_phase=None, force=False))
+        # Set noise to failed with a reason
+        rc = cmd_benchmark_state(argparse.Namespace(
+            workspace=str(ws), namespace=None,
+            set_phase="noise", status="failed",
+            pipelinerun="pr-xyz", results=None,
+            failure_reason="OOMKilled after 2h", force=False,
+        ))
+        assert rc == 0, f"Setting phase to failed should succeed, got {rc}"
+        state = json.loads((ws / "benchmark_state.json").read_text())
+        assert state["phases"]["noise"]["status"] == "failed"
+        assert state["phases"]["noise"]["failure_reason"] == "OOMKilled after 2h"
+
+    def test_corrupt_algorithm_summary_json_exits_2(self, tmp_path):
+        """Corrupt algorithm_summary.json (invalid JSON) on first invocation exits 2."""
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        (ws / "algorithm_summary.json").write_text("{not valid json")
+        import argparse
+        from tools.transfer_cli import cmd_benchmark_state
+        args = argparse.Namespace(workspace=str(ws), namespace="ns",
+                                  set_phase=None, force=False)
+        rc = cmd_benchmark_state(args)
+        assert rc == 2, f"Corrupt algorithm_summary.json should exit 2, got {rc}"
+
+
+import csv, textwrap
+
+
+def _write_tracev2(directory, rows):
+    """Write minimal TraceV2 files. rows = list of dicts with CSV fields."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "trace_header.yaml").write_text(
+        "trace_version: 2\ntime_unit: microseconds\nmode: real\n"
+    )
+    fieldnames = ["request_id", "send_time_us", "first_chunk_time_us",
+                  "last_chunk_time_us", "num_chunks", "status", "error_message"]
+    with open(directory / "trace_data.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for r in rows:
+            row = {k: "" for k in fieldnames}
+            row.update(r)
+            w.writerow(row)
+
+
+class TestConvertTrace:
+    def test_baseline_single_workload(self, tmp_path):
+        wl_dir = tmp_path / "baseline" / "glia-40qps"
+        _write_tracev2(wl_dir, [
+            {"send_time_us": "0", "first_chunk_time_us": "100000",
+             "last_chunk_time_us": "200000", "num_chunks": "5", "status": "ok"},
+            {"send_time_us": "0", "first_chunk_time_us": "120000",
+             "last_chunk_time_us": "220000", "num_chunks": "5", "status": "ok"},
+        ])
+        out = tmp_path / "baseline_results.json"
+        from tools.transfer_cli import cmd_convert_trace
+        import argparse
+        args = argparse.Namespace(input_dir=str(tmp_path / "baseline"),
+                                  output=str(out))
+        rc = cmd_convert_trace(args)
+        assert rc == 0
+        import json
+        result = json.loads(out.read_text())
+        assert result["workloads"][0]["name"] == "glia-40qps"
+        m = result["workloads"][0]["metrics"]
+        assert "ttft_p50" in m and "ttft_p99" in m
+        assert m["ttft_p50"] == 100.0   # 100000 us / 1000
+
+    def test_noise_per_run_structure(self, tmp_path):
+        for i in range(3):
+            wl_dir = tmp_path / "noise" / "glia-40qps" / f"run-{i}"
+            _write_tracev2(wl_dir, [
+                {"send_time_us": "0", "first_chunk_time_us": str(100000 + i*1000),
+                 "last_chunk_time_us": str(200000 + i*1000),
+                 "num_chunks": "4", "status": "ok"},
+            ])
+        out = tmp_path / "noise_results.json"
+        from tools.transfer_cli import cmd_convert_trace
+        import argparse
+        args = argparse.Namespace(input_dir=str(tmp_path / "noise"),
+                                  output=str(out))
+        rc = cmd_convert_trace(args)
+        assert rc == 0
+        import json
+        result = json.loads(out.read_text())
+        wl = result["workloads"][0]
+        assert wl["name"] == "glia-40qps"
+        assert "runs" in wl
+        assert len(wl["runs"]) == 3
+
+    def test_all_failed_rows_exits_1(self, tmp_path):
+        wl_dir = tmp_path / "baseline" / "broken-workload"
+        _write_tracev2(wl_dir, [
+            {"send_time_us": "0", "first_chunk_time_us": "0",
+             "last_chunk_time_us": "0", "num_chunks": "0", "status": "timeout"},
+        ])
+        from tools.transfer_cli import cmd_convert_trace
+        import argparse
+        args = argparse.Namespace(input_dir=str(tmp_path / "baseline"),
+                                  output=str(tmp_path / "out.json"))
+        rc = cmd_convert_trace(args)
+        assert rc == 1
+
+    def test_missing_csv_exits_1(self, tmp_path):
+        wl_dir = tmp_path / "baseline" / "glia-40qps"
+        wl_dir.mkdir(parents=True)
+        (wl_dir / "trace_header.yaml").write_text("trace_version: 2\n")
+        # no trace_data.csv
+        from tools.transfer_cli import cmd_convert_trace
+        import argparse
+        args = argparse.Namespace(input_dir=str(tmp_path / "baseline"),
+                                  output=str(tmp_path / "out.json"))
+        rc = cmd_convert_trace(args)
+        assert rc == 1
+
+    def test_underscore_directory_names_are_normalized(self, tmp_path):
+        """convert-trace normalizes workload_ prefix and underscores to hyphens,
+        matching _classify_workloads normalization."""
+        # Directory name: glia_40qps (underscores, no workload_ prefix)
+        wl_dir = tmp_path / "baseline" / "glia_40qps"
+        _write_tracev2(wl_dir, [
+            {"send_time_us": "0", "first_chunk_time_us": "100000",
+             "last_chunk_time_us": "200000", "num_chunks": "5", "status": "ok"},
+        ])
+        out = tmp_path / "baseline_results.json"
+        from tools.transfer_cli import cmd_convert_trace
+        import argparse, json
+        args = argparse.Namespace(input_dir=str(tmp_path / "baseline"), output=str(out))
+        rc = cmd_convert_trace(args)
+        assert rc == 0
+        result = json.loads(out.read_text())
+        # Name should be normalized: glia_40qps → glia-40qps
+        assert result["workloads"][0]["name"] == "glia-40qps", (
+            f"Expected 'glia-40qps' but got '{result['workloads'][0]['name']}'. "
+            "convert-trace must normalize workload names to match _classify_workloads."
+        )
+
+
+class TestRenderPipelinerun:
+    def test_substitutes_variables(self, tmp_path):
+        stub = tmp_path / "stub.yaml"
+        stub.write_text(
+            "metadata:\n  name: $PIPELINERUN_NAME\n  namespace: ${NAMESPACE}\n"
+        )
+        out = tmp_path / "rendered.yaml"
+        from tools.transfer_cli import cmd_render_pipelinerun
+        import argparse
+        args = argparse.Namespace(
+            template=str(stub),
+            vars=["PIPELINERUN_NAME=pr-123", "NAMESPACE=test-ns"],
+            out=str(out),
+        )
+        rc = cmd_render_pipelinerun(args)
+        assert rc == 0
+        content = out.read_text()
+        assert "pr-123" in content
+        assert "test-ns" in content
+
+    def test_exits_1_on_unresolved_placeholder(self, tmp_path):
+        stub = tmp_path / "stub.yaml"
+        stub.write_text("name: $PIPELINERUN_NAME\nns: $NAMESPACE\n")
+        out = tmp_path / "rendered.yaml"
+        from tools.transfer_cli import cmd_render_pipelinerun
+        import argparse
+        # Only supply one of two required vars
+        args = argparse.Namespace(
+            template=str(stub),
+            vars=["PIPELINERUN_NAME=pr-456"],
+            out=str(out),
+        )
+        rc = cmd_render_pipelinerun(args)
+        assert rc == 1  # $NAMESPACE unresolved
+
+
+class TestCompilePipeline:
+    def test_exits_2_on_missing_template_dir(self, tmp_path):
+        from tools.transfer_cli import cmd_compile_pipeline
+        import argparse
+        args = argparse.Namespace(
+            template_dir=str(tmp_path / "nonexistent"),
+            values=str(tmp_path / "values.yaml"),
+            phase="baseline",
+            out=str(tmp_path / "out"),
+        )
+        rc = cmd_compile_pipeline(args)
+        assert rc == 2
+
+    def test_exits_2_on_missing_values_file(self, tmp_path):
+        from tools.transfer_cli import cmd_compile_pipeline
+        import argparse
+        tdir = tmp_path / "tekton"
+        tdir.mkdir()
+        (tdir / "baseline-pipeline.yaml.j2").write_text("{{ phase }}")
+        args = argparse.Namespace(
+            template_dir=str(tdir),
+            values=str(tmp_path / "nonexistent_values.yaml"),
+            phase="baseline",
+            out=str(tmp_path / "out"),
+        )
+        rc = cmd_compile_pipeline(args)
+        assert rc == 2
+
+    def test_success_path_produces_output_file(self, tmp_path):
+        """compile-pipeline exit 0 and produces output file when template + values present."""
+        import argparse, unittest.mock as mock
+        from tools.transfer_cli import cmd_compile_pipeline
+        tdir = tmp_path / "tekton"
+        tdir.mkdir()
+        (tdir / "baseline-pipeline.yaml.j2").write_text("phase: {{ phase }}\n")
+        vf = tmp_path / "values.yaml"
+        vf.write_text("phase: baseline\n")
+        out = tmp_path / "out"
+        out.mkdir()
+        args = argparse.Namespace(
+            template_dir=str(tdir),
+            values=str(vf),
+            phase="baseline",
+            out=str(out),
+        )
+        # cmd_compile_pipeline calls tektonc.py via subprocess — mock subprocess.run
+        with mock.patch("subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            rc = cmd_compile_pipeline(args)
+        assert rc == 0
+
+    def test_tektonc_compilation_failure_returns_1(self, tmp_path):
+        """compile-pipeline exits 1 (not 2) when tektonc runs but returns non-zero.
+        Exit 1 = compilation failure; exit 2 = infrastructure failure (missing files)."""
+        import argparse, unittest.mock as mock
+        from tools.transfer_cli import cmd_compile_pipeline
+        tdir = tmp_path / "tekton"
+        tdir.mkdir()
+        (tdir / "noise-pipeline.yaml.j2").write_text("{{ undefined_var }}\n")
+        vf = tmp_path / "values.yaml"
+        vf.write_text("some_key: value\n")
+        args = argparse.Namespace(
+            template_dir=str(tdir),
+            values=str(vf),
+            phase="noise",
+            out=str(tmp_path / "out"),
+        )
+        with mock.patch("subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(returncode=1, stdout="", stderr="Jinja2 UndefinedError")
+            rc = cmd_compile_pipeline(args)
+        assert rc == 1, (
+            f"tektonc compilation failure should exit 1, got {rc}. "
+            "Infrastructure failures are exit 2; compilation failures are exit 1."
+        )
+
+
+class TestPreflight:
+    def _values(self, tmp_path):
+        import yaml
+        v = {
+            "stack": {
+                "model": {
+                    "helmValues": {
+                        "decode": {
+                            "replicas": 2,
+                            "acceleratorTypes": {
+                                "labelKey": "nvidia.com/gpu.product",
+                                "labelValues": ["NVIDIA-H100-80GB-HBM3"],
+                            }
+                        }
+                    }
+                },
+                "scorer": {
+                    "baseline": {"configContent": "apiVersion: v1"},
+                    "treatment": {"configContent": "apiVersion: v1"},
+                }
+            },
+            "observe": {
+                "image": "ghcr.io/inference-sim/blis:v1.0.0",
+                "workloads": [{"name": "glia-40qps"}],
+                "noise_runs": 5,
+            }
+        }
+        ws = tmp_path / "workspace" / "tekton"
+        ws.mkdir(parents=True)
+        vf = ws / "values.yaml"
+        vf.write_text(yaml.dump(v))
+        return vf
+
+    def test_unresolved_tag_fails(self, tmp_path):
+        import yaml
+        vf = self._values(tmp_path)
+        data = yaml.safe_load(vf.read_text())
+        data["observe"]["image"] = "ghcr.io/inference-sim/blis:<TAG>"
+        vf.write_text(yaml.dump(data))
+        from tools.transfer_cli import _preflight_check_values
+        errors = _preflight_check_values(vf, "test-ns", "noise")
+        assert any("<TAG>" in e for e in errors)
+
+    def test_missing_treatment_config_fails_for_treatment(self, tmp_path):
+        import yaml
+        vf = self._values(tmp_path)
+        data = yaml.safe_load(vf.read_text())
+        data["stack"]["scorer"]["treatment"]["configContent"] = ""
+        vf.write_text(yaml.dump(data))
+        from tools.transfer_cli import _preflight_check_values
+        errors = _preflight_check_values(vf, "test-ns", "treatment")
+        assert any("treatment" in e.lower() for e in errors)
+
+    def test_noise_phase_skips_treatment_check(self, tmp_path):
+        import yaml
+        vf = self._values(tmp_path)
+        data = yaml.safe_load(vf.read_text())
+        data["stack"]["scorer"]["treatment"]["configContent"] = ""
+        vf.write_text(yaml.dump(data))
+        from tools.transfer_cli import _preflight_check_values
+        errors = _preflight_check_values(vf, "test-ns", "noise")
+        # treatment check not run for noise phase
+        assert not any("treatment" in e.lower() for e in errors)
+
+    def test_missing_values_file_returns_oserror_message(self, tmp_path):
+        """_preflight_check_values returns an OS-level error message for a missing file,
+        not a YAML parse error."""
+        from tools.transfer_cli import _preflight_check_values
+        from pathlib import Path
+        errors = _preflight_check_values(Path(tmp_path / "nonexistent.yaml"), "ns", "noise")
+        assert errors, "Missing file should produce at least one error"
+        assert any("read" in e.lower() or "no such" in e.lower() or "errno" in e.lower()
+                   for e in errors), (
+            f"Expected an OS/read error message for missing file, got: {errors}"
+        )
+        assert not any("parse" in e.lower() for e in errors), (
+            f"Should NOT say 'parse' for a missing file — that implies a YAML syntax problem: {errors}"
+        )
+
+
+    def test_treatment_scorer_build_timeout_marks_failed(self, tmp_path):
+        """preflight exits 1 (not hangs) when go build times out.
+        subprocess is imported locally in cmd_preflight, so mock subprocess.run globally."""
+        import argparse, unittest.mock as mock, subprocess as subprocess_mod
+        vf = self._values(tmp_path)
+        # Create fake scheduler submodule dir so the go build branch is entered
+        scheduler_dir = tmp_path / "llm-d-inference-scheduler"
+        scheduler_dir.mkdir()
+
+        def fake_run(cmd, **kwargs):
+            # Raise TimeoutExpired for go commands; succeed for everything else (kubectl etc.)
+            if cmd and "go" in str(cmd[0]):
+                raise subprocess_mod.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout", 120))
+            result = mock.Mock()
+            result.returncode = 0
+            result.stdout = "ok"
+            result.stderr = ""
+            return result
+
+        with mock.patch("tools.transfer_cli.REPO_ROOT", tmp_path), \
+             mock.patch("subprocess.run", side_effect=fake_run):
+            from tools.transfer_cli import cmd_preflight
+            args = argparse.Namespace(phase="treatment", values=str(vf),
+                                      namespace="test-ns")
+            rc = cmd_preflight(args)
+        # preflight must still return (not hang), and some check must have failed
+        assert rc == 1, (
+            f"preflight should exit 1 when go build times out, got {rc}. "
+            "If it hangs, timeout is not being set on the go build subprocess call."
+        )
+
+
+class TestBenchmarkNew:
+    def _make_noise(self, tmp_path, cv=0.05):
+        """noise_results.json with controllable CV."""
+        import json, math
+        base = 100.0
+        runs = [{"metrics": {"ttft_p50": base, "ttft_p99": base * (1 + cv * (i - 2) / 2),
+                              "tpot_p50": 10.0, "tpot_p99": 15.0}}
+                for i in range(5)]
+        data = {"workloads": [
+            {"name": "glia-40qps", "runs": runs},
+            {"name": "prefix-heavy", "runs": runs},
+        ]}
+        p = tmp_path / "noise_results.json"
+        p.write_text(json.dumps(data))
+        return p
+
+    def _make_baseline_treatment(self, tmp_path, baseline_p99=100.0, treatment_p99=85.0):
+        import json
+        bl = {"workloads": [
+            {"name": "glia-40qps",
+             "metrics": {"ttft_p50": 50.0, "ttft_p99": baseline_p99,
+                         "tpot_p50": 10.0, "tpot_p99": 15.0}},
+            {"name": "prefix-heavy",
+             "metrics": {"ttft_p50": 55.0, "ttft_p99": baseline_p99,
+                         "tpot_p50": 10.0, "tpot_p99": 15.0}},
+        ]}
+        tr = {"workloads": [
+            {"name": "glia-40qps",
+             "metrics": {"ttft_p50": 45.0, "ttft_p99": treatment_p99,
+                         "tpot_p50": 9.0, "tpot_p99": 13.0}},
+            {"name": "prefix-heavy",
+             "metrics": {"ttft_p50": 52.0, "ttft_p99": baseline_p99,  # no improvement
+                         "tpot_p50": 10.0, "tpot_p99": 15.0}},
+        ]}
+        bp = tmp_path / "baseline_results.json"
+        tp = tmp_path / "treatment_results.json"
+        bp.write_text(json.dumps(bl))
+        tp.write_text(json.dumps(tr))
+        return bp, tp
+
+    def _make_signal_coverage(self, tmp_path):
+        import json
+        sc = {"signals": [
+            {"sim_name": "KVUtilization", "prod_name": "kvUtil",
+             "prod_access_path": "node.status.kv_utilization",
+             "fidelity_rating": "high", "staleness_window_ms": 0, "mapped": True},
+            {"sim_name": "InFlightRequests", "prod_name": "inFlight",
+             "prod_access_path": "node.status.in_flight_requests",
+             "fidelity_rating": "high", "staleness_window_ms": 0, "mapped": True},
+        ], "unmapped_signals": [], "commit_hash": "abc123", "coverage_complete": True}
+        p = tmp_path / "signal_coverage.json"
+        p.write_text(json.dumps(sc))
+        return p
+
+    def _make_workloads_dir(self, tmp_path):
+        """Workload YAMLs that exercise mapped signals."""
+        import yaml
+        wd = tmp_path / "workloads"
+        wd.mkdir()
+        # glia-40qps exercises kv_utilization → KVUtilization (mapped)
+        (wd / "workload_glia-40qps.yaml").write_text(
+            yaml.dump({"version": "1", "kv_utilization": 0.5, "aggregate_rate": 40})
+        )
+        # prefix-heavy exercises InFlightRequests via aggregate_rate (universal indirect driver)
+        (wd / "workload_prefix-heavy.yaml").write_text(
+            yaml.dump({"version": "1", "aggregate_rate": 85})
+        )
+        return wd
+
+    def test_pass_verdict_with_clear_improvement(self, tmp_path):
+        import json, argparse
+        noise = self._make_noise(tmp_path, cv=0.02)
+        bl, tr = self._make_baseline_treatment(tmp_path, 100.0, 80.0)  # 20% improvement
+        sc = self._make_signal_coverage(tmp_path)
+        wd = self._make_workloads_dir(tmp_path)
+        out = tmp_path / "bench_out.json"
+        from tools.transfer_cli import cmd_benchmark_new
+        args = argparse.Namespace(noise=str(noise), baseline=str(bl), treatment=str(tr),
+                                  signal_coverage=str(sc), workloads_dir=str(wd),
+                                  out=str(out))
+        rc = cmd_benchmark_new(args)
+        assert rc == 0
+        result = json.loads(out.read_text())
+        assert result["mechanism_check_verdict"] == "PASS"
+        assert result["passed"] is True
+
+    def test_fail_verdict_no_improvement(self, tmp_path):
+        import json, argparse
+        noise = self._make_noise(tmp_path, cv=0.02)
+        bl, tr = self._make_baseline_treatment(tmp_path, 100.0, 100.0)  # 0% improvement
+        sc = self._make_signal_coverage(tmp_path)
+        wd = self._make_workloads_dir(tmp_path)
+        out = tmp_path / "bench_out.json"
+        from tools.transfer_cli import cmd_benchmark_new
+        args = argparse.Namespace(noise=str(noise), baseline=str(bl), treatment=str(tr),
+                                  signal_coverage=str(sc), workloads_dir=str(wd),
+                                  out=str(out))
+        rc = cmd_benchmark_new(args)
+        assert rc == 1  # FAIL
+        result = json.loads(out.read_text())
+        assert result["mechanism_check_verdict"] == "FAIL"
+
+    def test_output_written_on_fail(self, tmp_path):
+        """benchmark --out is always written regardless of verdict."""
+        import json, argparse
+        noise = self._make_noise(tmp_path)
+        bl, tr = self._make_baseline_treatment(tmp_path, 100.0, 100.0)
+        sc = self._make_signal_coverage(tmp_path)
+        wd = self._make_workloads_dir(tmp_path)
+        out = tmp_path / "bench_out.json"
+        from tools.transfer_cli import cmd_benchmark_new
+        args = argparse.Namespace(noise=str(noise), baseline=str(bl), treatment=str(tr),
+                                  signal_coverage=str(sc), workloads_dir=str(wd),
+                                  out=str(out))
+        cmd_benchmark_new(args)
+        assert out.exists()
+
+    def test_inconclusive_verdict_small_improvement(self, tmp_path):
+        """INCONCLUSIVE: positive improvement below t_eff exits 0."""
+        import json, argparse
+        # cv=0.1 → t_eff ≈ 0.22 (22%). Use 5% improvement — positive but below floor.
+        noise = self._make_noise(tmp_path, cv=0.1)
+        bl, tr = self._make_baseline_treatment(tmp_path, 100.0, 95.0)  # 5% improvement
+        sc = self._make_signal_coverage(tmp_path)
+        wd = self._make_workloads_dir(tmp_path)
+        out = tmp_path / "bench_out.json"
+        from tools.transfer_cli import cmd_benchmark_new
+        args = argparse.Namespace(noise=str(noise), baseline=str(bl), treatment=str(tr),
+                                  signal_coverage=str(sc), workloads_dir=str(wd),
+                                  out=str(out))
+        rc = cmd_benchmark_new(args)
+        assert rc == 0, f"INCONCLUSIVE should exit 0, got {rc}"
+        result = json.loads(out.read_text())
+        assert result["mechanism_check_verdict"] == "INCONCLUSIVE"
+
+    def test_noise_cv_computed_per_workload_not_pooled(self, tmp_path):
+        """Two workloads with different mean latencies but identical low CVs
+        should produce t_eff near 2*cv, NOT inflated by inter-workload variance."""
+        import json, argparse
+        # workload A: mean≈50ms, cv≈0.02; workload B: mean≈200ms, cv≈0.02
+        # Pooled approach: huge CV from 50 vs 200ms difference
+        # Per-workload approach: max CV ≈ 0.02 → t_eff = max(0.05, 0.04) = 0.05
+        runs_a = [{"metrics": {"ttft_p50": v, "ttft_p99": v,
+                                "tpot_p50": 10.0, "tpot_p99": 10.0}}
+                   for v in [49.0, 50.0, 51.0, 50.5, 49.5]]   # cv ≈ 0.015
+        runs_b = [{"metrics": {"ttft_p50": v, "ttft_p99": v,
+                                "tpot_p50": 10.0, "tpot_p99": 10.0}}
+                   for v in [196.0, 200.0, 204.0, 202.0, 198.0]]  # cv ≈ 0.015
+        noise_data = {"workloads": [
+            {"name": "fast-workload", "runs": runs_a},
+            {"name": "slow-workload", "runs": runs_b},
+        ]}
+        noise = tmp_path / "noise_results.json"
+        noise.write_text(json.dumps(noise_data))
+        bl, tr = self._make_baseline_treatment(tmp_path, 100.0, 80.0)
+        sc = self._make_signal_coverage(tmp_path)
+        wd = self._make_workloads_dir(tmp_path)
+        out = tmp_path / "bench_out.json"
+        from tools.transfer_cli import cmd_benchmark_new
+        args = argparse.Namespace(noise=str(noise), baseline=str(bl), treatment=str(tr),
+                                  signal_coverage=str(sc), workloads_dir=str(wd),
+                                  out=str(out))
+        rc = cmd_benchmark_new(args)
+        result = json.loads(out.read_text())
+        # Per-workload CV ≈ 0.015 → t_eff = 0.05 (floor). Pooled CV would be >> 0.5.
+        # If t_eff is > 0.5 the test will have got a wrong inflated t_eff.
+        assert result["t_eff"] <= 0.10, (
+            f"t_eff={result['t_eff']} is suspiciously large — noise CV is being "
+            "inflated by pooling across workloads with different mean latencies"
+        )
+
+    def test_insufficient_noise_runs_exits_2(self, tmp_path):
+        """benchmark exits 2 when a noise workload has fewer than 2 runs."""
+        import json, argparse
+        noise_data = {"workloads": [
+            {"name": "glia-40qps", "runs": [
+                {"metrics": {"ttft_p50": 100.0, "ttft_p99": 100.0,
+                             "tpot_p50": 10.0, "tpot_p99": 15.0}}
+            ]},  # only 1 run — insufficient for CV
+        ]}
+        noise = tmp_path / "noise_results.json"
+        noise.write_text(json.dumps(noise_data))
+        bl, tr = self._make_baseline_treatment(tmp_path)
+        sc = self._make_signal_coverage(tmp_path)
+        wd = self._make_workloads_dir(tmp_path)
+        out = tmp_path / "bench_out.json"
+        from tools.transfer_cli import cmd_benchmark_new
+        args = argparse.Namespace(noise=str(noise), baseline=str(bl), treatment=str(tr),
+                                  signal_coverage=str(sc), workloads_dir=str(wd),
+                                  out=str(out))
+        rc = cmd_benchmark_new(args)
+        assert rc == 2, f"Insufficient noise runs should exit 2, got {rc}"
+
+    def test_error_verdict_on_workload_name_mismatch(self, tmp_path):
+        """ERROR: all workloads skipped due to name mismatch exits 2."""
+        import json, argparse, yaml
+        noise = self._make_noise(tmp_path, cv=0.02)
+        bl, tr = self._make_baseline_treatment(tmp_path, 100.0, 80.0)
+        sc = self._make_signal_coverage(tmp_path)
+        # Create workloads dir whose filenames don't match any result names
+        wd = tmp_path / "workloads_mismatch"
+        wd.mkdir()
+        (wd / "workload_completely-different.yaml").write_text(
+            yaml.dump({"version": "1", "kv_utilization": 0.5, "aggregate_rate": 40})
+        )
+        out = tmp_path / "bench_out.json"
+        from tools.transfer_cli import cmd_benchmark_new
+        args = argparse.Namespace(noise=str(noise), baseline=str(bl), treatment=str(tr),
+                                  signal_coverage=str(sc), workloads_dir=str(wd),
+                                  out=str(out))
+        rc = cmd_benchmark_new(args)
+        assert rc == 2, f"Name mismatch ERROR should exit 2, got {rc}"
+        result = json.loads(out.read_text())
+        assert result["mechanism_check_verdict"] == "ERROR"
+        assert "skipped_workloads" not in result, (
+            "skipped_workloads key is not in benchmark_output.schema.json — "
+            "use specificity_notes instead"
+        )
+        assert result["specificity_notes"], "name-mismatch error details should appear in specificity_notes"
+        assert any("completely-different" in note or "skipped" in note.lower()
+                   for note in result["specificity_notes"])
+
+    def test_malformed_workload_yaml_exits_2(self, tmp_path):
+        """benchmark exits 2 when a workload YAML file is malformed (not silently unmatched)."""
+        import json, argparse
+        noise = self._make_noise(tmp_path, cv=0.05)
+        bl, tr = self._make_baseline_treatment(tmp_path)
+        sc = self._make_signal_coverage(tmp_path)
+        wd = tmp_path / "workloads_bad"
+        wd.mkdir()
+        # Write outright invalid YAML to trigger YAMLError
+        (wd / "workload_glia-40qps.yaml").write_text(": {bad yaml: [unclosed")
+        out = tmp_path / "bench_out.json"
+        from tools.transfer_cli import cmd_benchmark_new
+        args = argparse.Namespace(noise=str(noise), baseline=str(bl), treatment=str(tr),
+                                  signal_coverage=str(sc), workloads_dir=str(wd),
+                                  out=str(out))
+        rc = cmd_benchmark_new(args)
+        assert rc == 2, (
+            f"Malformed workload YAML should exit 2 (infrastructure error), got {rc}. "
+            "Silent reclassification to 'unmatched' is not acceptable — "
+            "it would produce a wrong benchmark verdict."
+        )
+
+    def test_error_path_output_conforms_to_schema(self, tmp_path):
+        """Error-path output (all workloads skipped) must not have extra keys
+        beyond what benchmark_output.schema.json declares."""
+        import json, argparse, yaml
+        noise = self._make_noise(tmp_path, cv=0.02)
+        bl, tr = self._make_baseline_treatment(tmp_path, 100.0, 80.0)
+        sc = self._make_signal_coverage(tmp_path)
+        wd = tmp_path / "workloads_mismatch"
+        wd.mkdir()
+        (wd / "workload_completely-different.yaml").write_text(
+            yaml.dump({"version": "1", "kv_utilization": 0.5})
+        )
+        out = tmp_path / "bench_out.json"
+        from tools.transfer_cli import cmd_benchmark_new
+        args = argparse.Namespace(noise=str(noise), baseline=str(bl), treatment=str(tr),
+                                  signal_coverage=str(sc), workloads_dir=str(wd),
+                                  out=str(out))
+        cmd_benchmark_new(args)
+        result = json.loads(out.read_text())
+        allowed_keys = {"t_eff", "noise_cv", "mechanism_check_verdict", "passed",
+                        "workload_classification", "specificity_notes"}
+        extra_keys = set(result.keys()) - allowed_keys
+        assert not extra_keys, f"Output has extra keys not in schema: {extra_keys}"
+
+    def test_error_verdict_when_all_workloads_unmatched_by_classification(self, tmp_path):
+        """ERROR exit 2 when all workloads resolve (no name mismatch) but none match
+        any signal — distinct from the name-mismatch ERROR path."""
+        import json, argparse, yaml
+        noise = self._make_noise(tmp_path, cv=0.02)
+        bl, tr = self._make_baseline_treatment(tmp_path, 100.0, 80.0)
+        sc = self._make_signal_coverage(tmp_path)
+        # Workloads present in result files but with no mapped signal fields.
+        # Deliberately exclude all mapping fields (aggregate_rate, kv_utilization, etc.)
+        # so that _classify_workloads returns "unmatched" for every workload.
+        wd = tmp_path / "workloads_no_signals"
+        wd.mkdir()
+        (wd / "workload_glia-40qps.yaml").write_text(
+            yaml.dump({"version": "1", "duration_secs": 60})  # no mapped fields
+        )
+        (wd / "workload_prefix-heavy.yaml").write_text(
+            yaml.dump({"version": "1", "duration_secs": 120})  # no mapped fields
+        )
+        out = tmp_path / "bench_out.json"
+        from tools.transfer_cli import cmd_benchmark_new
+        args = argparse.Namespace(noise=str(noise), baseline=str(bl), treatment=str(tr),
+                                  signal_coverage=str(sc), workloads_dir=str(wd),
+                                  out=str(out))
+        rc = cmd_benchmark_new(args)
+        assert rc == 2, f"All-unmatched classification should exit 2 (ERROR), got {rc}"
+        result = json.loads(out.read_text())
+        assert result["mechanism_check_verdict"] == "ERROR"
+        # Confirm this is the classification-ERROR path (workload_classification is non-empty)
+        assert len(result["workload_classification"]) > 0
+
+    def test_missing_noise_file_exits_2(self, tmp_path):
+        """benchmark exits 2 when --noise file does not exist."""
+        import argparse
+        bl, tr = self._make_baseline_treatment(tmp_path)
+        sc = self._make_signal_coverage(tmp_path)
+        wd = self._make_workloads_dir(tmp_path)
+        from tools.transfer_cli import cmd_benchmark_new
+        args = argparse.Namespace(
+            noise=str(tmp_path / "nonexistent_noise.json"),
+            baseline=str(bl), treatment=str(tr),
+            signal_coverage=str(sc), workloads_dir=str(wd),
+            out=str(tmp_path / "out.json"),
+        )
+        rc = cmd_benchmark_new(args)
+        assert rc == 2, f"Missing noise file should exit 2, got {rc}"
+
+    def test_malformed_json_input_exits_2(self, tmp_path):
+        """benchmark exits 2 when an input JSON file is malformed."""
+        import argparse
+        noise = tmp_path / "bad_noise.json"
+        noise.write_text("{broken json")
+        bl, tr = self._make_baseline_treatment(tmp_path)
+        sc = self._make_signal_coverage(tmp_path)
+        wd = self._make_workloads_dir(tmp_path)
+        from tools.transfer_cli import cmd_benchmark_new
+        args = argparse.Namespace(
+            noise=str(noise), baseline=str(bl), treatment=str(tr),
+            signal_coverage=str(sc), workloads_dir=str(wd),
+            out=str(tmp_path / "out.json"),
+        )
+        rc = cmd_benchmark_new(args)
+        assert rc == 2, f"Malformed JSON input should exit 2, got {rc}"
+
+    def test_nested_clients_keys_are_used_for_classification(self, tmp_path):
+        """_classify_workloads must match signals from clients[] nested keys,
+        not just top-level workload YAML keys."""
+        import json, argparse, yaml
+        noise = self._make_noise(tmp_path, cv=0.02)
+        bl, tr = self._make_baseline_treatment(tmp_path, 100.0, 80.0)
+        sc = self._make_signal_coverage(tmp_path)
+        wd = tmp_path / "workloads_nested"
+        wd.mkdir()
+        # kv_utilization is inside clients[], not at top level
+        (wd / "workload_glia-40qps.yaml").write_text(
+            yaml.dump({
+                "version": "1",
+                "aggregate_rate": 40,
+                "clients": [{"kv_utilization": 0.5, "concurrency": 10}],
+            })
+        )
+        (wd / "workload_prefix-heavy.yaml").write_text(
+            yaml.dump({"version": "1", "aggregate_rate": 85})
+        )
+        out = tmp_path / "bench_out.json"
+        from tools.transfer_cli import cmd_benchmark_new
+        args = argparse.Namespace(noise=str(noise), baseline=str(bl), treatment=str(tr),
+                                  signal_coverage=str(sc), workloads_dir=str(wd),
+                                  out=str(out))
+        rc = cmd_benchmark_new(args)
+        result = json.loads(out.read_text())
+        # glia-40qps has kv_utilization inside clients[] — should be "matched"
+        glia = next(w for w in result["workload_classification"] if w["workload"] == "glia-40qps")
+        assert glia["classification"] == "matched", (
+            f"glia-40qps has kv_utilization in clients[] — should be 'matched', "
+            f"got '{glia['classification']}'. clients[] keys must be included in signal matching."
+        )
+
+
+class TestGenerateEvidence:
+    def _make_workspace(self, tmp_path):
+        import json
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        (ws / "algorithm_summary.json").write_text(json.dumps({
+            "algorithm_name": "blis-routing-v1",
+            "evolve_block_source": "routing/",
+        }))
+        (ws / "validation_results.json").write_text(json.dumps({
+            "suite_a": {"passed": True, "kendall_tau": 0.92,
+                        "max_abs_error": 0.0001, "tuple_count": 150},
+            "suite_b": {"passed": True, "rank_stability_tau": 1.0,
+                        "threshold_crossing_pct": 0.0, "informational_only": True},
+            "suite_c": {"passed": True, "deterministic": True,
+                        "max_pile_on_ratio": 1.1},
+            "benchmark": {
+                "passed": True,
+                "mechanism_check_verdict": "PASS",
+                "t_eff": 0.05,
+                "workload_classification": [
+                    {"workload": "glia-40qps", "classification": "matched",
+                     "improvement": 0.15, "matched_signals": ["KVUtilization"]},
+                    {"workload": "prefix-heavy", "classification": "unmatched",
+                     "improvement": 0.02, "matched_signals": []},
+                ],
+                "specificity_notes": [],
+            },
+            "overall_verdict": "PASS",
+            "noise_cv": 0.03,
+        }))
+        return ws
+
+    def test_generates_evidence_file(self, tmp_path):
+        ws = self._make_workspace(tmp_path)
+        out = tmp_path / "transfer_evidence.md"
+        from tools.transfer_cli import cmd_generate_evidence
+        import argparse
+        args = argparse.Namespace(workspace=str(ws), out=str(out),
+                                  calibration_log="docs/transfer/calibration_log.md")
+        rc = cmd_generate_evidence(args)
+        assert rc == 0
+        content = out.read_text()
+        assert "blis-routing-v1" in content
+        assert "PASS" in content
+        assert "glia-40qps" in content
+        assert "0.92" in content  # suite_a tau
+
+    def test_missing_validation_results_exits_1(self, tmp_path):
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        import json
+        (ws / "algorithm_summary.json").write_text(json.dumps(
+            {"algorithm_name": "x", "evolve_block_source": "routing/"}
+        ))
+        # no validation_results.json
+        from tools.transfer_cli import cmd_generate_evidence
+        import argparse
+        args = argparse.Namespace(workspace=str(ws), out=str(tmp_path / "out.md"),
+                                  calibration_log="docs/transfer/calibration_log.md")
+        rc = cmd_generate_evidence(args)
+        assert rc == 1
+
+    def test_generates_evidence_file_fail_verdict(self, tmp_path):
+        """generate-evidence with overall_verdict=FAIL exits 0 and file contains FAIL narrative."""
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        import json
+        (ws / "algorithm_summary.json").write_text(json.dumps({
+            "algorithm_name": "blis-routing-v1",
+            "evolve_block_source": "routing/",
+        }))
+        (ws / "validation_results.json").write_text(json.dumps({
+            "suite_a": {"passed": False, "kendall_tau": 0.60,
+                        "max_abs_error": 0.05, "tuple_count": 100},
+            "suite_b": {"passed": True, "rank_stability_tau": 1.0,
+                        "threshold_crossing_pct": 0.0, "informational_only": True},
+            "suite_c": {"passed": True, "deterministic": True,
+                        "max_pile_on_ratio": 1.1},
+            "benchmark": {
+                "passed": False,
+                "mechanism_check_verdict": "FAIL",
+                "t_eff": 0.20,
+                "workload_classification": [
+                    {"workload": "glia-40qps", "classification": "matched",
+                     "improvement": 0.00, "matched_signals": ["KVUtilization"]},
+                ],
+                "specificity_notes": [],
+            },
+            "overall_verdict": "FAIL",
+            "noise_cv": 0.10,
+        }))
+        out = tmp_path / "transfer_evidence.md"
+        from tools.transfer_cli import cmd_generate_evidence
+        import argparse
+        args = argparse.Namespace(workspace=str(ws), out=str(out),
+                                  calibration_log="docs/transfer/calibration_log.md")
+        rc = cmd_generate_evidence(args)
+        assert rc == 0, f"generate-evidence should exit 0 even on FAIL verdict, got {rc}"
+        content = out.read_text()
+        assert "FAIL" in content
+        assert "noise floor" in content  # from the FAIL narrative string
+
+    def test_missing_benchmark_key_exits_1(self, tmp_path):
+        """generate-evidence exits 1 when validation_results.json has no 'benchmark' key."""
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        import json
+        (ws / "algorithm_summary.json").write_text(json.dumps({
+            "algorithm_name": "blis-routing-v1",
+            "evolve_block_source": "routing/",
+        }))
+        (ws / "validation_results.json").write_text(json.dumps({
+            "suite_a": {"passed": True, "kendall_tau": 0.92,
+                        "max_abs_error": 0.001, "tuple_count": 100},
+            "suite_b": {"passed": True, "rank_stability_tau": 1.0,
+                        "threshold_crossing_pct": 0.0, "informational_only": True},
+            "suite_c": {"passed": True, "deterministic": True,
+                        "max_pile_on_ratio": 1.1},
+            "overall_verdict": "PASS",
+            "noise_cv": 0.03,
+            # deliberately omit "benchmark" key
+        }))
+        out = tmp_path / "transfer_evidence.md"
+        from tools.transfer_cli import cmd_generate_evidence
+        import argparse
+        args = argparse.Namespace(workspace=str(ws), out=str(out),
+                                  calibration_log="docs/transfer/calibration_log.md")
+        rc = cmd_generate_evidence(args)
+        assert rc == 1, f"Missing 'benchmark' key should exit 1, got {rc}"
+
+
+class TestEndToEndLocal:
+    """Full local pipeline: convert-trace → benchmark → generate-evidence."""
+
+    def _setup_workspace(self, tmp_path):
+        import csv
+        import json
+        import yaml
+
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+
+        # algorithm_summary — only schema-valid fields (additionalProperties: false)
+        (ws / "algorithm_summary.json").write_text(json.dumps({
+            "algorithm_name": "blis-routing-v1",
+            "evolve_block_source": "routing/",
+        }))
+
+        # signal_coverage (prod_access_path required by signal_coverage.schema.json)
+        (ws / "signal_coverage.json").write_text(json.dumps({
+            "signals": [{"sim_name": "KVUtilization", "prod_name": "kv",
+                         "prod_access_path": "node.status.kv_utilization",
+                         "fidelity_rating": "high", "staleness_window_ms": 0,
+                         "mapped": True}],
+            "unmapped_signals": [], "commit_hash": "abc", "coverage_complete": True,
+        }))
+
+        # validation_results (from Suites A/B/C — pre-existing, no benchmark yet)
+        (ws / "validation_results.json").write_text(json.dumps({
+            "suite_a": {"passed": True, "kendall_tau": 0.93,
+                        "max_abs_error": 0.0001, "tuple_count": 120},
+            "suite_b": {"passed": True, "rank_stability_tau": 1.0,
+                        "threshold_crossing_pct": 0.0, "informational_only": True},
+            "suite_c": {"passed": True, "deterministic": True,
+                        "max_pile_on_ratio": 1.05},
+        }))
+
+        # workloads dir
+        wd = tmp_path / "workloads"
+        wd.mkdir()
+        (wd / "workload_glia-40qps.yaml").write_text(
+            yaml.dump({"version": "1", "kv_utilization": 0.5})
+        )
+        (wd / "workload_prefix-heavy.yaml").write_text(
+            yaml.dump({"version": "1", "aggregate_rate": 85})
+        )
+
+        def write_tv2(d, ttft_us=100000, chunks=5):
+            d.mkdir(parents=True)
+            (d / "trace_header.yaml").write_text("trace_version: 2\n")
+            with open(d / "trace_data.csv", "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["request_id", "send_time_us", "first_chunk_time_us",
+                             "last_chunk_time_us", "num_chunks", "status", "error_message"])
+                for i in range(10):
+                    w.writerow([i, 0, ttft_us + i * 1000,
+                                 ttft_us + 50000 + i * 1000, chunks, "ok", ""])
+
+        # noise: 5 runs × 2 workloads
+        raw_noise = tmp_path / "noise_raw"
+        for wl in ["glia-40qps", "prefix-heavy"]:
+            for r in range(5):
+                write_tv2(raw_noise / wl / f"run-{r}", ttft_us=100000 + r * 500)
+
+        # baseline and treatment (single run per workload)
+        raw_bl = tmp_path / "baseline_raw"
+        raw_tr = tmp_path / "treatment_raw"
+        for wl, base_ttft in [("glia-40qps", 100000), ("prefix-heavy", 120000)]:
+            write_tv2(raw_bl / wl, ttft_us=base_ttft)
+            write_tv2(raw_tr / wl, ttft_us=int(base_ttft * 0.82))  # ~18% improvement
+
+        return ws, wd, raw_noise, raw_bl, raw_tr
+
+    def test_full_local_pipeline(self, tmp_path):
+        import argparse
+        import json
+
+        from tools.transfer_cli import (cmd_benchmark_new, cmd_convert_trace,
+                                        cmd_generate_evidence)
+
+        ws, wd, raw_noise, raw_bl, raw_tr = self._setup_workspace(tmp_path)
+
+        # convert-trace for all three phases
+        for phase, raw_dir in [("noise", raw_noise),
+                                ("baseline", raw_bl),
+                                ("treatment", raw_tr)]:
+            args = argparse.Namespace(
+                input_dir=str(raw_dir),
+                output=str(ws / f"{phase}_results.json"),
+            )
+            rc = cmd_convert_trace(args)
+            assert rc == 0, f"convert-trace failed for {phase}"
+
+        # benchmark
+        args = argparse.Namespace(
+            noise=str(ws / "noise_results.json"),
+            baseline=str(ws / "baseline_results.json"),
+            treatment=str(ws / "treatment_results.json"),
+            signal_coverage=str(ws / "signal_coverage.json"),
+            workloads_dir=str(wd),
+            out=str(tmp_path / "benchmark_output.json"),
+        )
+        rc = cmd_benchmark_new(args)
+        assert rc == 0, "benchmark failed"
+        bench_out = json.loads((tmp_path / "benchmark_output.json").read_text())
+        assert bench_out["mechanism_check_verdict"] == "PASS"
+
+        # Merge benchmark output into validation_results (matches Step 5c-merge)
+        val = json.loads((ws / "validation_results.json").read_text())
+        val["benchmark"] = {k: v for k, v in bench_out.items() if k != "noise_cv"}
+        val["overall_verdict"] = "PASS"
+        val["noise_cv"] = bench_out["noise_cv"]
+        (ws / "validation_results.json").write_text(json.dumps(val))
+
+        # generate-evidence
+        args_ev = argparse.Namespace(
+            workspace=str(ws),
+            out=str(ws / "transfer_evidence.md"),
+            calibration_log="docs/transfer/calibration_log.md",
+        )
+        rc = cmd_generate_evidence(args_ev)
+        assert rc == 0, "generate-evidence failed"
+        evidence = (ws / "transfer_evidence.md").read_text()
+        assert "PASS" in evidence
+        assert "blis-routing-v1" in evidence

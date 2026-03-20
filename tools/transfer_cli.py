@@ -6,8 +6,13 @@ Commands:
     validate-mapping         Check mapping artifact completeness
     validate-schema <path>   Validate workspace artifact against JSON Schema
     test-status              Classify go build/test output (stdin) into error classes
-    noise-characterize       Compute per-metric CV and T_eff from baseline latency runs
-    benchmark                Compute mechanism check from benchmark results
+    benchmark                Compute T_eff and mechanism check from noise/baseline/treatment results
+    convert-trace            Convert blis observe TraceV2 output to metrics JSON
+    benchmark-state          Read/write workspace/benchmark_state.json phase tracking
+    compile-pipeline         Compile a tektonc pipeline template for a given phase
+    render-pipelinerun       Substitute variables in a PipelineRun stub
+    preflight                Run pre-flight cluster checks before submitting a pipeline phase
+    generate-evidence        Generate workspace/transfer_evidence.md from workspace artifacts
 
 Exit codes: 0 = success, 1 = validation failure, 2 = infrastructure error
 All commands output JSON to stdout.
@@ -931,248 +936,905 @@ def cmd_test_status(args: argparse.Namespace) -> int:
                    errors=primary_errors)
 
 
-# ─── noise-characterize ───────────────────────────────────────────────────────
-
-def _cmd_noise_characterize(args: argparse.Namespace) -> int:
-    """Compute per-metric CV and T_eff from baseline latency runs.
-
-    Input JSON format:
-        {"runs": [{"p50": float, "p95": float, "p99": float}, ...]}
-
-    Exit codes:
-        0 = success (halt=false)
-        1 = validation failure (halt=true, CV > 15%)
-        2 = infrastructure error (file missing or invalid JSON)
-    """
-    import math
-
-    runs_path = Path(args.runs).resolve()
-    allowed_root = Path(os.environ["_SIM2REAL_ALLOWED_ROOT"]).resolve() if "_SIM2REAL_ALLOWED_ROOT" in os.environ else REPO_ROOT
-    if not runs_path.is_relative_to(allowed_root):
-        return _output("error", 2,
-                       errors=[f"Runs path '{runs_path}' is outside allowed root '{allowed_root}'."],
-                       per_metric_cv={}, t_eff=0.0, halt=False)
-    if not runs_path.exists():
-        return _output("error", 2, errors=[f"runs file not found: {args.runs}"],
-                       per_metric_cv={}, t_eff=0.0, halt=False)
-
+def _kubectl_current_context() -> str:
+    """Return current kubectl context, or empty string on error."""
+    import subprocess
     try:
-        if runs_path.stat().st_size > MAX_FILE_SIZE:
-            return _output("error", 2,
-                           errors=[f"runs file exceeds {MAX_FILE_SIZE} bytes: {args.runs}"],
-                           per_metric_cv={}, t_eff=0.0, halt=False)
-    except OSError as e:
-        return _output("error", 2,
-                       errors=[f"cannot stat runs file '{args.runs}': {e}"],
-                       per_metric_cv={}, t_eff=0.0, halt=False)
+        r = subprocess.run(
+            ["kubectl", "config", "current-context"],
+            capture_output=True, text=True, timeout=10
+        )
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception as e:
+        print(f"WARNING: kubectl context check failed: {e}", file=sys.stderr)
+        return ""
 
-    try:
-        data = json.loads(runs_path.read_text())
-    except OSError as e:
-        return _output("error", 2, errors=[f"cannot read runs file '{args.runs}': {e}"],
-                       per_metric_cv={}, t_eff=0.0, halt=False)
-    except json.JSONDecodeError as e:
-        return _output("error", 2, errors=[f"invalid JSON in {args.runs}: {e}"],
-                       per_metric_cv={}, t_eff=0.0, halt=False)
 
-    if not isinstance(data, dict) or "runs" not in data:
-        return _output("error", 2,
-                       errors=["missing 'runs' key in input JSON"],
-                       per_metric_cv={}, t_eff=0.0, halt=False)
+def _default_benchmark_state(algorithm_name: str, namespace: str, context: str) -> dict:
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    phase_template = {
+        "status": "pending", "pipelinerun_name": None,
+        "submitted_at": None, "completed_at": None,
+        "results_local_path": None, "failure_reason": None,
+    }
+    return {
+        "schema_version": 1,
+        "algorithm_name": algorithm_name,
+        "created_at": now,
+        "cluster_context": context,
+        "namespace": namespace,
+        "phases": {
+            "noise":     {**phase_template, "results_pvc_path": "noise/"},
+            "baseline":  {**phase_template, "results_pvc_path": "baseline/"},
+            "treatment": {**phase_template, "results_pvc_path": "treatment/"},
+        }
+    }
 
-    runs = data["runs"]
-    if not isinstance(runs, list) or len(runs) == 0:
-        return _output("error", 2,
-                       errors=["'runs' must be a non-empty list (BC-16: malformed input → exit 2)"],
-                       per_metric_cv={}, t_eff=0.0, halt=False)
 
-    metrics = ["p50", "p95", "p99"]
-    per_metric_cv: dict[str, float] = {}
+_PHASE_ORDER = ["noise", "baseline", "treatment"]
 
-    for metric in metrics:
-        raw_values = [r[metric] for r in runs if isinstance(r, dict) and metric in r
-                      and isinstance(r[metric], (int, float))]
-        values = [v for v in raw_values if v > 0]
-        excluded = len(raw_values) - len(values)
-        if excluded > 0:
+
+def cmd_benchmark_state(args: "argparse.Namespace") -> int:
+    import json
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    ws = Path(args.workspace)
+    state_path = ws / "benchmark_state.json"
+
+    # ---- read or create ----
+    if not state_path.exists():
+        alg_path = ws / "algorithm_summary.json"
+        if not alg_path.exists():
+            print(f"ERROR: {alg_path} not found — run Stage 1 extract first.",
+                  file=sys.stderr)
+            return 2
+        try:
+            raw = alg_path.read_text()
+        except OSError as e:
+            print(f"ERROR: cannot read {alg_path}: {e}", file=sys.stderr)
+            return 2
+        try:
+            alg = json.loads(raw)
+        except json.JSONDecodeError as e:
+            print(f"ERROR: {alg_path} contains invalid JSON: {e}", file=sys.stderr)
+            return 2
+        if "algorithm_name" not in alg:
+            print(f"ERROR: {alg_path} missing required 'algorithm_name' field.",
+                  file=sys.stderr)
+            return 2
+        alg_name = alg["algorithm_name"]
+        if not getattr(args, "namespace", None):
+            print("ERROR: --namespace required on first invocation.", file=sys.stderr)
+            return 2
+        ctx = _kubectl_current_context()
+        if not ctx:
             print(
-                f"WARNING: metric '{metric}': {excluded} of {len(raw_values)} run(s) excluded "
-                f"(zero or non-positive values) — CV computed from {len(values)} run(s)",
+                "WARNING: kubectl context could not be determined — "
+                "cluster context guard will be disabled for this state file. "
+                "Ensure kubectl is configured before continuing.",
                 file=sys.stderr,
             )
-        if len(values) < 2:
-            print(f"WARNING: metric '{metric}' has {len(values)} valid data point(s) (need ≥2), skipping from CV computation", file=sys.stderr)
-            continue
-
-        mean = sum(values) / len(values)
-        # Sample variance (Bessel's correction: n-1)
-        variance = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
-        std = math.sqrt(variance)
-        per_metric_cv[metric] = std / mean
-
-    if not per_metric_cv:
-        n_runs = len([r for r in runs if isinstance(r, dict)])
-        return _output("error", 2,
-                       errors=[f"insufficient runs for CV computation: need ≥2 data points per metric, got {n_runs} run(s) with valid latency values"],
-                       per_metric_cv={}, t_eff=0.0, halt=False)
-
-    max_cv = max(per_metric_cv.values())
-    t_eff = max(0.05, 2.0 * max_cv)
-    halt = max_cv > 0.15
-
-    if halt:
-        return _output("error", 1, per_metric_cv=per_metric_cv, t_eff=t_eff, halt=True,
-                       errors=[f"noise too high: max CV={max_cv:.4f} > 0.15 threshold"])
-
-    return _output("ok", 0, per_metric_cv=per_metric_cv, t_eff=t_eff, halt=False)
-
-
-# ─── benchmark ────────────────────────────────────────────────────────────────
-
-def _cmd_benchmark(args: argparse.Namespace) -> int:
-    """Compute mechanism check from benchmark results.
-
-    Input JSON format:
-        {"workloads": [
-            {"name": str, "classification": "matched"|"unmatched",
-             "baseline_p99": float, "transfer_p99": float},
-            ...
-        ]}
-
-    Exit codes:
-        0 = success (PASS or INCONCLUSIVE — operator must check mechanism_check_verdict)
-        1 = validation failure (FAIL verdict)
-        2 = infrastructure error (file missing, invalid JSON, or missing --t-eff)
-    """
-    if args.t_eff is None:
-        return _output("error", 2,
-                       errors=["--t-eff required: run noise-characterize first"],
-                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
-
-    t_eff = args.t_eff
-    if t_eff <= 0:
-        return _output("error", 2,
-                       errors=[f"--t-eff must be > 0, got {t_eff}. "
-                               "noise-characterize guarantees T_eff >= 0.05; "
-                               "a non-positive value indicates manual override error."],
-                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
-
-    results_path = Path(args.results).resolve()
-    allowed_root = Path(os.environ["_SIM2REAL_ALLOWED_ROOT"]).resolve() if "_SIM2REAL_ALLOWED_ROOT" in os.environ else REPO_ROOT
-    if not results_path.is_relative_to(allowed_root):
-        return _output("error", 2,
-                       errors=[f"Results path '{results_path}' is outside allowed root '{allowed_root}'."],
-                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
-    if not results_path.exists():
-        return _output("error", 2,
-                       errors=[f"results file not found: {args.results}"],
-                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
-
-    try:
-        if results_path.stat().st_size > MAX_FILE_SIZE:
-            return _output("error", 2,
-                           errors=[f"results file exceeds {MAX_FILE_SIZE} bytes: {args.results}"],
-                           mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
-    except OSError as e:
-        return _output("error", 2,
-                       errors=[f"cannot stat results file '{args.results}': {e}"],
-                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
-
-    try:
-        data = json.loads(results_path.read_text())
-    except OSError as e:
-        return _output("error", 2,
-                       errors=[f"cannot read results file '{args.results}': {e}"],
-                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
-    except json.JSONDecodeError as e:
-        return _output("error", 2,
-                       errors=[f"invalid JSON in {args.results}: {e}"],
-                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
-
-    if not isinstance(data, dict) or "workloads" not in data:
-        return _output("error", 2,
-                       errors=["missing 'workloads' key in input JSON"],
-                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
-
-    workloads = data["workloads"]
-    if not isinstance(workloads, list):
-        return _output("error", 2,
-                       errors=["'workloads' must be a list"],
-                       mechanism_check_verdict="ERROR", passed=False, workload_classification=[])
-
-    results = []
-    matched_improvements = []
-    specificity_notes = []
-    errors = []
-    format_errors = []
-
-    for idx, w in enumerate(workloads):
-        if not isinstance(w, dict):
-            format_errors.append(f"workloads[{idx}] is not an object (got {type(w).__name__!r}); skipped")
-            continue
-        name = w.get("name", "unknown")
-        classification = w.get("classification", "unmatched")
-        baseline_p99 = w.get("baseline_p99", None)
-        transfer_p99 = w.get("transfer_p99", None)
-
-        if baseline_p99 is None or transfer_p99 is None:
-            missing = [k for k in ["baseline_p99", "transfer_p99"]
-                       if k not in w or w[k] is None]
-            results.append({"workload": name, "classification": classification,
-                             "improvement": 0.0, "error": f"missing required field(s): {', '.join(missing)}"})
-            continue
-
-        if baseline_p99 <= 0:
-            results.append({"workload": name, "classification": classification,
-                             "improvement": 0.0, "error": "baseline_p99 must be > 0"})
-            continue
-
-        if transfer_p99 < 0:
-            results.append({"workload": name, "classification": classification,
-                             "improvement": 0.0, "error": "transfer_p99 must be >= 0"})
-            continue
-
-        improvement = (baseline_p99 - transfer_p99) / baseline_p99
-        results.append({"workload": name, "classification": classification,
-                         "improvement": round(improvement, 6)})
-
-        if classification == "matched":
-            matched_improvements.append(improvement)
-        elif classification == "unmatched":
-            change_ratio = round(abs(baseline_p99 - transfer_p99) / baseline_p99, 6)
-            if change_ratio >= t_eff:
-                specificity_notes.append(
-                    f"workload {name}: |change|/baseline = {change_ratio} >= T_eff"
+        state = _default_benchmark_state(alg_name, args.namespace, ctx)
+        try:
+            state_path.write_text(json.dumps(state, indent=2))
+        except OSError as e:
+            print(f"ERROR: cannot write {state_path}: {e}", file=sys.stderr)
+            return 2
+    else:
+        try:
+            raw = state_path.read_text()
+        except OSError as e:
+            print(f"ERROR: cannot read {state_path}: {e}", file=sys.stderr)
+            return 2
+        try:
+            state = json.loads(raw)
+        except json.JSONDecodeError as e:
+            print(f"ERROR: {state_path} contains invalid JSON: {e}", file=sys.stderr)
+            return 2
+        if not isinstance(state, dict) or "phases" not in state:
+            print(
+                f"ERROR: {state_path} is missing 'phases' key or is not a dict — "
+                "file may be corrupted. Delete it to start fresh.",
+                file=sys.stderr,
+            )
+            return 2
+        for expected_phase in _PHASE_ORDER:
+            if expected_phase not in state["phases"]:
+                print(
+                    f"ERROR: {state_path} 'phases' dict is missing phase '{expected_phase}' — "
+                    "file may be corrupted. Delete it to start fresh.",
+                    file=sys.stderr,
                 )
-        else:
-            errors.append(f"unrecognized classification value: {classification!r} for workload {name!r}")
+                return 2
 
-    if not matched_improvements:
-        return _output("error", 2,
-                       errors=format_errors + ["no matched workloads found — cannot compute mechanism check (configuration error: check workload classification)"],
-                       mechanism_check_verdict="ERROR", passed=False,
-                       workload_classification=results,
-                       t_eff=t_eff, specificity_notes=specificity_notes)
+    # ---- context guard (read-only calls) ----
+    if not getattr(args, "set_phase", None):
+        current_ctx = _kubectl_current_context()
+        recorded_ctx = state.get("cluster_context", "")
+        if recorded_ctx and current_ctx and current_ctx != recorded_ctx:
+            print(
+                f"ERROR: State was recorded against cluster '{recorded_ctx}' "
+                f"but current context is '{current_ctx}'. "
+                "Delete workspace/benchmark_state.json to start fresh against "
+                "the new cluster, or switch back to the original context.",
+                file=sys.stderr,
+            )
+            return 1
+        print(json.dumps(state, indent=2))
+        return 0
+
+    # ---- set-phase update ----
+    phase = args.set_phase
+    if phase not in _PHASE_ORDER:
+        print(f"ERROR: unknown phase '{phase}'. Must be one of {_PHASE_ORDER}.",
+              file=sys.stderr)
+        return 2
+
+    new_status = args.status
+    if new_status is None:
+        print("ERROR: --status is required when --set-phase is used.", file=sys.stderr)
+        return 2
+    current_status = state["phases"][phase]["status"]
+
+    # status regression guard
+    if not getattr(args, "force", False):
+        if current_status == "done" and new_status in ("pending", "running"):
+            print(
+                f"ERROR: cannot regress phase '{phase}' from 'done' to '{new_status}'. "
+                "Use --force to override.", file=sys.stderr
+            )
+            return 2
+
+    # ordering guard
+    if new_status == "running" and not getattr(args, "force", False):
+        idx = _PHASE_ORDER.index(phase)
+        if idx > 0:
+            prev = _PHASE_ORDER[idx - 1]
+            if state["phases"][prev]["status"] != "done":
+                print(
+                    f"ERROR: cannot set '{phase}' to running — "
+                    f"previous phase '{prev}' is not done (status: "
+                    f"'{state['phases'][prev]['status']}'). "
+                    "Use --force to bypass.", file=sys.stderr
+                )
+                return 1
+
+    state["phases"][phase]["status"] = new_status
+    if getattr(args, "pipelinerun", None):
+        state["phases"][phase]["pipelinerun_name"] = args.pipelinerun
+        state["phases"][phase]["submitted_at"] = (
+            datetime.now(timezone.utc).isoformat(timespec="seconds")
+        )
+    if getattr(args, "results", None):
+        state["phases"][phase]["results_local_path"] = args.results
+        state["phases"][phase]["completed_at"] = (
+            datetime.now(timezone.utc).isoformat(timespec="seconds")
+        )
+    if getattr(args, "failure_reason", None):
+        state["phases"][phase]["failure_reason"] = args.failure_reason
+
+    try:
+        state_path.write_text(json.dumps(state, indent=2))
+    except OSError as e:
+        print(f"ERROR: cannot write {state_path}: {e}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def _percentile(values: list, p: int) -> float:
+    """Compute p-th percentile of a sorted list (nearest-rank, ceiling method)."""
+    import math
+    if not values:
+        return 0.0
+    values = sorted(values)
+    idx = min(len(values) - 1, max(0, math.ceil(len(values) * p / 100) - 1))
+    return values[idx]
+
+
+def _parse_tracev2_dir(directory: "Path") -> dict:
+    """Parse a single TraceV2 directory → metrics dict. Raises on error."""
+    import csv as csv_mod
+    header_path = directory / "trace_header.yaml"
+    data_path = directory / "trace_data.csv"
+    if not header_path.exists():
+        raise FileNotFoundError(
+            f"missing trace_header.yaml in {directory} — blis observe may have crashed mid-write."
+        )
+    if not data_path.exists():
+        raise FileNotFoundError(
+            f"missing trace_data.csv in {directory} — blis observe may have crashed mid-write."
+        )
+    ttft_vals, tpot_vals = [], []
+    try:
+        with open(data_path, newline="") as f:
+            reader = csv_mod.DictReader(f)
+            for row in reader:
+                if row.get("status") != "ok":
+                    continue
+                send = int(row["send_time_us"])
+                first = int(row["first_chunk_time_us"])
+                last = int(row["last_chunk_time_us"])
+                chunks = max(int(row["num_chunks"]) - 1, 1)
+                ttft_vals.append((first - send) / 1000.0)
+                tpot_vals.append((last - first) / chunks / 1000.0)
+    except (ValueError, KeyError) as e:
+        raise ValueError(
+            f"malformed CSV in {data_path}: {e} — check that all numeric columns "
+            "(send_time_us, first_chunk_time_us, last_chunk_time_us, num_chunks) "
+            "contain valid integers for rows with status='ok'"
+        ) from e
+    return {
+        "ttft_p50": _percentile(ttft_vals, 50),
+        "ttft_p99": _percentile(ttft_vals, 99),
+        "tpot_p50": _percentile(tpot_vals, 50),
+        "tpot_p99": _percentile(tpot_vals, 99),
+        "_valid_rows": len(ttft_vals),
+    }
+
+
+def cmd_convert_trace(args: "argparse.Namespace") -> int:
+    import json
+    from pathlib import Path
+
+    input_dir = Path(args.input_dir)
+    output = Path(args.output)
+
+    if not input_dir.is_dir():
+        print(f"ERROR: input directory '{input_dir}' does not exist.", file=sys.stderr)
+        return 2
+
+    workloads = []
+    for wl_dir in sorted(input_dir.iterdir()):
+        if not wl_dir.is_dir():
+            continue
+        # Normalize to match _classify_workloads: strip "workload_" prefix, underscores→hyphens
+        wl_name = wl_dir.name.removeprefix("workload_").replace("_", "-")
+        # auto-detect noise (has run-* subdirs) vs baseline/treatment
+        run_dirs = sorted(wl_dir.glob("run-*"))
+        if run_dirs:
+            # noise per-run structure
+            runs = []
+            for run_dir in run_dirs:
+                try:
+                    metrics = _parse_tracev2_dir(run_dir)
+                except (FileNotFoundError, ValueError) as e:
+                    print(f"ERROR: {e}", file=sys.stderr)
+                    return 1
+                if metrics["_valid_rows"] == 0:
+                    print(
+                        f"ERROR: workload '{wl_name}' run '{run_dir.name}' has 0 rows "
+                        f"with status 'ok' in {run_dir}/trace_data.csv — "
+                        "all requests failed or timed out.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                del metrics["_valid_rows"]
+                runs.append({"metrics": metrics})
+            workloads.append({"name": wl_name, "runs": runs})
+        else:
+            # baseline/treatment single-value structure
+            try:
+                metrics = _parse_tracev2_dir(wl_dir)
+            except (FileNotFoundError, ValueError) as e:
+                print(f"ERROR: {e}", file=sys.stderr)
+                return 1
+            if metrics["_valid_rows"] == 0:
+                print(
+                    f"ERROR: workload '{wl_name}' has 0 rows with status 'ok' "
+                    f"in {wl_dir}/trace_data.csv — all requests failed or timed out.",
+                    file=sys.stderr,
+                )
+                return 1
+            del metrics["_valid_rows"]
+            workloads.append({"name": wl_name, "metrics": metrics})
+
+    if not workloads:
+        print(f"ERROR: no workload directories found in '{input_dir}'.", file=sys.stderr)
+        return 2
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        output.write_text(json.dumps({"workloads": workloads}, indent=2))
+    except OSError as e:
+        print(f"ERROR: cannot write output file '{output}': {e}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def cmd_render_pipelinerun(args: "argparse.Namespace") -> int:
+    template = Path(args.template)
+    out = Path(args.out)
+
+    if not template.exists():
+        print(f"ERROR: template file '{template}' not found.", file=sys.stderr)
+        return 2
+
+    # Parse KEY=VAL pairs
+    var_map = {}
+    for item in (args.vars or []):
+        if "=" not in item:
+            print(f"ERROR: --vars entry '{item}' is not KEY=VAL format.", file=sys.stderr)
+            return 2
+        k, v = item.split("=", 1)
+        var_map[k.strip()] = v.strip()
+
+    content = template.read_text()
+
+    # Substitute ${VAR} and $VAR patterns
+    def replacer(m):
+        name = m.group(1) or m.group(2)
+        return var_map[name] if name in var_map else m.group(0)
+
+    rendered = re.sub(r'\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)',
+                      replacer, content)
+
+    # Check for unresolved placeholders
+    remaining = re.findall(r'\$\{?[A-Za-z_][A-Za-z0-9_]*\}?', rendered)
+    if remaining:
+        print(
+            f"ERROR: unresolved placeholders in rendered output: {remaining}. "
+            "Provide all required --vars.", file=sys.stderr
+        )
+        return 1
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        out.write_text(rendered)
+    except OSError as e:
+        print(f"ERROR: cannot write output file '{out}': {e}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def cmd_compile_pipeline(args: "argparse.Namespace") -> int:
+    import subprocess
+
+    template_dir = Path(args.template_dir)
+    values_file = Path(args.values)
+    phase = args.phase
+    out_dir = Path(args.out)
+
+    if not template_dir.is_dir():
+        print(f"ERROR: template directory '{template_dir}' not found.", file=sys.stderr)
+        return 2
+    if not values_file.exists():
+        print(f"ERROR: values file '{values_file}' not found.", file=sys.stderr)
+        return 2
+
+    template_file = template_dir / f"{phase}-pipeline.yaml.j2"
+    if not template_file.exists():
+        print(f"ERROR: pipeline template '{template_file}' not found.", file=sys.stderr)
+        return 2
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_file = out_dir / f"{phase}-pipeline.yaml"
+
+    tektonc = Path(__file__).resolve().parent.parent / "tektonc-data-collection" / "tektonc" / "tektonc.py"
+    if not tektonc.exists():
+        print(f"ERROR: tektonc not found at '{tektonc.resolve()}'.", file=sys.stderr)
+        return 2
+
+    try:
+        r = subprocess.run(
+            [sys.executable, str(tektonc),
+             "-t", str(template_file),
+             "-f", str(values_file),
+             "-o", str(out_file)],
+            capture_output=True, text=True, shell=False, timeout=120
+        )
+    except subprocess.TimeoutExpired:
+        print("ERROR: tektonc timed out after 120s.", file=sys.stderr)
+        return 2
+    except OSError as e:
+        print(f"ERROR: failed to launch tektonc: {e}", file=sys.stderr)
+        return 2
+    if r.returncode != 0:
+        print(f"ERROR: tektonc compilation failed:\n{r.stderr}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+def _preflight_check_values(values_path: "Path", namespace: str, phase: str) -> list:
+    """Check values.yaml for issues that don't need kubectl. Returns list of error strings."""
+    import yaml
+    errors = []
+    try:
+        raw = values_path.read_text()
+    except OSError as e:
+        return [f"Cannot read values.yaml: {e}"]
+    try:
+        data = yaml.safe_load(raw)
+    except yaml.YAMLError as e:
+        return [f"Cannot parse values.yaml: {e}"]
+
+    if not isinstance(data, dict):
+        return [f"values.yaml is empty or not a mapping (got {type(data).__name__})"]
+
+    image = (data.get("observe") or {}).get("image", "")
+    if "<TAG>" in image:
+        errors.append(
+            f"FAIL: observe.image contains unresolved <TAG> placeholder '{image}' — "
+            "re-run Stage 3 generate to resolve."
+        )
+
+    if phase == "treatment":
+        cfg = ((data.get("stack") or {}).get("scorer") or {}).get("treatment", {})
+        if not cfg.get("configContent", "").strip():
+            errors.append(
+                "FAIL: scorer.treatment.configContent is empty — "
+                "treatment scorer config must be generated by Stage 3."
+            )
+
+    return errors
+
+
+def cmd_preflight(args: "argparse.Namespace") -> int:
+    import subprocess
+    from pathlib import Path
+    import yaml
+
+    phase = args.phase
+    values_path = Path(args.values)
+    namespace = args.namespace
+
+    checks = []  # list of (label, passed, detail)
+
+    def run(label: str, cmd: list) -> bool:
+        err_reason = ""
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
+                                shell=False)
+            ok = r.returncode == 0
+        except Exception as e:
+            ok = False
+            err_reason = f"check failed: {e}"
+        checks.append((label, ok, err_reason))
+        return ok
+
+    # --- values-only checks (no kubectl) ---
+    val_errors = _preflight_check_values(values_path, namespace, phase)
+    for e in val_errors:
+        checks.append((e, False, ""))
+
+    # --- kubectl checks ---
+    run("kubectl reachable", ["kubectl", "cluster-info"])
+    run("Tekton CRD installed",
+        ["kubectl", "get", "crd", "pipelines.tekton.dev"])
+    run(f"Namespace '{namespace}' exists",
+        ["kubectl", "get", "ns", namespace])
+    run("hf-secret present",
+        ["kubectl", "get", "secret", "hf-secret", "-n", namespace])
+    run("model-pvc present",
+        ["kubectl", "get", "pvc", "model-pvc", "-n", namespace])
+    run("data-pvc present",
+        ["kubectl", "get", "pvc", "data-pvc", "-n", namespace])
+    run("tkn CLI present", ["tkn", "version"])
+
+    # GPU nodes check
+    try:
+        data = yaml.safe_load(values_path.read_text())
+        acc = (data.get("stack", {}).get("model", {})
+               .get("helmValues", {}).get("decode", {})
+               .get("acceleratorTypes", {}))
+        label_key = acc.get("labelKey", "")
+        label_vals = acc.get("labelValues", [])
+        replicas = (data.get("stack", {}).get("model", {})
+                    .get("helmValues", {}).get("decode", {})
+                    .get("replicas", 1))
+        if label_key and label_vals:
+            selector = f"{label_key}={label_vals[0]}"
+            r = subprocess.run(
+                ["kubectl", "get", "nodes", "-l", selector, "-o", "name"],
+                capture_output=True, text=True, timeout=30, shell=False
+            )
+            count = len([l for l in r.stdout.strip().splitlines() if l]) if r.returncode == 0 else 0
+            ok = r.returncode == 0 and count >= replicas
+            checks.append((
+                f"GPU nodes (≥{replicas} with {selector})", ok,
+                f"found {count}"
+            ))
+    except Exception as e:
+        checks.append(("GPU nodes check", False, f"error: {e}"))
+
+    if phase == "treatment":
+        scheduler_dir = REPO_ROOT / "llm-d-inference-scheduler"
+        if scheduler_dir.is_dir():
+            try:
+                r = subprocess.run(
+                    ["go", "build", "./pkg/plugins/scorer/..."],
+                    capture_output=True, text=True, cwd=str(scheduler_dir),
+                    shell=False, timeout=120
+                )
+                ok = r.returncode == 0
+                detail = r.stderr.strip() if not ok else ""
+            except subprocess.TimeoutExpired:
+                ok = False
+                detail = "go build timed out after 120s"
+            except OSError as e:
+                ok = False
+                detail = f"failed to launch go: {e}"
+        else:
+            ok = False
+            detail = f"scheduler submodule not found at {scheduler_dir}"
+        checks.append(("Stage 4 scorer builds", ok, detail))
+
+    # Print checklist to stderr; output JSON to stdout per module contract
+    any_fail = False
+    check_results = []
+    for label, passed, detail in checks:
+        mark = "✓" if passed else "✗"
+        suffix = f" ({detail})" if detail else ""
+        print(f"  [{mark}] {label}{suffix}", file=sys.stderr)
+        if not passed:
+            any_fail = True
+        check_results.append({"label": label, "passed": passed, "detail": detail})
+
+    rc = 1 if any_fail else 0
+    _output("ok" if rc == 0 else "fail", rc,
+            **{"phase": phase, "checks": check_results, "passed": not any_fail})
+    return rc
+
+
+def _compute_cv(values: list) -> float:
+    if len(values) < 2:
+        return 0.0
+    mean = sum(values) / len(values)
+    if mean == 0:
+        return 0.0
+    variance = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
+    return (variance ** 0.5) / mean
+
+
+def _classify_workloads(workloads_dir: "Path", signal_coverage_path: "Path",
+                         mapping_path: "Path | None" = None) -> dict:
+    """Return {workload_name: {"classification": "matched"|"unmatched", "matched_signals": [...]}}"""
+    import json, yaml
+    if mapping_path is None:
+        mapping_path = Path(__file__).parent / "workload_signal_mapping.json"
+    if not mapping_path.exists():
+        raise FileNotFoundError(
+            f"workload signal mapping not found at '{mapping_path}' — "
+            "ensure Task 1 (Step 1.8) was completed to create this file"
+        )
+    try:
+        parsed = json.loads(mapping_path.read_text())
+    except json.JSONDecodeError as e:
+        raise ValueError(f"workload signal mapping '{mapping_path}' is malformed JSON: {e}") from e
+    try:
+        mapping = parsed["mappings"]
+    except KeyError:
+        raise ValueError(
+            f"workload signal mapping '{mapping_path}' is missing required top-level "
+            f"'mappings' key"
+        )
+    try:
+        sc = json.loads(signal_coverage_path.read_text())
+    except json.JSONDecodeError as e:
+        raise ValueError(f"signal coverage file '{signal_coverage_path}' is malformed JSON: {e}") from e
+    mapped_signals = {s["sim_name"] for s in sc.get("signals", []) if s.get("mapped")}
+
+    result = {}
+    for wf in sorted(workloads_dir.iterdir()):
+        if wf.suffix not in (".yaml", ".yml"):
+            continue
+        # Normalize underscores to hyphens: workload_glia_40qps.yaml → glia-40qps
+        wl_name = wf.stem.removeprefix("workload_").replace("_", "-")
+        try:
+            raw = wf.read_text()
+        except OSError as e:
+            raise ValueError(f"cannot read workload file {wf}: {e}") from e
+        try:
+            wl_data = yaml.safe_load(raw) or {}
+        except yaml.YAMLError as e:
+            raise ValueError(f"cannot parse workload file {wf}: {e}") from e
+        # Collect all keys at top level AND within clients[] items
+        all_keys = set(wl_data.keys())
+        for client in wl_data.get("clients", []):
+            if isinstance(client, dict):
+                all_keys.update(client.keys())
+        matched = []
+        for entry in mapping:
+            if entry["workload_field"] in all_keys:
+                for sig in entry["signals"]:
+                    if sig in mapped_signals:
+                        matched.append(sig)
+        result[wl_name] = {
+            "classification": "matched" if matched else "unmatched",
+            "matched_signals": list(set(matched)),
+        }
+    return result
+
+
+def cmd_benchmark_new(args: "argparse.Namespace") -> int:
+    import json
+    from pathlib import Path
+
+    noise_path = Path(args.noise)
+    baseline_path = Path(args.baseline)
+    treatment_path = Path(args.treatment)
+    sc_path = Path(args.signal_coverage)
+    wd_path = Path(args.workloads_dir)
+
+    mapping_path = Path(__file__).parent / "workload_signal_mapping.json"
+    for p in [noise_path, baseline_path, treatment_path, sc_path, wd_path, mapping_path]:
+        if not p.exists():
+            print(f"ERROR: required input '{p}' not found.", file=sys.stderr)
+            return 2
+
+    try:
+        noise = json.loads(noise_path.read_text())
+        baseline = json.loads(baseline_path.read_text())
+        treatment = json.loads(treatment_path.read_text())
+    except Exception as e:
+        print(f"ERROR: cannot parse input JSON: {e}", file=sys.stderr)
+        return 2
+
+    for label, data in [("noise", noise), ("baseline", baseline), ("treatment", treatment)]:
+        if not isinstance(data, dict) or "workloads" not in data:
+            print(
+                f"ERROR: {label} results file is missing 'workloads' key or is not a dict — "
+                "run convert-trace to regenerate.",
+                file=sys.stderr,
+            )
+            return 2
+
+    # Compute T_eff from noise — per-workload CV (not pooled across workloads)
+    metrics_keys = ["ttft_p50", "ttft_p99", "tpot_p50", "tpot_p99"]
+    noise_cv = 0.0
+    try:
+        for wl in noise["workloads"]:
+            wl_name = wl.get("name", "?")
+            per_metric = {k: [] for k in metrics_keys}
+            for run in wl["runs"]:
+                for k in metrics_keys:
+                    per_metric[k].append(run["metrics"][k])
+            for k in metrics_keys:
+                if len(per_metric[k]) < 2:
+                    print(
+                        f"ERROR: noise workload '{wl_name}' has only "
+                        f"{len(per_metric[k])} run(s) for metric '{k}' — "
+                        "at least 2 runs are required to compute a noise estimate.",
+                        file=sys.stderr,
+                    )
+                    return 2
+            wl_cv = max(_compute_cv(per_metric[k]) for k in metrics_keys)
+            noise_cv = max(noise_cv, wl_cv)
+    except (KeyError, TypeError) as e:
+        print(
+            f"ERROR: malformed noise results — missing expected field: {e}. "
+            "Each workload must have 'runs' with 'metrics' containing "
+            "ttft_p50, ttft_p99, tpot_p50, tpot_p99.",
+            file=sys.stderr,
+        )
+        return 2
+    t_eff = max(0.05, 2.0 * noise_cv)
+
+    # Build lookup maps
+    try:
+        bl_map = {w["name"]: w["metrics"]["ttft_p99"] for w in baseline["workloads"]}
+        tr_map = {w["name"]: w["metrics"]["ttft_p99"] for w in treatment["workloads"]}
+    except (KeyError, TypeError) as e:
+        print(
+            f"ERROR: malformed baseline or treatment results — missing expected field: {e}. "
+            "Each workload entry must have 'name' and 'metrics.ttft_p99'.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Classify workloads
+    try:
+        classification = _classify_workloads(wd_path, sc_path, mapping_path)
+    except (OSError, ValueError) as e:
+        print(f"ERROR: workload classification failed: {e}", file=sys.stderr)
+        return 2
+
+    workload_classification = []
+    matched_improvements = []
+    unmatched_above_teff = []
+    skipped_workloads = []
+
+    for wl_name, cls_info in sorted(classification.items()):
+        bl_p99 = bl_map.get(wl_name)
+        tr_p99 = tr_map.get(wl_name)
+        if bl_p99 is None or tr_p99 is None:
+            print(
+                f"WARNING: workload '{wl_name}' from workloads_dir not found in "
+                f"{'baseline' if bl_p99 is None else 'treatment'} results "
+                f"(available: {sorted(bl_map.keys())}). Skipping.",
+                file=sys.stderr,
+            )
+            skipped_workloads.append(wl_name)
+            continue
+        improvement = (bl_p99 - tr_p99) / bl_p99 if bl_p99 else 0.0
+        entry = {
+            "workload": wl_name,
+            "classification": cls_info["classification"],
+            "improvement": round(improvement, 4),
+            "matched_signals": cls_info["matched_signals"],
+        }
+        workload_classification.append(entry)
+        if cls_info["classification"] == "matched":
+            matched_improvements.append(improvement)
+        elif improvement >= t_eff:
+            unmatched_above_teff.append(
+                f"workload {wl_name}: improvement={improvement:.2%} >= T_eff={t_eff:.2%}"
+            )
+
+    if skipped_workloads and not workload_classification:
+        msg = (
+            f"ERROR: all {len(skipped_workloads)} workload(s) were skipped due to name "
+            f"mismatch between workloads_dir and result files. "
+            f"Skipped: {skipped_workloads}. "
+            f"Baseline result names: {sorted(bl_map.keys())}."
+        )
+        print(msg, file=sys.stderr)
+        error_output = {
+            "mechanism_check_verdict": "ERROR",
+            "passed": False,
+            "t_eff": round(t_eff, 4),
+            "noise_cv": round(noise_cv, 4),
+            "workload_classification": [],
+            "specificity_notes": [
+                f"all {len(skipped_workloads)} workload(s) skipped due to name mismatch "
+                f"between workloads_dir and result files; "
+                f"skipped={skipped_workloads}; "
+                f"baseline names={sorted(bl_map.keys())}"
+            ],
+        }
+        if getattr(args, "out", None):
+            out_path = Path(args.out)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(json.dumps(error_output, indent=2))
+        else:
+            print(json.dumps(error_output, indent=2))
+        return 2
 
     # Mechanism check
-    if any(imp >= t_eff for imp in matched_improvements):
+    if not matched_improvements:
+        verdict = "ERROR"
+        passed = False
+    elif max(matched_improvements) >= t_eff:
         verdict = "PASS"
-    elif any(imp > 0 for imp in matched_improvements):
+        passed = True
+    elif max(matched_improvements) > 0:
         verdict = "INCONCLUSIVE"
+        passed = False
     else:
         verdict = "FAIL"
+        passed = False
 
-    exit_code = 1 if verdict == "FAIL" else 0
-    status = "error" if verdict == "FAIL" else ("inconclusive" if verdict == "INCONCLUSIVE" else "ok")
-    if verdict == "FAIL":
-        errors.append("mechanism check FAIL: no matched workload improvement >= T_eff")
-    if specificity_notes:
-        errors.append(f"specificity check failed for {len(specificity_notes)} unmatched workload(s)")
+    output = {
+        "t_eff": round(t_eff, 4),
+        "noise_cv": round(noise_cv, 4),
+        "mechanism_check_verdict": verdict,
+        "passed": passed,
+        "workload_classification": workload_classification,
+        "specificity_notes": unmatched_above_teff,
+    }
 
-    passed = verdict == "PASS"
-    return _output(status, exit_code, mechanism_check_verdict=verdict, passed=passed,
-                   workload_classification=results, t_eff=t_eff, specificity_notes=specificity_notes,
-                   errors=format_errors + errors)
+    if getattr(args, "out", None):
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(output, indent=2))
+    else:
+        print(json.dumps(output, indent=2))
+
+    # INCONCLUSIVE exits 0 — pipeline should proceed with operator review (see validate.md)
+    return 2 if verdict == "ERROR" else (1 if verdict == "FAIL" else 0)
+
+
+def cmd_generate_evidence(args: "argparse.Namespace") -> int:
+    import json
+    from datetime import date
+    from pathlib import Path
+
+    ws = Path(args.workspace)
+    out_path = Path(args.out)
+    cal_log = Path(getattr(args, "calibration_log", "docs/transfer/calibration_log.md"))
+
+    alg_path = ws / "algorithm_summary.json"
+    val_path = ws / "validation_results.json"
+
+    for p, label in [(alg_path, "algorithm_summary.json"),
+                     (val_path, "validation_results.json")]:
+        if not p.exists():
+            print(f"ERROR: generate-evidence requires '{p}' — "
+                  f"{label} not found.", file=sys.stderr)
+            return 1
+
+    try:
+        alg = json.loads(alg_path.read_text())
+        val = json.loads(val_path.read_text())
+    except json.JSONDecodeError as e:
+        print(f"ERROR: cannot parse JSON from workspace artifact: {e}", file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f"ERROR: cannot read workspace artifact: {e}", file=sys.stderr)
+        return 1
+
+    bench = val.get("benchmark", {})
+    if not bench:
+        print("ERROR: 'benchmark' key missing from validation_results.json — "
+              "run Step 5c (benchmark) first.", file=sys.stderr)
+        return 1
+
+    # Calibration count
+    calib_n = 1
+    if cal_log.exists():
+        calib_n = cal_log.read_text().count("### Transfer:") + 1
+
+    # Extract fields
+    alg_name = alg.get("algorithm_name", "unknown")
+    overall = val.get("overall_verdict", "UNKNOWN")
+    tau = val.get("suite_a", {}).get("kendall_tau", "N/A")
+    err = val.get("suite_a", {}).get("max_abs_error", "N/A")
+    suite_a_pass = val.get("suite_a", {}).get("passed", False)
+    suite_c_pass = val.get("suite_c", {}).get("passed", False)
+    pile_on = val.get("suite_c", {}).get("max_pile_on_ratio", "N/A")
+    t_eff_pct = round(bench.get("t_eff", 0) * 100, 1)
+    mech = bench.get("mechanism_check_verdict", "UNKNOWN")
+
+    wc = bench.get("workload_classification", [])
+    matched_entry = next((w for w in wc if w.get("classification") == "matched"), None)
+    matched_wl = (matched_entry or {}).get("workload", alg_name)
+    unmatched_entries = [w for w in wc if w.get("classification") == "unmatched"]
+    matched_pct = round((matched_entry or {}).get("improvement", 0) * 100, 1)
+    unmatched_mean_pct = (
+        round(sum(w.get("improvement", 0) for w in unmatched_entries) /
+              len(unmatched_entries) * 100, 1)
+        if unmatched_entries else 0.0
+    )
+
+    narrative = {
+        "PASS": f"Simulation-predicted benefit transferred to production.",
+        "FAIL": f"Transfer failed — production improvement did not exceed noise floor.",
+        "INCONCLUSIVE": f"Transfer result is inconclusive — see operator notes.",
+    }.get(overall, f"Transfer verdict: {overall}.")
+
+    evidence = f"""## Evidence: {alg_name} sim-to-real transfer
+
+**Date:** {date.today().isoformat()}
+**Verdict:** {overall}
+
+### Claim
+The evolved routing algorithm improves performance on {matched_wl}
+in production with improvement above noise floor (T_eff={t_eff_pct}%).
+
+### Evidence Chain
+
+**1. Algorithm source**
+- Algorithm: {alg_name}
+- Source: {alg.get('evolve_block_source', 'N/A')}
+
+**2. Translation fidelity verified**
+- Suite A Kendall-tau: {tau} (threshold: 0.8) — {"PASS" if suite_a_pass else "FAIL"}
+- Suite A max absolute error: {err}
+- Suite C concurrent safety: {"PASS" if suite_c_pass else "FAIL"}, pile-on ratio: {pile_on}
+- Interpretation: The production plugin reproduces the simulation
+  algorithm's ranking behavior within measured tolerance.
+
+**3. Production result**
+- Observed improvement: {matched_pct}% on {matched_wl}
+- Noise floor (T_eff): {t_eff_pct}%
+
+**4. Mechanism specificity**
+- Matched workload improvement: {matched_pct}%
+- Mean unmatched workload improvement: {unmatched_mean_pct}%
+- Mechanism check: {mech}
+
+**5. Calibration**
+- Running calibration: transfer {calib_n} of 3 (uncalibrated period)
+
+### Summary
+{narrative}
+"""
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(evidence)
+    return 0
 
 
 def main():
@@ -1213,21 +1875,69 @@ def main():
         help="Classify errors from go build/test output (reads stdin)")
     p_test_status.set_defaults(func=cmd_test_status)
 
-    # noise-characterize subcommand
-    p_noise = subparsers.add_parser("noise-characterize",
-        help="Compute per-metric CV and T_eff from baseline latency runs")
-    p_noise.add_argument("--runs", required=True,
-        help="Path to JSON file with baseline latency runs: {runs: [{p50, p95, p99}]}")
-    p_noise.set_defaults(func=_cmd_noise_characterize)
-
     # benchmark subcommand
     p_bench = subparsers.add_parser("benchmark",
-        help="Compute mechanism check from benchmark results")
-    p_bench.add_argument("--results", required=True,
-        help="Path to JSON file with workload results")
-    p_bench.add_argument("--t-eff", type=float, default=None,
-        help="Effective threshold from noise-characterize")
-    p_bench.set_defaults(func=_cmd_benchmark)
+        help="Compute T_eff and mechanism check from noise/baseline/treatment results")
+    p_bench.add_argument("--noise", required=True)
+    p_bench.add_argument("--baseline", required=True)
+    p_bench.add_argument("--treatment", required=True)
+    p_bench.add_argument("--signal-coverage", required=True, dest="signal_coverage")
+    p_bench.add_argument("--workloads-dir", required=True, dest="workloads_dir")
+    p_bench.add_argument("--out")
+    p_bench.set_defaults(func=cmd_benchmark_new)
+
+    p_ct = subparsers.add_parser("convert-trace",
+        help="Convert blis observe TraceV2 output to metrics JSON")
+    p_ct.add_argument("--input-dir", required=True,
+                       dest="input_dir",
+                       help="Phase directory containing per-workload TraceV2 subdirs")
+    p_ct.add_argument("--output", required=True,
+                       help="Output metrics JSON file path")
+    p_ct.set_defaults(func=cmd_convert_trace)
+
+    p_bstate = subparsers.add_parser("benchmark-state",
+        help="Read/write workspace/benchmark_state.json phase tracking")
+    p_bstate.add_argument("--workspace", required=True)
+    p_bstate.add_argument("--namespace")
+    p_bstate.add_argument("--set-phase", dest="set_phase",
+                           choices=["noise", "baseline", "treatment"])
+    p_bstate.add_argument("--status",
+                           choices=["pending", "running", "done", "failed"])
+    p_bstate.add_argument("--pipelinerun")
+    p_bstate.add_argument("--results")
+    p_bstate.add_argument("--failure-reason", dest="failure_reason")
+    p_bstate.add_argument("--force", action="store_true")
+    p_bstate.set_defaults(func=cmd_benchmark_state)
+
+    p_cp = subparsers.add_parser("compile-pipeline",
+        help="Compile a tektonc pipeline template for a given phase")
+    p_cp.add_argument("--template-dir", required=True, dest="template_dir")
+    p_cp.add_argument("--values", required=True)
+    p_cp.add_argument("--phase", required=True, choices=["noise", "baseline", "treatment"])
+    p_cp.add_argument("--out", required=True)
+    p_cp.set_defaults(func=cmd_compile_pipeline)
+
+    p_rpr = subparsers.add_parser("render-pipelinerun",
+        help="Substitute variables in a PipelineRun stub")
+    p_rpr.add_argument("--template", required=True)
+    p_rpr.add_argument("--vars", nargs="+", metavar="KEY=VAL")
+    p_rpr.add_argument("--out", required=True)
+    p_rpr.set_defaults(func=cmd_render_pipelinerun)
+
+    p_pf = subparsers.add_parser("preflight",
+        help="Run pre-flight cluster checks before submitting a pipeline phase")
+    p_pf.add_argument("--phase", required=True, choices=["noise", "baseline", "treatment"])
+    p_pf.add_argument("--values", required=True)
+    p_pf.add_argument("--namespace", required=True)
+    p_pf.set_defaults(func=cmd_preflight)
+
+    p_ge = subparsers.add_parser("generate-evidence",
+        help="Generate workspace/transfer_evidence.md from workspace artifacts")
+    p_ge.add_argument("--workspace", required=True)
+    p_ge.add_argument("--out", required=True)
+    p_ge.add_argument("--calibration-log", dest="calibration_log",
+                       default="docs/transfer/calibration_log.md")
+    p_ge.set_defaults(func=cmd_generate_evidence)
 
     args = parser.parse_args()
     exit_code = args.func(args)

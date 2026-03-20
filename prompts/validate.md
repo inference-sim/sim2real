@@ -46,30 +46,49 @@ test -f workspace/algorithm_summary.json || { echo "HALT: workspace/algorithm_su
 
 **HALT if `workspace/algorithm_summary.json` is absent or invalid.** Without it, Suite A silently skips (exits 0/PASS) without running any equivalence checks — this would bypass the go/no-go gate.
 
-## Step 1: Noise Characterization
+## Step 1: Noise Characterization Gate
 
-**[OPERATOR ACTION REQUIRED]** This step requires live cluster access that Claude Code cannot perform.
-Use the `llm-d-benchmark` harness (submodule at `llm-d-benchmark/`) to run 5 baseline requests against the production cluster (without the evolved scorer enabled).
-Record P50/P95/P99 latency **per request** (not per workload). Run exactly 5 total requests using a single representative workload configuration. Save to `workspace/baseline_runs.json` in format:
+Noise characterization runs as the `noise` phase of the cluster pipeline (Step 5a/5b).
+This step verifies noise is done before proceeding to Suites A/B/C.
 
-```json
-{"runs": [{"p50": 0.12, "p95": 0.25, "p99": 0.45}, ...]}
-```
+**Routing preamble — run first:**
 
-The `runs` array must contain exactly 5 entries (one per baseline request). The `noise-characterize` command computes CV and T_eff from these entries; an incorrect count will skew thresholds.
+~~~bash
+# Resolve NAMESPACE (operator-set env var or prompt)
+# Initialize state and check noise status
+BENCH_STATE_OUTPUT=$(.venv/bin/python tools/transfer_cli.py \
+  benchmark-state --workspace workspace/ --namespace ${NAMESPACE:?NAMESPACE must be set})
+BENCH_STATE_EXIT=$?
 
-**Format note:** The `baseline_runs.json` format stores one entry per benchmark run (not per workload). Collect 5 runs total across all workloads in a single benchmark pass — e.g., one run covers all workload metrics. An operator with 3 workload files still produces 5 `runs[]` entries, not 15.
+if [ $BENCH_STATE_EXIT -eq 2 ]; then
+  echo "HALT: benchmark-state failed — missing workspace/algorithm_summary.json. Run Stage 1 extract first."
+  exit 1
+elif [ $BENCH_STATE_EXIT -ne 0 ]; then
+  echo "HALT: benchmark-state failed (exit $BENCH_STATE_EXIT). Check cluster context."
+  echo "$BENCH_STATE_OUTPUT"
+  exit 1
+fi
 
-Then compute CV and T_eff:
+NOISE_STATUS=$(echo "$BENCH_STATE_OUTPUT" \
+  | .venv/bin/python -c "import sys,json; print(json.load(sys.stdin)['phases']['noise']['status'])")
 
-```bash
-.venv/bin/python tools/transfer_cli.py noise-characterize --runs workspace/baseline_runs.json
-```
+if [ "$NOISE_STATUS" != "done" ]; then
+  echo "REENTER: Noise phase is '$NOISE_STATUS' — jump to Step 5 (5a and 5b for noise phase only)."
+  echo "After noise phase completes: re-run validate.md from Step 1 (do NOT fall through to Suite A/B/C now)."
+  # Signal to automated harnesses: this is a planned re-entry pause, not a success completion.
+  # Exit 3 = REENTER (distinct from exit 0 = complete, exit 1 = error, exit 2 = infrastructure error).
+  exit 3
+fi
+# If noise_status == "done": fall through to Step 2 (Suite A) below.
+~~~
 
-**HALT if exit code 1 (CV > 15%).** Message: "HALT: Noise too high — re-run during lower-variance window."
-Maximum 3 noise-characterization attempts (per R4 in macro plan). After 3 consecutive CV > 15% failures, halt the transfer entirely — do not proceed to Suite A or subsequent steps.
-**HALT if exit code 2 (infrastructure error).** Message: "HALT: noise-characterize infrastructure error — check that workspace/baseline_runs.json exists and contains valid JSON."
-Record `t_eff` from the `t_eff` field in the JSON output for use in Step 5 (the `--t-eff` argument to the `benchmark` command). Also record `noise_cv = max(per_metric_cv.values())` from the JSON output for use in Step 6 (`validation_results.json`).
+**If noise is `done`:** proceed to Step 2 (Suite A).
+**If noise is not `done`:** script exits 3 (REENTER). Jump to Step 5 now, run the noise phase pipeline,
+then re-enter Stage 5 from the top for Pass 2 (Suites A/B/C + baseline/treatment).
+Automated harnesses should treat exit 3 as a planned re-entry pause (not an error and not a completion).
+
+T_eff is computed internally by `transfer_cli.py benchmark` from `workspace/noise_results.json`.
+The old `baseline_runs.json` format and `noise-characterize` subcommand are superseded.
 
 ## Step 2: Suite A — Rank Correlation Equivalence
 
@@ -132,69 +151,11 @@ grep -oE 'max_pile_on_ratio=[0-9]+\.[0-9]+' /tmp/suite_c_output.json
 
 Record: deterministic (true if TestSuiteC_ConcurrentDeterminism passes), max_pile_on_ratio from `t.Logf` line: `Suite C pile-on: max_pile_on_ratio=X.XX`.
 
-## Step 5: Cluster Benchmarks
+## Step 4b: Write partial validation_results.json (suites A/B/C)
 
-**[OPERATOR ACTION REQUIRED]** This step requires live cluster access that Claude Code cannot perform.
+Write `workspace/validation_results.json` with suite_a, suite_b, and suite_c results collected in Steps 2–4. Step 5c-merge will add `benchmark`, `noise_cv`, and `overall_verdict` after cluster pipelines complete.
 
-> **Hardware reference:** Use `blis_router/CLUSTER.md` for the exact hardware and cluster configuration required to reproduce the simulation environment.
-
-**Prerequisite check:** Verify workload YAML files exist before classification:
-
-```bash
-ls blis_router/workloads/*.yaml
-```
-
-**HALT if no files match the glob.** Message: "HALT: No blis_router/workloads/*.yaml files found — cannot classify workloads as matched/unmatched. Ensure blis_router artifacts are present." Without these files, the LLM has no data to perform workload classification and would fabricate assignments.
-
-For each benchmark workload, classify as **matched** or **unmatched** using this rule:
-
-> A workload is **matched** if the signals exercised by the workload (per `blis_router/workloads/*.yaml` parameter ranges) overlap with at least one signal listed in `workspace/signal_coverage.json` `signals[]` that has `mapped == true` (equivalently, `prod_name` is non-null). A workload is **unmatched** if none of its exercised signals are mapped.
->
-> **Concrete check:** For each workload YAML, identify which sim parameters vary using the YAML-field-to-signal mapping below. If any of those signals appear in `signal_coverage.json` `signals[]` with `mapped: true` (i.e., `prod_name` is non-null), the workload is matched. Otherwise unmatched.
->
-> **YAML field → signal_coverage.json `sim_name` mapping:**
->
-> The blis_router workload YAMLs use a `clients[]` structure. Use the following characteristics to infer which sim signals a workload exercises:
->
-> | Workload YAML characteristic | signal_coverage `sim_name` |
-> |------------------------------|---------------------------|
-> | `aggregate_rate` and/or `clients[*].arrival.process` + `cv` (request arrival rate and burstiness drive concurrency) | `InFlightRequests` |
-> | `clients[*].prefix_group` present and/or `clients[*].prefix_length` set (prefix sharing drives KV block reuse) | `KVUtilization` |
-> | `clients[*].input_distribution.params.mean` at large values (long prompts occupy KV blocks) | `KVUtilization` |
->
-> A workload that has no `prefix_group` entries and has short token distributions may still exercise `InFlightRequests` via `aggregate_rate`. If a workload YAML introduces field names not covered by this table, check `workspace/signal_coverage.json` `signals[].sim_name` for exact or partial matches. The table above reflects the blis_router workload schema (version "1" `clients[]` format); earlier v0 workloads used flat `queue_depth_range`/`kv_util_range` fields that are no longer present.
-
-Use the `llm-d-benchmark` harness (submodule at `llm-d-benchmark/`) to run baseline and transfer benchmark configurations. Save results to `workspace/benchmark_results.json`:
-
-```json
-{"workloads": [
-    {"name": "workload-name", "classification": "matched|unmatched",
-     "baseline_p99": 0.45, "transfer_p99": 0.40}
-]}
-```
-
-Then compute mechanism check:
-
-```bash
-.venv/bin/python tools/transfer_cli.py benchmark --results workspace/benchmark_results.json --t-eff <T_EFF_FROM_STEP_1>
-```
-
-**HALT if exit code 2 (infrastructure error — file missing or invalid JSON).** Message: "HALT: benchmark infrastructure error." Do NOT attempt to parse JSON output on exit code 2; the output may be absent or malformed.
-
-⚠ **Unlike other pipeline commands, `benchmark` exits 0 for both PASS and INCONCLUSIVE.** You MUST parse the JSON output to check `mechanism_check_verdict` — do NOT rely on exit code alone.
-
-**HALT if mechanism_check_verdict == "FAIL".** Message: "HALT: Mechanism check FAIL — generated scorer shows no improvement."
-**HALT if mechanism_check_verdict == "INCONCLUSIVE".** Message: "HALT: Mechanism check INCONCLUSIVE — improvement detected but below T_eff threshold."
-  Remediation options for INCONCLUSIVE:
-  1. **Re-run with more baseline samples** — increase from 5 to 10+ runs in Step 1 to reduce T_eff (lower noise → lower threshold → INCONCLUSIVE may become PASS).
-  2. **Re-run during lower-variance window** — cluster noise may be temporarily elevated; retry during off-peak hours.
-  3. **Inspect per-workload improvements** — check the `workload_classification` array in the benchmark JSON output. If one matched workload is close to T_eff, a targeted re-run of that workload with more samples may resolve the ambiguity.
-  4. **Accept as soft-pass with operator sign-off** — if improvement is consistent across matched workloads but marginally below T_eff, the operator may document the rationale in the `operator_notes` field of `validation_results.json` and proceed to Stage 6 with an `overall_verdict: "INCONCLUSIVE"`. This is the **only** path that produces an INCONCLUSIVE overall_verdict — it requires explicit operator sign-off.
-Record: mechanism_check_verdict, workload classification results, specificity_notes.
-
-## Step 6: Write validation_results.json
-
-Compile results from Steps 1–5 into `workspace/validation_results.json`:
+**Do not call validate-schema yet** — the partial file intentionally omits `benchmark`, `overall_verdict`, and `noise_cv` (all required by the schema). Schema validation will fail on the partial file; run it only after Step 5c-merge.
 
 ```json
 {
@@ -214,31 +175,205 @@ Compile results from Steps 1–5 into `workspace/validation_results.json`:
     "passed": <true|false>,
     "deterministic": true,
     "max_pile_on_ratio": <ratio>
-  },
-  "benchmark": {
-    "passed": <mechanism_check_verdict == "PASS">,
-    "mechanism_check_verdict": "<PASS|FAIL|INCONCLUSIVE>",
-    "t_eff": <t_eff>,
-    "workload_classification": <copy from benchmark CLI output's "workload_classification" field>,
-    "specificity_notes": <convert each CLI "specificity_failures" entry to a string, e.g., "workload-X: |change|/baseline=0.35 >= T_eff=0.30"; empty array [] if none>
-  },
-  "overall_verdict": "<PASS|FAIL|INCONCLUSIVE>",
-  "noise_cv": <max_cv_from_step_1>,
-  "operator_notes": "<required if overall_verdict is INCONCLUSIVE; omit otherwise>"
+  }
 }
 ```
 
-**Computing `noise_cv`:** The `noise-characterize` command outputs `per_metric_cv` (a dict keyed by metric name, e.g. `{"p50": 0.03, "p95": 0.04, "p99": 0.05}`). Compute `noise_cv = max(per_metric_cv.values())`. For example, if per_metric_cv is `{"p50": 0.03, "p95": 0.04, "p99": 0.05}`, then `noise_cv = 0.05`. Do NOT use `t_eff` as a substitute (t_eff = max(0.05, 2*noise_cv), which is a derived value).
+Save this (with actual values substituted) to `workspace/validation_results.json`.
 
-**overall_verdict computation:**
-- PASS iff suite_a.passed AND suite_c.passed AND benchmark.mechanism_check_verdict == "PASS"
-- INCONCLUSIVE iff suite_a.passed AND suite_c.passed AND benchmark.mechanism_check_verdict == "INCONCLUSIVE" AND operator sign-off was given (Step 5 Option 4). The `operator_notes` field MUST be populated with the sign-off rationale.
-- FAIL otherwise
-- Suite B excluded from v1 verdict (informational_only=true)
-- Note: INCONCLUSIVE is only reachable via the Step 5 Option 4 operator sign-off path. Without sign-off, Step 5 HALTs on INCONCLUSIVE benchmark verdict before reaching Step 6.
-<!-- TODO(v2-precise-scorer): Include Suite B in verdict when staleness_window_ms > 0 -->
+## Step 5: Cluster Benchmarks
 
-Validate the written artifact:
+This step submits Tekton pipelines against the production cluster for noise, baseline, and treatment phases.
+
+> **Hardware reference:** Use `blis_router/CLUSTER.md` for the exact hardware and cluster configuration required to reproduce the simulation environment.
+
+### 5a. Initialize state
+
+~~~bash
+.venv/bin/python tools/transfer_cli.py benchmark-state \
+  --workspace workspace/ --namespace $NAMESPACE
+~~~
+
+**HALT if exit 1** (cluster context mismatch — operator ran this on a different cluster than previous phases). **HALT if exit 2** (missing `workspace/algorithm_summary.json`).
+
+### 5b. For each non-done phase in order: noise → baseline → treatment
+
+Execute the procedure below **three times** — for `noise`, then `baseline`, then `treatment` — using this explicit loop (phases with status `done` are skipped automatically):
+
+~~~bash
+for phase in noise baseline treatment; do
+  STATUS=$(.venv/bin/python -c \
+    "import json; print(json.load(open('workspace/benchmark_state.json'))['phases']['$phase']['status'])" \
+    2>/dev/null || echo "unknown")
+  if [ "$STATUS" = "done" ]; then
+    echo "Phase $phase already done — skipping."; continue
+  fi
+  echo "=== Processing phase: $phase ==="
+~~~
+
+**Pre-flight:**
+~~~bash
+.venv/bin/python tools/transfer_cli.py preflight \
+  --phase $phase --values workspace/tekton/values.yaml --namespace $NAMESPACE
+~~~
+**HALT if exit 1.**
+
+**Compile:**
+~~~bash
+.venv/bin/python tools/transfer_cli.py compile-pipeline \
+  --template-dir tektonc-data-collection/tektoncsample/sim2real \
+  --values workspace/tekton/values.yaml --phase $phase \
+  --out workspace/tekton/compiled/
+~~~
+
+**Submit:**
+~~~bash
+kubectl apply -f workspace/tekton/compiled/${phase}-pipeline.yaml \
+  || { echo "HALT: kubectl apply pipeline failed for $phase"; exit 1; }
+PIPELINERUN_NAME=sim2real-${phase}-$(date +%s)
+.venv/bin/python tools/transfer_cli.py render-pipelinerun \
+  --template workspace/tekton/pipelinerun-${phase}.yaml \
+  --vars PIPELINERUN_NAME=$PIPELINERUN_NAME NAMESPACE=$NAMESPACE PHASE=$phase \
+  --out /tmp/pipelinerun-${phase}.yaml \
+  || { echo "HALT: render-pipelinerun failed for $phase"; exit 1; }
+kubectl apply -f /tmp/pipelinerun-${phase}.yaml \
+  || { echo "HALT: kubectl apply pipelinerun failed for $phase"; exit 1; }
+.venv/bin/python tools/transfer_cli.py benchmark-state --workspace workspace/ \
+  --set-phase $phase --status running --pipelinerun $PIPELINERUN_NAME
+~~~
+
+**Wait (4h timeout):**
+~~~bash
+TIMEOUT_SECS=14400; ELAPSED=0
+while true; do
+  REASON=$(tkn pr describe $PIPELINERUN_NAME \
+    -o jsonpath='{.status.conditions[0].reason}' 2>/dev/null)
+  echo "$REASON" | grep -qE 'Succeeded|Failed|PipelineRunCancelled|CouldntGetTask' && break
+  sleep 30; ELAPSED=$((ELAPSED+30))
+  if [ $ELAPSED -ge $TIMEOUT_SECS ]; then
+    .venv/bin/python tools/transfer_cli.py benchmark-state --workspace workspace/ \
+      --set-phase $phase --status failed \
+      --failure-reason "Polling timeout after ${TIMEOUT_SECS}s"
+    echo "HALT: $phase pipeline timed out."; exit 1
+  fi
+done
+~~~
+
+**On Failed:**
+~~~bash
+FAIL_REASON=$(tkn pr describe $PIPELINERUN_NAME \
+  -o jsonpath='{.status.conditions[0].message}' 2>/dev/null || echo "PipelineRun failed")
+.venv/bin/python tools/transfer_cli.py benchmark-state --workspace workspace/ \
+  --set-phase $phase --status failed \
+  --failure-reason "$FAIL_REASON"
+echo "HALT: $phase pipeline failed — $FAIL_REASON"; exit 1
+~~~
+
+**On Succeeded — extract via extractor pod:**
+~~~bash
+trap "kubectl delete pod sim2real-extract-${phase} -n $NAMESPACE --ignore-not-found 2>/dev/null" EXIT ERR
+kubectl run sim2real-extract-${phase} --image=alpine:3.19 --restart=Never \
+  --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"data-pvc"}}],"containers":[{"name":"e","image":"alpine:3.19","command":["sleep","600"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}' \
+  -n $NAMESPACE
+kubectl wait pod/sim2real-extract-${phase} --for=condition=Ready --timeout=60s -n $NAMESPACE \
+  || { echo "HALT: extractor pod not ready"; exit 1; }
+kubectl cp $NAMESPACE/sim2real-extract-${phase}:/data/${phase}/ workspace/${phase}_raw/ --retries=3 \
+  || { echo "HALT: kubectl cp failed"; exit 1; }
+.venv/bin/python tools/transfer_cli.py convert-trace \
+  --input-dir workspace/${phase}_raw/ --output workspace/${phase}_results.json \
+  || { echo "HALT: convert-trace failed"; exit 1; }
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/${phase}_results.json \
+  || { echo "HALT: schema validation failed for workspace/${phase}_results.json — results file is malformed, do not mark phase done"; exit 1; }
+.venv/bin/python tools/transfer_cli.py benchmark-state --workspace workspace/ \
+  --set-phase $phase --status done --results workspace/${phase}_results.json
+done  # end for phase in noise baseline treatment
+~~~
+
+### 5c. Mechanism check
+
+~~~bash
+.venv/bin/python tools/transfer_cli.py benchmark \
+  --noise    workspace/noise_results.json \
+  --baseline workspace/baseline_results.json \
+  --treatment workspace/treatment_results.json \
+  --signal-coverage workspace/signal_coverage.json \
+  --workloads-dir blis_router/workloads/ \
+  --out workspace/benchmark_output.json
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/benchmark_output.json \
+  || { echo "HALT: benchmark_output.json failed schema validation"; exit 1; }
+~~~
+
+Exit 0 = PASS or INCONCLUSIVE (parse `mechanism_check_verdict` from JSON).
+**HALT if exit 1** (FAIL). **HALT if exit 2** (infrastructure error (file missing or invalid JSON — check stderr) OR ERROR verdict (no matched workloads — check `mechanism_check_verdict` in output JSON)).
+
+~~~bash
+MECH_VERDICT=$(python -c "import json; print(json.load(open('workspace/benchmark_output.json'))['mechanism_check_verdict'])")
+if [ "$MECH_VERDICT" = "INCONCLUSIVE" ]; then
+  echo "OPERATOR REVIEW REQUIRED: mechanism_check_verdict is INCONCLUSIVE."
+  echo "Inspect workspace/benchmark_output.json, resolve ambiguity, then re-run or override manually."
+  echo "Do NOT proceed to generate-evidence or Stage 6 without explicit operator sign-off."
+  exit 1
+fi
+~~~
+
+Remediation options for INCONCLUSIVE:
+  1. **Re-run during lower-variance window** — cluster noise may be temporarily elevated; retry during off-peak hours.
+  2. **Inspect per-workload improvements** — check the `workload_classification` array in `workspace/benchmark_output.json`. If one matched workload is close to T_eff, a targeted re-run of that workload may resolve the ambiguity.
+  3. **Accept as soft-pass with operator sign-off** — if improvement is consistent across matched workloads but marginally below T_eff, the operator may manually set `overall_verdict: "INCONCLUSIVE"` and populate `operator_notes` with the rationale. This is the **only** path that produces an INCONCLUSIVE overall_verdict — it requires explicit operator sign-off and must bypass the automatic HALT above.
+
+### 5c-merge. Merge benchmark output into validation_results.json
+
+`generate-evidence` (Step 5d) reads `benchmark` from `workspace/validation_results.json`. This step merges `workspace/benchmark_output.json` into the partial file written in Step 4b.
+
+Note: `noise_cv` from `benchmark_output.json` must be placed at the top level of `validation_results.json` (not inside `benchmark`), because `validation_results.schema.json` places `noise_cv` at top level and has `additionalProperties: false` on the `benchmark` sub-object.
+
+~~~bash
+test -f workspace/validation_results.json \
+  || { echo "HALT: workspace/validation_results.json not found — ensure Suites A/B/C have run before Step 5c-merge"; exit 1; }
+.venv/bin/python - <<'EOF'
+import json, sys
+
+bench = json.loads(open('workspace/benchmark_output.json').read())
+val_path = 'workspace/validation_results.json'
+val = json.loads(open(val_path).read())
+
+# Copy all benchmark fields except noise_cv into val["benchmark"]
+val['benchmark'] = {k: v for k, v in bench.items() if k != 'noise_cv'}
+# noise_cv goes to top-level (per validation_results.schema.json)
+val['noise_cv'] = bench['noise_cv']
+
+mech = bench.get('mechanism_check_verdict', 'ERROR')
+if mech == 'PASS' and val.get('suite_a', {}).get('passed') and val.get('suite_c', {}).get('passed'):
+    val['overall_verdict'] = 'PASS'
+elif mech == 'INCONCLUSIVE':
+    val['overall_verdict'] = 'INCONCLUSIVE'
+else:
+    val['overall_verdict'] = 'FAIL'
+
+open(val_path, 'w').write(json.dumps(val, indent=2))
+print('Merged benchmark into validation_results.json — overall_verdict:', val['overall_verdict'])
+EOF
+~~~
+
+**HALT if exit non-zero.**
+
+~~~bash
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/validation_results.json \
+  || { echo "HALT: validation_results.json failed schema validation after benchmark merge"; exit 1; }
+~~~
+
+### 5d. Generate evidence document
+
+~~~bash
+.venv/bin/python tools/transfer_cli.py generate-evidence \
+  --workspace workspace/ --out workspace/transfer_evidence.md
+~~~
+
+**HALT if exit 1.**
+
+## Step 6: Final artifact validation
+
+`workspace/validation_results.json` was completed by Step 5c-merge (which added `benchmark`, `noise_cv`, and `overall_verdict`). Run a final schema check:
 
 ```bash
 .venv/bin/python tools/transfer_cli.py validate-schema workspace/validation_results.json
@@ -247,12 +382,12 @@ Validate the written artifact:
 **HALT if validate-schema exits non-zero.**
 
 **Manual verification (required — the lightweight validator cannot enforce `if/then` conditionals):**
-If `overall_verdict` is `"INCONCLUSIVE"`, verify that `operator_notes` is present and non-empty in `workspace/validation_results.json`. This is the audit trail for the Option 4 soft-pass path. **HALT if `overall_verdict` is `"INCONCLUSIVE"` and `operator_notes` is absent or empty.** Message: "HALT: operator_notes required for INCONCLUSIVE verdict (Option 4 soft-pass audit trail)."
+If `overall_verdict` is `"INCONCLUSIVE"`, verify that `operator_notes` is present and non-empty in `workspace/validation_results.json`. This is the audit trail for the Step 5c option 3 soft-pass path. **HALT if `overall_verdict` is `"INCONCLUSIVE"` and `operator_notes` is absent or empty.** Message: "HALT: operator_notes required for INCONCLUSIVE verdict (Step 5c option 3 soft-pass audit trail)."
 
 ## Step 7: Proceed to Stage 6
 
 If overall_verdict == "PASS", proceed to `prompts/pr.md` (Stage 6). **Note:** `prompts/pr.md` is a PR6 deliverable and will not exist until PR6 is merged. If PR6 has not yet landed, stop here — Stage 5 is complete and Stage 6 will be available after PR6.
-If overall_verdict == "INCONCLUSIVE" (only reachable via Step 5 Option 4 operator sign-off), proceed to Stage 6 with the documented rationale in `operator_notes`. The same PR6 note above applies.
+If overall_verdict == "INCONCLUSIVE" (only reachable via Step 5c option 3 operator sign-off), proceed to Stage 6 with the documented rationale in `operator_notes`. The same PR6 note above applies.
 If overall_verdict == "FAIL", do NOT proceed — stop and document the failure.
 
 ## Halt Conditions Summary
@@ -261,12 +396,20 @@ If overall_verdict == "FAIL", do NOT proceed — stop and document the failure.
 |-----------|---------|--------|
 | Missing prerequisite artifact | algorithm_summary.json, signal_coverage.json, or stage3_output.json absent/invalid; or Stage 4 `go build`/`go vet` fails | HALT: "Stage [N] prerequisite missing" |
 | Suite A SKIP (false pass) | algorithm_summary.json absent → `t.Skip` → exit 0 without running equivalence | Caught by prerequisite check above; algorithm_summary.json must exist before Suite A runs |
-| Noise CV > 15% | noise-characterize exit 1 | HALT: "Noise too high" |
-| Noise infrastructure error | noise-characterize exit 2 | HALT: "noise-characterize infrastructure error" |
-| Benchmark infrastructure error | benchmark exit 2 (file missing or invalid JSON) | HALT: "benchmark infrastructure error" |
+| Noise not done (Step 1) | benchmark-state exit 0 but noise phase != "done" | Exit 3 (REENTER): jump to Step 5, run noise phase, then re-enter from Step 1 |
+| benchmark-state infrastructure error | benchmark-state exit 2 (missing algorithm_summary.json) | HALT: "benchmark-state failed — missing workspace/algorithm_summary.json" |
+| Cluster context mismatch | benchmark-state exit 1 (kubectl context changed) | HALT: "benchmark-state failed — check cluster context" |
+| Preflight failure | preflight exit 1 | HALT: "Preflight failed for $phase" |
+| Pipeline submission failure | kubectl apply exits non-zero | HALT: "kubectl apply failed for $phase" |
+| Pipeline polling timeout | 4h elapsed without terminal state | HALT: "$phase pipeline timed out" |
+| Pipeline run failure | tkn pr describe shows Failed/PipelineRunCancelled | HALT: "$phase pipeline failed — $FAIL_REASON" |
+| Extractor pod failure | kubectl cp or convert-trace exits non-zero | HALT: "extractor pod not ready" / "kubectl cp failed" / "convert-trace failed" |
+| Results schema validation failure | validate-schema exits non-zero on phase_results.json | HALT: "schema validation failed for workspace/${phase}_results.json — do not mark phase done" |
+| Benchmark input failure | benchmark exit 2 with no JSON output (file missing or invalid JSON) — check stderr only | HALT: "benchmark infrastructure error — see stderr" |
+| Benchmark ERROR verdict | benchmark exit 2 with JSON output written — `mechanism_check_verdict` is ERROR (all workloads skipped due to name mismatch, or no matched signal classifications) | HALT: "benchmark ERROR — check workload names and signal_coverage.json" |
 | Suite A FAIL | PIPESTATUS[0] non-zero or `"Action":"fail"` in JSON output (rank divergence or key-format mismatch) | HALT: "Suite A FAIL — check test output for root cause" |
 | Suite C FAIL | PIPESTATUS[0] non-zero or `"Action":"fail"` in JSON output (determinism violated or pile-on > 2.0) | HALT: "Suite C FAIL" |
 | Mechanism FAIL | no matched workload improvement ≥ T_eff | HALT: "Mechanism check FAIL" |
-| Mechanism INCONCLUSIVE | improvement > 0 but < T_eff | HALT: "Mechanism check INCONCLUSIVE" — **unless** operator invokes Option 4 (soft-pass with sign-off). If Option 4 is chosen, proceed to Step 6 with `overall_verdict: "INCONCLUSIVE"` and populate `operator_notes` with rationale. See Step 5 Option 4 and Step 7 for details. |
-| Specificity check failures | Unmatched workload(s) with |change|/baseline ≥ T_eff | No halt — informational only. Record in `specificity_notes` array of benchmark object for audit trail. Does not affect mechanism_check_verdict. |
+| Mechanism INCONCLUSIVE | improvement > 0 but < T_eff | HALT: "Mechanism check INCONCLUSIVE" — **unless** operator manually overrides (soft-pass with sign-off). If override chosen, set `overall_verdict: "INCONCLUSIVE"` and populate `operator_notes` with rationale. See Step 5c and Step 7 for details. |
+| Specificity check failures | Unmatched workload(s) with \|change\|/baseline ≥ T_eff | No halt — informational only. Recorded in `specificity_notes` of benchmark output for audit trail. Does not affect mechanism_check_verdict. |
 | Schema validation failure | validate-schema exits non-zero | HALT: "Schema validation failed" |
