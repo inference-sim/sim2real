@@ -1899,7 +1899,7 @@ class TestBenchmarkNew:
         (wd / "workload_glia-40qps.yaml").write_text(
             yaml.dump({"version": "1", "kv_utilization": 0.5, "aggregate_rate": 40})
         )
-        # prefix-heavy does not exercise any mapped signals
+        # prefix-heavy exercises InFlightRequests via aggregate_rate (universal indirect driver)
         (wd / "workload_prefix-heavy.yaml").write_text(
             yaml.dump({"version": "1", "aggregate_rate": 85})
         )
