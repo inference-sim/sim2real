@@ -1183,7 +1183,8 @@ def cmd_convert_trace(args: "argparse.Namespace") -> int:
     for wl_dir in sorted(input_dir.iterdir()):
         if not wl_dir.is_dir():
             continue
-        wl_name = wl_dir.name
+        # Normalize to match _classify_workloads: strip "workload_" prefix, underscores→hyphens
+        wl_name = wl_dir.name.removeprefix("workload_").replace("_", "-")
         # auto-detect noise (has run-* subdirs) vs baseline/treatment
         run_dirs = sorted(wl_dir.glob("run-*"))
         if run_dirs:

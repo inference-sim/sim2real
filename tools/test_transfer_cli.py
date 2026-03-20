@@ -1589,6 +1589,28 @@ class TestConvertTrace:
         rc = cmd_convert_trace(args)
         assert rc == 1
 
+    def test_underscore_directory_names_are_normalized(self, tmp_path):
+        """convert-trace normalizes workload_ prefix and underscores to hyphens,
+        matching _classify_workloads normalization."""
+        # Directory name: glia_40qps (underscores, no workload_ prefix)
+        wl_dir = tmp_path / "baseline" / "glia_40qps"
+        _write_tracev2(wl_dir, [
+            {"send_time_us": "0", "first_chunk_time_us": "100000",
+             "last_chunk_time_us": "200000", "num_chunks": "5", "status": "ok"},
+        ])
+        out = tmp_path / "baseline_results.json"
+        from tools.transfer_cli import cmd_convert_trace
+        import argparse, json
+        args = argparse.Namespace(input_dir=str(tmp_path / "baseline"), output=str(out))
+        rc = cmd_convert_trace(args)
+        assert rc == 0
+        result = json.loads(out.read_text())
+        # Name should be normalized: glia_40qps → glia-40qps
+        assert result["workloads"][0]["name"] == "glia-40qps", (
+            f"Expected 'glia-40qps' but got '{result['workloads'][0]['name']}'. "
+            "convert-trace must normalize workload names to match _classify_workloads."
+        )
+
 
 class TestRenderPipelinerun:
     def test_substitutes_variables(self, tmp_path):
