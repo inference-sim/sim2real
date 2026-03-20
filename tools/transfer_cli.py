@@ -985,12 +985,20 @@ def cmd_benchmark_state(args: "argparse.Namespace") -> int:
                   file=sys.stderr)
             return 2
         try:
-            alg = json.loads(alg_path.read_text())
-            alg_name = alg["algorithm_name"]
-        except Exception as e:
-            print(f"ERROR: cannot read algorithm_name from {alg_path}: {e}",
+            raw = alg_path.read_text()
+        except OSError as e:
+            print(f"ERROR: cannot read {alg_path}: {e}", file=sys.stderr)
+            return 2
+        try:
+            alg = json.loads(raw)
+        except json.JSONDecodeError as e:
+            print(f"ERROR: {alg_path} contains invalid JSON: {e}", file=sys.stderr)
+            return 2
+        if "algorithm_name" not in alg:
+            print(f"ERROR: {alg_path} missing required 'algorithm_name' field.",
                   file=sys.stderr)
             return 2
+        alg_name = alg["algorithm_name"]
         if not getattr(args, "namespace", None):
             print("ERROR: --namespace required on first invocation.", file=sys.stderr)
             return 2
@@ -1003,12 +1011,21 @@ def cmd_benchmark_state(args: "argparse.Namespace") -> int:
                 file=sys.stderr,
             )
         state = _default_benchmark_state(alg_name, args.namespace, ctx)
-        state_path.write_text(json.dumps(state, indent=2))
+        try:
+            state_path.write_text(json.dumps(state, indent=2))
+        except OSError as e:
+            print(f"ERROR: cannot write {state_path}: {e}", file=sys.stderr)
+            return 2
     else:
         try:
-            state = json.loads(state_path.read_text())
-        except Exception as e:
-            print(f"ERROR: cannot parse {state_path}: {e}", file=sys.stderr)
+            raw = state_path.read_text()
+        except OSError as e:
+            print(f"ERROR: cannot read {state_path}: {e}", file=sys.stderr)
+            return 2
+        try:
+            state = json.loads(raw)
+        except json.JSONDecodeError as e:
+            print(f"ERROR: {state_path} contains invalid JSON: {e}", file=sys.stderr)
             return 2
         if not isinstance(state, dict) or "phases" not in state:
             print(
@@ -1092,7 +1109,11 @@ def cmd_benchmark_state(args: "argparse.Namespace") -> int:
     if getattr(args, "failure_reason", None):
         state["phases"][phase]["failure_reason"] = args.failure_reason
 
-    state_path.write_text(json.dumps(state, indent=2))
+    try:
+        state_path.write_text(json.dumps(state, indent=2))
+    except OSError as e:
+        print(f"ERROR: cannot write {state_path}: {e}", file=sys.stderr)
+        return 2
     return 0
 
 

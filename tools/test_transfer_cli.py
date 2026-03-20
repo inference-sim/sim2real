@@ -1453,6 +1453,51 @@ class TestBenchmarkState:
         state = json.loads((ws / "benchmark_state.json").read_text())
         assert state["phases"]["noise"]["status"] == "pending"
 
+    def test_missing_namespace_on_first_invocation_exits_2(self, tmp_path):
+        """First invocation without --namespace must exit 2 (not create a broken state file)."""
+        ws = self._alg_summary(tmp_path)
+        import argparse
+        from tools.transfer_cli import cmd_benchmark_state
+        args = argparse.Namespace(workspace=str(ws), namespace=None,
+                                  set_phase=None, force=False)
+        rc = cmd_benchmark_state(args)
+        assert rc == 2, f"Missing --namespace on first invocation should exit 2, got {rc}"
+        assert not (ws / "benchmark_state.json").exists(), (
+            "No state file should be created when --namespace is absent"
+        )
+
+    def test_set_phase_failed_persists_failure_reason(self, tmp_path):
+        """--status failed with --failure-reason persists reason in state file."""
+        ws = self._alg_summary(tmp_path)
+        import json, argparse
+        from tools.transfer_cli import cmd_benchmark_state
+        # Create state
+        cmd_benchmark_state(argparse.Namespace(workspace=str(ws), namespace="ns",
+                                               set_phase=None, force=False))
+        # Set noise to failed with a reason
+        rc = cmd_benchmark_state(argparse.Namespace(
+            workspace=str(ws), namespace=None,
+            set_phase="noise", status="failed",
+            pipelinerun="pr-xyz", results=None,
+            failure_reason="OOMKilled after 2h", force=False,
+        ))
+        assert rc == 0, f"Setting phase to failed should succeed, got {rc}"
+        state = json.loads((ws / "benchmark_state.json").read_text())
+        assert state["phases"]["noise"]["status"] == "failed"
+        assert state["phases"]["noise"]["failure_reason"] == "OOMKilled after 2h"
+
+    def test_corrupt_algorithm_summary_json_exits_2(self, tmp_path):
+        """Corrupt algorithm_summary.json (invalid JSON) on first invocation exits 2."""
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        (ws / "algorithm_summary.json").write_text("{not valid json")
+        import argparse
+        from tools.transfer_cli import cmd_benchmark_state
+        args = argparse.Namespace(workspace=str(ws), namespace="ns",
+                                  set_phase=None, force=False)
+        rc = cmd_benchmark_state(args)
+        assert rc == 2, f"Corrupt algorithm_summary.json should exit 2, got {rc}"
+
 
 import csv, textwrap
 
