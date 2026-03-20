@@ -1587,7 +1587,7 @@ def cmd_benchmark_new(args: "argparse.Namespace") -> int:
     # Classify workloads
     try:
         classification = _classify_workloads(wd_path, sc_path, mapping_path)
-    except (FileNotFoundError, ValueError) as e:
+    except (OSError, ValueError) as e:
         print(f"ERROR: workload classification failed: {e}", file=sys.stderr)
         return 2
 
