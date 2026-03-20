@@ -1448,6 +1448,89 @@ def cmd_convert_trace(args: "argparse.Namespace") -> int:
     return 0
 
 
+def cmd_render_pipelinerun(args: "argparse.Namespace") -> int:
+    template = Path(args.template)
+    out = Path(args.out)
+
+    if not template.exists():
+        print(f"ERROR: template file '{template}' not found.", file=sys.stderr)
+        return 2
+
+    # Parse KEY=VAL pairs
+    var_map = {}
+    for item in (args.vars or []):
+        if "=" not in item:
+            print(f"ERROR: --vars entry '{item}' is not KEY=VAL format.", file=sys.stderr)
+            return 2
+        k, v = item.split("=", 1)
+        var_map[k.strip()] = v.strip()
+
+    content = template.read_text()
+
+    # Substitute ${VAR} and $VAR patterns
+    def replacer(m):
+        name = m.group(1) or m.group(2)
+        return var_map[name] if name in var_map else m.group(0)
+
+    rendered = re.sub(r'\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)',
+                      replacer, content)
+
+    # Check for unresolved placeholders
+    remaining = re.findall(r'\$\{?[A-Za-z_][A-Za-z0-9_]*\}?', rendered)
+    if remaining:
+        print(
+            f"ERROR: unresolved placeholders in rendered output: {remaining}. "
+            "Provide all required --vars.", file=sys.stderr
+        )
+        return 1
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(rendered)
+    return 0
+
+
+def cmd_compile_pipeline(args: "argparse.Namespace") -> int:
+    import subprocess
+
+    template_dir = Path(args.template_dir)
+    values_file = Path(args.values)
+    phase = args.phase
+    out_dir = Path(args.out)
+
+    if not template_dir.is_dir():
+        print(f"ERROR: template directory '{template_dir}' not found.", file=sys.stderr)
+        return 2
+    if not values_file.exists():
+        print(f"ERROR: values file '{values_file}' not found.", file=sys.stderr)
+        return 2
+
+    template_file = template_dir / f"{phase}-pipeline.yaml.j2"
+    if not template_file.exists():
+        print(f"ERROR: pipeline template '{template_file}' not found.", file=sys.stderr)
+        return 2
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_file = out_dir / f"{phase}-pipeline.yaml"
+
+    tektonc = Path("tektonc-data-collection/tektonc/tektonc.py")
+    if not tektonc.exists():
+        print(f"ERROR: tektonc not found at '{tektonc}'.", file=sys.stderr)
+        return 2
+
+    result = subprocess.run(
+        [sys.executable, str(tektonc),
+         "-t", str(template_file),
+         "-f", str(values_file),
+         "-o", str(out_file)],
+        capture_output=True, text=True, shell=False, timeout=120
+    )
+    if result.returncode != 0:
+        print(f"ERROR: tektonc compilation failed:\n{result.stderr}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
 def main():
     if sys.version_info < (3, 10):
         print("ERROR: transfer_cli.py requires Python >= 3.10 "
@@ -1524,6 +1607,21 @@ def main():
     p_bstate.add_argument("--failure-reason", dest="failure_reason")
     p_bstate.add_argument("--force", action="store_true")
     p_bstate.set_defaults(func=cmd_benchmark_state)
+
+    p_cp = subparsers.add_parser("compile-pipeline",
+        help="Compile a tektonc pipeline template for a given phase")
+    p_cp.add_argument("--template-dir", required=True, dest="template_dir")
+    p_cp.add_argument("--values", required=True)
+    p_cp.add_argument("--phase", required=True, choices=["noise", "baseline", "treatment"])
+    p_cp.add_argument("--out", required=True)
+    p_cp.set_defaults(func=cmd_compile_pipeline)
+
+    p_rpr = subparsers.add_parser("render-pipelinerun",
+        help="Substitute variables in a PipelineRun stub")
+    p_rpr.add_argument("--template", required=True)
+    p_rpr.add_argument("--vars", nargs="+", metavar="KEY=VAL")
+    p_rpr.add_argument("--out", required=True)
+    p_rpr.set_defaults(func=cmd_render_pipelinerun)
 
     args = parser.parse_args()
     exit_code = args.func(args)

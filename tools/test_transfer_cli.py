@@ -1712,3 +1712,91 @@ class TestConvertTrace:
                                   output=str(tmp_path / "out.json"))
         rc = cmd_convert_trace(args)
         assert rc == 1
+
+
+class TestRenderPipelinerun:
+    def test_substitutes_variables(self, tmp_path):
+        stub = tmp_path / "stub.yaml"
+        stub.write_text(
+            "metadata:\n  name: $PIPELINERUN_NAME\n  namespace: ${NAMESPACE}\n"
+        )
+        out = tmp_path / "rendered.yaml"
+        from tools.transfer_cli import cmd_render_pipelinerun
+        import argparse
+        args = argparse.Namespace(
+            template=str(stub),
+            vars=["PIPELINERUN_NAME=pr-123", "NAMESPACE=test-ns"],
+            out=str(out),
+        )
+        rc = cmd_render_pipelinerun(args)
+        assert rc == 0
+        content = out.read_text()
+        assert "pr-123" in content
+        assert "test-ns" in content
+
+    def test_exits_1_on_unresolved_placeholder(self, tmp_path):
+        stub = tmp_path / "stub.yaml"
+        stub.write_text("name: $PIPELINERUN_NAME\nns: $NAMESPACE\n")
+        out = tmp_path / "rendered.yaml"
+        from tools.transfer_cli import cmd_render_pipelinerun
+        import argparse
+        # Only supply one of two required vars
+        args = argparse.Namespace(
+            template=str(stub),
+            vars=["PIPELINERUN_NAME=pr-456"],
+            out=str(out),
+        )
+        rc = cmd_render_pipelinerun(args)
+        assert rc == 1  # $NAMESPACE unresolved
+
+
+class TestCompilePipeline:
+    def test_exits_2_on_missing_template_dir(self, tmp_path):
+        from tools.transfer_cli import cmd_compile_pipeline
+        import argparse
+        args = argparse.Namespace(
+            template_dir=str(tmp_path / "nonexistent"),
+            values=str(tmp_path / "values.yaml"),
+            phase="baseline",
+            out=str(tmp_path / "out"),
+        )
+        rc = cmd_compile_pipeline(args)
+        assert rc == 2
+
+    def test_exits_2_on_missing_values_file(self, tmp_path):
+        from tools.transfer_cli import cmd_compile_pipeline
+        import argparse
+        tdir = tmp_path / "tekton"
+        tdir.mkdir()
+        (tdir / "baseline-pipeline.yaml.j2").write_text("{{ phase }}")
+        args = argparse.Namespace(
+            template_dir=str(tdir),
+            values=str(tmp_path / "nonexistent_values.yaml"),
+            phase="baseline",
+            out=str(tmp_path / "out"),
+        )
+        rc = cmd_compile_pipeline(args)
+        assert rc == 2
+
+    def test_success_path_produces_output_file(self, tmp_path):
+        """compile-pipeline exit 0 and produces output file when template + values present."""
+        import argparse, unittest.mock as mock
+        from tools.transfer_cli import cmd_compile_pipeline
+        tdir = tmp_path / "tekton"
+        tdir.mkdir()
+        (tdir / "baseline-pipeline.yaml.j2").write_text("phase: {{ phase }}\n")
+        vf = tmp_path / "values.yaml"
+        vf.write_text("phase: baseline\n")
+        out = tmp_path / "out"
+        out.mkdir()
+        args = argparse.Namespace(
+            template_dir=str(tdir),
+            values=str(vf),
+            phase="baseline",
+            out=str(out),
+        )
+        # cmd_compile_pipeline calls tektonc.py via subprocess — mock subprocess.run
+        with mock.patch("subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            rc = cmd_compile_pipeline(args)
+        assert rc == 0
