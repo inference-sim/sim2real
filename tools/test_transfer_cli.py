@@ -1833,6 +1833,64 @@ class TestBenchmarkNew:
         result = json.loads(out.read_text())
         assert result["mechanism_check_verdict"] == "INCONCLUSIVE"
 
+    def test_noise_cv_computed_per_workload_not_pooled(self, tmp_path):
+        """Two workloads with different mean latencies but identical low CVs
+        should produce t_eff near 2*cv, NOT inflated by inter-workload variance."""
+        import json, argparse
+        # workload A: mean≈50ms, cv≈0.02; workload B: mean≈200ms, cv≈0.02
+        # Pooled approach: huge CV from 50 vs 200ms difference
+        # Per-workload approach: max CV ≈ 0.02 → t_eff = max(0.05, 0.04) = 0.05
+        runs_a = [{"metrics": {"ttft_p50": v, "ttft_p99": v,
+                                "tpot_p50": 10.0, "tpot_p99": 10.0}}
+                   for v in [49.0, 50.0, 51.0, 50.5, 49.5]]   # cv ≈ 0.015
+        runs_b = [{"metrics": {"ttft_p50": v, "ttft_p99": v,
+                                "tpot_p50": 10.0, "tpot_p99": 10.0}}
+                   for v in [196.0, 200.0, 204.0, 202.0, 198.0]]  # cv ≈ 0.015
+        noise_data = {"workloads": [
+            {"name": "fast-workload", "runs": runs_a},
+            {"name": "slow-workload", "runs": runs_b},
+        ]}
+        noise = tmp_path / "noise_results.json"
+        noise.write_text(json.dumps(noise_data))
+        bl, tr = self._make_baseline_treatment(tmp_path, 100.0, 80.0)
+        sc = self._make_signal_coverage(tmp_path)
+        wd = self._make_workloads_dir(tmp_path)
+        out = tmp_path / "bench_out.json"
+        from tools.transfer_cli import cmd_benchmark_new
+        args = argparse.Namespace(noise=str(noise), baseline=str(bl), treatment=str(tr),
+                                  signal_coverage=str(sc), workloads_dir=str(wd),
+                                  out=str(out))
+        rc = cmd_benchmark_new(args)
+        result = json.loads(out.read_text())
+        # Per-workload CV ≈ 0.015 → t_eff = 0.05 (floor). Pooled CV would be >> 0.5.
+        # If t_eff is > 0.5 the test will have got a wrong inflated t_eff.
+        assert result["t_eff"] <= 0.10, (
+            f"t_eff={result['t_eff']} is suspiciously large — noise CV is being "
+            "inflated by pooling across workloads with different mean latencies"
+        )
+
+    def test_insufficient_noise_runs_exits_2(self, tmp_path):
+        """benchmark exits 2 when a noise workload has fewer than 2 runs."""
+        import json, argparse
+        noise_data = {"workloads": [
+            {"name": "glia-40qps", "runs": [
+                {"metrics": {"ttft_p50": 100.0, "ttft_p99": 100.0,
+                             "tpot_p50": 10.0, "tpot_p99": 15.0}}
+            ]},  # only 1 run — insufficient for CV
+        ]}
+        noise = tmp_path / "noise_results.json"
+        noise.write_text(json.dumps(noise_data))
+        bl, tr = self._make_baseline_treatment(tmp_path)
+        sc = self._make_signal_coverage(tmp_path)
+        wd = self._make_workloads_dir(tmp_path)
+        out = tmp_path / "bench_out.json"
+        from tools.transfer_cli import cmd_benchmark_new
+        args = argparse.Namespace(noise=str(noise), baseline=str(bl), treatment=str(tr),
+                                  signal_coverage=str(sc), workloads_dir=str(wd),
+                                  out=str(out))
+        rc = cmd_benchmark_new(args)
+        assert rc == 2, f"Insufficient noise runs should exit 2, got {rc}"
+
     def test_error_verdict_on_workload_name_mismatch(self, tmp_path):
         """ERROR: all workloads skipped due to name mismatch exits 2."""
         import json, argparse, yaml

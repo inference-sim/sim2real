@@ -1530,14 +1530,27 @@ def cmd_benchmark_new(args: "argparse.Namespace") -> int:
             )
             return 2
 
-    # Compute T_eff from noise
+    # Compute T_eff from noise — per-workload CV (not pooled across workloads)
     metrics_keys = ["ttft_p50", "ttft_p99", "tpot_p50", "tpot_p99"]
-    per_metric = {k: [] for k in metrics_keys}
+    noise_cv = 0.0
     try:
         for wl in noise["workloads"]:
+            wl_name = wl.get("name", "?")
+            per_metric = {k: [] for k in metrics_keys}
             for run in wl["runs"]:
                 for k in metrics_keys:
                     per_metric[k].append(run["metrics"][k])
+            for k in metrics_keys:
+                if len(per_metric[k]) < 2:
+                    print(
+                        f"ERROR: noise workload '{wl_name}' has only "
+                        f"{len(per_metric[k])} run(s) for metric '{k}' — "
+                        "at least 2 runs are required to compute a noise estimate.",
+                        file=sys.stderr,
+                    )
+                    return 2
+            wl_cv = max(_compute_cv(per_metric[k]) for k in metrics_keys)
+            noise_cv = max(noise_cv, wl_cv)
     except (KeyError, TypeError) as e:
         print(
             f"ERROR: malformed noise results — missing expected field: {e}. "
@@ -1546,7 +1559,6 @@ def cmd_benchmark_new(args: "argparse.Namespace") -> int:
             file=sys.stderr,
         )
         return 2
-    noise_cv = max(_compute_cv(per_metric[k]) for k in metrics_keys)
     t_eff = max(0.05, 2.0 * noise_cv)
 
     # Build lookup maps
