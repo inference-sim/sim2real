@@ -1699,6 +1699,30 @@ class TestCompilePipeline:
             rc = cmd_compile_pipeline(args)
         assert rc == 0
 
+    def test_tektonc_compilation_failure_returns_1(self, tmp_path):
+        """compile-pipeline exits 1 (not 2) when tektonc runs but returns non-zero.
+        Exit 1 = compilation failure; exit 2 = infrastructure failure (missing files)."""
+        import argparse, unittest.mock as mock
+        from tools.transfer_cli import cmd_compile_pipeline
+        tdir = tmp_path / "tekton"
+        tdir.mkdir()
+        (tdir / "noise-pipeline.yaml.j2").write_text("{{ undefined_var }}\n")
+        vf = tmp_path / "values.yaml"
+        vf.write_text("some_key: value\n")
+        args = argparse.Namespace(
+            template_dir=str(tdir),
+            values=str(vf),
+            phase="noise",
+            out=str(tmp_path / "out"),
+        )
+        with mock.patch("subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(returncode=1, stdout="", stderr="Jinja2 UndefinedError")
+            rc = cmd_compile_pipeline(args)
+        assert rc == 1, (
+            f"tektonc compilation failure should exit 1, got {rc}. "
+            "Infrastructure failures are exit 2; compilation failures are exit 1."
+        )
+
 
 class TestPreflight:
     def _values(self, tmp_path):
@@ -2079,6 +2103,103 @@ class TestBenchmarkNew:
                         "workload_classification", "specificity_notes"}
         extra_keys = set(result.keys()) - allowed_keys
         assert not extra_keys, f"Output has extra keys not in schema: {extra_keys}"
+
+    def test_error_verdict_when_all_workloads_unmatched_by_classification(self, tmp_path):
+        """ERROR exit 2 when all workloads resolve (no name mismatch) but none match
+        any signal — distinct from the name-mismatch ERROR path."""
+        import json, argparse, yaml
+        noise = self._make_noise(tmp_path, cv=0.02)
+        bl, tr = self._make_baseline_treatment(tmp_path, 100.0, 80.0)
+        sc = self._make_signal_coverage(tmp_path)
+        # Workloads present in result files but with no mapped signal fields.
+        # Deliberately exclude all mapping fields (aggregate_rate, kv_utilization, etc.)
+        # so that _classify_workloads returns "unmatched" for every workload.
+        wd = tmp_path / "workloads_no_signals"
+        wd.mkdir()
+        (wd / "workload_glia-40qps.yaml").write_text(
+            yaml.dump({"version": "1", "duration_secs": 60})  # no mapped fields
+        )
+        (wd / "workload_prefix-heavy.yaml").write_text(
+            yaml.dump({"version": "1", "duration_secs": 120})  # no mapped fields
+        )
+        out = tmp_path / "bench_out.json"
+        from tools.transfer_cli import cmd_benchmark_new
+        args = argparse.Namespace(noise=str(noise), baseline=str(bl), treatment=str(tr),
+                                  signal_coverage=str(sc), workloads_dir=str(wd),
+                                  out=str(out))
+        rc = cmd_benchmark_new(args)
+        assert rc == 2, f"All-unmatched classification should exit 2 (ERROR), got {rc}"
+        result = json.loads(out.read_text())
+        assert result["mechanism_check_verdict"] == "ERROR"
+        # Confirm this is the classification-ERROR path (workload_classification is non-empty)
+        assert len(result["workload_classification"]) > 0
+
+    def test_missing_noise_file_exits_2(self, tmp_path):
+        """benchmark exits 2 when --noise file does not exist."""
+        import argparse
+        bl, tr = self._make_baseline_treatment(tmp_path)
+        sc = self._make_signal_coverage(tmp_path)
+        wd = self._make_workloads_dir(tmp_path)
+        from tools.transfer_cli import cmd_benchmark_new
+        args = argparse.Namespace(
+            noise=str(tmp_path / "nonexistent_noise.json"),
+            baseline=str(bl), treatment=str(tr),
+            signal_coverage=str(sc), workloads_dir=str(wd),
+            out=str(tmp_path / "out.json"),
+        )
+        rc = cmd_benchmark_new(args)
+        assert rc == 2, f"Missing noise file should exit 2, got {rc}"
+
+    def test_malformed_json_input_exits_2(self, tmp_path):
+        """benchmark exits 2 when an input JSON file is malformed."""
+        import argparse
+        noise = tmp_path / "bad_noise.json"
+        noise.write_text("{broken json")
+        bl, tr = self._make_baseline_treatment(tmp_path)
+        sc = self._make_signal_coverage(tmp_path)
+        wd = self._make_workloads_dir(tmp_path)
+        from tools.transfer_cli import cmd_benchmark_new
+        args = argparse.Namespace(
+            noise=str(noise), baseline=str(bl), treatment=str(tr),
+            signal_coverage=str(sc), workloads_dir=str(wd),
+            out=str(tmp_path / "out.json"),
+        )
+        rc = cmd_benchmark_new(args)
+        assert rc == 2, f"Malformed JSON input should exit 2, got {rc}"
+
+    def test_nested_clients_keys_are_used_for_classification(self, tmp_path):
+        """_classify_workloads must match signals from clients[] nested keys,
+        not just top-level workload YAML keys."""
+        import json, argparse, yaml
+        noise = self._make_noise(tmp_path, cv=0.02)
+        bl, tr = self._make_baseline_treatment(tmp_path, 100.0, 80.0)
+        sc = self._make_signal_coverage(tmp_path)
+        wd = tmp_path / "workloads_nested"
+        wd.mkdir()
+        # kv_utilization is inside clients[], not at top level
+        (wd / "workload_glia-40qps.yaml").write_text(
+            yaml.dump({
+                "version": "1",
+                "aggregate_rate": 40,
+                "clients": [{"kv_utilization": 0.5, "concurrency": 10}],
+            })
+        )
+        (wd / "workload_prefix-heavy.yaml").write_text(
+            yaml.dump({"version": "1", "aggregate_rate": 85})
+        )
+        out = tmp_path / "bench_out.json"
+        from tools.transfer_cli import cmd_benchmark_new
+        args = argparse.Namespace(noise=str(noise), baseline=str(bl), treatment=str(tr),
+                                  signal_coverage=str(sc), workloads_dir=str(wd),
+                                  out=str(out))
+        rc = cmd_benchmark_new(args)
+        result = json.loads(out.read_text())
+        # glia-40qps has kv_utilization inside clients[] — should be "matched"
+        glia = next(w for w in result["workload_classification"] if w["workload"] == "glia-40qps")
+        assert glia["classification"] == "matched", (
+            f"glia-40qps has kv_utilization in clients[] — should be 'matched', "
+            f"got '{glia['classification']}'. clients[] keys must be included in signal matching."
+        )
 
 
 class TestGenerateEvidence:
