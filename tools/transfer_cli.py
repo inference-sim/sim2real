@@ -1228,7 +1228,11 @@ def cmd_convert_trace(args: "argparse.Namespace") -> int:
         return 2
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps({"workloads": workloads}, indent=2))
+    try:
+        output.write_text(json.dumps({"workloads": workloads}, indent=2))
+    except OSError as e:
+        print(f"ERROR: cannot write output file '{output}': {e}", file=sys.stderr)
+        return 2
     return 0
 
 
@@ -1269,7 +1273,11 @@ def cmd_render_pipelinerun(args: "argparse.Namespace") -> int:
         return 1
 
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(rendered)
+    try:
+        out.write_text(rendered)
+    except OSError as e:
+        print(f"ERROR: cannot write output file '{out}': {e}", file=sys.stderr)
+        return 2
     return 0
 
 
