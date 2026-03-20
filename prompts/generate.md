@@ -300,8 +300,8 @@ Note: `stage3_output.schema.json` defines `tekton_artifacts` with `additionalPro
 | CacheHitRate unavailable (multiplier) | `cache_hit_rate_unavailable_stage3` | Write escalation.json, HALT |
 | Pre-write validation failure | `pre_write_validation_failure_stage3` | Write escalation.json, HALT |
 | Post-write validation failure | `post_write_validation_failure_stage3` | Write escalation.json, HALT |
-| inference-sim tag unresolved | n/a | HALT (Stage 8) |
-| tekton_artifacts schema validation | n/a | HALT (Stage 8) |
+| inference-sim tag unresolved | `inference_sim_tag_unresolved_stage3` | HALT (Stage 8): write `workspace/escalation.json` with `"stage": 3` and this halt_reason |
+| tekton_artifacts schema validation | `tekton_artifacts_validation_failure_stage3` | HALT (Stage 8): write `workspace/escalation.json` with `"stage": 3` and this halt_reason |
 
 On any halt, write `workspace/escalation.json` per the escalation schema with `"stage": 3` and the appropriate `halt_reason`.
 

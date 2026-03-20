@@ -7,6 +7,12 @@ Commands:
     validate-schema <path>   Validate workspace artifact against JSON Schema
     test-status              Classify go build/test output (stdin) into error classes
     benchmark                Compute T_eff and mechanism check from noise/baseline/treatment results
+    convert-trace            Convert blis observe TraceV2 output to metrics JSON
+    benchmark-state          Read/write workspace/benchmark_state.json phase tracking
+    compile-pipeline         Compile a tektonc pipeline template for a given phase
+    render-pipelinerun       Substitute variables in a PipelineRun stub
+    preflight                Run pre-flight cluster checks before submitting a pipeline phase
+    generate-evidence        Generate workspace/transfer_evidence.md from workspace artifacts
 
 Exit codes: 0 = success, 1 = validation failure, 2 = infrastructure error
 All commands output JSON to stdout.

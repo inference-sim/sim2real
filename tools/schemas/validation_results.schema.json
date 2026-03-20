@@ -82,7 +82,7 @@
     },
     "operator_notes": {
       "type": "string",
-      "description": "Optional. Required when overall_verdict is INCONCLUSIVE (operator sign-off via Step 5 Option 4). Documents the rationale for proceeding despite INCONCLUSIVE benchmark verdict."
+      "description": "Optional. Required when overall_verdict is INCONCLUSIVE (operator sign-off via Step 5c option 3). Documents the rationale for proceeding despite INCONCLUSIVE benchmark verdict."
     }
   }
 }

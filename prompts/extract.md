@@ -33,7 +33,7 @@ if ! grep -q "AddCommand(observeCmd)" inference-sim/cmd/root.go; then
 fi
 ```
 
-Do **not** HALT here. `blis observe` is only required for Stage 5 cluster pipeline submission (Step 5b). Stages 1-4 work with the current submodule. The real enforcement gate for `blis observe` is the `preflight --phase noise` call in Stage 5 Step 5b, which checks the compiled task image and will fail if `blis observe` is not available.
+Do **not** HALT here. `blis observe` is only required for Stage 5 cluster pipeline submission (Step 5b). Stages 1-4 work with the current submodule. The real enforcement gate for `blis observe` is the `preflight --phase noise` call in Stage 5 Step 5b, which verifies that `observe.image` in `workspace/tekton/values.yaml` has been resolved (no `<TAG>` placeholder) and that cluster prerequisites are in place. The `blis observe` command availability inside the image is not verified at preflight time — ensure the inference-sim submodule is bumped and the image is rebuilt before submitting the pipeline.
 
 Note: `cmd/observe.go` exists in the current submodule but only contains HTTP client utilities — the `observeCmd` cobra.Command is **not registered** until PR #704 merges. File existence is not sufficient; the grep confirms actual command registration.
 

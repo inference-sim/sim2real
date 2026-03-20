@@ -405,7 +405,8 @@ If overall_verdict == "FAIL", do NOT proceed — stop and document the failure.
 | Pipeline run failure | tkn pr describe shows Failed/PipelineRunCancelled | HALT: "$phase pipeline failed — $FAIL_REASON" |
 | Extractor pod failure | kubectl cp or convert-trace exits non-zero | HALT: "extractor pod not ready" / "kubectl cp failed" / "convert-trace failed" |
 | Results schema validation failure | validate-schema exits non-zero on phase_results.json | HALT: "schema validation failed for workspace/${phase}_results.json — do not mark phase done" |
-| Benchmark infrastructure error | benchmark exit 2 (file missing or invalid JSON — check stderr; OR ERROR verdict meaning no matched workloads — check `mechanism_check_verdict` in output JSON) | HALT: "benchmark infrastructure error" |
+| Benchmark input failure | benchmark exit 2 with no JSON output (file missing or invalid JSON) — check stderr only | HALT: "benchmark infrastructure error — see stderr" |
+| Benchmark ERROR verdict | benchmark exit 2 with JSON output written — `mechanism_check_verdict` is ERROR (all workloads skipped due to name mismatch, or no matched signal classifications) | HALT: "benchmark ERROR — check workload names and signal_coverage.json" |
 | Suite A FAIL | PIPESTATUS[0] non-zero or `"Action":"fail"` in JSON output (rank divergence or key-format mismatch) | HALT: "Suite A FAIL — check test output for root cause" |
 | Suite C FAIL | PIPESTATUS[0] non-zero or `"Action":"fail"` in JSON output (determinism violated or pile-on > 2.0) | HALT: "Suite C FAIL" |
 | Mechanism FAIL | no matched workload improvement ≥ T_eff | HALT: "Mechanism check FAIL" |

@@ -89,7 +89,7 @@ Downstream stages MUST use the exit code (not file existence) as the success sig
   `compile-pipeline` invokes `tektonc-data-collection/tektonc/tektonc.py` via subprocess; that tool requires `jinja2` and `PyYAML`.
   All of these are installed via `pip install -r requirements.txt`.
   The stdlib-only constraint does not apply to these subcommands.
-- `benchmark` exits 0 for both PASS and INCONCLUSIVE verdicts (pipeline should proceed); operators must review `mechanism_check_verdict` in the output JSON to distinguish the two cases.
+- `benchmark` exit codes: 0 = PASS or INCONCLUSIVE (pipeline should proceed); 1 = FAIL (no matched improvement ≥ T_eff); 2 = ERROR (all workloads skipped due to name mismatch or no matched classifications) or infrastructure failure (missing/malformed input files). Operators must always parse `mechanism_check_verdict` from the output JSON to distinguish PASS from INCONCLUSIVE.
 - Stage 5 validate.md exit codes (shell script level, not CLI):
   - `0` = complete (all phases done, all suites passed)
   - `1` = error/halt (context mismatch, ordering violation, suite failure)
