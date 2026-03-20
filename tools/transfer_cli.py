@@ -1333,6 +1333,121 @@ def cmd_benchmark_state(args: "argparse.Namespace") -> int:
     return 0
 
 
+def _percentile(values: list, p: int) -> float:
+    """Compute p-th percentile of a sorted list (nearest-rank, ceiling method)."""
+    import math
+    if not values:
+        return 0.0
+    values = sorted(values)
+    idx = min(len(values) - 1, max(0, math.ceil(len(values) * p / 100) - 1))
+    return values[idx]
+
+
+def _parse_tracev2_dir(directory: "Path") -> dict:
+    """Parse a single TraceV2 directory → metrics dict. Raises on error."""
+    import csv as csv_mod
+    header_path = directory / "trace_header.yaml"
+    data_path = directory / "trace_data.csv"
+    if not header_path.exists():
+        raise FileNotFoundError(
+            f"missing trace_header.yaml in {directory} — blis observe may have crashed mid-write."
+        )
+    if not data_path.exists():
+        raise FileNotFoundError(
+            f"missing trace_data.csv in {directory} — blis observe may have crashed mid-write."
+        )
+    ttft_vals, tpot_vals = [], []
+    try:
+        with open(data_path, newline="") as f:
+            reader = csv_mod.DictReader(f)
+            for row in reader:
+                if row.get("status") != "ok":
+                    continue
+                send = int(row["send_time_us"])
+                first = int(row["first_chunk_time_us"])
+                last = int(row["last_chunk_time_us"])
+                chunks = max(int(row["num_chunks"]) - 1, 1)
+                ttft_vals.append((first - send) / 1000.0)
+                tpot_vals.append((last - first) / chunks / 1000.0)
+    except (ValueError, KeyError) as e:
+        raise ValueError(
+            f"malformed CSV in {data_path}: {e} — check that all numeric columns "
+            "(send_time_us, first_chunk_time_us, last_chunk_time_us, num_chunks) "
+            "contain valid integers for rows with status='ok'"
+        ) from e
+    return {
+        "ttft_p50": _percentile(ttft_vals, 50),
+        "ttft_p99": _percentile(ttft_vals, 99),
+        "tpot_p50": _percentile(tpot_vals, 50),
+        "tpot_p99": _percentile(tpot_vals, 99),
+        "_valid_rows": len(ttft_vals),
+    }
+
+
+def cmd_convert_trace(args: "argparse.Namespace") -> int:
+    import json
+    from pathlib import Path
+
+    input_dir = Path(args.input_dir)
+    output = Path(args.output)
+
+    if not input_dir.is_dir():
+        print(f"ERROR: input directory '{input_dir}' does not exist.", file=sys.stderr)
+        return 2
+
+    workloads = []
+    for wl_dir in sorted(input_dir.iterdir()):
+        if not wl_dir.is_dir():
+            continue
+        wl_name = wl_dir.name
+        # auto-detect noise (has run-* subdirs) vs baseline/treatment
+        run_dirs = sorted(wl_dir.glob("run-*"))
+        if run_dirs:
+            # noise per-run structure
+            runs = []
+            for run_dir in run_dirs:
+                try:
+                    metrics = _parse_tracev2_dir(run_dir)
+                except (FileNotFoundError, ValueError) as e:
+                    print(f"ERROR: {e}", file=sys.stderr)
+                    return 1
+                if metrics["_valid_rows"] == 0:
+                    print(
+                        f"ERROR: workload '{wl_name}' run '{run_dir.name}' has 0 rows "
+                        f"with status 'ok' in {run_dir}/trace_data.csv — "
+                        "all requests failed or timed out.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                del metrics["_valid_rows"]
+                runs.append({"metrics": metrics})
+            workloads.append({"name": wl_name, "runs": runs})
+        else:
+            # baseline/treatment single-value structure
+            try:
+                metrics = _parse_tracev2_dir(wl_dir)
+            except (FileNotFoundError, ValueError) as e:
+                print(f"ERROR: {e}", file=sys.stderr)
+                return 1
+            if metrics["_valid_rows"] == 0:
+                print(
+                    f"ERROR: workload '{wl_name}' has 0 rows with status 'ok' "
+                    f"in {wl_dir}/trace_data.csv — all requests failed or timed out.",
+                    file=sys.stderr,
+                )
+                return 1
+            del metrics["_valid_rows"]
+            workloads.append({"name": wl_name, "metrics": metrics})
+
+    if not workloads:
+        print(f"ERROR: no workload directories found in '{input_dir}'.", file=sys.stderr)
+        return 2
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps({"workloads": workloads}, indent=2))
+    return 0
+
+
 def main():
     if sys.version_info < (3, 10):
         print("ERROR: transfer_cli.py requires Python >= 3.10 "
@@ -1386,6 +1501,15 @@ def main():
     p_bench.add_argument("--t-eff", type=float, default=None,
         help="Effective threshold from noise-characterize")
     p_bench.set_defaults(func=_cmd_benchmark)
+
+    p_ct = subparsers.add_parser("convert-trace",
+        help="Convert blis observe TraceV2 output to metrics JSON")
+    p_ct.add_argument("--input-dir", required=True,
+                       dest="input_dir",
+                       help="Phase directory containing per-workload TraceV2 subdirs")
+    p_ct.add_argument("--output", required=True,
+                       help="Output metrics JSON file path")
+    p_ct.set_defaults(func=cmd_convert_trace)
 
     p_bstate = subparsers.add_parser("benchmark-state",
         help="Read/write workspace/benchmark_state.json phase tracking")

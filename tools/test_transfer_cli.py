@@ -1621,3 +1621,94 @@ class TestBenchmarkState:
                                   set_phase=None, force=False)
         rc = cmd_benchmark_state(args)
         assert rc == 2
+
+
+import csv, textwrap
+
+
+def _write_tracev2(directory, rows):
+    """Write minimal TraceV2 files. rows = list of dicts with CSV fields."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "trace_header.yaml").write_text(
+        "trace_version: 2\ntime_unit: microseconds\nmode: real\n"
+    )
+    fieldnames = ["request_id", "send_time_us", "first_chunk_time_us",
+                  "last_chunk_time_us", "num_chunks", "status", "error_message"]
+    with open(directory / "trace_data.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for r in rows:
+            row = {k: "" for k in fieldnames}
+            row.update(r)
+            w.writerow(row)
+
+
+class TestConvertTrace:
+    def test_baseline_single_workload(self, tmp_path):
+        wl_dir = tmp_path / "baseline" / "glia-40qps"
+        _write_tracev2(wl_dir, [
+            {"send_time_us": "0", "first_chunk_time_us": "100000",
+             "last_chunk_time_us": "200000", "num_chunks": "5", "status": "ok"},
+            {"send_time_us": "0", "first_chunk_time_us": "120000",
+             "last_chunk_time_us": "220000", "num_chunks": "5", "status": "ok"},
+        ])
+        out = tmp_path / "baseline_results.json"
+        from tools.transfer_cli import cmd_convert_trace
+        import argparse
+        args = argparse.Namespace(input_dir=str(tmp_path / "baseline"),
+                                  output=str(out))
+        rc = cmd_convert_trace(args)
+        assert rc == 0
+        import json
+        result = json.loads(out.read_text())
+        assert result["workloads"][0]["name"] == "glia-40qps"
+        m = result["workloads"][0]["metrics"]
+        assert "ttft_p50" in m and "ttft_p99" in m
+        assert m["ttft_p50"] == 100.0   # 100000 us / 1000
+
+    def test_noise_per_run_structure(self, tmp_path):
+        for i in range(3):
+            wl_dir = tmp_path / "noise" / "glia-40qps" / f"run-{i}"
+            _write_tracev2(wl_dir, [
+                {"send_time_us": "0", "first_chunk_time_us": str(100000 + i*1000),
+                 "last_chunk_time_us": str(200000 + i*1000),
+                 "num_chunks": "4", "status": "ok"},
+            ])
+        out = tmp_path / "noise_results.json"
+        from tools.transfer_cli import cmd_convert_trace
+        import argparse
+        args = argparse.Namespace(input_dir=str(tmp_path / "noise"),
+                                  output=str(out))
+        rc = cmd_convert_trace(args)
+        assert rc == 0
+        import json
+        result = json.loads(out.read_text())
+        wl = result["workloads"][0]
+        assert wl["name"] == "glia-40qps"
+        assert "runs" in wl
+        assert len(wl["runs"]) == 3
+
+    def test_all_failed_rows_exits_1(self, tmp_path):
+        wl_dir = tmp_path / "baseline" / "broken-workload"
+        _write_tracev2(wl_dir, [
+            {"send_time_us": "0", "first_chunk_time_us": "0",
+             "last_chunk_time_us": "0", "num_chunks": "0", "status": "timeout"},
+        ])
+        from tools.transfer_cli import cmd_convert_trace
+        import argparse
+        args = argparse.Namespace(input_dir=str(tmp_path / "baseline"),
+                                  output=str(tmp_path / "out.json"))
+        rc = cmd_convert_trace(args)
+        assert rc == 1
+
+    def test_missing_csv_exits_1(self, tmp_path):
+        wl_dir = tmp_path / "baseline" / "glia-40qps"
+        wl_dir.mkdir(parents=True)
+        (wl_dir / "trace_header.yaml").write_text("trace_version: 2\n")
+        # no trace_data.csv
+        from tools.transfer_cli import cmd_convert_trace
+        import argparse
+        args = argparse.Namespace(input_dir=str(tmp_path / "baseline"),
+                                  output=str(tmp_path / "out.json"))
+        rc = cmd_convert_trace(args)
+        assert rc == 1
