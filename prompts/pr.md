@@ -111,35 +111,55 @@ Append the calibration entry **before** creating PRs. If the append fails, no PR
 ## Step 5: Create PR in llm-d-inference-scheduler
 
 ```bash
-EVIDENCE=$(cat workspace/transfer_evidence.md)
 SUITE_A_TAU=$(.venv/bin/python -c "import json; print(json.load(open('workspace/validation_results.json'))['suite_a']['kendall_tau'])")
 SUITE_C_PASS=$(.venv/bin/python -c "import json; print(str(json.load(open('workspace/validation_results.json'))['suite_c']['passed']).lower())")
 MECH=$(.venv/bin/python -c "import json; print(json.load(open('workspace/validation_results.json'))['benchmark']['mechanism_check_verdict'])")
+
+# Write body to a temp file to avoid shell quoting issues with Markdown content
+# (transfer_evidence.md may contain double quotes, backslashes, or $ signs).
+PR_BODY_FILE=$(mktemp)
+cat << 'PRBODYEOF' > "$PR_BODY_FILE"
+## Summary
+
+Sim-to-production transfer: `ALG_NAME_PLACEHOLDER`
+
+**Validation:**
+- Suite A Kendall-tau: `SUITE_A_TAU_PLACEHOLDER` (threshold: 0.8)
+- Suite C concurrent safety: `SUITE_C_PASS_PLACEHOLDER`
+- Mechanism check: `MECH_PLACEHOLDER`
+- Overall verdict: `VERDICT_PLACEHOLDER`
+
+## Evidence
+
+EVIDENCE_PLACEHOLDER
+
+## Rollback
+
+To disable: in EndpointPickerConfig, find the `plugins` entry with `type: blis-weighted-scorer` (or by the explicit `name:` you used when adding it in Stage 4) and set `parameters.enabled: false`.
+PRBODYEOF
+# Substitute placeholders (safe: sed operates on file content, not shell)
+sed -i "s|ALG_NAME_PLACEHOLDER|${ALG_NAME}|g" "$PR_BODY_FILE"
+sed -i "s|SUITE_A_TAU_PLACEHOLDER|${SUITE_A_TAU}|g" "$PR_BODY_FILE"
+sed -i "s|SUITE_C_PASS_PLACEHOLDER|${SUITE_C_PASS}|g" "$PR_BODY_FILE"
+sed -i "s|MECH_PLACEHOLDER|${MECH}|g" "$PR_BODY_FILE"
+sed -i "s|VERDICT_PLACEHOLDER|${VERDICT}|g" "$PR_BODY_FILE"
+# Replace evidence placeholder with actual content (evidence may contain sed special chars,
+# so use python for the substitution)
+.venv/bin/python - "$PR_BODY_FILE" <<'PYEOF'
+import sys, pathlib
+body_file = pathlib.Path(sys.argv[1])
+evidence = pathlib.Path("workspace/transfer_evidence.md").read_text()
+body_file.write_text(body_file.read_text().replace("EVIDENCE_PLACEHOLDER", evidence))
+PYEOF
 
 cd llm-d-inference-scheduler
 gh pr create \
   --title "feat(scorer): add ${ALG_NAME} sim-to-production scorer plugin" \
   --base main \
   --head "$BRANCH" \
-  --body "## Summary
-
-Sim-to-production transfer: \`${ALG_NAME}\`
-
-**Validation:**
-- Suite A Kendall-tau: \`${SUITE_A_TAU}\` (threshold: 0.8)
-- Suite C concurrent safety: \`${SUITE_C_PASS}\`
-- Mechanism check: \`${MECH}\`
-- Overall verdict: \`${VERDICT}\`
-
-## Evidence
-
-${EVIDENCE}
-
-## Rollback
-
-To disable: in EndpointPickerConfig, find the \`plugins\` entry with \`type: blis-weighted-scorer\` (or by the explicit \`name:\` you used when adding it in Stage 4) and set \`parameters.enabled: false\`.
-" \
-  || { PUSH_BRANCH="$BRANCH"; echo "HALT: gh pr create failed for llm-d-inference-scheduler. Branch '$PUSH_BRANCH' is already pushed — create PR manually or retry 'gh pr create'."; cd ..; exit 1; }
+  --body-file "$PR_BODY_FILE" \
+  || { PUSH_BRANCH="$BRANCH"; rm -f "$PR_BODY_FILE"; echo "HALT: gh pr create failed for llm-d-inference-scheduler. Branch '$PUSH_BRANCH' is already pushed — create PR manually or retry 'gh pr create'."; cd ..; exit 1; }
+rm -f "$PR_BODY_FILE"
 
 SCHEDULER_PR_URL=$(gh pr view --json url -q .url)
 echo "Created PR: $SCHEDULER_PR_URL"
