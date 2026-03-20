@@ -2058,3 +2058,129 @@ class TestGenerateEvidence:
                                   calibration_log="docs/transfer/calibration_log.md")
         rc = cmd_generate_evidence(args)
         assert rc == 1
+
+
+class TestEndToEndLocal:
+    """Full local pipeline: convert-trace → benchmark → generate-evidence."""
+
+    def _setup_workspace(self, tmp_path):
+        import csv
+        import json
+        import yaml
+
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+
+        # algorithm_summary — only schema-valid fields (additionalProperties: false)
+        (ws / "algorithm_summary.json").write_text(json.dumps({
+            "algorithm_name": "blis-routing-v1",
+            "evolve_block_source": "routing/",
+        }))
+
+        # signal_coverage (prod_access_path required by signal_coverage.schema.json)
+        (ws / "signal_coverage.json").write_text(json.dumps({
+            "signals": [{"sim_name": "KVUtilization", "prod_name": "kv",
+                         "prod_access_path": "node.status.kv_utilization",
+                         "fidelity_rating": "high", "staleness_window_ms": 0,
+                         "mapped": True}],
+            "unmapped_signals": [], "commit_hash": "abc", "coverage_complete": True,
+        }))
+
+        # validation_results (from Suites A/B/C — pre-existing, no benchmark yet)
+        (ws / "validation_results.json").write_text(json.dumps({
+            "suite_a": {"passed": True, "kendall_tau": 0.93,
+                        "max_abs_error": 0.0001, "tuple_count": 120},
+            "suite_b": {"passed": True, "rank_stability_tau": 1.0,
+                        "threshold_crossing_pct": 0.0, "informational_only": True},
+            "suite_c": {"passed": True, "deterministic": True,
+                        "max_pile_on_ratio": 1.05},
+        }))
+
+        # workloads dir
+        wd = tmp_path / "workloads"
+        wd.mkdir()
+        (wd / "workload_glia-40qps.yaml").write_text(
+            yaml.dump({"version": "1", "kv_utilization": 0.5})
+        )
+        (wd / "workload_prefix-heavy.yaml").write_text(
+            yaml.dump({"version": "1", "aggregate_rate": 85})
+        )
+
+        def write_tv2(d, ttft_us=100000, chunks=5):
+            d.mkdir(parents=True)
+            (d / "trace_header.yaml").write_text("trace_version: 2\n")
+            with open(d / "trace_data.csv", "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["request_id", "send_time_us", "first_chunk_time_us",
+                             "last_chunk_time_us", "num_chunks", "status", "error_message"])
+                for i in range(10):
+                    w.writerow([i, 0, ttft_us + i * 1000,
+                                 ttft_us + 50000 + i * 1000, chunks, "ok", ""])
+
+        # noise: 5 runs × 2 workloads
+        raw_noise = tmp_path / "noise_raw"
+        for wl in ["glia-40qps", "prefix-heavy"]:
+            for r in range(5):
+                write_tv2(raw_noise / wl / f"run-{r}", ttft_us=100000 + r * 500)
+
+        # baseline and treatment (single run per workload)
+        raw_bl = tmp_path / "baseline_raw"
+        raw_tr = tmp_path / "treatment_raw"
+        for wl, base_ttft in [("glia-40qps", 100000), ("prefix-heavy", 120000)]:
+            write_tv2(raw_bl / wl, ttft_us=base_ttft)
+            write_tv2(raw_tr / wl, ttft_us=int(base_ttft * 0.82))  # ~18% improvement
+
+        return ws, wd, raw_noise, raw_bl, raw_tr
+
+    def test_full_local_pipeline(self, tmp_path):
+        import argparse
+        import json
+
+        from tools.transfer_cli import (cmd_benchmark_new, cmd_convert_trace,
+                                        cmd_generate_evidence)
+
+        ws, wd, raw_noise, raw_bl, raw_tr = self._setup_workspace(tmp_path)
+
+        # convert-trace for all three phases
+        for phase, raw_dir in [("noise", raw_noise),
+                                ("baseline", raw_bl),
+                                ("treatment", raw_tr)]:
+            args = argparse.Namespace(
+                input_dir=str(raw_dir),
+                output=str(ws / f"{phase}_results.json"),
+            )
+            rc = cmd_convert_trace(args)
+            assert rc == 0, f"convert-trace failed for {phase}"
+
+        # benchmark
+        args = argparse.Namespace(
+            noise=str(ws / "noise_results.json"),
+            baseline=str(ws / "baseline_results.json"),
+            treatment=str(ws / "treatment_results.json"),
+            signal_coverage=str(ws / "signal_coverage.json"),
+            workloads_dir=str(wd),
+            out=str(tmp_path / "benchmark_output.json"),
+        )
+        rc = cmd_benchmark_new(args)
+        assert rc == 0, "benchmark failed"
+        bench_out = json.loads((tmp_path / "benchmark_output.json").read_text())
+        assert bench_out["mechanism_check_verdict"] == "PASS"
+
+        # Merge benchmark output into validation_results (matches Step 5c-merge)
+        val = json.loads((ws / "validation_results.json").read_text())
+        val["benchmark"] = {k: v for k, v in bench_out.items() if k != "noise_cv"}
+        val["overall_verdict"] = "PASS"
+        val["noise_cv"] = bench_out["noise_cv"]
+        (ws / "validation_results.json").write_text(json.dumps(val))
+
+        # generate-evidence
+        args_ev = argparse.Namespace(
+            workspace=str(ws),
+            out=str(ws / "transfer_evidence.md"),
+            calibration_log="docs/transfer/calibration_log.md",
+        )
+        rc = cmd_generate_evidence(args_ev)
+        assert rc == 0, "generate-evidence failed"
+        evidence = (ws / "transfer_evidence.md").read_text()
+        assert "PASS" in evidence
+        assert "blis-routing-v1" in evidence
