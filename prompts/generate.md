@@ -222,7 +222,7 @@ Using the translation rules document (`docs/transfer/blis_to_llmd_mapping.md` an
 
 **Validate generated values.yaml required keys:**
 ```bash
-python -c "
+.venv/bin/python -c "
 import yaml
 v = yaml.safe_load(open('workspace/tekton/values.yaml'))
 required = ['stack', 'observe']
@@ -281,7 +281,7 @@ spec:
 }
 ```
 
-Note: `stage3_output.schema.json` defines `tekton_artifacts` with `additionalProperties: false` and only allows `values_yaml` (string) and `pipeline_stubs` (array). Individual keys per phase are not permitted — use `pipeline_stubs` array. Stage 5 reads the stub paths from this array in phase order (noise, baseline, treatment).
+Note: `stage3_output.schema.json` defines `tekton_artifacts` with `additionalProperties: false` and only allows `values_yaml` (string) and `pipeline_stubs` (array). Individual keys per phase are not permitted — use `pipeline_stubs` array. Stage 5 reads the stub paths from this array in phase order (noise, baseline, treatment). Within `tekton_artifacts`, `values_yaml` is required; `pipeline_stubs` is optional per the schema, though Stage 5 expects it to be present.
 
 **Validate stage3_output.json after updating:**
 ```bash

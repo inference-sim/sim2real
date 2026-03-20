@@ -6,8 +6,7 @@ Commands:
     validate-mapping         Check mapping artifact completeness
     validate-schema <path>   Validate workspace artifact against JSON Schema
     test-status              Classify go build/test output (stdin) into error classes
-    noise-characterize       Compute per-metric CV and T_eff from baseline latency runs
-    benchmark                Compute mechanism check from benchmark results
+    benchmark                Compute T_eff and mechanism check from noise/baseline/treatment results
 
 Exit codes: 0 = success, 1 = validation failure, 2 = infrastructure error
 All commands output JSON to stdout.

@@ -198,11 +198,17 @@ This step submits Tekton pipelines against the production cluster for noise, bas
 
 ### 5b. For each non-done phase in order: noise → baseline → treatment
 
-Check phase status from state file. For each pending or failed phase (run this block once per phase, substituting `phase` for each of `noise`, `baseline`, `treatment` in order):
+Execute the procedure below **three times** — for `noise`, then `baseline`, then `treatment` — using this explicit loop (phases with status `done` are skipped automatically):
 
 ~~~bash
-# Bind phase variable — repeat this block for each of: noise, baseline, treatment
-phase=noise   # change to baseline or treatment for subsequent iterations
+for phase in noise baseline treatment; do
+  STATUS=$(.venv/bin/python -c \
+    "import json; print(json.load(open('workspace/benchmark_state.json'))['phases']['$phase']['status'])" \
+    2>/dev/null || echo "unknown")
+  if [ "$STATUS" = "done" ]; then
+    echo "Phase $phase already done — skipping."; continue
+  fi
+  echo "=== Processing phase: $phase ==="
 ~~~
 
 **Pre-flight:**
@@ -280,6 +286,7 @@ kubectl cp $NAMESPACE/sim2real-extract-${phase}:/data/${phase}/ workspace/${phas
   || { echo "HALT: schema validation failed for workspace/${phase}_results.json — results file is malformed, do not mark phase done"; exit 1; }
 .venv/bin/python tools/transfer_cli.py benchmark-state --workspace workspace/ \
   --set-phase $phase --status done --results workspace/${phase}_results.json
+done  # end for phase in noise baseline treatment
 ~~~
 
 ### 5c. Mechanism check
@@ -297,7 +304,7 @@ kubectl cp $NAMESPACE/sim2real-extract-${phase}:/data/${phase}/ workspace/${phas
 ~~~
 
 Exit 0 = PASS or INCONCLUSIVE (parse `mechanism_check_verdict` from JSON).
-**HALT if exit 1** (FAIL). **HALT if exit 2** (infrastructure error).
+**HALT if exit 1** (FAIL). **HALT if exit 2** (infrastructure error (file missing or invalid JSON — check stderr) OR ERROR verdict (no matched workloads — check `mechanism_check_verdict` in output JSON)).
 
 ~~~bash
 MECH_VERDICT=$(python -c "import json; print(json.load(open('workspace/benchmark_output.json'))['mechanism_check_verdict'])")
@@ -375,12 +382,12 @@ EOF
 **HALT if validate-schema exits non-zero.**
 
 **Manual verification (required — the lightweight validator cannot enforce `if/then` conditionals):**
-If `overall_verdict` is `"INCONCLUSIVE"`, verify that `operator_notes` is present and non-empty in `workspace/validation_results.json`. This is the audit trail for the Option 4 soft-pass path. **HALT if `overall_verdict` is `"INCONCLUSIVE"` and `operator_notes` is absent or empty.** Message: "HALT: operator_notes required for INCONCLUSIVE verdict (Option 4 soft-pass audit trail)."
+If `overall_verdict` is `"INCONCLUSIVE"`, verify that `operator_notes` is present and non-empty in `workspace/validation_results.json`. This is the audit trail for the Step 5c option 3 soft-pass path. **HALT if `overall_verdict` is `"INCONCLUSIVE"` and `operator_notes` is absent or empty.** Message: "HALT: operator_notes required for INCONCLUSIVE verdict (Step 5c option 3 soft-pass audit trail)."
 
 ## Step 7: Proceed to Stage 6
 
 If overall_verdict == "PASS", proceed to `prompts/pr.md` (Stage 6). **Note:** `prompts/pr.md` is a PR6 deliverable and will not exist until PR6 is merged. If PR6 has not yet landed, stop here — Stage 5 is complete and Stage 6 will be available after PR6.
-If overall_verdict == "INCONCLUSIVE" (only reachable via Step 5 Option 4 operator sign-off), proceed to Stage 6 with the documented rationale in `operator_notes`. The same PR6 note above applies.
+If overall_verdict == "INCONCLUSIVE" (only reachable via Step 5c option 3 operator sign-off), proceed to Stage 6 with the documented rationale in `operator_notes`. The same PR6 note above applies.
 If overall_verdict == "FAIL", do NOT proceed — stop and document the failure.
 
 ## Halt Conditions Summary
@@ -398,7 +405,7 @@ If overall_verdict == "FAIL", do NOT proceed — stop and document the failure.
 | Pipeline run failure | tkn pr describe shows Failed/PipelineRunCancelled | HALT: "$phase pipeline failed — $FAIL_REASON" |
 | Extractor pod failure | kubectl cp or convert-trace exits non-zero | HALT: "extractor pod not ready" / "kubectl cp failed" / "convert-trace failed" |
 | Results schema validation failure | validate-schema exits non-zero on phase_results.json | HALT: "schema validation failed for workspace/${phase}_results.json — do not mark phase done" |
-| Benchmark infrastructure error | benchmark exit 2 (file missing or invalid JSON) | HALT: "benchmark infrastructure error" |
+| Benchmark infrastructure error | benchmark exit 2 (file missing or invalid JSON — check stderr; OR ERROR verdict meaning no matched workloads — check `mechanism_check_verdict` in output JSON) | HALT: "benchmark infrastructure error" |
 | Suite A FAIL | PIPESTATUS[0] non-zero or `"Action":"fail"` in JSON output (rank divergence or key-format mismatch) | HALT: "Suite A FAIL — check test output for root cause" |
 | Suite C FAIL | PIPESTATUS[0] non-zero or `"Action":"fail"` in JSON output (determinism violated or pile-on > 2.0) | HALT: "Suite C FAIL" |
 | Mechanism FAIL | no matched workload improvement ≥ T_eff | HALT: "Mechanism check FAIL" |
