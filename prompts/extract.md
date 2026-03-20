@@ -20,6 +20,23 @@ test -f blis_router/best/best_program.go || { echo "HALT: missing blis_router/be
 test -f blis_router/best/best_program_info.json || { echo "HALT: missing blis_router/best/best_program_info.json"; exit 1; }
 ```
 
+### Stage 5 cluster prerequisite check (warning only — Stage 1 can complete without blis observe)
+
+```bash
+# Check if inference-sim submodule includes blis observe (PR #704)
+if ! grep -q "AddCommand(observeCmd)" inference-sim/cmd/root.go; then
+  echo "WARNING: inference-sim submodule does not yet include \`blis observe\` (PR #704 not merged)."
+  echo "Stage 1 extract and Stages 2-4 will complete normally."
+  echo "Stage 5 cluster benchmarks will fail until the submodule is bumped."
+  echo "See docs/transfer/blis_to_llmd_mapping.md § Submodule Prerequisites for how to bump."
+  echo "CONTINUE: proceeding with Stage 1 extract."
+fi
+```
+
+Do **not** HALT here. `blis observe` is only required for Stage 5 cluster pipeline submission (Step 5b). Stages 1-4 work with the current submodule. The real enforcement gate for `blis observe` is the `preflight --phase noise` call in Stage 5 Step 5b, which checks the compiled task image and will fail if `blis observe` is not available.
+
+Note: `cmd/observe.go` exists in the current submodule but only contains HTTP client utilities — the `observeCmd` cobra.Command is **not registered** until PR #704 merges. File existence is not sufficient; the grep confirms actual command registration.
+
 ## Stale Artifact Guard
 
 Delete any existing output artifact to prevent downstream stages from consuming
