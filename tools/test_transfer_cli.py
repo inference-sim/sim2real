@@ -1517,3 +1517,107 @@ class TestValidateSchemaValidationResults:
         finally:
             if artifact_path.exists():
                 artifact_path.unlink()
+
+
+class TestBenchmarkState:
+    def _alg_summary(self, tmp_path):
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        (ws / "algorithm_summary.json").write_text(
+            '{"algorithm_name": "test-algo", "scope_validation_passed": true,'
+            ' "fidelity_checked": true, "evolve_block_source": "blis_router/best/best_program.go:1-10",'
+            ' "evolve_block_content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
+            ' "signals": [{"name": "KVUtilization", "type": "float64", "access_path": "kv"}],'
+            ' "composite_signals": [], "metrics": {"combined_score": 1.5},'
+            ' "mapping_artifact_version": "1.0"}'
+        )
+        return ws
+
+    def test_creates_state_file_when_absent(self, tmp_path):
+        ws = self._alg_summary(tmp_path)
+        from tools.transfer_cli import cmd_benchmark_state
+        import argparse
+        args = argparse.Namespace(workspace=str(ws), namespace="test-ns",
+                                  set_phase=None, force=False)
+        rc = cmd_benchmark_state(args)
+        assert rc == 0
+        import json
+        state = json.loads((ws / "benchmark_state.json").read_text())
+        assert state["algorithm_name"] == "test-algo"
+        assert state["namespace"] == "test-ns"
+        assert state["phases"]["noise"]["status"] == "pending"
+        assert state["phases"]["baseline"]["status"] == "pending"
+        assert state["phases"]["treatment"]["status"] == "pending"
+
+    def test_context_guard_warns_on_mismatch(self, tmp_path, monkeypatch):
+        ws = self._alg_summary(tmp_path)
+        import json
+        state = {
+            "schema_version": 1, "algorithm_name": "test-algo",
+            "created_at": "2026-01-01T00:00:00Z",
+            "cluster_context": "original-cluster", "namespace": "test-ns",
+            "phases": {
+                "noise":     {"status": "pending", "pipelinerun_name": None,
+                              "submitted_at": None, "completed_at": None,
+                              "results_pvc_path": "noise/", "results_local_path": None,
+                              "failure_reason": None},
+                "baseline":  {"status": "pending", "pipelinerun_name": None,
+                              "submitted_at": None, "completed_at": None,
+                              "results_pvc_path": "baseline/", "results_local_path": None,
+                              "failure_reason": None},
+                "treatment": {"status": "pending", "pipelinerun_name": None,
+                              "submitted_at": None, "completed_at": None,
+                              "results_pvc_path": "treatment/", "results_local_path": None,
+                              "failure_reason": None},
+            }
+        }
+        (ws / "benchmark_state.json").write_text(json.dumps(state))
+        monkeypatch.setattr("tools.transfer_cli._kubectl_current_context",
+                            lambda: "different-cluster")
+        from tools.transfer_cli import cmd_benchmark_state
+        import argparse
+        args = argparse.Namespace(workspace=str(ws), namespace=None,
+                                  set_phase=None, force=False)
+        rc = cmd_benchmark_state(args)
+        assert rc == 1
+
+    def test_set_phase_updates_status(self, tmp_path):
+        ws = self._alg_summary(tmp_path)
+        import json, argparse
+        from tools.transfer_cli import cmd_benchmark_state
+        # create
+        args = argparse.Namespace(workspace=str(ws), namespace="ns",
+                                  set_phase=None, force=False)
+        cmd_benchmark_state(args)
+        # set noise to done
+        args2 = argparse.Namespace(workspace=str(ws), namespace=None,
+                                   set_phase="noise", status="done",
+                                   pipelinerun=None, results=None,
+                                   failure_reason=None, force=False)
+        rc = cmd_benchmark_state(args2)
+        assert rc == 0
+        state = json.loads((ws / "benchmark_state.json").read_text())
+        assert state["phases"]["noise"]["status"] == "done"
+
+    def test_ordering_guard_blocks_baseline_before_noise(self, tmp_path):
+        ws = self._alg_summary(tmp_path)
+        import argparse
+        from tools.transfer_cli import cmd_benchmark_state
+        cmd_benchmark_state(argparse.Namespace(workspace=str(ws), namespace="ns",
+                                               set_phase=None, force=False))
+        args = argparse.Namespace(workspace=str(ws), namespace=None,
+                                  set_phase="baseline", status="running",
+                                  pipelinerun="pr-1", results=None,
+                                  failure_reason=None, force=False)
+        rc = cmd_benchmark_state(args)
+        assert rc == 1  # ordering violation
+
+    def test_missing_algorithm_summary_exits_2(self, tmp_path):
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        import argparse
+        from tools.transfer_cli import cmd_benchmark_state
+        args = argparse.Namespace(workspace=str(ws), namespace="ns",
+                                  set_phase=None, force=False)
+        rc = cmd_benchmark_state(args)
+        assert rc == 2

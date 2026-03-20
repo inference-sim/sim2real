@@ -1175,6 +1175,164 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
                    errors=format_errors + errors)
 
 
+def _kubectl_current_context() -> str:
+    """Return current kubectl context, or empty string on error."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["kubectl", "config", "current-context"],
+            capture_output=True, text=True, timeout=10
+        )
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _default_benchmark_state(algorithm_name: str, namespace: str, context: str) -> dict:
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    phase_template = {
+        "status": "pending", "pipelinerun_name": None,
+        "submitted_at": None, "completed_at": None,
+        "results_local_path": None, "failure_reason": None,
+    }
+    return {
+        "schema_version": 1,
+        "algorithm_name": algorithm_name,
+        "created_at": now,
+        "cluster_context": context,
+        "namespace": namespace,
+        "phases": {
+            "noise":     {**phase_template, "results_pvc_path": "noise/"},
+            "baseline":  {**phase_template, "results_pvc_path": "baseline/"},
+            "treatment": {**phase_template, "results_pvc_path": "treatment/"},
+        }
+    }
+
+
+_PHASE_ORDER = ["noise", "baseline", "treatment"]
+
+
+def cmd_benchmark_state(args: "argparse.Namespace") -> int:
+    import json
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    ws = Path(args.workspace)
+    state_path = ws / "benchmark_state.json"
+
+    # ---- read or create ----
+    if not state_path.exists():
+        alg_path = ws / "algorithm_summary.json"
+        if not alg_path.exists():
+            print(f"ERROR: {alg_path} not found — run Stage 1 extract first.",
+                  file=sys.stderr)
+            return 2
+        try:
+            alg = json.loads(alg_path.read_text())
+            alg_name = alg["algorithm_name"]
+        except Exception as e:
+            print(f"ERROR: cannot read algorithm_name from {alg_path}: {e}",
+                  file=sys.stderr)
+            return 2
+        if not getattr(args, "namespace", None):
+            print("ERROR: --namespace required on first invocation.", file=sys.stderr)
+            return 2
+        ctx = _kubectl_current_context()
+        state = _default_benchmark_state(alg_name, args.namespace, ctx)
+        state_path.write_text(json.dumps(state, indent=2))
+    else:
+        try:
+            state = json.loads(state_path.read_text())
+        except Exception as e:
+            print(f"ERROR: cannot parse {state_path}: {e}", file=sys.stderr)
+            return 2
+        if not isinstance(state, dict) or "phases" not in state:
+            print(
+                f"ERROR: {state_path} is missing 'phases' key or is not a dict — "
+                "file may be corrupted. Delete it to start fresh.",
+                file=sys.stderr,
+            )
+            return 2
+        for expected_phase in _PHASE_ORDER:
+            if expected_phase not in state["phases"]:
+                print(
+                    f"ERROR: {state_path} 'phases' dict is missing phase '{expected_phase}' — "
+                    "file may be corrupted. Delete it to start fresh.",
+                    file=sys.stderr,
+                )
+                return 2
+
+    # ---- context guard (read-only calls) ----
+    if not getattr(args, "set_phase", None):
+        current_ctx = _kubectl_current_context()
+        recorded_ctx = state.get("cluster_context", "")
+        if recorded_ctx and current_ctx and current_ctx != recorded_ctx:
+            print(
+                f"ERROR: State was recorded against cluster '{recorded_ctx}' "
+                f"but current context is '{current_ctx}'. "
+                "Delete workspace/benchmark_state.json to start fresh against "
+                "the new cluster, or switch back to the original context.",
+                file=sys.stderr,
+            )
+            return 1
+        print(json.dumps(state, indent=2))
+        return 0
+
+    # ---- set-phase update ----
+    phase = args.set_phase
+    if phase not in _PHASE_ORDER:
+        print(f"ERROR: unknown phase '{phase}'. Must be one of {_PHASE_ORDER}.",
+              file=sys.stderr)
+        return 2
+
+    new_status = args.status
+    if new_status is None:
+        print("ERROR: --status is required when --set-phase is used.", file=sys.stderr)
+        return 2
+    current_status = state["phases"][phase]["status"]
+
+    # status regression guard
+    if not getattr(args, "force", False):
+        if current_status == "done" and new_status in ("pending", "running"):
+            print(
+                f"ERROR: cannot regress phase '{phase}' from 'done' to '{new_status}'. "
+                "Use --force to override.", file=sys.stderr
+            )
+            return 2
+
+    # ordering guard
+    if new_status == "running" and not getattr(args, "force", False):
+        idx = _PHASE_ORDER.index(phase)
+        if idx > 0:
+            prev = _PHASE_ORDER[idx - 1]
+            if state["phases"][prev]["status"] != "done":
+                print(
+                    f"ERROR: cannot set '{phase}' to running — "
+                    f"previous phase '{prev}' is not done (status: "
+                    f"'{state['phases'][prev]['status']}'). "
+                    "Use --force to bypass.", file=sys.stderr
+                )
+                return 1
+
+    state["phases"][phase]["status"] = new_status
+    if getattr(args, "pipelinerun", None):
+        state["phases"][phase]["pipelinerun_name"] = args.pipelinerun
+        state["phases"][phase]["submitted_at"] = (
+            datetime.now(timezone.utc).isoformat(timespec="seconds")
+        )
+    if getattr(args, "results", None):
+        state["phases"][phase]["results_local_path"] = args.results
+        state["phases"][phase]["completed_at"] = (
+            datetime.now(timezone.utc).isoformat(timespec="seconds")
+        )
+    if getattr(args, "failure_reason", None):
+        state["phases"][phase]["failure_reason"] = args.failure_reason
+
+    state_path.write_text(json.dumps(state, indent=2))
+    return 0
+
+
 def main():
     if sys.version_info < (3, 10):
         print("ERROR: transfer_cli.py requires Python >= 3.10 "
@@ -1228,6 +1386,20 @@ def main():
     p_bench.add_argument("--t-eff", type=float, default=None,
         help="Effective threshold from noise-characterize")
     p_bench.set_defaults(func=_cmd_benchmark)
+
+    p_bstate = subparsers.add_parser("benchmark-state",
+        help="Read/write workspace/benchmark_state.json phase tracking")
+    p_bstate.add_argument("--workspace", required=True)
+    p_bstate.add_argument("--namespace")
+    p_bstate.add_argument("--set-phase", dest="set_phase",
+                           choices=["noise", "baseline", "treatment"])
+    p_bstate.add_argument("--status",
+                           choices=["pending", "running", "done", "failed"])
+    p_bstate.add_argument("--pipelinerun")
+    p_bstate.add_argument("--results")
+    p_bstate.add_argument("--failure-reason", dest="failure_reason")
+    p_bstate.add_argument("--force", action="store_true")
+    p_bstate.set_defaults(func=cmd_benchmark_state)
 
     args = parser.parse_args()
     exit_code = args.func(args)
