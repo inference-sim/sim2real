@@ -1,0 +1,11 @@
+{
+  "mappings": [
+    {"workload_field": "queue_depth_range", "signals": ["QueueDepth"], "description": "Queue depth range exercises QueueDepth signal"},
+    {"workload_field": "kv_util_range", "signals": ["KVUtilization"], "description": "KV utilization range exercises KVUtilization signal"},
+    {"workload_field": "kv_utilization", "signals": ["KVUtilization"], "description": "KV utilization value exercises KVUtilization signal"},
+    {"workload_field": "in_flight_range", "signals": ["InFlightRequests"], "description": "In-flight range exercises InFlightRequests signal"},
+    {"workload_field": "in_flight_requests", "signals": ["InFlightRequests"], "description": "In-flight requests exercises InFlightRequests signal"},
+    {"workload_field": "cache_hit_rate", "signals": ["CacheHitRate"], "description": "Cache hit rate exercises CacheHitRate signal"},
+    {"workload_field": "prefix_group", "signals": ["KVUtilization"], "description": "Prefix groups drive KV block reuse (shared prefix caching occupies KV cache), exercising KVUtilization"}
+  ]
+}
