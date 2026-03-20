@@ -1864,6 +1864,110 @@ def cmd_benchmark_new(args: "argparse.Namespace") -> int:
     return 2 if verdict == "ERROR" else (1 if verdict == "FAIL" else 0)
 
 
+def cmd_generate_evidence(args: "argparse.Namespace") -> int:
+    import json
+    from datetime import date
+    from pathlib import Path
+
+    ws = Path(args.workspace)
+    out_path = Path(args.out)
+    cal_log = Path(getattr(args, "calibration_log", "docs/transfer/calibration_log.md"))
+
+    alg_path = ws / "algorithm_summary.json"
+    val_path = ws / "validation_results.json"
+
+    for p, label in [(alg_path, "algorithm_summary.json"),
+                     (val_path, "validation_results.json")]:
+        if not p.exists():
+            print(f"ERROR: generate-evidence requires '{p}' — "
+                  f"{label} not found.", file=sys.stderr)
+            return 1
+
+    alg = json.loads(alg_path.read_text())
+    val = json.loads(val_path.read_text())
+
+    bench = val.get("benchmark", {})
+    if not bench:
+        print("ERROR: 'benchmark' key missing from validation_results.json — "
+              "run Step 5c (benchmark) first.", file=sys.stderr)
+        return 1
+
+    # Calibration count
+    calib_n = 1
+    if cal_log.exists():
+        calib_n = cal_log.read_text().count("### Transfer:") + 1
+
+    # Extract fields
+    alg_name = alg.get("algorithm_name", "unknown")
+    overall = val.get("overall_verdict", "UNKNOWN")
+    tau = val.get("suite_a", {}).get("kendall_tau", "N/A")
+    err = val.get("suite_a", {}).get("max_abs_error", "N/A")
+    suite_a_pass = val.get("suite_a", {}).get("passed", False)
+    suite_c_pass = val.get("suite_c", {}).get("passed", False)
+    pile_on = val.get("suite_c", {}).get("max_pile_on_ratio", "N/A")
+    t_eff_pct = round(bench.get("t_eff", 0) * 100, 1)
+    mech = bench.get("mechanism_check_verdict", "UNKNOWN")
+
+    wc = bench.get("workload_classification", [])
+    matched_entry = next((w for w in wc if w.get("classification") == "matched"), None)
+    matched_wl = (matched_entry or {}).get("workload", alg_name)
+    unmatched_entries = [w for w in wc if w.get("classification") == "unmatched"]
+    matched_pct = round((matched_entry or {}).get("improvement", 0) * 100, 1)
+    unmatched_mean_pct = (
+        round(sum(w.get("improvement", 0) for w in unmatched_entries) /
+              len(unmatched_entries) * 100, 1)
+        if unmatched_entries else 0.0
+    )
+
+    narrative = {
+        "PASS": f"Simulation-predicted benefit transferred to production.",
+        "FAIL": f"Transfer failed — production improvement did not exceed noise floor.",
+        "INCONCLUSIVE": f"Transfer result is inconclusive — see operator notes.",
+    }.get(overall, f"Transfer verdict: {overall}.")
+
+    evidence = f"""## Evidence: {alg_name} sim-to-real transfer
+
+**Date:** {date.today().isoformat()}
+**Verdict:** {overall}
+
+### Claim
+The evolved routing algorithm improves performance on {matched_wl}
+in production with improvement above noise floor (T_eff={t_eff_pct}%).
+
+### Evidence Chain
+
+**1. Algorithm source**
+- Algorithm: {alg_name}
+- Source: {alg.get('evolve_block_source', 'N/A')}
+
+**2. Translation fidelity verified**
+- Suite A Kendall-tau: {tau} (threshold: 0.8) — {"PASS" if suite_a_pass else "FAIL"}
+- Suite A max absolute error: {err}
+- Suite C concurrent safety: {"PASS" if suite_c_pass else "FAIL"}, pile-on ratio: {pile_on}
+- Interpretation: The production plugin reproduces the simulation
+  algorithm's ranking behavior within measured tolerance.
+
+**3. Production result**
+- Observed improvement: {matched_pct}% on {matched_wl}
+- Noise floor (T_eff): {t_eff_pct}%
+
+**4. Mechanism specificity**
+- Matched workload improvement: {matched_pct}%
+- Mean unmatched workload improvement: {unmatched_mean_pct}%
+- Mechanism check: {mech}
+
+**5. Calibration**
+- Running calibration: transfer {calib_n} of 3 (uncalibrated period)
+
+### Summary
+{narrative}
+"""
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(evidence)
+    return 0
+
+
 def main():
     if sys.version_info < (3, 10):
         print("ERROR: transfer_cli.py requires Python >= 3.10 "
@@ -1957,6 +2061,14 @@ def main():
     p_pf.add_argument("--values", required=True)
     p_pf.add_argument("--namespace", required=True)
     p_pf.set_defaults(func=cmd_preflight)
+
+    p_ge = subparsers.add_parser("generate-evidence",
+        help="Generate workspace/transfer_evidence.md from workspace artifacts")
+    p_ge.add_argument("--workspace", required=True)
+    p_ge.add_argument("--out", required=True)
+    p_ge.add_argument("--calibration-log", dest="calibration_log",
+                       default="docs/transfer/calibration_log.md")
+    p_ge.set_defaults(func=cmd_generate_evidence)
 
     args = parser.parse_args()
     exit_code = args.func(args)

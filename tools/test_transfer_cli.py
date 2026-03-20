@@ -1994,3 +1994,67 @@ class TestBenchmarkNew:
                                   out=str(out))
         cmd_benchmark_new(args)
         assert out.exists()
+
+
+class TestGenerateEvidence:
+    def _make_workspace(self, tmp_path):
+        import json
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        (ws / "algorithm_summary.json").write_text(json.dumps({
+            "algorithm_name": "blis-routing-v1",
+            "evolve_block_source": "routing/",
+        }))
+        (ws / "validation_results.json").write_text(json.dumps({
+            "suite_a": {"passed": True, "kendall_tau": 0.92,
+                        "max_abs_error": 0.0001, "tuple_count": 150},
+            "suite_b": {"passed": True, "rank_stability_tau": 1.0,
+                        "threshold_crossing_pct": 0.0, "informational_only": True},
+            "suite_c": {"passed": True, "deterministic": True,
+                        "max_pile_on_ratio": 1.1},
+            "benchmark": {
+                "passed": True,
+                "mechanism_check_verdict": "PASS",
+                "t_eff": 0.05,
+                "workload_classification": [
+                    {"workload": "glia-40qps", "classification": "matched",
+                     "improvement": 0.15, "matched_signals": ["KVUtilization"]},
+                    {"workload": "prefix-heavy", "classification": "unmatched",
+                     "improvement": 0.02, "matched_signals": []},
+                ],
+                "specificity_notes": [],
+            },
+            "overall_verdict": "PASS",
+            "noise_cv": 0.03,
+        }))
+        return ws
+
+    def test_generates_evidence_file(self, tmp_path):
+        ws = self._make_workspace(tmp_path)
+        out = tmp_path / "transfer_evidence.md"
+        from tools.transfer_cli import cmd_generate_evidence
+        import argparse
+        args = argparse.Namespace(workspace=str(ws), out=str(out),
+                                  calibration_log="docs/transfer/calibration_log.md")
+        rc = cmd_generate_evidence(args)
+        assert rc == 0
+        content = out.read_text()
+        assert "blis-routing-v1" in content
+        assert "PASS" in content
+        assert "glia-40qps" in content
+        assert "0.92" in content  # suite_a tau
+
+    def test_missing_validation_results_exits_1(self, tmp_path):
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        import json
+        (ws / "algorithm_summary.json").write_text(json.dumps(
+            {"algorithm_name": "x", "evolve_block_source": "routing/"}
+        ))
+        # no validation_results.json
+        from tools.transfer_cli import cmd_generate_evidence
+        import argparse
+        args = argparse.Namespace(workspace=str(ws), out=str(tmp_path / "out.md"),
+                                  calibration_log="docs/transfer/calibration_log.md")
+        rc = cmd_generate_evidence(args)
+        assert rc == 1
