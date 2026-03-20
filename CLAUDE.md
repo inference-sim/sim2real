@@ -104,8 +104,8 @@ Downstream stages MUST use the exit code (not file existence) as the success sig
 | PR2 | Scorer template artifact | Complete |
 | PR3 | Prompt templates (Stages 1-3) + Go harness | Complete |
 | PR4 | Stage 4 prompt + test retry logic | Complete |
-| PR5 | Validation pipeline (Stage 5) | In progress |
-| PR6 | Stage 6 + self-verification + calibration | Not started |
+| PR5 | Validation pipeline (Stage 5) | Complete |
+| PR6 | Stage 6 + self-verification + calibration | Complete |
 
 ## Cross-PR Notes
 

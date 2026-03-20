@@ -1837,6 +1837,132 @@ in production with improvement above noise floor (T_eff={t_eff_pct}%).
     return 0
 
 
+def cmd_append_calibration_log(args: "argparse.Namespace") -> int:
+    """Append a per-transfer calibration entry to docs/transfer/calibration_log.md.
+
+    Exit 0 = success; 1 = corruption detected; 2 = infrastructure error.
+    """
+    import json
+    from datetime import date
+    from pathlib import Path
+    import subprocess
+
+    ws = Path(args.workspace)
+    cal_path = Path(args.calibration_log)
+
+    alg_path = ws / "algorithm_summary.json"
+    val_path = ws / "validation_results.json"
+
+    for p, label in [(alg_path, "algorithm_summary.json"),
+                     (val_path, "validation_results.json")]:
+        if not p.exists():
+            print(f"ERROR: append-calibration-log requires '{p}' — {label} not found.",
+                  file=sys.stderr)
+            return 2
+
+    try:
+        alg = json.loads(alg_path.read_text())
+        val = json.loads(val_path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"ERROR: cannot read workspace artifacts: {e}", file=sys.stderr)
+        return 2
+
+    pipeline_commit = alg.get("pipeline_commit", "")
+    if not pipeline_commit:
+        try:
+            pipeline_commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], text=True).strip()
+        except Exception:
+            pipeline_commit = "unknown"
+
+    alg_name = alg.get("algorithm_name", "unknown")
+    overall = val.get("overall_verdict", "UNKNOWN")
+    suite_a = val.get("suite_a", {})
+    suite_b = val.get("suite_b", {})
+    suite_c = val.get("suite_c", {})
+    bench = val.get("benchmark", {})
+
+    matched_improvement = 0.0
+    for wc in bench.get("workload_classification", []):
+        if wc.get("classification") == "matched":
+            matched_improvement = max(matched_improvement, wc.get("improvement", 0.0))
+
+    entry = (
+        f"\n### Transfer: {alg_name}\n"
+        f"```yaml\n"
+        f"transfer_date: {date.today().isoformat()}\n"
+        f"algorithm_name: {alg_name}\n"
+        f"pipeline_commit: {pipeline_commit}\n"
+        f"single_run_provisional: true\n"
+        f"suite_a_results:\n"
+        f"  kendall_tau: {suite_a.get('kendall_tau', 0.0)}\n"
+        f"  max_abs_error: {suite_a.get('max_abs_error', 0.0)}\n"
+        f"suite_b_results:\n"
+        f"  rank_stability_tau: {suite_b.get('rank_stability_tau', 0.0)}\n"
+        f"  threshold_crossing_pct: {suite_b.get('threshold_crossing_pct', 0.0)}\n"
+        f"  informational_only: true\n"
+        f"suite_c_results:\n"
+        f"  deterministic: {str(suite_c.get('deterministic', False)).lower()}\n"
+        f"  max_pile_on_ratio: {suite_c.get('max_pile_on_ratio', 0.0)}\n"
+        f"benchmark_results:\n"
+        f"  mechanism_check_verdict: {bench.get('mechanism_check_verdict', 'UNKNOWN')}\n"
+        f"  t_eff: {bench.get('t_eff', 0.0)}\n"
+        f"  matched_improvement: {matched_improvement}\n"
+        f"noise_cv: {val.get('noise_cv', 0.0)}\n"
+        f"overall_verdict: {overall}\n"
+        f"threshold_adjustments: []\n"
+        f"```\n"
+    )
+
+    if not cal_path.exists():
+        cal_path.parent.mkdir(parents=True, exist_ok=True)
+        cal_path.write_text(
+            "# Transfer Pipeline Calibration Log\n\nAppend-only: do not modify existing entries.\n\n"
+            "## Entries\n\n<!-- Stage 6 appends entries below this line -->\n"
+        )
+
+    try:
+        before_text = cal_path.read_text()
+    except OSError as e:
+        print(f"ERROR: cannot read calibration log: {e}", file=sys.stderr)
+        return 2
+    count_before = before_text.count("### Transfer:")
+
+    try:
+        cal_path.write_text(before_text + entry)
+    except OSError as e:
+        print(f"ERROR: cannot write to calibration log: {e}", file=sys.stderr)
+        return 2
+
+    try:
+        after_text = cal_path.read_text()
+    except OSError as e:
+        print(f"ERROR: cannot re-read calibration log after append: {e}", file=sys.stderr)
+        return 2
+    count_after = after_text.count("### Transfer:")
+
+    if count_after != count_before + 1:
+        print(
+            f"ERROR: calibration log corruption — count changed from {count_before} "
+            f"to {count_after} (expected {count_before + 1}). "
+            f"Inspect {cal_path} and repair from git history.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not after_text.endswith(entry):
+        print(
+            "ERROR: calibration log corruption — last entry does not match appended content. "
+            f"Inspect {cal_path} and repair from git history.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"OK: calibration entry appended for '{alg_name}' "
+          f"(overall_verdict={overall}, entry {count_after} of log).")
+    return 0
+
+
 def main():
     if sys.version_info < (3, 10):
         print("ERROR: transfer_cli.py requires Python >= 3.10 "
@@ -1938,6 +2064,16 @@ def main():
     p_ge.add_argument("--calibration-log", dest="calibration_log",
                        default="docs/transfer/calibration_log.md")
     p_ge.set_defaults(func=cmd_generate_evidence)
+
+    p_acl = subparsers.add_parser(
+        "append-calibration-log",
+        help="Append a calibration entry to docs/transfer/calibration_log.md",
+    )
+    p_acl.add_argument("--workspace", default="workspace/",
+                       help="Path to workspace directory")
+    p_acl.add_argument("--calibration-log", default="docs/transfer/calibration_log.md",
+                       help="Path to calibration log")
+    p_acl.set_defaults(func=cmd_append_calibration_log)
 
     args = parser.parse_args()
     exit_code = args.func(args)

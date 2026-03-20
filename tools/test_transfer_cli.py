@@ -2458,3 +2458,183 @@ class TestEndToEndLocal:
         evidence = (ws / "transfer_evidence.md").read_text()
         assert "PASS" in evidence
         assert "blis-routing-v1" in evidence
+
+
+# ---------------------------------------------------------------------------
+# Helpers for TestAppendCalibrationLog (added in PR6)
+# ---------------------------------------------------------------------------
+
+TOOLS_DIR = Path(__file__).parent
+
+
+def _run_cli(*args, cwd=None):
+    """Run transfer_cli.py; return (exit_code, stdout, stderr)."""
+    cmd = [sys.executable, str(TOOLS_DIR / "transfer_cli.py")] + list(args)
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd or TOOLS_DIR.parent)
+    return result.returncode, result.stdout, result.stderr
+
+
+def _write_algorithm_summary(ws: Path, algorithm_name: str = "test_algo") -> None:
+    # Note: pipeline_commit is NOT a field in algorithm_summary.json schema.
+    # The CLI reads algorithm_name; pipeline_commit falls back to git rev-parse HEAD.
+    (ws / "algorithm_summary.json").write_text(json.dumps({
+        "algorithm_name": algorithm_name,
+        "evolve_block_source": "blis_router/best/best_program.go:1-5",
+        "evolve_block_content_hash": "abc123",
+        "signals": [], "composite_signals": [],
+        "metrics": {"combined_score": 0.0},
+        "scope_validation_passed": True,
+        "mapping_artifact_version": "1.0",
+        "fidelity_checked": True,
+    }))
+
+
+def _write_validation_results(ws: Path, verdict: str = "PASS") -> None:
+    data = {
+        "suite_a": {"passed": True, "kendall_tau": 0.92, "max_abs_error": 0.01, "tuple_count": 200},
+        "suite_b": {"passed": True, "rank_stability_tau": 0.95,
+                    "threshold_crossing_pct": 0.0, "informational_only": True},
+        "suite_c": {"passed": True, "deterministic": True, "max_pile_on_ratio": 1.1},
+        "benchmark": {
+            "passed": True, "mechanism_check_verdict": "PASS", "t_eff": 0.05,
+            "workload_classification": [
+                {"workload": "wl-a", "classification": "matched",
+                 "improvement": 0.12, "matched_signals": ["queue_depth"]}
+            ],
+            "specificity_notes": [],
+        },
+        "overall_verdict": verdict,
+        "noise_cv": 0.03,
+    }
+    if verdict == "INCONCLUSIVE":
+        data["operator_notes"] = "Improvement marginally below T_eff; operator approves"
+    (ws / "validation_results.json").write_text(json.dumps(data))
+
+
+def _write_calibration_log(cal: Path, n_entries: int = 0) -> None:
+    header = ("# Transfer Pipeline Calibration Log\n\nAppend-only.\n\n"
+              "## Entries\n\n<!-- Stage 6 appends entries below this line -->\n")
+    entries = "".join(
+        f"\n### Transfer: prior_algo_{i}\n```yaml\ntransfer_date: 2026-01-0{i+1}\n```\n"
+        for i in range(n_entries)
+    )
+    cal.write_text(header + entries)
+
+
+class TestAppendCalibrationLog:
+    def test_appends_entry_to_empty_log(self, tmp_path):
+        """BC-5: happy path — appends entry when log has 0 existing entries."""
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        _write_algorithm_summary(ws)
+        _write_validation_results(ws)
+        cal = tmp_path / "calibration_log.md"
+        _write_calibration_log(cal, n_entries=0)
+        rc, out, err = _run_cli(
+            "append-calibration-log",
+            "--workspace", str(ws),
+            "--calibration-log", str(cal),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        content = cal.read_text()
+        assert content.count("### Transfer:") == 1
+        assert "test_algo" in content
+
+    def test_appends_entry_to_existing_log(self, tmp_path):
+        """BC-5: appends entry when log already has N entries."""
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        _write_algorithm_summary(ws, "second_algo")
+        _write_validation_results(ws)
+        cal = tmp_path / "calibration_log.md"
+        _write_calibration_log(cal, n_entries=2)
+        rc, out, err = _run_cli(
+            "append-calibration-log",
+            "--workspace", str(ws),
+            "--calibration-log", str(cal),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        assert cal.read_text().count("### Transfer:") == 3
+
+    def test_missing_algorithm_summary_exits_2(self, tmp_path):
+        """BC-11: exits 2 when algorithm_summary.json is absent."""
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        _write_validation_results(ws)
+        cal = tmp_path / "calibration_log.md"
+        _write_calibration_log(cal)
+        rc, out, err = _run_cli(
+            "append-calibration-log",
+            "--workspace", str(ws),
+            "--calibration-log", str(cal),
+        )
+        assert rc == 2, f"expected exit 2, got {rc}"
+        assert "algorithm_summary.json" in err
+
+    def test_missing_validation_results_exits_2(self, tmp_path):
+        """BC-11: exits 2 when validation_results.json is absent."""
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        _write_algorithm_summary(ws)
+        cal = tmp_path / "calibration_log.md"
+        _write_calibration_log(cal)
+        rc, out, err = _run_cli(
+            "append-calibration-log",
+            "--workspace", str(ws),
+            "--calibration-log", str(cal),
+        )
+        assert rc == 2, f"expected exit 2, got {rc}"
+        assert "validation_results.json" in err
+
+    def test_corruption_detected_exits_1(self, tmp_path, monkeypatch):
+        """BC-12: exit 1 when count mismatch detected after append.
+
+        Uses monkeypatch on pathlib.Path.write_text to inject an extra ### Transfer:
+        sentinel after the CLI's append, simulating a concurrent write to the file.
+        Calls cmd_append_calibration_log directly (not via subprocess) so the
+        monkeypatch takes effect in-process.
+        """
+        import argparse
+        sys.path.insert(0, str(Path(__file__).parent))
+        import transfer_cli  # the actual module under test
+
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        _write_algorithm_summary(ws)
+        _write_validation_results(ws)
+        cal = tmp_path / "calibration_log.md"
+        _write_calibration_log(cal, n_entries=1)
+
+        # Patch Path.write_text so that after the CLI writes its entry,
+        # we also inject an extra sentinel — simulating a concurrent process.
+        real_write = Path.write_text
+        patched = [False]
+
+        def injecting_write(path_self, data, *args, **kwargs):
+            real_write(path_self, data, *args, **kwargs)
+            if not patched[0] and str(path_self) == str(cal):
+                patched[0] = True
+                # Overwrite with extra sentinel to trigger count mismatch
+                real_write(path_self, data + "\n### Transfer: injected\n```yaml\n```\n")
+
+        monkeypatch.setattr(Path, "write_text", injecting_write)
+
+        args = argparse.Namespace(workspace=str(ws), calibration_log=str(cal))
+        rc = transfer_cli.cmd_append_calibration_log(args)
+        assert rc == 1, f"expected exit 1 (corruption detected), got {rc}"
+
+    def test_inconclusive_with_operator_notes_succeeds(self, tmp_path):
+        """BC-2: INCONCLUSIVE verdict with operator_notes is accepted."""
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        _write_algorithm_summary(ws)
+        _write_validation_results(ws, verdict="INCONCLUSIVE")
+        cal = tmp_path / "calibration_log.md"
+        _write_calibration_log(cal)
+        rc, out, err = _run_cli(
+            "append-calibration-log",
+            "--workspace", str(ws),
+            "--calibration-log", str(cal),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        assert "INCONCLUSIVE" in cal.read_text()
