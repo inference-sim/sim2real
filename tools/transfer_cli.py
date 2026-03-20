@@ -1659,6 +1659,211 @@ def cmd_preflight(args: "argparse.Namespace") -> int:
     return rc
 
 
+def _compute_cv(values: list) -> float:
+    if len(values) < 2:
+        return 0.0
+    mean = sum(values) / len(values)
+    if mean == 0:
+        return 0.0
+    variance = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
+    return (variance ** 0.5) / mean
+
+
+def _classify_workloads(workloads_dir: "Path", signal_coverage_path: "Path",
+                         mapping_path: "Path | None" = None) -> dict:
+    """Return {workload_name: {"classification": "matched"|"unmatched", "matched_signals": [...]}}"""
+    import json, yaml
+    if mapping_path is None:
+        mapping_path = Path(__file__).parent / "workload_signal_mapping.json"
+    if not mapping_path.exists():
+        raise FileNotFoundError(
+            f"workload signal mapping not found at '{mapping_path}' — "
+            "ensure Task 1 (Step 1.8) was completed to create this file"
+        )
+    try:
+        mapping = json.loads(mapping_path.read_text())["mappings"]
+    except json.JSONDecodeError as e:
+        raise ValueError(f"workload signal mapping '{mapping_path}' is malformed JSON: {e}") from e
+    try:
+        sc = json.loads(signal_coverage_path.read_text())
+    except json.JSONDecodeError as e:
+        raise ValueError(f"signal coverage file '{signal_coverage_path}' is malformed JSON: {e}") from e
+    mapped_signals = {s["sim_name"] for s in sc.get("signals", []) if s.get("mapped")}
+
+    result = {}
+    for wf in sorted(workloads_dir.iterdir()):
+        if not wf.suffix in (".yaml", ".yml"):
+            continue
+        # Normalize underscores to hyphens: workload_glia_40qps.yaml → glia-40qps
+        wl_name = wf.stem.removeprefix("workload_").replace("_", "-")
+        try:
+            wl_data = yaml.safe_load(wf.read_text()) or {}
+        except Exception:
+            wl_data = {}
+        # Collect all keys at top level AND within clients[] items
+        all_keys = set(wl_data.keys())
+        for client in wl_data.get("clients", []):
+            if isinstance(client, dict):
+                all_keys.update(client.keys())
+        matched = []
+        for entry in mapping:
+            if entry["workload_field"] in all_keys:
+                for sig in entry["signals"]:
+                    if sig in mapped_signals:
+                        matched.append(sig)
+        result[wl_name] = {
+            "classification": "matched" if matched else "unmatched",
+            "matched_signals": list(set(matched)),
+        }
+    return result
+
+
+def cmd_benchmark_new(args: "argparse.Namespace") -> int:
+    import json
+    from pathlib import Path
+
+    noise_path = Path(args.noise)
+    baseline_path = Path(args.baseline)
+    treatment_path = Path(args.treatment)
+    sc_path = Path(args.signal_coverage)
+    wd_path = Path(args.workloads_dir)
+
+    mapping_path = Path(__file__).parent / "workload_signal_mapping.json"
+    for p in [noise_path, baseline_path, treatment_path, sc_path, wd_path, mapping_path]:
+        if not p.exists():
+            print(f"ERROR: required input '{p}' not found.", file=sys.stderr)
+            return 2
+
+    try:
+        noise = json.loads(noise_path.read_text())
+        baseline = json.loads(baseline_path.read_text())
+        treatment = json.loads(treatment_path.read_text())
+    except Exception as e:
+        print(f"ERROR: cannot parse input JSON: {e}", file=sys.stderr)
+        return 2
+
+    for label, data in [("noise", noise), ("baseline", baseline), ("treatment", treatment)]:
+        if not isinstance(data, dict) or "workloads" not in data:
+            print(
+                f"ERROR: {label} results file is missing 'workloads' key or is not a dict — "
+                "run convert-trace to regenerate.",
+                file=sys.stderr,
+            )
+            return 2
+
+    # Compute T_eff from noise
+    metrics_keys = ["ttft_p50", "ttft_p99", "tpot_p50", "tpot_p99"]
+    per_metric = {k: [] for k in metrics_keys}
+    try:
+        for wl in noise["workloads"]:
+            for run in wl["runs"]:
+                for k in metrics_keys:
+                    per_metric[k].append(run["metrics"][k])
+    except (KeyError, TypeError) as e:
+        print(
+            f"ERROR: malformed noise results — missing expected field: {e}. "
+            "Each workload must have 'runs' with 'metrics' containing "
+            "ttft_p50, ttft_p99, tpot_p50, tpot_p99.",
+            file=sys.stderr,
+        )
+        return 2
+    noise_cv = max(_compute_cv(per_metric[k]) for k in metrics_keys)
+    t_eff = max(0.05, 2.0 * noise_cv)
+
+    # Build lookup maps
+    try:
+        bl_map = {w["name"]: w["metrics"]["ttft_p99"] for w in baseline["workloads"]}
+        tr_map = {w["name"]: w["metrics"]["ttft_p99"] for w in treatment["workloads"]}
+    except (KeyError, TypeError) as e:
+        print(
+            f"ERROR: malformed baseline or treatment results — missing expected field: {e}. "
+            "Each workload entry must have 'name' and 'metrics.ttft_p99'.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Classify workloads
+    try:
+        classification = _classify_workloads(wd_path, sc_path, mapping_path)
+    except Exception as e:
+        print(f"ERROR: workload classification failed: {e}", file=sys.stderr)
+        return 2
+
+    workload_classification = []
+    matched_improvements = []
+    unmatched_above_teff = []
+    skipped_workloads = []
+
+    for wl_name, cls_info in sorted(classification.items()):
+        bl_p99 = bl_map.get(wl_name)
+        tr_p99 = tr_map.get(wl_name)
+        if bl_p99 is None or tr_p99 is None:
+            print(
+                f"WARNING: workload '{wl_name}' from workloads_dir not found in "
+                f"{'baseline' if bl_p99 is None else 'treatment'} results "
+                f"(available: {sorted(bl_map.keys())}). Skipping.",
+                file=sys.stderr,
+            )
+            skipped_workloads.append(wl_name)
+            continue
+        improvement = (bl_p99 - tr_p99) / bl_p99 if bl_p99 else 0.0
+        entry = {
+            "workload": wl_name,
+            "classification": cls_info["classification"],
+            "improvement": round(improvement, 4),
+            "matched_signals": cls_info["matched_signals"],
+        }
+        workload_classification.append(entry)
+        if cls_info["classification"] == "matched":
+            matched_improvements.append(improvement)
+        elif improvement >= t_eff:
+            unmatched_above_teff.append(
+                f"workload {wl_name}: improvement={improvement:.2%} >= T_eff={t_eff:.2%}"
+            )
+
+    if skipped_workloads and not workload_classification:
+        msg = (
+            f"ERROR: all {len(skipped_workloads)} workload(s) were skipped due to name "
+            f"mismatch between workloads_dir and result files. "
+            f"Skipped: {skipped_workloads}. "
+            f"Baseline result names: {sorted(bl_map.keys())}."
+        )
+        print(msg, file=sys.stderr)
+        print(msg)
+
+    # Mechanism check
+    if not matched_improvements:
+        verdict = "ERROR"
+        passed = False
+    elif max(matched_improvements) >= t_eff:
+        verdict = "PASS"
+        passed = True
+    elif max(matched_improvements) > 0:
+        verdict = "INCONCLUSIVE"
+        passed = False
+    else:
+        verdict = "FAIL"
+        passed = False
+
+    output = {
+        "t_eff": round(t_eff, 4),
+        "noise_cv": round(noise_cv, 4),
+        "mechanism_check_verdict": verdict,
+        "passed": passed,
+        "workload_classification": workload_classification,
+        "specificity_notes": unmatched_above_teff,
+    }
+
+    if getattr(args, "out", None):
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(output, indent=2))
+    else:
+        print(json.dumps(output, indent=2))
+
+    return 2 if verdict == "ERROR" else (1 if verdict == "FAIL" else 0)
+
+
 def main():
     if sys.version_info < (3, 10):
         print("ERROR: transfer_cli.py requires Python >= 3.10 "
@@ -1697,21 +1902,16 @@ def main():
         help="Classify errors from go build/test output (reads stdin)")
     p_test_status.set_defaults(func=cmd_test_status)
 
-    # noise-characterize subcommand
-    p_noise = subparsers.add_parser("noise-characterize",
-        help="Compute per-metric CV and T_eff from baseline latency runs")
-    p_noise.add_argument("--runs", required=True,
-        help="Path to JSON file with baseline latency runs: {runs: [{p50, p95, p99}]}")
-    p_noise.set_defaults(func=_cmd_noise_characterize)
-
     # benchmark subcommand
     p_bench = subparsers.add_parser("benchmark",
-        help="Compute mechanism check from benchmark results")
-    p_bench.add_argument("--results", required=True,
-        help="Path to JSON file with workload results")
-    p_bench.add_argument("--t-eff", type=float, default=None,
-        help="Effective threshold from noise-characterize")
-    p_bench.set_defaults(func=_cmd_benchmark)
+        help="Compute T_eff and mechanism check from noise/baseline/treatment results")
+    p_bench.add_argument("--noise", required=True)
+    p_bench.add_argument("--baseline", required=True)
+    p_bench.add_argument("--treatment", required=True)
+    p_bench.add_argument("--signal-coverage", required=True, dest="signal_coverage")
+    p_bench.add_argument("--workloads-dir", required=True, dest="workloads_dir")
+    p_bench.add_argument("--out")
+    p_bench.set_defaults(func=cmd_benchmark_new)
 
     p_ct = subparsers.add_parser("convert-trace",
         help="Convert blis observe TraceV2 output to metrics JSON")
