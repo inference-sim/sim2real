@@ -221,7 +221,7 @@ for phase in noise baseline treatment; do
 **Compile:**
 ~~~bash
 .venv/bin/python tools/transfer_cli.py compile-pipeline \
-  --template-dir tektonc-data-collection/tekton \
+  --template-dir tektonc-data-collection/tektoncsample/sim2real \
   --values workspace/tekton/values.yaml --phase $phase \
   --out workspace/tekton/compiled/
 ~~~
