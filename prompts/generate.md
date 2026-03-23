@@ -51,6 +51,7 @@ Delete any existing output artifacts to prevent stale files from a prior run.
 
 ```bash
 rm -f workspace/stage3_output.json
+rm -f workspace/tekton/algorithm_values.yaml
 # Also remove any previously generated scorer files (read algorithm_name from summary)
 ALGO_NAME=$(.venv/bin/python -c "import json; print(json.load(open('workspace/algorithm_summary.json'))['algorithm_name'])" 2>/dev/null || true)
 if [ -n "$ALGO_NAME" ]; then
@@ -185,6 +186,8 @@ Construct and validate the output artifact:
 
 After writing `workspace/stage3_output.json`, generate the Tekton benchmarking artifacts for Stage 5.
 
+### Part A: Prerequisites and inference-sim tag
+
 **Prerequisites check:**
 ```bash
 .venv/bin/python tools/transfer_cli.py validate-schema workspace/algorithm_summary.json
@@ -208,139 +211,55 @@ echo "Resolved tag: $BLIS_IMAGE_TAG"
 ```
 Record `$BLIS_IMAGE_TAG` for use in `observe.image` below.
 
-**Generate `workspace/tekton/values.yaml`:**
+### Part B: Read env_defaults
 
-Using the translation rules document (`docs/transfer/blis_to_llmd_mapping.md` and
-`blis_router/llm_config.yaml` + `blis_router/hardware_config.json`), generate
-`workspace/tekton/values.yaml` following the schema in the design spec. Key required fields:
+**Read `config/env_defaults.yaml` to understand the current infrastructure configuration.**
 
-- `stack.model.helmValues` — must match the `llm-d-modelservice` Helm chart schema.
-  Use `tektonc-data-collection/tektoncsample/blis-inference-perf/values.yaml`
-  (`stack.model.helmValues`) as the canonical reference structure. Do NOT use flat
-  top-level keys (`modelName`, `hfRepo`, `image`, `tensorParallelSize`,
-  `gpuMemoryUtilization`, `replicaCount`, `accelerator`, etc.) — the chart's
-  `additionalProperties: false` schema rejects them at deploy time.
+The file contains the stable infrastructure defaults that don't change between algorithm runs: gateway type, connection pool settings, baseline scorer config, model deployment constants. Read it before generating `algorithm_values.yaml` so you understand:
+- Which gateway provider is configured (`stack.gateway.helmValues.gateway.provider`)
+- The treatment scorer type naming convention to use in `stack.gaie.treatment`
 
-  Key translation rules from `blis_router/llm_config.yaml`:
-  - `modelName` (top-level key, required by templates via `{{ stack.model.helmValues.modelName }}`):
-    model HF repo ID (e.g. `Qwen/Qwen2.5-7B-Instruct`)
-  - `modelArtifacts.name`: same model ID
-  - `modelArtifacts.uri`: `pvc://model-pvc/models/<sanitized-model-name>`
-  - `modelArtifacts.authSecretName`: `"hf-secret"`
-  - `decode.replicas`: `cluster.num_instances`
-  - `decode.parallelism.tensor`: `serving.tensor_parallel_size`
-  - `decode.containers[0].image`: `vllm/vllm-openai:<serving.vllm_version>`
-  - `decode.containers[0].extraConfig.vllm.gpuMemoryUtilization`: `serving.gpu_memory_utilization`
-  - `decode.containers[0].extraConfig.vllm.maxNumSeqs`: `vllm_config.max_num_running_reqs`
-  - `decode.containers[0].extraConfig.vllm.maxNumBatchedTokens`: `vllm_config.max_num_scheduled_tokens`
-  - `decode.acceleratorTypes.labelKey`: `"nvidia.com/gpu.product"`
-  - `decode.acceleratorTypes.labelValues`: map `hardware.gpu_type` to k8s label
-    (e.g. `H100-80GB` → `["NVIDIA-H100-80GB-HBM3"]`)
-  - `prefill.create: false`
-  - `routing.servicePort: 8000`
+If the user specified an override at prompt time (e.g., "use kgateway instead of istio"), apply the override by editing `config/env_defaults.yaml` before proceeding. This persists the override for future runs.
 
-- `stack.gateway.helmValues.gateway` — helm values for the `llm-d-infra/llm-d-infra` gateway chart.
-  Use the llm-d standard istio configuration as defaults:
-  ```yaml
-  gateway:
-    helmValues:
-      gateway:
-        # Source: https://github.com/llm-d/llm-d/blob/main/guides/prereq/gateway-provider/common-configurations/istio.yaml
-        provider: istio
-        gatewayClassName: istio
-        gatewayParameters:
-          resources:
-            limits:
-              cpu: "16"
-              memory: 16Gi
-            requests:
-              cpu: "4"
-              memory: 4Gi
-          istio:
-            accessLogging: false  # default false for production
-        # kgateway alternative (deprecated — migration only):
-        # provider: kgateway
-        # gatewayClassName: agentgateway
-  ```
-  `gatewayClassName` determines the service name suffix in the `deploy-gateway` task:
-  `istio` → service name `{release}-inference-gateway-istio`;
-  `agentgateway`/`kgateway` → `{release}-inference-gateway`.
+### Part C: Generate algorithm_values.yaml
 
-- `stack.gaie.baseline.helmValues` and `stack.gaie.treatment.helmValues` — complete helm
-  values for `oci://registry.k8s.io/gateway-api-inference-extension/charts/inferencepool`.
-  These are passed directly to the `deploy-gaie` task via `{{ stack.gaie.<phase>.helmValues | tojson }}`.
-  The scorer `EndpointPickerConfig` goes under `inferenceExtension.pluginsCustomConfig`
-  (a filename-keyed map). Common connection pool defaults from the llm-d standard config
-  are duplicated in each phase because the scorer config differs per phase.
+**Generate `workspace/tekton/algorithm_values.yaml`** containing only the BLIS-derived values.
+
+Using `blis_router/llm_config.yaml`, `blis_router/hardware_config.json`, and `workspace/stage3_output.json` (for `scorer_type`), generate ONLY the BLIS-derived values. The output must match the `algorithm_values.schema.json` schema.
+
+Key translation rules from `blis_router/llm_config.yaml`:
+- `stack.model.modelName`: model HF repo ID (e.g. `Qwen/Qwen2.5-7B-Instruct`)
+- `stack.model.helmValues.modelArtifacts.name`: same model ID
+- `stack.model.helmValues.modelArtifacts.uri`: `pvc://model-pvc/models/<sanitized-model-name>`
+  (sanitize: lowercase, replace `/` with `-`, strip non-alphanumeric except `-`)
+- `stack.model.helmValues.decode.replicas`: `cluster.num_instances`
+- `stack.model.helmValues.decode.parallelism.tensor`: `serving.tensor_parallel_size`
+- `stack.model.helmValues.decode.containers[0].image`: `vllm/vllm-openai:<serving.vllm_version>`
+- `stack.model.helmValues.decode.containers[0].extraConfig.vllm.gpuMemoryUtilization`: `serving.gpu_memory_utilization`
+- `stack.model.helmValues.decode.containers[0].extraConfig.vllm.maxNumSeqs`: `vllm_config.max_num_running_reqs`
+- `stack.model.helmValues.decode.containers[0].extraConfig.vllm.maxNumBatchedTokens`: `vllm_config.max_num_scheduled_tokens`
+- `stack.model.helmValues.decode.acceleratorTypes.labelValues`: map `hardware.gpu_type` to k8s label
+  (e.g. `H100-80GB` → `["NVIDIA-H100-80GB-HBM3"]`)
+- `stack.gaie.treatment.helmValues.inferenceExtension.pluginsCustomConfig`: use `scorer_type` from
+  `workspace/stage3_output.json` in the EndpointPickerConfig:
   ```yaml
   gaie:
-    baseline:
-      helmValues:
-        inferenceExtension:
-          pluginsConfigFile: "custom-plugins.yaml"
-          pluginsCustomConfig:
-            custom-plugins.yaml: |
-              apiVersion: inference.networking.x-k8s.io/v1alpha1
-              kind: EndpointPickerConfig
-              plugins:
-              - type: load-aware-scorer
-              <...full baseline EndpointPickerConfig from docs/transfer/blis_to_llmd_mapping.md...>
-          flags:
-            - name: v
-              value: 1
-        provider:
-          name: istio  # match stack.gateway.helmValues.gateway.provider
-        istio:
-          # Source: https://github.com/llm-d/llm-d/blob/main/guides/prereq/gateway-provider/common-configurations/istio.yaml
-          destinationRule:
-            trafficPolicy:
-              connectionPool:
-                http:
-                  http1MaxPendingRequests: 256000
-                  maxRequestsPerConnection: 256000
-                  http2MaxRequests: 256000
-                  idleTimeout: "900s"
-                tcp:
-                  maxConnections: 256000
-                  maxConnectionDuration: "1800s"
-                  connectTimeout: "900s"
     treatment:
       helmValues:
         inferenceExtension:
-          pluginsConfigFile: "custom-plugins.yaml"
           pluginsCustomConfig:
             custom-plugins.yaml: |
               apiVersion: inference.networking.x-k8s.io/v1alpha1
               kind: EndpointPickerConfig
               plugins:
-              - type: <generated-scorer-type>
+              - type: <scorer_type from stage3_output.json>
               <...full treatment EndpointPickerConfig from Stage 3 scorer generation...>
-          flags:
-            - name: v
-              value: 1
-        provider:
-          name: istio
-        istio:
-          destinationRule:
-            trafficPolicy:
-              connectionPool:
-                http:
-                  http1MaxPendingRequests: 256000
-                  maxRequestsPerConnection: 256000
-                  http2MaxRequests: 256000
-                  idleTimeout: "900s"
-                tcp:
-                  maxConnections: 256000
-                  maxConnectionDuration: "1800s"
-                  connectTimeout: "900s"
   ```
   **Encoding note:** `pluginsCustomConfig` values are YAML block scalars (`|`) — no `\n`
   escaping required. The pipeline templates use `{{ stack.gaie.<phase>.helmValues | tojson }}`
   which serializes the full nested structure to JSON, correctly preserving multiline values.
-
-- `observe.image` — `"ghcr.io/inference-sim/blis:$BLIS_IMAGE_TAG"` (resolved above)
-
-- `observe.workloads` — one entry per `blis_router/workloads/workload_*.yaml` file.
+- `observe.image`: `"ghcr.io/inference-sim/blis:$BLIS_IMAGE_TAG"` (tag resolved in Part A)
+- `observe.workloads`: one entry per `blis_router/workloads/workload_*.yaml` file.
   Each entry **must** use the field name `spec:` (not `content:` or any other name) —
   the pipeline templates access `workload.spec` directly:
   ```yaml
@@ -351,7 +270,29 @@ Using the translation rules document (`docs/transfer/blis_to_llmd_mapping.md` an
         <full file contents verbatim>
   ```
 
-- `observe.noise_runs: 5`
+Do NOT include in `algorithm_values.yaml`: gateway config, connection pool settings,
+baseline scorer config, `routing.servicePort`, `prefill.create`, `modelArtifacts.authSecretName`,
+`decode.acceleratorTypes.labelKey`, `observe.noise_runs`. These come from `config/env_defaults.yaml`
+and are merged in Part D.
+
+### Part D: Validate and merge
+
+**Validate algorithm_values.yaml:**
+```bash
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/tekton/algorithm_values.yaml \
+  || { echo "HALT: algorithm_values.yaml schema validation failed"; exit 1; }
+```
+
+**Merge to produce values.yaml:**
+```bash
+.venv/bin/python tools/transfer_cli.py merge-values \
+  --env config/env_defaults.yaml \
+  --algorithm workspace/tekton/algorithm_values.yaml \
+  --out workspace/tekton/values.yaml \
+  || { echo "HALT: merge-values failed"; exit 1; }
+```
+
+### Part E: Validate merged values.yaml
 
 **Validate generated values.yaml required keys:**
 ```bash
@@ -366,6 +307,7 @@ assert '<TAG>' not in v['observe']['image'], 'unresolved <TAG> in observe.image'
 assert v['observe'].get('noise_runs'), 'missing observe.noise_runs'
 wl = v['observe'].get('workloads', [])
 assert len(wl) > 0, 'observe.workloads must be non-empty (no workload files found in blis_router/workloads/)'
+assert v['stack'].get('model', {}).get('modelName'), 'missing stack.model.modelName'
 # gateway defaults
 gw = v['stack'].get('gateway', {}).get('helmValues', {}).get('gateway', {})
 assert gw.get('provider'), 'missing stack.gateway.helmValues.gateway.provider'
@@ -445,8 +387,10 @@ Note: `stage3_output.schema.json` defines `tekton_artifacts` with `additionalPro
 | CacheHitRate unavailable (multiplier) | `cache_hit_rate_unavailable_stage3` | Write escalation.json, HALT |
 | Pre-write validation failure | `pre_write_validation_failure_stage3` | Write escalation.json, HALT |
 | Post-write validation failure | `post_write_validation_failure_stage3` | Write escalation.json, HALT |
-| inference-sim tag unresolved | `inference_sim_tag_unresolved_stage3` | HALT (Stage 8): write `workspace/escalation.json` with `"stage": 3` and this halt_reason |
-| tekton_artifacts schema validation | `tekton_artifacts_validation_failure_stage3` | HALT (Stage 8): write `workspace/escalation.json` with `"stage": 3` and this halt_reason |
+| inference-sim tag unresolved | `inference_sim_tag_unresolved_stage3` | HALT (Step 8): write `workspace/escalation.json` with `"stage": 3` and this halt_reason |
+| tekton_artifacts schema validation | `tekton_artifacts_validation_failure_stage3` | HALT (Step 8): write `workspace/escalation.json` with `"stage": 3` and this halt_reason |
+| algorithm_values.yaml schema validation fails | `algorithm_values_validation_failure_stage3` | HALT (Step 8): write `workspace/escalation.json` with `"stage": 3` and this halt_reason |
+| merge-values fails | `merge_values_failure_stage3` | HALT (Step 8): write `workspace/escalation.json` with `"stage": 3` and this halt_reason |
 
 On any halt, write `workspace/escalation.json` per the escalation schema with `"stage": 3` and the appropriate `halt_reason`.
 
@@ -461,5 +405,6 @@ On any halt, write `workspace/escalation.json` per the escalation schema with `"
   - `register_file`: path to register.go
   - `scorer_type`: the TypedName type string
   - `tekton_artifacts`: `values_yaml` path and `pipeline_stubs` array
-- `workspace/tekton/values.yaml` — Tekton pipeline values
+- `workspace/tekton/algorithm_values.yaml` — BLIS-derived Tekton values (generated by Step 8)
+- `workspace/tekton/values.yaml` — merged Tekton pipeline values (env_defaults + algorithm_values)
 - `workspace/tekton/pipelinerun-{noise,baseline,treatment}.yaml` — PipelineRun stubs
