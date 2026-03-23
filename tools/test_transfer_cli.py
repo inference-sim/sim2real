@@ -781,6 +781,57 @@ class TestValidateSchema:
         finally:
             real.write_text(backup)
 
+    def test_validate_schema_yaml_algorithm_values(self):
+        """validate-schema loads YAML files by extension."""
+        alg = {
+            "stack": {
+                "model": {
+                    "modelName": "Org/Model-7B",
+                    "helmValues": {
+                        "modelArtifacts": {"name": "Org/Model-7B", "uri": "pvc://model-pvc/models/Model-7B"},
+                        "decode": {
+                            "replicas": 4,
+                            "containers": [{"image": "vllm/vllm-openai:v0.11.0"}],
+                        },
+                    },
+                },
+                "gaie": {
+                    "treatment": {
+                        "helmValues": {
+                            "inferenceExtension": {
+                                "pluginsCustomConfig": {"custom-plugins.yaml": "..."},
+                            }
+                        }
+                    }
+                },
+            },
+            "observe": {
+                "image": "ghcr.io/inference-sim/blis:v0.6.13",
+                "workloads": [{"name": "glia-prefix-heavy", "spec": "version: 1\n"}],
+            },
+        }
+        import yaml
+        yaml_file = WORKSPACE / "algorithm_values.yaml"
+        yaml_file.write_text(yaml.dump(alg))
+        try:
+            code, output = run_cli("validate-schema", str(yaml_file))
+            assert code == 0, f"Expected pass: {output}"
+        finally:
+            if yaml_file.exists():
+                yaml_file.unlink()
+
+    def test_validate_schema_yaml_missing_required(self):
+        """validate-schema on YAML reports missing required fields."""
+        import yaml
+        yaml_file = WORKSPACE / "algorithm_values.yaml"
+        yaml_file.write_text(yaml.dump({"stack": {"model": {"modelName": "x"}}}))
+        try:
+            code, output = run_cli("validate-schema", str(yaml_file))
+            assert code == 1, f"Expected violations, got: {output}"
+        finally:
+            if yaml_file.exists():
+                yaml_file.unlink()
+
 
 class TestCompositeSignalConsistency:
     """Cross-validate METHOD_EXPANSIONS against the mapping artifact."""

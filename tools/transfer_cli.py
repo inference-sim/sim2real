@@ -772,7 +772,18 @@ def cmd_validate_schema(args: argparse.Namespace) -> int:
                         output_type="schema_validation", violations=[])
 
     try:
-        data = json.loads(artifact_path.read_text())
+        import yaml as _yaml
+        raw = artifact_path.read_text()
+        if artifact_path.suffix in (".yaml", ".yml"):
+            data = _yaml.safe_load(raw)
+            if not isinstance(data, dict):
+                return _output("error", 2, errors=[f"YAML file did not parse to a mapping: {artifact_path}"],
+                                output_type="schema_validation", violations=[])
+        else:
+            data = json.loads(raw)
+    except _yaml.YAMLError as e:
+        return _output("error", 2, errors=[f"Failed to load YAML artifact: {e}"],
+                        output_type="schema_validation", violations=[])
     except (json.JSONDecodeError, OSError) as e:
         return _output("error", 2, errors=[f"Failed to load artifact: {e}"],
                         output_type="schema_validation",
