@@ -231,7 +231,8 @@ Key translation rules from `blis_router/llm_config.yaml`:
 - `stack.model.modelName`: model HF repo ID (e.g. `Qwen/Qwen2.5-7B-Instruct`)
 - `stack.model.helmValues.modelArtifacts.name`: same model ID
 - `stack.model.helmValues.modelArtifacts.uri`: `pvc://model-pvc/models/<sanitized-model-name>`
-  (sanitize: lowercase, replace `/` with `-`, strip non-alphanumeric except `-`)
+  (sanitize: lowercase, replace `/` with `-`, keep alphanumeric/hyphens/dots, strip everything else;
+  e.g. `Qwen/Qwen2.5-7B-Instruct` → `qwen-qwen2.5-7b-instruct`)
 - `stack.model.helmValues.decode.replicas`: `cluster.num_instances`
 - `stack.model.helmValues.decode.parallelism.tensor`: `serving.tensor_parallel_size`
 - `stack.model.helmValues.decode.containers[0].image`: `vllm/vllm-openai:<serving.vllm_version>`
@@ -279,12 +280,14 @@ and are merged in Part D.
 
 **Validate algorithm_values.yaml:**
 ```bash
+# halt_reason: algorithm_values_validation_failure_stage3
 .venv/bin/python tools/transfer_cli.py validate-schema workspace/tekton/algorithm_values.yaml \
   || { echo "HALT: algorithm_values.yaml schema validation failed"; exit 1; }
 ```
 
 **Merge to produce values.yaml:**
 ```bash
+# halt_reason: merge_values_failure_stage3
 .venv/bin/python tools/transfer_cli.py merge-values \
   --env config/env_defaults.yaml \
   --algorithm workspace/tekton/algorithm_values.yaml \
