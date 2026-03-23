@@ -23,10 +23,11 @@ stack:
             accessLogging: false  # default false for production
 
   model:
+    # modelName: required by pipeline templates via {{ stack.model.modelName }}
+    # Source: blis_router/llm_config.yaml model.hf_repo
+    modelName: Qwen/Qwen2.5-7B-Instruct
+
     helmValues:
-      # modelName: required by pipeline templates via {{ stack.model.helmValues.modelName }}
-      # Source: blis_router/llm_config.yaml model.hf_repo
-      modelName: Qwen/Qwen2.5-7B-Instruct
 
       modelArtifacts:
         name: Qwen/Qwen2.5-7B-Instruct
