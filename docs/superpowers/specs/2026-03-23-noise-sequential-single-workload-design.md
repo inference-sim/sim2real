@@ -73,9 +73,24 @@ Change `resultsDir` from compile-time `run-{{ run_index }}` to runtime
   value: "noise/{{ workload.name }}/run-$(params.runIndex)"
 ```
 
-The `collect-results` task and `finally` teardown block are unchanged.
 Infrastructure deployed: gateway, model, GAIE (using `stack.gaie.baseline.helmValues`),
 httproute — same as current noise pipeline.
+
+The `collect-results` task `runAfter` block must be updated to reference the single
+per-workload task name, matching the baseline/treatment pattern:
+
+```yaml
+- name: collect-results
+  runAfter:
+    {% for workload in observe.workloads %}
+    - run-workload-{{ workload.name | dns }}
+    {% endfor %}
+```
+
+The old `runAfter` referenced loop-derived names (`run-workload-...-run-N`) that no
+longer exist after removing the foreach — leaving the old block would cause Tekton to
+reject every PipelineRun submission with a reference error. The `finally` teardown
+block is unchanged.
 
 #### 2b. `workspace/tekton/pipelinerun-noise.yaml` (stub)
 
@@ -97,7 +112,34 @@ via `--vars ... RUN_INDEX=$i`.
 #### 2c. `prompts/validate.md` — Step 5b, noise phase only
 
 Replace the single submit→wait block for the noise phase with a sequential loop.
-Baseline and treatment phases in Step 5b are unchanged.
+
+The existing `for phase in noise baseline treatment` loop in Step 5b becomes
+`for phase in baseline treatment` — noise is removed from the generic loop and
+handled by the new dedicated loop below. Baseline and treatment phases are unchanged.
+
+**Prerequisite check before the loop:**
+
+Before entering the loop, verify that Stage 3 Step 8 has been rerun after deleting
+`workload_glia_40qps.yaml`. If `values.yaml` still references glia-40qps the compiled
+pipeline will include two workloads (contaminating results and doubling run time):
+
+```bash
+grep -q 'glia-40qps' workspace/tekton/values.yaml \
+  && { echo "HALT: values.yaml still contains glia-40qps — re-run Stage 3 Step 8 first"; exit 1; }
+```
+
+**Compile and apply the pipeline once before the loop** (the compiled artifact is
+identical for all iterations since `runIndex` is a runtime param; the Pipeline object
+must exist in the cluster before any PipelineRun that references it is submitted):
+
+```bash
+.venv/bin/python tools/transfer_cli.py compile-pipeline \
+  --template-dir tektonc-data-collection/tektoncsample/sim2real \
+  --values workspace/tekton/values.yaml --phase noise \
+  --out workspace/tekton/compiled/
+kubectl apply -f workspace/tekton/compiled/noise-pipeline.yaml \
+  || { echo "HALT: kubectl apply pipeline failed for noise"; exit 1; }
+```
 
 **New noise submission loop:**
 
@@ -109,16 +151,13 @@ NOISE_RUNS=$(.venv/bin/python -c \
 for i in $(seq 0 $((NOISE_RUNS - 1))); do
   PIPELINERUN_NAME=sim2real-noise-run${i}-$(date +%s)
 
-  # Pre-flight (once per run — values unchanged, but validates cluster state)
+  # Pre-flight each run — validates live cluster state between deploy/teardown cycles.
+  # Note: the prior run's finally-teardown may still be in progress when preflight
+  # runs. If preflight false-fails due to resources in Terminating state, wait briefly
+  # and retry once before halting.
   .venv/bin/python tools/transfer_cli.py preflight \
     --phase noise --values workspace/tekton/values.yaml --namespace $NAMESPACE
   # HALT if exit 1
-
-  # Compile (once before the loop is sufficient; included here for safety)
-  .venv/bin/python tools/transfer_cli.py compile-pipeline \
-    --template-dir tektonc-data-collection/tektoncsample/sim2real \
-    --values workspace/tekton/values.yaml --phase noise \
-    --out workspace/tekton/compiled/
 
   # Render and submit
   .venv/bin/python tools/transfer_cli.py render-pipelinerun \
@@ -127,6 +166,11 @@ for i in $(seq 0 $((NOISE_RUNS - 1))); do
            PHASE=noise RUN_INDEX=$i \
     --out /tmp/pipelinerun-noise-run${i}.yaml
   kubectl apply -f /tmp/pipelinerun-noise-run${i}.yaml
+
+  # Record the current run's PipelineRun name in state. Each iteration overwrites
+  # the previous name — this is intentional. Only the most recent name is persisted;
+  # failed-run diagnosis uses the $PIPELINERUN_NAME shell variable still in scope
+  # at halt time (via `tkn pr describe $PIPELINERUN_NAME`).
   .venv/bin/python tools/transfer_cli.py benchmark-state --workspace workspace/ \
     --set-phase noise --status running --pipelinerun $PIPELINERUN_NAME
 
@@ -141,15 +185,28 @@ done  # end noise run loop
 
 After all `noise_runs` PipelineRuns complete, run the extractor pod **once**.
 At this point the PVC contains `noise/glia-prefix-heavy/run-0` through
-`noise/glia-prefix-heavy/run-4`. The existing extractor, convert-trace, and
-schema validation steps are unchanged.
+`noise/glia-prefix-heavy/run-4`. The `kubectl cp` copies the entire `noise/`
+subtree in one operation, collecting all runs.
+
+Use the same `trap`-based cleanup pattern as the existing per-phase extractors
+to ensure the pod is deleted on exit or error (handles REENTER re-entry where a
+prior `sim2real-extract-noise` pod may not have been cleaned up):
 
 ```bash
-# Extract all runs in one kubectl cp
-kubectl cp $NAMESPACE/sim2real-extract-noise:/data/noise/ workspace/noise_raw/ --retries=3
+trap "kubectl delete pod sim2real-extract-noise -n $NAMESPACE --ignore-not-found 2>/dev/null" EXIT ERR
+kubectl delete pod sim2real-extract-noise -n $NAMESPACE --ignore-not-found 2>/dev/null || true
+kubectl run sim2real-extract-noise --image=alpine:3.19 --restart=Never \
+  --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"data-pvc"}}],"containers":[{"name":"e","image":"alpine:3.19","command":["sleep","600"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}' \
+  -n $NAMESPACE
+kubectl wait pod/sim2real-extract-noise --for=condition=Ready --timeout=60s -n $NAMESPACE \
+  || { echo "HALT: extractor pod not ready"; exit 1; }
+kubectl cp $NAMESPACE/sim2real-extract-noise:/data/noise/ workspace/noise_raw/ --retries=3 \
+  || { echo "HALT: kubectl cp failed"; exit 1; }
 .venv/bin/python tools/transfer_cli.py convert-trace \
-  --input-dir workspace/noise_raw/ --output workspace/noise_results.json
-.venv/bin/python tools/transfer_cli.py validate-schema workspace/noise_results.json
+  --input-dir workspace/noise_raw/ --output workspace/noise_results.json \
+  || { echo "HALT: convert-trace failed"; exit 1; }
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/noise_results.json \
+  || { echo "HALT: schema validation failed for noise_results.json"; exit 1; }
 .venv/bin/python tools/transfer_cli.py benchmark-state --workspace workspace/ \
   --set-phase noise --status done --results workspace/noise_results.json
 ```
