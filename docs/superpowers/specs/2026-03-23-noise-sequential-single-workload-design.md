@@ -1,0 +1,201 @@
+# Design: Sequential Noise Runs + Single Workload
+
+**Date:** 2026-03-23
+**Status:** Approved
+
+## Problem
+
+Two related issues with the current Stage 5 noise characterization pipeline:
+
+1. **Two workloads running on shared infrastructure** — glia-40qps and glia-prefix-heavy
+   run on the same 4 model pods. glia-40qps can warm the KV cache before
+   glia-prefix-heavy runs, producing contaminated measurements.
+
+2. **5 noise runs are parallel on shared infrastructure** — all 5 runs of glia-prefix-heavy
+   fire simultaneously on the same pods. Later requests within a run may hit cache warmed
+   by concurrent runs, so the 5 samples are not independent. This inflates or deflates
+   noise_cv depending on cache hit rates, producing an unreliable T_eff threshold.
+
+## Goals
+
+- Each noise run starts with a cold, freshly deployed KV cache.
+- Noise samples are statistically independent (no shared infra between runs).
+- Baseline and treatment phases are unaffected (they already get fresh infra per phase
+  and will run only one workload after Change 1).
+
+## Non-Goals
+
+- Changing noise_runs count (stays 5).
+- Modifying baseline or treatment pipeline templates.
+- Changing Suite A / B / C (no cluster involvement).
+
+## Changes
+
+### Change 1: Remove glia-40qps workload
+
+**File:** `blis_router/workloads/workload_glia_40qps.yaml` — **delete**.
+
+Stage 3 Step 8 reads `blis_router/workloads/workload_*.yaml` to populate
+`observe.workloads` in `workspace/tekton/values.yaml`. After deletion, rerunning
+Step 8 produces a values.yaml with only glia-prefix-heavy. No pipeline template
+or validate.md changes required for this change.
+
+**Effect on phases:**
+- Noise: 5 runs × 1 workload = 5 tasks (was 5 × 2 = 10)
+- Baseline: 1 run × 1 workload = 1 task (was 1 × 2 = 2)
+- Treatment: 1 run × 1 workload = 1 task (was 1 × 2 = 2)
+
+### Change 2: Sequential noise runs with fresh infra per run
+
+#### 2a. `tektonc-data-collection/tektoncsample/sim2real/noise-pipeline.yaml.j2`
+
+Replace the `loopName: noise-runs / foreach` structure with the same
+`{% for workload in observe.workloads %}` pattern used by baseline and treatment.
+The pipeline runs exactly one workload execution per submission.
+
+Add `runIndex` as a Pipeline-level param:
+
+```yaml
+params:
+  - name: experimentId
+    type: string
+  - name: namespace
+    type: string
+  - name: runIndex
+    type: string
+```
+
+Change `resultsDir` from compile-time `run-{{ run_index }}` to runtime
+`run-$(params.runIndex)`:
+
+```yaml
+- name: resultsDir
+  value: "noise/{{ workload.name }}/run-$(params.runIndex)"
+```
+
+The `collect-results` task and `finally` teardown block are unchanged.
+Infrastructure deployed: gateway, model, GAIE (using `stack.gaie.baseline.helmValues`),
+httproute — same as current noise pipeline.
+
+#### 2b. `workspace/tekton/pipelinerun-noise.yaml` (stub)
+
+Add `runIndex` param alongside existing `experimentId` and `namespace`:
+
+```yaml
+params:
+  - name: experimentId
+    value: $PIPELINERUN_NAME
+  - name: namespace
+    value: $NAMESPACE
+  - name: runIndex
+    value: $RUN_INDEX
+```
+
+`render-pipelinerun` in validate.md substitutes `$RUN_INDEX` at submission time
+via `--vars ... RUN_INDEX=$i`.
+
+#### 2c. `prompts/validate.md` — Step 5b, noise phase only
+
+Replace the single submit→wait block for the noise phase with a sequential loop.
+Baseline and treatment phases in Step 5b are unchanged.
+
+**New noise submission loop:**
+
+```bash
+NOISE_RUNS=$(.venv/bin/python -c \
+  "import yaml; v=yaml.safe_load(open('workspace/tekton/values.yaml')); \
+   print(v['observe']['noise_runs'])")
+
+for i in $(seq 0 $((NOISE_RUNS - 1))); do
+  PIPELINERUN_NAME=sim2real-noise-run${i}-$(date +%s)
+
+  # Pre-flight (once per run — values unchanged, but validates cluster state)
+  .venv/bin/python tools/transfer_cli.py preflight \
+    --phase noise --values workspace/tekton/values.yaml --namespace $NAMESPACE
+  # HALT if exit 1
+
+  # Compile (once before the loop is sufficient; included here for safety)
+  .venv/bin/python tools/transfer_cli.py compile-pipeline \
+    --template-dir tektonc-data-collection/tektoncsample/sim2real \
+    --values workspace/tekton/values.yaml --phase noise \
+    --out workspace/tekton/compiled/
+
+  # Render and submit
+  .venv/bin/python tools/transfer_cli.py render-pipelinerun \
+    --template workspace/tekton/pipelinerun-noise.yaml \
+    --vars PIPELINERUN_NAME=$PIPELINERUN_NAME NAMESPACE=$NAMESPACE \
+           PHASE=noise RUN_INDEX=$i \
+    --out /tmp/pipelinerun-noise-run${i}.yaml
+  kubectl apply -f /tmp/pipelinerun-noise-run${i}.yaml
+  .venv/bin/python tools/transfer_cli.py benchmark-state --workspace workspace/ \
+    --set-phase noise --status running --pipelinerun $PIPELINERUN_NAME
+
+  # Wait (4h timeout per run)
+  # ... same polling loop as current ...
+  # HALT on failure
+
+done  # end noise run loop
+```
+
+**After the loop — single extractor run:**
+
+After all `noise_runs` PipelineRuns complete, run the extractor pod **once**.
+At this point the PVC contains `noise/glia-prefix-heavy/run-0` through
+`noise/glia-prefix-heavy/run-4`. The existing extractor, convert-trace, and
+schema validation steps are unchanged.
+
+```bash
+# Extract all runs in one kubectl cp
+kubectl cp $NAMESPACE/sim2real-extract-noise:/data/noise/ workspace/noise_raw/ --retries=3
+.venv/bin/python tools/transfer_cli.py convert-trace \
+  --input-dir workspace/noise_raw/ --output workspace/noise_results.json
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/noise_results.json
+.venv/bin/python tools/transfer_cli.py benchmark-state --workspace workspace/ \
+  --set-phase noise --status done --results workspace/noise_results.json
+```
+
+#### 2d. `workspace/tekton/values.yaml`
+
+`observe.noise_runs: 5` is unchanged. Its meaning shifts from "parallel tasks
+per pipeline submission" to "sequential pipeline submissions." The field name
+and value remain valid; validate.md reads it to control the loop count.
+
+## Data Flow
+
+```
+values.yaml (noise_runs: 5)
+        │
+        ▼
+validate.md loop (i = 0..4)
+  ├─ PipelineRun noise run-0 → deploy → run → teardown → PVC: noise/glia-prefix-heavy/run-0
+  ├─ PipelineRun noise run-1 → deploy → run → teardown → PVC: noise/glia-prefix-heavy/run-1
+  ├─ PipelineRun noise run-2 → deploy → run → teardown → PVC: noise/glia-prefix-heavy/run-2
+  ├─ PipelineRun noise run-3 → deploy → run → teardown → PVC: noise/glia-prefix-heavy/run-3
+  └─ PipelineRun noise run-4 → deploy → run → teardown → PVC: noise/glia-prefix-heavy/run-4
+        │
+        ▼ (single extractor pod after loop)
+workspace/noise_results.json
+        │
+        ▼
+transfer_cli.py benchmark → noise_cv → T_eff
+```
+
+## Files Changed
+
+| File | Change |
+|------|--------|
+| `blis_router/workloads/workload_glia_40qps.yaml` | Delete |
+| `tektonc-data-collection/tektoncsample/sim2real/noise-pipeline.yaml.j2` | Add `runIndex` param; replace foreach loop with per-workload loop; update `resultsDir` |
+| `workspace/tekton/pipelinerun-noise.yaml` | Add `runIndex` param |
+| `prompts/validate.md` | Replace single noise submission with sequential loop; extractor runs once after loop |
+| `workspace/tekton/values.yaml` | Regenerate via Stage 3 Step 8 (auto-removes glia-40qps from workloads) |
+
+## Not Changed
+
+- `baseline-pipeline.yaml.j2`
+- `treatment-pipeline.yaml.j2`
+- `pipelinerun-baseline.yaml`, `pipelinerun-treatment.yaml`
+- `workspace/tekton/values.yaml` — `noise_runs: 5` value
+- Suite A / B / C test harness
+- Stage 3 `generate.md`
+- `transfer_cli.py` (no new subcommands needed)
