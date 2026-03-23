@@ -43,6 +43,7 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 # dict matches the Go struct exactly.
 ROUTING_SNAPSHOT_FIELDS = {
     "ID": "string",              # Struct field — used as map key, NOT a routing signal
+    "Model": "string",           # Struct field — identifies served model, NOT a routing signal
     "QueueDepth": "int",
     "BatchSize": "int",
     "KVUtilization": "float64",
@@ -53,7 +54,7 @@ ROUTING_SNAPSHOT_FIELDS = {
 
 # Fields used as identifiers/keys, not routing signals. These are in
 # ROUTING_SNAPSHOT_FIELDS (for struct completeness) but excluded from signal extraction.
-_IDENTIFIER_FIELDS = {"ID"}
+_IDENTIFIER_FIELDS = {"ID", "Model"}
 
 # Method calls that expand to multiple fields.
 # Verified against: inference-sim EffectiveLoad() = QueueDepth + BatchSize + InFlightRequests
