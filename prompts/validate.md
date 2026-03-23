@@ -196,12 +196,139 @@ This step submits Tekton pipelines against the production cluster for noise, bas
 
 **HALT if exit 1** (cluster context mismatch — operator ran this on a different cluster than previous phases). **HALT if exit 2** (missing `workspace/algorithm_summary.json`).
 
-### 5b. For each non-done phase in order: noise → baseline → treatment
+### 5b. Run noise phase (sequential runs with fresh infra), then baseline and treatment
 
-Execute the procedure below **three times** — for `noise`, then `baseline`, then `treatment` — using this explicit loop (phases with status `done` are skipped automatically):
+#### Noise phase — sequential runs
+
+Each of the `noise_runs` iterations deploys fresh infrastructure, runs the workload
+once, and tears down before the next iteration starts. This ensures each noise sample
+starts with a cold KV cache and is statistically independent.
+
+**Prerequisite:** verify Stage 3 Step 8 was rerun after removing glia-40qps:
 
 ~~~bash
-for phase in noise baseline treatment; do
+grep -q 'glia-40qps' workspace/tekton/values.yaml \
+  && { echo "HALT: values.yaml still contains glia-40qps — re-run Stage 3 Step 8 first"; exit 1; }
+~~~
+
+**Check noise phase status (skip if already done):**
+
+~~~bash
+NOISE_STATUS=$(.venv/bin/python -c \
+  "import json; print(json.load(open('workspace/benchmark_state.json'))['phases']['noise']['status'])" \
+  2>/dev/null || echo "unknown")
+if [ "$NOISE_STATUS" = "done" ]; then
+  echo "Noise phase already done — skipping noise loop."
+else
+~~~
+
+**Compile and apply the noise pipeline once (reused for all runs):**
+
+~~~bash
+.venv/bin/python tools/transfer_cli.py compile-pipeline \
+  --template-dir tektonc-data-collection/tektoncsample/sim2real \
+  --values workspace/tekton/values.yaml --phase noise \
+  --out workspace/tekton/compiled/
+kubectl apply -f workspace/tekton/compiled/noise-pipeline.yaml \
+  || { echo "HALT: kubectl apply pipeline failed for noise"; exit 1; }
+~~~
+
+**Sequential noise run loop:**
+
+~~~bash
+NOISE_RUNS=$(.venv/bin/python -c \
+  "import yaml; v=yaml.safe_load(open('workspace/tekton/values.yaml')); \
+   print(v['observe']['noise_runs'])")
+
+for i in $(seq 0 $((NOISE_RUNS - 1))); do
+  PIPELINERUN_NAME=sim2real-noise-run${i}-$(date +%s)
+  echo "=== Noise run $i of $((NOISE_RUNS - 1)): $PIPELINERUN_NAME ==="
+~~~
+
+**Pre-flight:**
+~~~bash
+  .venv/bin/python tools/transfer_cli.py preflight \
+    --phase noise --values workspace/tekton/values.yaml --namespace $NAMESPACE
+~~~
+**HALT if exit 1.** Note: if the prior run's `finally` teardown is still completing,
+preflight may transiently fail. Wait 30 seconds and retry once before halting.
+
+**Submit:**
+~~~bash
+  .venv/bin/python tools/transfer_cli.py render-pipelinerun \
+    --template workspace/tekton/pipelinerun-noise.yaml \
+    --vars PIPELINERUN_NAME=$PIPELINERUN_NAME NAMESPACE=$NAMESPACE \
+           PHASE=noise RUN_INDEX=$i \
+    --out /tmp/pipelinerun-noise-run${i}.yaml \
+    || { echo "HALT: render-pipelinerun failed for noise run $i"; exit 1; }
+  kubectl apply -f /tmp/pipelinerun-noise-run${i}.yaml \
+    || { echo "HALT: kubectl apply pipelinerun failed for noise run $i"; exit 1; }
+  .venv/bin/python tools/transfer_cli.py benchmark-state --workspace workspace/ \
+    --set-phase noise --status running --pipelinerun $PIPELINERUN_NAME
+~~~
+
+**Wait (4h timeout per run):**
+~~~bash
+  TIMEOUT_SECS=14400; ELAPSED=0
+  while true; do
+    REASON=$(tkn pr describe $PIPELINERUN_NAME \
+      -o jsonpath='{.status.conditions[0].reason}' 2>/dev/null)
+    echo "$REASON" | grep -qE 'Succeeded|Failed|PipelineRunCancelled|CouldntGetTask' && break
+    sleep 30; ELAPSED=$((ELAPSED+30))
+    if [ $ELAPSED -ge $TIMEOUT_SECS ]; then
+      .venv/bin/python tools/transfer_cli.py benchmark-state --workspace workspace/ \
+        --set-phase noise --status failed \
+        --failure-reason "Polling timeout after ${TIMEOUT_SECS}s on run $i"
+      echo "HALT: noise run $i timed out."; exit 1
+    fi
+  done
+~~~
+
+**On Failed:**
+~~~bash
+  REASON=$(tkn pr describe $PIPELINERUN_NAME \
+    -o jsonpath='{.status.conditions[0].reason}' 2>/dev/null)
+  if echo "$REASON" | grep -qE 'Failed|PipelineRunCancelled|CouldntGetTask'; then
+    FAIL_REASON=$(tkn pr describe $PIPELINERUN_NAME \
+      -o jsonpath='{.status.conditions[0].message}' 2>/dev/null || echo "PipelineRun failed")
+    .venv/bin/python tools/transfer_cli.py benchmark-state --workspace workspace/ \
+      --set-phase noise --status failed \
+      --failure-reason "$FAIL_REASON"
+    echo "HALT: noise run $i failed — $FAIL_REASON"; exit 1
+  fi
+
+done  # end noise run loop
+~~~
+
+**After loop — extract all noise runs via single extractor pod:**
+~~~bash
+trap "kubectl delete pod sim2real-extract-noise -n $NAMESPACE --ignore-not-found 2>/dev/null" EXIT ERR
+kubectl delete pod sim2real-extract-noise -n $NAMESPACE --ignore-not-found 2>/dev/null || true
+kubectl run sim2real-extract-noise --image=alpine:3.19 --restart=Never \
+  --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"data-pvc"}}],"containers":[{"name":"e","image":"alpine:3.19","command":["sleep","600"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}' \
+  -n $NAMESPACE
+kubectl wait pod/sim2real-extract-noise --for=condition=Ready --timeout=60s -n $NAMESPACE \
+  || { echo "HALT: extractor pod not ready"; exit 1; }
+kubectl cp $NAMESPACE/sim2real-extract-noise:/data/noise/ workspace/noise_raw/ --retries=3 \
+  || { echo "HALT: kubectl cp failed"; exit 1; }
+.venv/bin/python tools/transfer_cli.py convert-trace \
+  --input-dir workspace/noise_raw/ --output workspace/noise_results.json \
+  || { echo "HALT: convert-trace failed"; exit 1; }
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/noise_results.json \
+  || { echo "HALT: schema validation failed for workspace/noise_results.json — results file is malformed, do not mark phase done"; exit 1; }
+.venv/bin/python tools/transfer_cli.py benchmark-state --workspace workspace/ \
+  --set-phase noise --status done --results workspace/noise_results.json
+
+fi  # end if NOISE_STATUS != done
+~~~
+
+#### Baseline and treatment phases
+
+Execute the procedure below for `baseline`, then `treatment` (phases with status
+`done` are skipped automatically):
+
+~~~bash
+for phase in baseline treatment; do
   STATUS=$(.venv/bin/python -c \
     "import json; print(json.load(open('workspace/benchmark_state.json'))['phases']['$phase']['status'])" \
     2>/dev/null || echo "unknown")
@@ -286,7 +413,7 @@ kubectl cp $NAMESPACE/sim2real-extract-${phase}:/data/${phase}/ workspace/${phas
   || { echo "HALT: schema validation failed for workspace/${phase}_results.json — results file is malformed, do not mark phase done"; exit 1; }
 .venv/bin/python tools/transfer_cli.py benchmark-state --workspace workspace/ \
   --set-phase $phase --status done --results workspace/${phase}_results.json
-done  # end for phase in noise baseline treatment
+done  # end for phase in baseline treatment
 ~~~
 
 ### 5c. Mechanism check
