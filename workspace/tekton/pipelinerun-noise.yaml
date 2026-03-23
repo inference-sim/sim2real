@@ -1,0 +1,27 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: $PIPELINERUN_NAME
+  namespace: $NAMESPACE
+  labels:
+    sim2real-phase: $PHASE
+spec:
+  pipelineRef:
+    name: sim2real-noise
+  taskRunTemplate:
+    serviceAccountName: helm-installer
+  params:
+    - name: experimentId
+      value: $PIPELINERUN_NAME
+    - name: namespace
+      value: $NAMESPACE
+  workspaces:
+    - name: model-cache
+      persistentVolumeClaim:
+        claimName: model-pvc
+    - name: hf-credentials
+      secret:
+        secretName: hf-secret
+    - name: data-storage
+      persistentVolumeClaim:
+        claimName: data-pvc
