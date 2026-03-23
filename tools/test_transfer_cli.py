@@ -781,6 +781,57 @@ class TestValidateSchema:
         finally:
             real.write_text(backup)
 
+    def test_validate_schema_yaml_algorithm_values(self):
+        """validate-schema loads YAML files by extension."""
+        alg = {
+            "stack": {
+                "model": {
+                    "modelName": "Org/Model-7B",
+                    "helmValues": {
+                        "modelArtifacts": {"name": "Org/Model-7B", "uri": "pvc://model-pvc/models/Model-7B"},
+                        "decode": {
+                            "replicas": 4,
+                            "containers": [{"image": "vllm/vllm-openai:v0.11.0"}],
+                        },
+                    },
+                },
+                "gaie": {
+                    "treatment": {
+                        "helmValues": {
+                            "inferenceExtension": {
+                                "pluginsCustomConfig": {"custom-plugins.yaml": "..."},
+                            }
+                        }
+                    }
+                },
+            },
+            "observe": {
+                "image": "ghcr.io/inference-sim/blis:v0.6.13",
+                "workloads": [{"name": "glia-prefix-heavy", "spec": "version: 1\n"}],
+            },
+        }
+        import yaml
+        yaml_file = WORKSPACE / "algorithm_values.yaml"
+        yaml_file.write_text(yaml.dump(alg))
+        try:
+            code, output = run_cli("validate-schema", str(yaml_file))
+            assert code == 0, f"Expected pass: {output}"
+        finally:
+            if yaml_file.exists():
+                yaml_file.unlink()
+
+    def test_validate_schema_yaml_missing_required(self):
+        """validate-schema on YAML reports missing required fields."""
+        import yaml
+        yaml_file = WORKSPACE / "algorithm_values.yaml"
+        yaml_file.write_text(yaml.dump({"stack": {"model": {"modelName": "x"}}}))
+        try:
+            code, output = run_cli("validate-schema", str(yaml_file))
+            assert code == 1, f"Expected violations, got: {output}"
+        finally:
+            if yaml_file.exists():
+                yaml_file.unlink()
+
 
 class TestCompositeSignalConsistency:
     """Cross-validate METHOD_EXPANSIONS against the mapping artifact."""
@@ -2458,6 +2509,358 @@ class TestEndToEndLocal:
         evidence = (ws / "transfer_evidence.md").read_text()
         assert "PASS" in evidence
         assert "blis-routing-v1" in evidence
+
+
+# ---------------------------------------------------------------------------
+# TestMergeValues
+# ---------------------------------------------------------------------------
+
+class TestMergeValues:
+    """Tests for the merge-values subcommand."""
+
+    def _write_yaml(self, path: Path, data: dict) -> None:
+        import yaml
+        path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
+
+    def _load_yaml(self, path: Path) -> dict:
+        import yaml
+        return yaml.safe_load(path.read_text()) or {}
+
+    def _minimal_algorithm_values(self, **overrides) -> dict:
+        """Return a minimal valid algorithm_values dict (all required keys present)."""
+        base = {
+            "stack": {
+                "model": {
+                    "modelName": "Org/Model-7B",
+                    "helmValues": {
+                        "modelArtifacts": {
+                            "name": "Org/Model-7B",
+                            "uri": "pvc://model-pvc/models/Model-7B",
+                        },
+                        "decode": {
+                            "replicas": 2,
+                            "containers": [{"image": "vllm/vllm-openai:v0.11.0"}],
+                        },
+                    },
+                },
+                "gaie": {
+                    "treatment": {
+                        "helmValues": {
+                            "inferenceExtension": {
+                                "pluginsCustomConfig": {
+                                    "custom-plugins.yaml": "treatment config"
+                                }
+                            }
+                        }
+                    }
+                },
+            },
+            "observe": {
+                "image": "ghcr.io/inference-sim/blis:v0.6.13",
+                "workloads": [{"name": "wl-a", "spec": "version: '1'"}],
+            },
+        }
+        return base
+
+    def _minimal_env_defaults(self) -> dict:
+        """Return a minimal valid env_defaults dict."""
+        return {
+            "stack": {
+                "gateway": {
+                    "helmValues": {
+                        "gateway": {
+                            "provider": "istio",
+                            "gatewayClassName": "istio",
+                        }
+                    }
+                }
+            }
+        }
+
+    def test_basic_deep_merge(self, tmp_path):
+        """Deep merge: nested dict keys are merged recursively."""
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        # Use minimal env_defaults (provides required gateway key) and add test key 'a'
+        env = self._minimal_env_defaults()
+        env["a"] = {"x": 1, "y": 2}
+        self._write_yaml(env_file, env)
+        # Algorithm has all required keys plus override for 'a'
+        alg = self._minimal_algorithm_values()
+        alg["a"] = {"y": 9, "z": 3}
+        self._write_yaml(alg_file, alg)
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        assert result["a"] == {"x": 1, "y": 9, "z": 3}, (
+            f"Expected deep-merged a dict, got: {result.get('a')}"
+        )
+
+    def test_list_replacement(self, tmp_path):
+        """List in overlay replaces list in base entirely (not appended)."""
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        env = self._minimal_env_defaults()
+        env["stack"]["model"] = {
+            "helmValues": {
+                "decode": {
+                    "replicas": 1,
+                    "containers": [{"image": "old", "modelCommand": "vllmServe"}],
+                },
+                "modelArtifacts": {"name": "x", "uri": "pvc://x/y"},
+            }
+        }
+        self._write_yaml(env_file, env)
+
+        alg = self._minimal_algorithm_values()
+        # Override containers with a new list (no modelCommand)
+        alg["stack"]["model"]["helmValues"]["decode"]["containers"] = [{"image": "new"}]
+        self._write_yaml(alg_file, alg)
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        containers = result["stack"]["model"]["helmValues"]["decode"]["containers"]
+        assert containers == [{"image": "new"}], (
+            f"Expected list replacement with [{{image: new}}], got: {containers}"
+        )
+        # modelCommand should be gone — list was replaced, not merged
+        assert "modelCommand" not in containers[0], (
+            "modelCommand should be absent after list replacement"
+        )
+
+    def test_gaie_shared_flattening(self, tmp_path):
+        """gaie.shared.helmValues is merged as base into both phases, then shared is removed."""
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        env = {
+            "stack": {
+                "gateway": {
+                    "helmValues": {
+                        "gateway": {"provider": "istio", "gatewayClassName": "istio"}
+                    }
+                },
+                "gaie": {
+                    "shared": {
+                        "helmValues": {
+                            "provider": {"name": "istio"},
+                            "flags": [{"name": "v", "value": 1}],
+                        }
+                    },
+                    "baseline": {
+                        "helmValues": {
+                            "inferenceExtension": {
+                                "pluginsCustomConfig": {
+                                    "custom-plugins.yaml": "baseline config"
+                                }
+                            }
+                        }
+                    },
+                },
+            }
+        }
+        self._write_yaml(env_file, env)
+
+        alg = self._minimal_algorithm_values()
+        # treatment helmValues from algorithm — should also get shared merged in
+        alg["stack"]["gaie"]["treatment"]["helmValues"]["inferenceExtension"] = {
+            "pluginsCustomConfig": {"custom-plugins.yaml": "treatment config"}
+        }
+        self._write_yaml(alg_file, alg)
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        gaie = result["stack"]["gaie"]
+
+        # shared must be absent
+        assert "shared" not in gaie, f"gaie.shared should be removed from output, got keys: {list(gaie.keys())}"
+
+        # baseline should have shared values merged in
+        bl_hv = gaie["baseline"]["helmValues"]
+        assert bl_hv.get("provider") == {"name": "istio"}, (
+            f"baseline.helmValues.provider should be from shared, got: {bl_hv.get('provider')}"
+        )
+        assert bl_hv.get("flags") == [{"name": "v", "value": 1}], (
+            f"baseline.helmValues.flags should be from shared, got: {bl_hv.get('flags')}"
+        )
+        # baseline pluginsCustomConfig should be preserved (from env base, not overridden)
+        bl_pcc = bl_hv["inferenceExtension"]["pluginsCustomConfig"]
+        assert bl_pcc.get("custom-plugins.yaml") == "baseline config", (
+            f"baseline pluginsCustomConfig should be preserved, got: {bl_pcc}"
+        )
+
+        # treatment should have shared values merged in
+        tr_hv = gaie["treatment"]["helmValues"]
+        assert tr_hv.get("provider") == {"name": "istio"}, (
+            f"treatment.helmValues.provider should be from shared, got: {tr_hv.get('provider')}"
+        )
+        # treatment pluginsCustomConfig should come from algorithm overlay
+        tr_pcc = tr_hv["inferenceExtension"]["pluginsCustomConfig"]
+        assert tr_pcc.get("custom-plugins.yaml") == "treatment config", (
+            f"treatment pluginsCustomConfig should be from algorithm, got: {tr_pcc}"
+        )
+
+    def test_gaie_shared_removed_from_output(self, tmp_path):
+        """gaie.shared key is absent in output even when present in env_defaults."""
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        env = self._minimal_env_defaults()
+        env["stack"]["gaie"] = {
+            "shared": {"helmValues": {"provider": {"name": "istio"}}},
+        }
+        self._write_yaml(env_file, env)
+        self._write_yaml(alg_file, self._minimal_algorithm_values())
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        assert "shared" not in result["stack"]["gaie"], (
+            "gaie.shared must not appear in output"
+        )
+
+    def test_missing_required_model_name_exits_1(self, tmp_path):
+        """Missing stack.model.modelName in merged output → exit 1 (validation failure)."""
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        self._write_yaml(env_file, self._minimal_env_defaults())
+
+        # algorithm_values without modelName
+        alg = self._minimal_algorithm_values()
+        del alg["stack"]["model"]["modelName"]
+        self._write_yaml(alg_file, alg)
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 1, f"Expected exit 1 (validation), got {rc}. stderr: {err}"
+        assert "stack.model.modelName" in err, (
+            f"stderr should mention missing key, got: {err}"
+        )
+
+    def test_missing_env_file_exits_2(self, tmp_path):
+        """Nonexistent --env path → exit 2 (infrastructure error)."""
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+        self._write_yaml(alg_file, self._minimal_algorithm_values())
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(tmp_path / "nonexistent_env.yaml"),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 2, f"Expected exit 2 (infrastructure), got {rc}. stderr: {err}"
+
+    def test_missing_algorithm_file_exits_2(self, tmp_path):
+        """Nonexistent --algorithm path → exit 2 (infrastructure error)."""
+        env_file = tmp_path / "env.yaml"
+        out_file = tmp_path / "out.yaml"
+        self._write_yaml(env_file, self._minimal_env_defaults())
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(tmp_path / "nonexistent_alg.yaml"),
+            "--out", str(out_file),
+        )
+        assert rc == 2, f"Expected exit 2 (infrastructure), got {rc}. stderr: {err}"
+
+    def test_round_trip_matches_current_values_yaml(self, tmp_path):
+        """Round-trip: env_defaults + algorithm_values → output has same top-level structure as values.yaml."""
+        import yaml
+
+        env_path = REPO_ROOT / "config" / "env_defaults.yaml"
+        alg_path = REPO_ROOT / "workspace" / "tekton" / "algorithm_values.yaml"
+        current_values_path = REPO_ROOT / "workspace" / "tekton" / "values.yaml"
+
+        if not env_path.exists() or not current_values_path.exists():
+            pytest.skip(
+                f"Round-trip test skipped: missing {'config/env_defaults.yaml' if not env_path.exists() else 'workspace/tekton/values.yaml'}"
+            )
+
+        # If algorithm_values.yaml doesn't exist, derive it from values.yaml using schema-known keys
+        if not alg_path.exists():
+            current = yaml.safe_load(current_values_path.read_text()) or {}
+            # Extract only BLIS-derived keys (model, gaie.treatment, observe)
+            alg_data = {
+                "stack": {
+                    "model": current.get("stack", {}).get("model", {}),
+                    "gaie": {
+                        "treatment": current.get("stack", {}).get("gaie", {}).get("treatment", {})
+                    },
+                },
+                "observe": current.get("observe", {}),
+            }
+            derived_alg_path = tmp_path / "algorithm_values.yaml"
+            derived_alg_path.write_text(
+                yaml.dump(alg_data, default_flow_style=False, sort_keys=False)
+            )
+            alg_path = derived_alg_path
+
+        out_file = tmp_path / "values.yaml"
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_path),
+            "--algorithm", str(alg_path),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+
+        result = self._load_yaml(out_file)
+
+        # Verify top-level sections are present
+        assert "stack" in result, "output missing 'stack' key"
+        assert "observe" in result, "output missing 'observe' key"
+        assert "model" in result["stack"], "output missing 'stack.model'"
+        assert "gaie" in result["stack"], "output missing 'stack.gaie'"
+        assert "baseline" in result["stack"]["gaie"], "output missing 'stack.gaie.baseline'"
+        assert "treatment" in result["stack"]["gaie"], "output missing 'stack.gaie.treatment'"
+
+        # gaie.shared must be absent in output
+        assert "shared" not in result["stack"]["gaie"], (
+            "gaie.shared must be removed from output"
+        )
+
+        # observe.workloads must be a non-empty list
+        workloads = result.get("observe", {}).get("workloads")
+        assert isinstance(workloads, list) and len(workloads) > 0, (
+            f"observe.workloads must be a non-empty list, got: {workloads}"
+        )
 
 
 # ---------------------------------------------------------------------------

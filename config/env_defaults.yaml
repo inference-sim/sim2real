@@ -1,0 +1,89 @@
+# config/env_defaults.yaml — infrastructure defaults for sim2real benchmarking
+# Edit this file to configure your environment. Algorithm-specific values are
+# generated separately (workspace/tekton/algorithm_values.yaml) by Stage 3 Step 8.
+#
+# Input model:
+#   - This file is the default source of truth for infrastructure choices.
+#   - When running Stage 3 (generate.md), you can override any value at prompt
+#     time (e.g., "use kgateway instead of istio"). The agent will update this
+#     file before merging, so the override persists for future runs.
+
+stack:
+  gateway:
+    helmValues:
+      gateway:
+        provider: istio          # User choice: istio or kgateway; must also update gaie.shared.helmValues.provider.name
+        gatewayClassName: istio  # Must match provider; must also update gaie.shared.helmValues.provider.name
+        gatewayParameters:
+          resources:
+            limits:
+              cpu: "16"
+              memory: 16Gi
+            requests:
+              cpu: "4"
+              memory: 4Gi
+          istio:
+            accessLogging: false
+
+  model:
+    helmValues:
+      modelArtifacts:
+        authSecretName: "hf-secret"
+      routing:
+        servicePort: 8000
+      prefill:
+        create: false
+      decode:
+        acceleratorTypes:
+          labelKey: "nvidia.com/gpu.product"
+        containers:
+          - modelCommand: vllmServe  # Only supported value
+
+  gaie:
+    # gaie.shared is merged into both baseline and treatment by merge-values.
+    # The final values.yaml has no gaie.shared key — it is flattened away.
+    shared:
+      helmValues:
+        inferenceExtension:
+          pluginsConfigFile: "custom-plugins.yaml"
+          flags:
+            - name: v
+              value: 1
+        provider:
+          name: istio           # Must match stack.gateway.helmValues.gateway.provider
+        istio:
+          destinationRule:
+            trafficPolicy:
+              connectionPool:
+                http:
+                  http1MaxPendingRequests: 256000
+                  maxRequestsPerConnection: 256000
+                  http2MaxRequests: 256000
+                  idleTimeout: "900s"
+                tcp:
+                  maxConnections: 256000
+                  maxConnectionDuration: "1800s"
+                  connectTimeout: "900s"
+
+    baseline:
+      helmValues:
+        inferenceExtension:
+          pluginsCustomConfig:
+            custom-plugins.yaml: |
+              apiVersion: inference.networking.x-k8s.io/v1alpha1
+              kind: EndpointPickerConfig
+              plugins:
+              - type: load-aware-scorer
+              - type: decode-filter
+              - type: max-score-picker
+              - type: single-profile-handler
+              schedulingProfiles:
+              - name: default
+                plugins:
+                - pluginRef: decode-filter
+                - pluginRef: max-score-picker
+                - pluginRef: load-aware-scorer
+                  weight: 1
+
+observe:
+  noise_runs: 5

@@ -13,6 +13,7 @@ Commands:
     render-pipelinerun       Substitute variables in a PipelineRun stub
     preflight                Run pre-flight cluster checks before submitting a pipeline phase
     generate-evidence        Generate workspace/transfer_evidence.md from workspace artifacts
+    merge-values             Merge env_defaults.yaml + algorithm_values.yaml → values.yaml
 
 Exit codes: 0 = success, 1 = validation failure, 2 = infrastructure error
 All commands output JSON to stdout.
@@ -43,6 +44,7 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 # dict matches the Go struct exactly.
 ROUTING_SNAPSHOT_FIELDS = {
     "ID": "string",              # Struct field — used as map key, NOT a routing signal
+    "Model": "string",           # Struct field — identifies served model, NOT a routing signal
     "QueueDepth": "int",
     "BatchSize": "int",
     "KVUtilization": "float64",
@@ -53,7 +55,7 @@ ROUTING_SNAPSHOT_FIELDS = {
 
 # Fields used as identifiers/keys, not routing signals. These are in
 # ROUTING_SNAPSHOT_FIELDS (for struct completeness) but excluded from signal extraction.
-_IDENTIFIER_FIELDS = {"ID"}
+_IDENTIFIER_FIELDS = {"ID", "Model"}
 
 # Method calls that expand to multiple fields.
 # Verified against: inference-sim EffectiveLoad() = QueueDepth + BatchSize + InFlightRequests
@@ -770,7 +772,18 @@ def cmd_validate_schema(args: argparse.Namespace) -> int:
                         output_type="schema_validation", violations=[])
 
     try:
-        data = json.loads(artifact_path.read_text())
+        import yaml
+        raw = artifact_path.read_text()
+        if artifact_path.suffix in (".yaml", ".yml"):
+            data = yaml.safe_load(raw)
+            if not isinstance(data, dict):
+                return _output("error", 2, errors=[f"YAML file did not parse to a mapping: {artifact_path}"],
+                                output_type="schema_validation", violations=[])
+        else:
+            data = json.loads(raw)
+    except yaml.YAMLError as e:
+        return _output("error", 2, errors=[f"Failed to load YAML artifact: {e}"],
+                        output_type="schema_validation", violations=[])
     except (json.JSONDecodeError, OSError) as e:
         return _output("error", 2, errors=[f"Failed to load artifact: {e}"],
                         output_type="schema_validation",
@@ -1726,6 +1739,126 @@ def cmd_benchmark_new(args: "argparse.Namespace") -> int:
     return 2 if verdict == "ERROR" else (1 if verdict == "FAIL" else 0)
 
 
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    """Deep-merge overlay onto base. Dict keys merged recursively; non-dict values replaced.
+
+    Lists are replaced entirely (not appended). Returns a new dict (deep copy).
+    """
+    import copy
+    result = copy.deepcopy(base)
+    for key, oval in overlay.items():
+        if key in result and isinstance(result[key], dict) and isinstance(oval, dict):
+            result[key] = _deep_merge(result[key], oval)
+        else:
+            result[key] = copy.deepcopy(oval)
+    return result
+
+
+def _flatten_gaie_shared(merged: dict) -> dict:
+    """Flatten gaie.shared.helmValues into each phase's helmValues.
+
+    For each phase in ['baseline', 'treatment'] that exists in merged:
+      - deep-merge gaie.shared.helmValues (base) with gaie.<phase>.helmValues (overlay)
+        → final gaie.<phase>.helmValues
+    Then delete gaie.shared from the result.
+
+    Returns the modified merged dict (modified in place and also returned).
+    """
+    gaie = merged.get("stack", {}).get("gaie", {})
+    shared = gaie.get("shared", {})
+    shared_helm = shared.get("helmValues", {})
+
+    for phase in ["baseline", "treatment"]:
+        if phase in gaie:
+            phase_helm = gaie[phase].get("helmValues", {})
+            gaie[phase]["helmValues"] = _deep_merge(shared_helm, phase_helm)
+
+    # Remove gaie.shared from output
+    gaie.pop("shared", None)
+
+    return merged
+
+
+def cmd_merge_values(args: "argparse.Namespace") -> int:
+    """Merge env_defaults.yaml and algorithm_values.yaml into values.yaml.
+
+    Exit 0 = success, 1 = validation failure, 2 = infrastructure error.
+    """
+    import yaml
+
+    env_path = Path(args.env)
+    alg_path = Path(args.algorithm)
+    out_path = Path(args.out)
+
+    # Load both YAML files (exit 2 if missing or parse failure)
+    for p, label in [(env_path, "--env"), (alg_path, "--algorithm")]:
+        if not p.exists():
+            print(f"ERROR: {label} file '{p}' not found.", file=sys.stderr)
+            return 2
+
+    try:
+        env_data = yaml.safe_load(env_path.read_text()) or {}
+    except yaml.YAMLError as e:
+        print(f"ERROR: failed to parse --env file '{env_path}': {e}", file=sys.stderr)
+        return 2
+
+    try:
+        alg_data = yaml.safe_load(alg_path.read_text()) or {}
+    except yaml.YAMLError as e:
+        print(f"ERROR: failed to parse --algorithm file '{alg_path}': {e}", file=sys.stderr)
+        return 2
+
+    # Deep-merge: algorithm_values overlays env_defaults
+    merged = _deep_merge(env_data, alg_data)
+
+    # Flatten gaie.shared into each phase, then remove gaie.shared
+    merged = _flatten_gaie_shared(merged)
+
+    # Validate required keys in merged output
+    def _get_nested(d: dict, *keys):
+        for k in keys:
+            if not isinstance(d, dict):
+                return None
+            d = d.get(k)
+        return d
+
+    required_checks = [
+        (["stack", "gateway", "helmValues", "gateway", "provider"],
+         "stack.gateway.helmValues.gateway.provider"),
+        (["stack", "model", "modelName"],
+         "stack.model.modelName"),
+        (["observe", "workloads"],
+         "observe.workloads"),
+        (["stack", "gaie", "treatment", "helmValues", "inferenceExtension", "pluginsCustomConfig"],
+         "stack.gaie.treatment.helmValues.inferenceExtension.pluginsCustomConfig"),
+    ]
+
+    missing = []
+    for key_path, label in required_checks:
+        val = _get_nested(merged, *key_path)
+        if val is None:
+            missing.append(label)
+        elif label == "observe.workloads" and (not isinstance(val, list) or len(val) == 0):
+            missing.append(f"{label} (must be a non-empty list)")
+
+    if missing:
+        print("ERROR: merged output is missing required keys:", file=sys.stderr)
+        for m in missing:
+            print(f"  - {m}", file=sys.stderr)
+        return 1
+
+    # Write output
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        out_path.write_text(yaml.dump(merged, default_flow_style=False, sort_keys=False))
+    except OSError as e:
+        print(f"ERROR: cannot write output file '{out_path}': {e}", file=sys.stderr)
+        return 2
+
+    _output("ok", 0, out=str(out_path))
+    return 0
+
+
 def cmd_generate_evidence(args: "argparse.Namespace") -> int:
     import json
     from datetime import date
@@ -2074,6 +2207,16 @@ def main():
     p_acl.add_argument("--calibration-log", default="docs/transfer/calibration_log.md",
                        help="Path to calibration log")
     p_acl.set_defaults(func=cmd_append_calibration_log)
+
+    p_mv = subparsers.add_parser("merge-values",
+        help="Merge env_defaults.yaml and algorithm_values.yaml into values.yaml")
+    p_mv.add_argument("--env", required=True,
+                      help="Path to infrastructure defaults YAML (e.g. config/env_defaults.yaml)")
+    p_mv.add_argument("--algorithm", required=True,
+                      help="Path to algorithm-specific values YAML (e.g. workspace/tekton/algorithm_values.yaml)")
+    p_mv.add_argument("--out", required=True,
+                      help="Output path for merged values.yaml")
+    p_mv.set_defaults(func=cmd_merge_values)
 
     args = parser.parse_args()
     exit_code = args.func(args)
