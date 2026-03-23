@@ -213,11 +213,144 @@ Record `$BLIS_IMAGE_TAG` for use in `observe.image` below.
 Using the translation rules document (`docs/transfer/blis_to_llmd_mapping.md` and
 `blis_router/llm_config.yaml` + `blis_router/hardware_config.json`), generate
 `workspace/tekton/values.yaml` following the schema in the design spec. Key required fields:
-- `stack.model.helmValues` — from `blis_router/llm_config.yaml` via translation rules
-- `stack.scorer.baseline.configContent` — from `docs/transfer/blis_to_llmd_mapping.md` baseline scorer config
-- `stack.scorer.treatment.configContent` — the generated plugin's scorer config (from Stage 3 scorer output)
+
+- `stack.model.helmValues` — must match the `llm-d-modelservice` Helm chart schema.
+  Use `tektonc-data-collection/tektoncsample/blis-inference-perf/values.yaml`
+  (`stack.model.helmValues`) as the canonical reference structure. Do NOT use flat
+  top-level keys (`modelName`, `hfRepo`, `image`, `tensorParallelSize`,
+  `gpuMemoryUtilization`, `replicaCount`, `accelerator`, etc.) — the chart's
+  `additionalProperties: false` schema rejects them at deploy time.
+
+  Key translation rules from `blis_router/llm_config.yaml`:
+  - `modelName` (top-level key, required by templates via `{{ stack.model.helmValues.modelName }}`):
+    model HF repo ID (e.g. `Qwen/Qwen2.5-7B-Instruct`)
+  - `modelArtifacts.name`: same model ID
+  - `modelArtifacts.uri`: `pvc://model-pvc/models/<sanitized-model-name>`
+  - `modelArtifacts.authSecretName`: `"hf-secret"`
+  - `decode.replicas`: `cluster.num_instances`
+  - `decode.parallelism.tensor`: `serving.tensor_parallel_size`
+  - `decode.containers[0].image`: `vllm/vllm-openai:<serving.vllm_version>`
+  - `decode.containers[0].extraConfig.vllm.gpuMemoryUtilization`: `serving.gpu_memory_utilization`
+  - `decode.containers[0].extraConfig.vllm.maxNumSeqs`: `vllm_config.max_num_running_reqs`
+  - `decode.containers[0].extraConfig.vllm.maxNumBatchedTokens`: `vllm_config.max_num_scheduled_tokens`
+  - `decode.acceleratorTypes.labelKey`: `"nvidia.com/gpu.product"`
+  - `decode.acceleratorTypes.labelValues`: map `hardware.gpu_type` to k8s label
+    (e.g. `H100-80GB` → `["NVIDIA-H100-80GB-HBM3"]`)
+  - `prefill.create: false`
+  - `routing.servicePort: 8000`
+
+- `stack.gateway.helmValues.gateway` — helm values for the `llm-d-infra/llm-d-infra` gateway chart.
+  Use the llm-d standard istio configuration as defaults:
+  ```yaml
+  gateway:
+    helmValues:
+      gateway:
+        # Source: https://github.com/llm-d/llm-d/blob/main/guides/prereq/gateway-provider/common-configurations/istio.yaml
+        provider: istio
+        gatewayClassName: istio
+        gatewayParameters:
+          resources:
+            limits:
+              cpu: "16"
+              memory: 16Gi
+            requests:
+              cpu: "4"
+              memory: 4Gi
+          istio:
+            accessLogging: false  # default false for production
+        # kgateway alternative (deprecated — migration only):
+        # provider: kgateway
+        # gatewayClassName: agentgateway
+  ```
+  `gatewayClassName` determines the service name suffix in the `deploy-gateway` task:
+  `istio` → service name `{release}-inference-gateway-istio`;
+  `agentgateway`/`kgateway` → `{release}-inference-gateway`.
+
+- `stack.gaie.baseline.helmValues` and `stack.gaie.treatment.helmValues` — complete helm
+  values for `oci://registry.k8s.io/gateway-api-inference-extension/charts/inferencepool`.
+  These are passed directly to the `deploy-gaie` task via `{{ stack.gaie.<phase>.helmValues | tojson }}`.
+  The scorer `EndpointPickerConfig` goes under `inferenceExtension.pluginsCustomConfig`
+  (a filename-keyed map). Common connection pool defaults from the llm-d standard config
+  are duplicated in each phase because the scorer config differs per phase.
+  ```yaml
+  gaie:
+    baseline:
+      helmValues:
+        inferenceExtension:
+          pluginsConfigFile: "custom-plugins.yaml"
+          pluginsCustomConfig:
+            custom-plugins.yaml: |
+              apiVersion: inference.networking.x-k8s.io/v1alpha1
+              kind: EndpointPickerConfig
+              plugins:
+              - type: load-aware-scorer
+              <...full baseline EndpointPickerConfig from docs/transfer/blis_to_llmd_mapping.md...>
+          flags:
+            - name: v
+              value: 1
+        provider:
+          name: istio  # match stack.gateway.helmValues.gateway.provider
+        istio:
+          # Source: https://github.com/llm-d/llm-d/blob/main/guides/prereq/gateway-provider/common-configurations/istio.yaml
+          destinationRule:
+            trafficPolicy:
+              connectionPool:
+                http:
+                  http1MaxPendingRequests: 256000
+                  maxRequestsPerConnection: 256000
+                  http2MaxRequests: 256000
+                  idleTimeout: "900s"
+                tcp:
+                  maxConnections: 256000
+                  maxConnectionDuration: "1800s"
+                  connectTimeout: "900s"
+    treatment:
+      helmValues:
+        inferenceExtension:
+          pluginsConfigFile: "custom-plugins.yaml"
+          pluginsCustomConfig:
+            custom-plugins.yaml: |
+              apiVersion: inference.networking.x-k8s.io/v1alpha1
+              kind: EndpointPickerConfig
+              plugins:
+              - type: <generated-scorer-type>
+              <...full treatment EndpointPickerConfig from Stage 3 scorer generation...>
+          flags:
+            - name: v
+              value: 1
+        provider:
+          name: istio
+        istio:
+          destinationRule:
+            trafficPolicy:
+              connectionPool:
+                http:
+                  http1MaxPendingRequests: 256000
+                  maxRequestsPerConnection: 256000
+                  http2MaxRequests: 256000
+                  idleTimeout: "900s"
+                tcp:
+                  maxConnections: 256000
+                  maxConnectionDuration: "1800s"
+                  connectTimeout: "900s"
+  ```
+  **Encoding note:** `pluginsCustomConfig` values are YAML block scalars (`|`) — no `\n`
+  escaping required. The pipeline templates use `{{ stack.gaie.<phase>.helmValues | tojson }}`
+  which serializes the full nested structure to JSON, correctly preserving multiline values.
+
 - `observe.image` — `"ghcr.io/inference-sim/blis:$BLIS_IMAGE_TAG"` (resolved above)
-- `observe.workloads` — embed full content of `blis_router/workloads/workload_*.yaml` files
+
+- `observe.workloads` — one entry per `blis_router/workloads/workload_*.yaml` file.
+  Each entry **must** use the field name `spec:` (not `content:` or any other name) —
+  the pipeline templates access `workload.spec` directly:
+  ```yaml
+  workloads:
+    - name: <workload-name>
+      source: blis_router/workloads/workload_<name>.yaml
+      spec: |
+        <full file contents verbatim>
+  ```
+
 - `observe.noise_runs: 5`
 
 **Validate generated values.yaml required keys:**
@@ -233,6 +366,16 @@ assert '<TAG>' not in v['observe']['image'], 'unresolved <TAG> in observe.image'
 assert v['observe'].get('noise_runs'), 'missing observe.noise_runs'
 wl = v['observe'].get('workloads', [])
 assert len(wl) > 0, 'observe.workloads must be non-empty (no workload files found in blis_router/workloads/)'
+# gateway defaults
+gw = v['stack'].get('gateway', {}).get('helmValues', {}).get('gateway', {})
+assert gw.get('provider'), 'missing stack.gateway.helmValues.gateway.provider'
+assert gw.get('gatewayClassName'), 'missing stack.gateway.helmValues.gateway.gatewayClassName'
+# gaie helmValues with pluginsCustomConfig
+for phase in ('baseline', 'treatment'):
+    hv = v['stack'].get('gaie', {}).get(phase, {}).get('helmValues', {})
+    assert hv, f'missing stack.gaie.{phase}.helmValues'
+    pcc = hv.get('inferenceExtension', {}).get('pluginsCustomConfig', {})
+    assert pcc, f'missing stack.gaie.{phase}.helmValues.inferenceExtension.pluginsCustomConfig'
 print('OK')
 "
 ```
@@ -250,6 +393,8 @@ metadata:
 spec:
   pipelineRef:
     name: sim2real-<phase>
+  taskRunTemplate:
+    serviceAccountName: helm-installer   # required: deploy-model/delete-model tasks need Helm RBAC
   params:
     - name: experimentId
       value: $PIPELINERUN_NAME

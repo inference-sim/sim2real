@@ -20,6 +20,7 @@ inference-sim to production llm-d-inference-scheduler scorer plugins.
 - `inference-sim/` — Discrete-event LLM inference simulator (source of evolved algorithms)
 - `llm-d-inference-scheduler/` — Production scheduler with scorer plugin system (target)
 - `llm-d-benchmark/` — Benchmark harness for cluster-level validation (target)
+- `tektonc-data-collection/` — Tekton-based cluster data collection pipeline (used by `compile-pipeline` subcommand)
 
 ## Transfer Pipeline
 
@@ -107,6 +108,3 @@ Downstream stages MUST use the exit code (not file existence) as the success sig
 | PR5 | Validation pipeline (Stage 5) | Complete |
 | PR6 | Stage 6 + self-verification + calibration | Complete |
 
-## Cross-PR Notes
-
-When implementing PR3, read `docs/transfer/README.md` § Cross-PR Contracts first.

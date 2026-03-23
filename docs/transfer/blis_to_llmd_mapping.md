@@ -1,8 +1,8 @@
 # BLIS-to-llm-d Signal Mapping Artifact
 
 **Version:** 1.0
-**Target submodule:** llm-d-inference-scheduler (VERIFIED — Scorer Interface Reference section verified against submodule at commit b9a4a82, PR2 Task 1. Signal Mapping Table field names VERIFIED in PR3/PR5 against `fwkdl.Metrics` at commit `b9a4a82`.)
-**Pinned commit hash:** b9a4a82e0d9b83ad362e37aa3682672f8c45f331
+**Target submodule:** llm-d-inference-scheduler (VERIFIED — Scorer Interface Reference section verified against submodule at commit b9a4a82, PR2 Task 1. Signal Mapping Table field names VERIFIED in PR3/PR5 against `fwkdl.Metrics` at commit `b9a4a82`. Submodule bumped to 4cd7046 in PR5; logging import path updated; Scorer interface and fwkdl.Metrics fields unchanged.)
+**Pinned commit hash:** 4cd7046e2cf9121be6cdc2fc0815dbeeba721c9f
 
 ## Signal Mapping Table
 
@@ -25,8 +25,8 @@
 
 ## Scorer Interface Reference
 
-> **Verified against** llm-d-inference-scheduler at commit `b9a4a82` (2026-03-17) — signatures confirmed indirectly via LoadAware's `var _ scheduling.Scorer = &LoadAware{}` type assertion and matching method signatures.
-> **Interface source:** The `scheduling.Scorer` interface is defined in the external dependency `sigs.k8s.io/gateway-api-inference-extension v0.0.0-20260128235548-fd30cb97714a`, not in the llm-d-inference-scheduler repository itself. Verification reads LoadAware's implementation of the interface as the ground truth.
+> **Verified against** llm-d-inference-scheduler at commit `b9a4a82` (2026-03-17) — signatures confirmed indirectly via LoadAware's `var _ scheduling.Scorer = &LoadAware{}` type assertion and matching method signatures. Bumped to `4cd7046` (2026-03-20): interface unchanged, logging package path changed (see import note below).
+> **Interface source:** The `scheduling.Scorer` interface is defined in the external dependency `sigs.k8s.io/gateway-api-inference-extension v0.0.0-20260316135939-f0ca6aef5114` (was `v0.0.0-20260128235548-fd30cb97714a`), not in the llm-d-inference-scheduler repository itself. Verification reads LoadAware's implementation of the interface as the ground truth.
 
 Target system: `llm-d-inference-scheduler` (gateway-api-inference-extension framework)
 
@@ -61,7 +61,7 @@ plugin.Register(scorer.LoadAwareType, scorer.LoadAwareFactory)
 - `endpoint.GetMetrics().WaitingQueueSize` — **VERIFIED** (load_aware.go:87)
 - `endpoint.GetMetrics().RunningRequestsSize` — **VERIFIED** (CORRECTED in PR5: previously documented as RunningQueueSize, which does not exist; RunningRequestsSize is the actual field in fwkdl.Metrics)
 - ~~`endpoint.GetMetrics().RunningRequestCount`~~ — **DOES NOT EXIST** (CORRECTED in PR5: previously documented as RunningRequestCount; RunningRequestsSize is the actual field; both BatchSize and InFlightRequests map to RunningRequestsSize)
-- `endpoint.GetMetrics().KVCacheUsagePercent` — **VERIFIED** (fwkdl.Metrics struct field at `sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/datalayer/metrics.go:33`, confirmed present at submodule pin b9a4a82)
+- `endpoint.GetMetrics().KVCacheUsagePercent` — **VERIFIED** (fwkdl.Metrics struct field at `sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/datalayer/metrics.go:33`, confirmed present at submodule pin b9a4a82; re-confirmed at 4cd7046)
 
 **Config:** YAML-based with scorer name, type, weight, and optional parameters (JSON blob parsed by factory).
 

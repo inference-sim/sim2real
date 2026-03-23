@@ -10,6 +10,12 @@
 
 **Spec:** `docs/plans/2026-03-17-tektonc-cluster-benchmarking-design.md`
 
+## Deviations from CLAUDE.md Constraints
+
+| # | Constraint Broken | Scope | Rationale |
+|---|---|---|---|
+| D-1 | `stdlib-only` Python | `compile-pipeline` and `preflight` subcommands only | Jinja2 and PyYAML are required to compile Tekton YAML templates. No stdlib-only alternative for Jinja2 template rendering exists. Impact is isolated to the two new subcommands; all other `transfer_cli.py` subcommands remain stdlib-only. Install via `pip install -r requirements.txt`. |
+
 ---
 
 ## File Map
@@ -43,6 +49,7 @@
 ### Already exists — verify only, do not recreate
 - `tools/schemas/benchmark_state.schema.json`
 - `tools/schemas/stage3_output.schema.json` (already has `tekton_artifacts` property)
+- `tektonc-data-collection/tektonc/tektonc.py` (Jinja2 template compiler; requires submodule init)
 
 ---
 
@@ -77,11 +84,20 @@ Expected: `OK`
 
 ```bash
 python -c "
-import json
+import json, pathlib
 s = json.load(open('tools/schemas/benchmark_state.schema.json'))
 assert 'phases' in s['properties']
 s2 = json.load(open('tools/schemas/stage3_output.schema.json'))
 assert 'tekton_artifacts' in s2['properties']
+# Verify sub-schema permits pipeline_stubs as an array (plan depends on this structure)
+ta = s2['properties']['tekton_artifacts']
+ta_props = ta.get('properties', {})
+assert 'pipeline_stubs' in ta_props, 'stage3_output.schema.json missing pipeline_stubs in tekton_artifacts'
+assert ta_props['pipeline_stubs'].get('type') == 'array', 'pipeline_stubs must be type array'
+assert 'values_yaml' in ta_props, 'stage3_output.schema.json missing values_yaml in tekton_artifacts'
+# Verify tektonc.py exists (required by compile-pipeline; fails early if submodule not initialized)
+tektonc = pathlib.Path('tektonc-data-collection/tektonc/tektonc.py')
+assert tektonc.exists(), f'tektonc not found at {tektonc} — run: git submodule update --init tektonc-data-collection'
 print('OK')
 "
 ```
@@ -210,7 +226,7 @@ Expected: `OK`
     {"workload_field": "in_flight_range", "signals": ["InFlightRequests"], "description": "In-flight range exercises InFlightRequests signal"},
     {"workload_field": "in_flight_requests", "signals": ["InFlightRequests"], "description": "In-flight requests exercises InFlightRequests signal"},
     {"workload_field": "cache_hit_rate", "signals": ["CacheHitRate"], "description": "Cache hit rate exercises CacheHitRate signal"},
-    {"workload_field": "prefix_group", "signals": ["CacheHitRate"], "description": "Prefix groups drive cache affinity, exercising CacheHitRate"}
+    {"workload_field": "prefix_group", "signals": ["KVUtilization"], "description": "Prefix groups drive KV block reuse (shared prefix caching occupies KV cache), exercising KVUtilization"}
   ]
 }
 ```
@@ -225,6 +241,38 @@ for p in pathlib.Path('tools/schemas').glob('*.json'):
 "
 ```
 Expected: `OK:` for every file.
+
+- [ ] **Step 1.9b: Verify validate-schema command supports new result file types**
+
+`validate-schema` uses the artifact stem to locate the schema (e.g., `noise_results.json` → `tools/schemas/noise_results.schema.json`). Confirm the naming convention resolves correctly for all three new result types:
+
+```bash
+# Create minimal valid fixtures and confirm validate-schema returns 0
+python -c "
+import json, pathlib
+# noise_results: requires workloads array with name+runs+metrics
+pathlib.Path('/tmp/noise_results.json').write_text(json.dumps({
+    'workloads': [{'name': 'glia-40qps', 'runs': [{'metrics': {
+        'ttft_p50': 1.0, 'ttft_p99': 2.0, 'tpot_p50': 0.5, 'tpot_p99': 1.0}}]}]
+}))
+# baseline_results: requires workloads array with name+metrics
+pathlib.Path('/tmp/baseline_results.json').write_text(json.dumps({
+    'workloads': [{'name': 'glia-40qps', 'metrics': {
+        'ttft_p50': 1.0, 'ttft_p99': 2.0, 'tpot_p50': 0.5, 'tpot_p99': 1.0}}]
+}))
+# treatment_results: same schema as baseline
+pathlib.Path('/tmp/treatment_results.json').write_text(
+    pathlib.Path('/tmp/baseline_results.json').read_text())
+"
+for f in noise_results baseline_results treatment_results; do
+  cp /tmp/${f}.json workspace/${f}.json
+  .venv/bin/python tools/transfer_cli.py validate-schema workspace/${f}.json \
+    && echo "OK: validate-schema $f" \
+    || echo "FAIL: validate-schema $f — check schema file name matches artifact stem"
+  rm workspace/${f}.json
+done
+```
+Expected: `OK: validate-schema` for all three.
 
 - [ ] **Step 1.10: Commit**
 
@@ -256,9 +304,18 @@ class TestBenchmarkState:
     def _alg_summary(self, tmp_path):
         ws = tmp_path / "workspace"
         ws.mkdir()
+        # Use schema-valid fields only (algorithm_summary.schema.json has
+        # additionalProperties: false). Fields like scope_verdict, signals_used,
+        # per_workload_results, branch_count are NOT in the schema and would fail
+        # validate-schema. cmd_benchmark_state only reads algorithm_name, so this
+        # minimal subset is sufficient for the command under test.
         (ws / "algorithm_summary.json").write_text(
-            '{"algorithm_name": "test-algo", "scope_verdict": "pass",'
-            ' "signals_used": [], "per_workload_results": [], "branch_count": 1}'
+            '{"algorithm_name": "test-algo", "scope_validation_passed": true,'
+            ' "fidelity_checked": true, "evolve_block_source": "blis_router/best/best_program.go:1-10",'
+            ' "evolve_block_content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
+            ' "signals": [{"name": "KVUtilization", "type": "float64", "access_path": "kv"}],'
+            ' "composite_signals": [], "metrics": {"combined_score": 1.5},'
+            ' "mapping_artifact_version": "1.0"}'
         )
         return ws
 
@@ -339,7 +396,7 @@ class TestBenchmarkState:
                                   pipelinerun="pr-1", results=None,
                                   failure_reason=None, force=False)
         rc = cmd_benchmark_state(args)
-        assert rc == 2  # noise not done yet
+        assert rc == 1  # ordering violation: noise not done yet (exit 1 = workflow error, not infrastructure error)
 
     def test_missing_algorithm_summary_exits_2(self, tmp_path):
         ws = tmp_path / "workspace"
@@ -431,7 +488,26 @@ def cmd_benchmark_state(args: "argparse.Namespace") -> int:
         state = _default_benchmark_state(alg_name, args.namespace, ctx)
         state_path.write_text(json.dumps(state, indent=2))
     else:
-        state = json.loads(state_path.read_text())
+        try:
+            state = json.loads(state_path.read_text())
+        except Exception as e:
+            print(f"ERROR: cannot parse {state_path}: {e}", file=sys.stderr)
+            return 2
+        if not isinstance(state, dict) or "phases" not in state:
+            print(
+                f"ERROR: {state_path} is missing 'phases' key or is not a dict — "
+                "file may be corrupted. Delete it to start fresh.",
+                file=sys.stderr,
+            )
+            return 2
+        for expected_phase in _PHASE_ORDER:
+            if expected_phase not in state["phases"]:
+                print(
+                    f"ERROR: {state_path} 'phases' dict is missing phase '{expected_phase}' — "
+                    "file may be corrupted. Delete it to start fresh.",
+                    file=sys.stderr,
+                )
+                return 2
 
     # ---- context guard (read-only calls) ----
     if not getattr(args, "set_phase", None):
@@ -457,6 +533,9 @@ def cmd_benchmark_state(args: "argparse.Namespace") -> int:
         return 2
 
     new_status = args.status
+    if new_status is None:
+        print("ERROR: --status is required when --set-phase is used.", file=sys.stderr)
+        return 2
     current_status = state["phases"][phase]["status"]
 
     # status regression guard
@@ -469,6 +548,8 @@ def cmd_benchmark_state(args: "argparse.Namespace") -> int:
             return 2
 
     # ordering guard: when setting to 'running', previous phase must be 'done'
+    # Returns exit 1 (workflow/user error) to distinguish from exit 2 (infrastructure error).
+    # validate.md Step 1 treats exit 2 as missing algorithm_summary.json, not ordering violation.
     if new_status == "running" and not getattr(args, "force", False):
         idx = _PHASE_ORDER.index(phase)
         if idx > 0:
@@ -480,7 +561,7 @@ def cmd_benchmark_state(args: "argparse.Namespace") -> int:
                     f"'{state['phases'][prev]['status']}'). "
                     "Use --force to bypass.", file=sys.stderr
                 )
-                return 2
+                return 1
 
     state["phases"][phase]["status"] = new_status
     if getattr(args, "pipelinerun", None):
@@ -660,11 +741,17 @@ Expected: 4 tests fail with `AttributeError`.
 
 ```python
 def _percentile(values: list, p: int) -> float:
-    """Compute p-th percentile of a sorted list (nearest-rank)."""
+    """Compute p-th percentile of a sorted list (nearest-rank, ceiling method).
+
+    Uses ceil(N*p/100) - 1 to avoid systematic underestimation for small N.
+    For N=2, p=99: ceil(2*0.99) - 1 = 1 → returns values[1] (correct).
+    The floor-based formula max(0, int(N*p/100)-1) returns index 0 for N=2,p=99 (wrong).
+    """
+    import math
     if not values:
         return 0.0
     values = sorted(values)
-    idx = max(0, int(len(values) * p / 100) - 1)
+    idx = min(len(values) - 1, max(0, math.ceil(len(values) * p / 100) - 1))
     return values[idx]
 
 
@@ -682,17 +769,24 @@ def _parse_tracev2_dir(directory: "Path") -> dict:
             f"missing trace_data.csv in {directory} — blis observe may have crashed mid-write."
         )
     ttft_vals, tpot_vals = [], []
-    with open(data_path, newline="") as f:
-        reader = csv_mod.DictReader(f)
-        for row in reader:
-            if row.get("status") != "ok":
-                continue
-            send = int(row["send_time_us"])
-            first = int(row["first_chunk_time_us"])
-            last = int(row["last_chunk_time_us"])
-            chunks = max(int(row["num_chunks"]) - 1, 1)
-            ttft_vals.append((first - send) / 1000.0)
-            tpot_vals.append((last - first) / chunks / 1000.0)
+    try:
+        with open(data_path, newline="") as f:
+            reader = csv_mod.DictReader(f)
+            for row in reader:
+                if row.get("status") != "ok":
+                    continue
+                send = int(row["send_time_us"])
+                first = int(row["first_chunk_time_us"])
+                last = int(row["last_chunk_time_us"])
+                chunks = max(int(row["num_chunks"]) - 1, 1)
+                ttft_vals.append((first - send) / 1000.0)
+                tpot_vals.append((last - first) / chunks / 1000.0)
+    except (ValueError, KeyError) as e:
+        raise ValueError(
+            f"malformed CSV in {data_path}: {e} — check that all numeric columns "
+            "(send_time_us, first_chunk_time_us, last_chunk_time_us, num_chunks) "
+            "contain valid integers for rows with status='ok'"
+        ) from e
     return {
         "ttft_p50": _percentile(ttft_vals, 50),
         "ttft_p99": _percentile(ttft_vals, 99),
@@ -726,7 +820,7 @@ def cmd_convert_trace(args: "argparse.Namespace") -> int:
             for run_dir in run_dirs:
                 try:
                     metrics = _parse_tracev2_dir(run_dir)
-                except FileNotFoundError as e:
+                except (FileNotFoundError, ValueError) as e:
                     print(f"ERROR: {e}", file=sys.stderr)
                     return 1
                 if metrics["_valid_rows"] == 0:
@@ -744,7 +838,7 @@ def cmd_convert_trace(args: "argparse.Namespace") -> int:
             # baseline/treatment single-value structure
             try:
                 metrics = _parse_tracev2_dir(wl_dir)
-            except FileNotFoundError as e:
+            except (FileNotFoundError, ValueError) as e:
                 print(f"ERROR: {e}", file=sys.stderr)
                 return 1
             if metrics["_valid_rows"] == 0:
@@ -860,6 +954,44 @@ class TestCompilePipeline:
         )
         rc = cmd_compile_pipeline(args)
         assert rc == 2
+
+    def test_exits_2_on_missing_values_file(self, tmp_path):
+        from tools.transfer_cli import cmd_compile_pipeline
+        import argparse
+        tdir = tmp_path / "tekton"
+        tdir.mkdir()
+        (tdir / "baseline-pipeline.yaml.j2").write_text("{{ phase }}")
+        args = argparse.Namespace(
+            template_dir=str(tdir),
+            values=str(tmp_path / "nonexistent_values.yaml"),
+            phase="baseline",
+            out=str(tmp_path / "out"),
+        )
+        rc = cmd_compile_pipeline(args)
+        assert rc == 2
+
+    def test_success_path_produces_output_file(self, tmp_path):
+        """compile-pipeline exit 0 and produces output file when template + values present."""
+        import argparse, unittest.mock as mock
+        from tools.transfer_cli import cmd_compile_pipeline
+        tdir = tmp_path / "tekton"
+        tdir.mkdir()
+        (tdir / "baseline-pipeline.yaml.j2").write_text("phase: {{ phase }}\n")
+        vf = tmp_path / "values.yaml"
+        vf.write_text("phase: baseline\n")
+        out = tmp_path / "out"
+        out.mkdir()
+        args = argparse.Namespace(
+            template_dir=str(tdir),
+            values=str(vf),
+            phase="baseline",
+            out=str(out),
+        )
+        # cmd_compile_pipeline calls tektonc.py via subprocess — mock subprocess.run
+        with mock.patch("subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            rc = cmd_compile_pipeline(args)
+        assert rc == 0
 ```
 
 - [ ] **Step 4.2: Run tests — confirm they fail**
@@ -867,7 +999,7 @@ class TestCompilePipeline:
 ```bash
 python -m pytest tools/test_transfer_cli.py::TestRenderPipelinerun tools/test_transfer_cli.py::TestCompilePipeline -v 2>&1 | tail -10
 ```
-Expected: 3 tests fail.
+Expected: 5 tests fail.
 
 - [ ] **Step 4.3: Implement `cmd_render_pipelinerun`**
 
@@ -954,7 +1086,7 @@ def cmd_compile_pipeline(args: "argparse.Namespace") -> int:
          "-t", str(template_file),
          "-f", str(values_file),
          "-o", str(out_file)],
-        capture_output=True, text=True, shell=False
+        capture_output=True, text=True, shell=False, timeout=120
     )
     if result.returncode != 0:
         print(f"ERROR: tektonc compilation failed:\n{result.stderr}", file=sys.stderr)
@@ -982,12 +1114,12 @@ p_rpr.add_argument("--out", required=True)
 p_rpr.set_defaults(func=cmd_render_pipelinerun)
 ```
 
-- [ ] **Step 4.6: Run tests — all 3 pass**
+- [ ] **Step 4.6: Run tests — all 5 pass**
 
 ```bash
 python -m pytest tools/test_transfer_cli.py::TestRenderPipelinerun tools/test_transfer_cli.py::TestCompilePipeline -v
 ```
-Expected: 3 passed.
+Expected: 5 passed.
 
 - [ ] **Step 4.7: Commit**
 
@@ -1093,6 +1225,9 @@ def _preflight_check_values(values_path: "Path", namespace: str, phase: str) -> 
     except Exception as e:
         return [f"Cannot parse values.yaml: {e}"]
 
+    if not isinstance(data, dict):
+        return [f"values.yaml is empty or not a mapping (got {type(data).__name__})"]
+
     image = (data.get("observe") or {}).get("image", "")
     if "<TAG>" in image:
         errors.append(
@@ -1193,16 +1328,21 @@ def cmd_preflight(args: "argparse.Namespace") -> int:
             ok = False
         checks.append(("Stage 4 scorer builds", ok, ""))
 
-    # Print checklist
+    # Print checklist to stderr (human-readable); output JSON to stdout per module contract
     any_fail = False
+    check_results = []
     for label, passed, detail in checks:
         mark = "✓" if passed else "✗"
         suffix = f" ({detail})" if detail else ""
-        print(f"  [{mark}] {label}{suffix}")
+        print(f"  [{mark}] {label}{suffix}", file=sys.stderr)
         if not passed:
             any_fail = True
+        check_results.append({"label": label, "passed": passed, "detail": detail})
 
-    return 1 if any_fail else 0
+    rc = 1 if any_fail else 0
+    _output("ok" if rc == 0 else "fail", rc,
+            **{"phase": phase, "checks": check_results, "passed": not any_fail})
+    return rc
 ```
 
 - [ ] **Step 5.4: Register parser in `main()`**
@@ -1290,8 +1430,10 @@ class TestBenchmarkNew:
         import json
         sc = {"signals": [
             {"sim_name": "KVUtilization", "prod_name": "kvUtil",
+             "prod_access_path": "node.status.kv_utilization",
              "fidelity_rating": "high", "staleness_window_ms": 0, "mapped": True},
             {"sim_name": "InFlightRequests", "prod_name": "inFlight",
+             "prod_access_path": "node.status.in_flight_requests",
              "fidelity_rating": "high", "staleness_window_ms": 0, "mapped": True},
         ], "unmapped_signals": [], "commit_hash": "abc123", "coverage_complete": True}
         p = tmp_path / "signal_coverage.json"
@@ -1364,6 +1506,13 @@ class TestBenchmarkNew:
 
 - [ ] **Step 6.2: Run tests — confirm they fail**
 
+**Prerequisite guard (Chunk 1 must be complete before Chunk 5 tests run):**
+
+```bash
+test -f tools/workload_signal_mapping.json \
+  || { echo "HALT: tools/workload_signal_mapping.json not found — complete Chunk 1 (Task 1) before running Chunk 5 tests."; exit 2; }
+```
+
 ```bash
 python -m pytest tools/test_transfer_cli.py::TestBenchmarkNew -v 2>&1 | tail -10
 ```
@@ -1383,26 +1532,47 @@ def _compute_cv(values: list) -> float:
     return (variance ** 0.5) / mean
 
 
-def _classify_workloads(workloads_dir: "Path", signal_coverage_path: "Path") -> dict:
+def _classify_workloads(workloads_dir: "Path", signal_coverage_path: "Path",
+                         mapping_path: "Path | None" = None) -> dict:
     """Return {workload_name: {"classification": "matched"|"unmatched", "matched_signals": [...]}}"""
     import json, yaml
-    mapping_path = Path("tools/workload_signal_mapping.json")
-    mapping = json.loads(mapping_path.read_text())["mappings"]
-    sc = json.loads(signal_coverage_path.read_text())
+    if mapping_path is None:
+        mapping_path = Path(__file__).parent / "workload_signal_mapping.json"
+    if not mapping_path.exists():
+        raise FileNotFoundError(
+            f"workload signal mapping not found at '{mapping_path}' — "
+            "ensure Task 1 (Step 1.8) was completed to create this file"
+        )
+    try:
+        mapping = json.loads(mapping_path.read_text())["mappings"]
+    except json.JSONDecodeError as e:
+        raise ValueError(f"workload signal mapping '{mapping_path}' is malformed JSON: {e}") from e
+    try:
+        sc = json.loads(signal_coverage_path.read_text())
+    except json.JSONDecodeError as e:
+        raise ValueError(f"signal coverage file '{signal_coverage_path}' is malformed JSON: {e}") from e
     mapped_signals = {s["sim_name"] for s in sc.get("signals", []) if s.get("mapped")}
 
     result = {}
     for wf in sorted(workloads_dir.iterdir()):
         if not wf.suffix in (".yaml", ".yml"):
             continue
-        wl_name = wf.stem.removeprefix("workload_")
+        # Normalize underscores to hyphens so that workload_glia_40qps.yaml → glia-40qps,
+        # matching the hyphenated names in values.yaml observe.workloads[].name and
+        # the PVC directory names produced by blis observe.
+        wl_name = wf.stem.removeprefix("workload_").replace("_", "-")
         try:
             wl_data = yaml.safe_load(wf.read_text()) or {}
         except Exception:
             wl_data = {}
+        # Collect all keys present at top level AND within clients[] items
+        all_keys = set(wl_data.keys())
+        for client in wl_data.get("clients", []):
+            if isinstance(client, dict):
+                all_keys.update(client.keys())
         matched = []
         for entry in mapping:
-            if entry["workload_field"] in wl_data:
+            if entry["workload_field"] in all_keys:
                 for sig in entry["signals"]:
                     if sig in mapped_signals:
                         matched.append(sig)
@@ -1423,40 +1593,84 @@ def cmd_benchmark_new(args: "argparse.Namespace") -> int:
     sc_path = Path(args.signal_coverage)
     wd_path = Path(args.workloads_dir)
 
-    for p in [noise_path, baseline_path, treatment_path, sc_path, wd_path]:
+    mapping_path = Path(__file__).parent / "workload_signal_mapping.json"
+    for p in [noise_path, baseline_path, treatment_path, sc_path, wd_path, mapping_path]:
         if not p.exists():
             print(f"ERROR: required input '{p}' not found.", file=sys.stderr)
             return 2
 
-    noise = json.loads(noise_path.read_text())
-    baseline = json.loads(baseline_path.read_text())
-    treatment = json.loads(treatment_path.read_text())
+    try:
+        noise = json.loads(noise_path.read_text())
+        baseline = json.loads(baseline_path.read_text())
+        treatment = json.loads(treatment_path.read_text())
+    except Exception as e:
+        print(f"ERROR: cannot parse input JSON: {e}", file=sys.stderr)
+        return 2
+
+    for label, data in [("noise", noise), ("baseline", baseline), ("treatment", treatment)]:
+        if not isinstance(data, dict) or "workloads" not in data:
+            print(
+                f"ERROR: {label} results file is missing 'workloads' key or is not a dict — "
+                "run convert-trace to regenerate.",
+                file=sys.stderr,
+            )
+            return 2
 
     # Compute T_eff from noise (pool all workloads per metric)
     metrics_keys = ["ttft_p50", "ttft_p99", "tpot_p50", "tpot_p99"]
     per_metric = {k: [] for k in metrics_keys}
-    for wl in noise["workloads"]:
-        for run in wl["runs"]:
-            for k in metrics_keys:
-                per_metric[k].append(run["metrics"][k])
+    try:
+        for wl in noise["workloads"]:
+            for run in wl["runs"]:
+                for k in metrics_keys:
+                    per_metric[k].append(run["metrics"][k])
+    except (KeyError, TypeError) as e:
+        print(
+            f"ERROR: malformed noise results — missing expected field: {e}. "
+            "Each workload must have 'runs' with 'metrics' containing "
+            "ttft_p50, ttft_p99, tpot_p50, tpot_p99.",
+            file=sys.stderr,
+        )
+        return 2
     noise_cv = max(_compute_cv(per_metric[k]) for k in metrics_keys)
     t_eff = max(0.05, 2.0 * noise_cv)
 
     # Build lookup maps
-    bl_map = {w["name"]: w["metrics"]["ttft_p99"] for w in baseline["workloads"]}
-    tr_map = {w["name"]: w["metrics"]["ttft_p99"] for w in treatment["workloads"]}
+    try:
+        bl_map = {w["name"]: w["metrics"]["ttft_p99"] for w in baseline["workloads"]}
+        tr_map = {w["name"]: w["metrics"]["ttft_p99"] for w in treatment["workloads"]}
+    except (KeyError, TypeError) as e:
+        print(
+            f"ERROR: malformed baseline or treatment results — missing expected field: {e}. "
+            "Each workload entry must have 'name' and 'metrics.ttft_p99'.",
+            file=sys.stderr,
+        )
+        return 2
 
-    # Classify workloads
-    classification = _classify_workloads(wd_path, sc_path)
+    # Classify workloads (pass mapping_path explicitly to avoid CWD sensitivity)
+    try:
+        classification = _classify_workloads(wd_path, sc_path, mapping_path)
+    except Exception as e:
+        print(f"ERROR: workload classification failed: {e}", file=sys.stderr)
+        return 2
 
     workload_classification = []
     matched_improvements = []
     unmatched_above_teff = []
+    skipped_workloads = []
 
     for wl_name, cls_info in sorted(classification.items()):
         bl_p99 = bl_map.get(wl_name)
         tr_p99 = tr_map.get(wl_name)
         if bl_p99 is None or tr_p99 is None:
+            # Emit diagnostic to help debug name mismatches
+            print(
+                f"WARNING: workload '{wl_name}' from workloads_dir not found in "
+                f"{'baseline' if bl_p99 is None else 'treatment'} results "
+                f"(available: {sorted(bl_map.keys())}). Skipping.",
+                file=sys.stderr,
+            )
+            skipped_workloads.append(wl_name)
             continue
         improvement = (bl_p99 - tr_p99) / bl_p99 if bl_p99 else 0.0
         entry = {
@@ -1473,13 +1687,31 @@ def cmd_benchmark_new(args: "argparse.Namespace") -> int:
                 f"workload {wl_name}: improvement={improvement:.2%} >= T_eff={t_eff:.2%}"
             )
 
+    if skipped_workloads and not workload_classification:
+        # All workloads were skipped — likely a name normalization mismatch.
+        # Print to stdout as well so automated pipelines capture it even if stderr is lost.
+        msg = (
+            f"ERROR: all {len(skipped_workloads)} workload(s) were skipped due to name "
+            f"mismatch between workloads_dir and result files. "
+            f"Skipped: {skipped_workloads}. "
+            f"Baseline result names: {sorted(bl_map.keys())}."
+        )
+        print(msg, file=sys.stderr)
+        print(msg)
+
     # Mechanism check
+    # INCONCLUSIVE = matched workloads found, some positive improvement, but below T_eff
+    # FAIL = matched workloads found, no positive improvement (regression or flat)
+    # ERROR = no matched workloads found at all (configuration/classification error)
     if not matched_improvements:
         verdict = "ERROR"
         passed = False
     elif max(matched_improvements) >= t_eff:
         verdict = "PASS"
         passed = True
+    elif max(matched_improvements) > 0:
+        verdict = "INCONCLUSIVE"
+        passed = False
     else:
         verdict = "FAIL"
         passed = False
@@ -1500,8 +1732,10 @@ def cmd_benchmark_new(args: "argparse.Namespace") -> int:
     else:
         print(json.dumps(output, indent=2))
 
-    return 1 if verdict == "FAIL" else 0
+    return 2 if verdict == "ERROR" else (1 if verdict == "FAIL" else 0)
 ```
+
+Note: `ERROR` (no matched workloads found — configuration/classification error) maps to exit 2 (infrastructure error), not exit 0. This matches CLAUDE.md exit code contract and the old `_cmd_benchmark` behavior. The validate.md Step 5c HALT conditions (`HALT if exit 1`, `HALT if exit 2`) will correctly halt on ERROR verdict.
 
 - [ ] **Step 6.4: Update the `benchmark` parser in `main()` — replace old parser**
 
@@ -1530,7 +1764,32 @@ Expected: 3 passed.
 
 - [ ] **Step 6.6: Run full suite — mark old benchmark/noise tests as expected-skip or update**
 
-Old `TestBenchmarkMechanism` and `test_noise_characterize_*` tests will now fail because the interfaces changed. Update them with `@pytest.mark.skip(reason="superseded by TestBenchmarkNew")`.
+In `tools/test_transfer_cli.py`, locate all top-level functions to skip (there is no `TestBenchmarkMechanism` class — the old benchmark and noise tests are module-level functions):
+
+```bash
+# Find exact line numbers before editing
+grep -n "^def test_benchmark_\|^def test_noise_characterize_" tools/test_transfer_cli.py
+```
+
+Add `@pytest.mark.skip(reason="superseded by TestBenchmarkNew")` on the line immediately before each of these top-level functions:
+- `def test_benchmark_mechanism_check_pass`
+- `def test_benchmark_mechanism_check_inconclusive`
+- `def test_benchmark_mechanism_check_fail`
+- `def test_benchmark_requires_t_eff`
+- `def test_benchmark_malformed_input`
+- `def test_benchmark_missing_workloads_key`
+- `def test_benchmark_no_matched_workloads`
+- `def test_noise_characterize_halts_on_high_cv`
+- `def test_noise_characterize_malformed_input`
+- `def test_noise_characterize_empty_runs`
+- `def test_noise_characterize_t_eff_computation`
+
+Example for a top-level function:
+```python
+@pytest.mark.skip(reason="superseded by TestBenchmarkNew")
+def test_benchmark_mechanism_check_pass(tmp_path):
+    ...
+```
 
 ```bash
 python -m pytest tools/ -v 2>&1 | tail -10
@@ -1562,12 +1821,10 @@ class TestGenerateEvidence:
         (ws / "algorithm_summary.json").write_text(json.dumps({
             "algorithm_name": "blis-routing-v1",
             "evolve_block_source": "routing/",
-            "per_workload_results": [
-                {"workload_name": "glia-40qps", "improvement_pct": 12.3,
-                 "metric_name": "ttft_p99", "baseline_value": 100.0,
-                 "evolved_value": 87.7}
-            ],
-            "matched_workload": "glia-40qps",
+            # Note: algorithm_summary.schema.json has additionalProperties: false.
+            # Only schema-defined fields are written here. matched_workload is
+            # NOT a schema field — it is derived by generate-evidence from
+            # validation_results.json benchmark.workload_classification.
         }))
         (ws / "validation_results.json").write_text(json.dumps({
             "suite_a": {"passed": True, "kendall_tau": 0.92,
@@ -1613,8 +1870,7 @@ class TestGenerateEvidence:
         ws.mkdir()
         import json
         (ws / "algorithm_summary.json").write_text(json.dumps(
-            {"algorithm_name": "x", "evolve_block_source": "routing/",
-             "per_workload_results": [], "matched_workload": "none"}
+            {"algorithm_name": "x", "evolve_block_source": "routing/"}
         ))
         # no validation_results.json
         from tools.transfer_cli import cmd_generate_evidence
@@ -1669,7 +1925,6 @@ def cmd_generate_evidence(args: "argparse.Namespace") -> int:
 
     # Extract fields
     alg_name = alg.get("algorithm_name", "unknown")
-    matched_wl = alg.get("matched_workload", "unknown")
     overall = val.get("overall_verdict", "UNKNOWN")
     tau = val.get("suite_a", {}).get("kendall_tau", "N/A")
     err = val.get("suite_a", {}).get("max_abs_error", "N/A")
@@ -1681,6 +1936,11 @@ def cmd_generate_evidence(args: "argparse.Namespace") -> int:
 
     wc = bench.get("workload_classification", [])
     matched_entry = next((w for w in wc if w.get("classification") == "matched"), None)
+    # Derive matched workload name from benchmark classification data.
+    # algorithm_summary.schema.json has additionalProperties: false and does not
+    # include a matched_workload field — reading it via alg.get() would always
+    # return the default. Use the first matched workload from the benchmark instead.
+    matched_wl = (matched_entry or {}).get("workload", alg_name)
     unmatched_entries = [w for w in wc if w.get("classification") == "unmatched"]
     matched_pct = round((matched_entry or {}).get("improvement", 0) * 100, 1)
     unmatched_mean_pct = (
@@ -1827,9 +2087,14 @@ spec:
         #!/bin/sh
         set -e
         mkdir -p /workspace/data/$(params.resultsDir)
-        cat > /workspace/workload.yaml <<'SIM2REAL_WORKLOAD_SPEC_END'
+        # Use a single-quoted heredoc sentinel to write the workload spec safely.
+        # Tekton substitutes $(params.workloadSpec) before the shell runs, replacing it
+        # with the actual YAML content. Single-quoting the sentinel disables shell
+        # expansion of any $, backtick, or special characters in the substituted content.
+        # The sentinel __WORKLOAD_SPEC_END__ cannot appear in any YAML workload file.
+        cat > /workspace/workload.yaml << '__WORKLOAD_SPEC_END__'
         $(params.workloadSpec)
-        SIM2REAL_WORKLOAD_SPEC_END
+        __WORKLOAD_SPEC_END__
         echo "Workload spec written to /workspace/workload.yaml"
         head -5 /workspace/workload.yaml
 
@@ -2008,7 +2273,7 @@ spec:
         - name: namespace
           value: "$(params.namespace)"
         - name: config
-          value: {{ stack.model.helmValues | toyaml }}
+          value: {{ stack.model.helmValues | tojson }}
 
     {% for workload in observe.workloads %}
     - name: run-workload-{{ workload.name | dns }}
@@ -2068,6 +2333,8 @@ Copy `baseline-pipeline.yaml.j2`, change:
 1. `name: sim2real-baseline` → `name: sim2real-treatment`
 2. `{% set scorer_config_content = stack.scorer.baseline.configContent %}` → `{% set scorer_config_content = stack.scorer.treatment.configContent %}`
 3. `value: "baseline/{{ workload.name }}"` → `value: "treatment/{{ workload.name }}"`
+
+Note: The baseline template already uses `tojson` (not `toyaml`) for `stack.model.helmValues`. The copied treatment template inherits this correctly — no change needed for that line.
 
 - [ ] **Step 9.4: Create `noise-pipeline.yaml.j2`**
 
@@ -2129,7 +2396,7 @@ spec:
         - name: namespace
           value: "$(params.namespace)"
         - name: config
-          value: {{ stack.model.helmValues | toyaml }}
+          value: {{ stack.model.helmValues | tojson }}
 
     - loopName: noise-runs
       foreach:
@@ -2258,14 +2525,20 @@ grep -n "prerequisite\|Prerequisite\|## " prompts/extract.md | head -20
 Find the "## Prerequisites" section in `prompts/extract.md` and append after the existing `LoadEvolvedBlock` check:
 
 ```markdown
-**Stage 5 cluster prerequisite (checked here to fail fast):**
+**Stage 5 cluster prerequisite check (warning only — Stage 1 can complete without blis observe):**
 
 ```bash
-# Verify inference-sim submodule includes blis observe (PR #704)
-grep -q "AddCommand(observeCmd)" inference-sim/cmd/root.go
+# Check if inference-sim submodule includes blis observe (PR #704)
+if ! grep -q "AddCommand(observeCmd)" inference-sim/cmd/root.go; then
+  echo "WARNING: inference-sim submodule does not yet include \`blis observe\` (PR #704 not merged)."
+  echo "Stage 1 extract and Stages 2-4 will complete normally."
+  echo "Stage 5 cluster benchmarks will fail until the submodule is bumped."
+  echo "See docs/transfer/blis_to_llmd_mapping.md § Submodule Prerequisites for how to bump."
+  echo "CONTINUE: proceeding with Stage 1 extract."
+fi
 ```
 
-**HALT if grep exits non-zero.** Message: "HALT: inference-sim submodule does not include `blis observe` (PR #704) — `observeCmd` not registered in `inference-sim/cmd/root.go`. Bump the inference-sim submodule to the commit recorded in `docs/transfer/blis_to_llmd_mapping.md` § Submodule Prerequisites before proceeding."
+Do **not** HALT here. `blis observe` is only required for Stage 5 cluster pipeline submission (Step 5b). Stages 1-4 work with the current submodule. The real enforcement gate for `blis observe` is the `preflight --phase noise` call in Stage 5 Step 5b, which checks the compiled task image and will fail if `blis observe` is not available.
 
 Note: `cmd/observe.go` exists in the current submodule but only contains HTTP client utilities — the `observeCmd` cobra.Command is **not registered** until PR #704 merges. File existence is not sufficient; the grep confirms actual command registration.
 ```
@@ -2352,16 +2625,19 @@ NOISE_STATUS=$(echo "$BENCH_STATE_OUTPUT" \
   | .venv/bin/python -c "import sys,json; print(json.load(sys.stdin)['phases']['noise']['status'])")
 
 if [ "$NOISE_STATUS" != "done" ]; then
-  echo "Noise phase is '$NOISE_STATUS' — running Step 5 for noise phase first."
-  # (execute Step 5a and Step 5b for noise phase only, then re-enter Stage 5)
-  # For LLM agent execution: jump to Step 5 now, run noise phase, then print:
-  # "REENTER: Stage 5 — noise phase complete, re-run validate.md from the top."
+  echo "REENTER: Noise phase is '$NOISE_STATUS' — jump to Step 5 (5a and 5b for noise phase only)."
+  echo "After noise phase completes: re-run validate.md from Step 1 (do NOT fall through to Suite A/B/C now)."
+  # Signal to automated harnesses: this is a planned re-entry pause, not a success completion.
+  # Exit 3 = REENTER (distinct from exit 0 = complete, exit 1 = error, exit 2 = infrastructure error).
+  exit 3
 fi
+# If noise_status == "done": fall through to Step 2 (Suite A) below.
 ```
 
 **If noise is `done`:** proceed to Step 2 (Suite A).
-**If noise is not `done`:** jump to Step 5 now, run the noise phase pipeline,
+**If noise is not `done`:** script exits 3 (REENTER). Jump to Step 5 now, run the noise phase pipeline,
 then re-enter Stage 5 from the top for Pass 2 (Suites A/B/C + baseline/treatment).
+Automated harnesses should treat exit 3 as a planned re-entry pause (not an error and not a completion).
 
 T_eff is computed internally by `transfer_cli.py benchmark` from `workspace/noise_results.json`.
 The old `baseline_runs.json` format and `noise-characterize` subcommand are superseded.
@@ -2383,12 +2659,17 @@ Find the `## Step 5: Cluster Benchmarks` block (marked `[OPERATOR ACTION REQUIRE
 
 ### 5b. For each non-done phase in order: noise → baseline → treatment
 
-Check phase status from state file. For each pending or failed phase:
+Check phase status from state file. For each pending or failed phase (run this block once per phase, substituting `phase` for each of `noise`, `baseline`, `treatment` in order):
+
+```bash
+# Bind phase variable — repeat this block for each of: noise, baseline, treatment
+phase=noise   # change to baseline or treatment for subsequent iterations
+```
 
 **Pre-flight:**
 ```bash
 .venv/bin/python tools/transfer_cli.py preflight \
-  --phase <phase> --values workspace/tekton/values.yaml --namespace $NAMESPACE
+  --phase $phase --values workspace/tekton/values.yaml --namespace $NAMESPACE
 ```
 **HALT if exit 1.**
 
@@ -2396,21 +2677,24 @@ Check phase status from state file. For each pending or failed phase:
 ```bash
 .venv/bin/python tools/transfer_cli.py compile-pipeline \
   --template-dir tektonc-data-collection/tekton \
-  --values workspace/tekton/values.yaml --phase <phase> \
+  --values workspace/tekton/values.yaml --phase $phase \
   --out workspace/tekton/compiled/
 ```
 
 **Submit:**
 ```bash
-kubectl apply -f workspace/tekton/compiled/<phase>-pipeline.yaml
-PIPELINERUN_NAME=sim2real-<phase>-$(date +%s)
+kubectl apply -f workspace/tekton/compiled/${phase}-pipeline.yaml \
+  || { echo "HALT: kubectl apply pipeline failed for $phase"; exit 1; }
+PIPELINERUN_NAME=sim2real-${phase}-$(date +%s)
 .venv/bin/python tools/transfer_cli.py render-pipelinerun \
-  --template workspace/tekton/pipelinerun-<phase>.yaml \
-  --vars PIPELINERUN_NAME=$PIPELINERUN_NAME NAMESPACE=$NAMESPACE PHASE=<phase> \
-  --out /tmp/pipelinerun-<phase>.yaml
-kubectl apply -f /tmp/pipelinerun-<phase>.yaml
+  --template workspace/tekton/pipelinerun-${phase}.yaml \
+  --vars PIPELINERUN_NAME=$PIPELINERUN_NAME NAMESPACE=$NAMESPACE PHASE=$phase \
+  --out /tmp/pipelinerun-${phase}.yaml \
+  || { echo "HALT: render-pipelinerun failed for $phase"; exit 1; }
+kubectl apply -f /tmp/pipelinerun-${phase}.yaml \
+  || { echo "HALT: kubectl apply pipelinerun failed for $phase"; exit 1; }
 .venv/bin/python tools/transfer_cli.py benchmark-state --workspace workspace/ \
-  --set-phase <phase> --status running --pipelinerun $PIPELINERUN_NAME
+  --set-phase $phase --status running --pipelinerun $PIPELINERUN_NAME
 ```
 
 **Wait (4h timeout):**
@@ -2423,31 +2707,40 @@ while true; do
   sleep 30; ELAPSED=$((ELAPSED+30))
   if [ $ELAPSED -ge $TIMEOUT_SECS ]; then
     .venv/bin/python tools/transfer_cli.py benchmark-state --workspace workspace/ \
-      --set-phase <phase> --status failed \
+      --set-phase $phase --status failed \
       --failure-reason "Polling timeout after ${TIMEOUT_SECS}s"
-    echo "HALT: <phase> pipeline timed out."; exit 1
+    echo "HALT: $phase pipeline timed out."; exit 1
   fi
 done
 ```
 
-**On Failed:** update state to failed, HALT.
+**On Failed:**
+```bash
+FAIL_REASON=$(tkn pr describe $PIPELINERUN_NAME \
+  -o jsonpath='{.status.conditions[0].message}' 2>/dev/null || echo "PipelineRun failed")
+.venv/bin/python tools/transfer_cli.py benchmark-state --workspace workspace/ \
+  --set-phase $phase --status failed \
+  --failure-reason "$FAIL_REASON"
+echo "HALT: $phase pipeline failed — $FAIL_REASON"; exit 1
+```
 
 **On Succeeded — extract via extractor pod:**
 ```bash
-trap 'kubectl delete pod sim2real-extract-<phase> -n $NAMESPACE --ignore-not-found 2>/dev/null' EXIT ERR
-kubectl run sim2real-extract-<phase> --image=alpine:3.19 --restart=Never \
+trap "kubectl delete pod sim2real-extract-${phase} -n $NAMESPACE --ignore-not-found 2>/dev/null" EXIT ERR
+kubectl run sim2real-extract-${phase} --image=alpine:3.19 --restart=Never \
   --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"data-pvc"}}],"containers":[{"name":"e","image":"alpine:3.19","command":["sleep","600"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}' \
   -n $NAMESPACE
-kubectl wait pod/sim2real-extract-<phase> --for=condition=Ready --timeout=60s -n $NAMESPACE \
+kubectl wait pod/sim2real-extract-${phase} --for=condition=Ready --timeout=60s -n $NAMESPACE \
   || { echo "HALT: extractor pod not ready"; exit 1; }
-kubectl cp $NAMESPACE/sim2real-extract-<phase>:/data/<phase>/ workspace/<phase>_raw/ --retries=3 \
+kubectl cp $NAMESPACE/sim2real-extract-${phase}:/data/${phase}/ workspace/${phase}_raw/ --retries=3 \
   || { echo "HALT: kubectl cp failed"; exit 1; }
 .venv/bin/python tools/transfer_cli.py convert-trace \
-  --input-dir workspace/<phase>_raw/ --output workspace/<phase>_results.json \
+  --input-dir workspace/${phase}_raw/ --output workspace/${phase}_results.json \
   || { echo "HALT: convert-trace failed"; exit 1; }
-.venv/bin/python tools/transfer_cli.py validate-schema workspace/<phase>_results.json
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/${phase}_results.json \
+  || { echo "HALT: schema validation failed for workspace/${phase}_results.json — results file is malformed, do not mark phase done"; exit 1; }
 .venv/bin/python tools/transfer_cli.py benchmark-state --workspace workspace/ \
-  --set-phase <phase> --status done --results workspace/<phase>_results.json
+  --set-phase $phase --status done --results workspace/${phase}_results.json
 ```
 
 ### 5c. Mechanism check
@@ -2459,9 +2752,61 @@ kubectl cp $NAMESPACE/sim2real-extract-<phase>:/data/<phase>/ workspace/<phase>_
   --signal-coverage workspace/signal_coverage.json \
   --workloads-dir blis_router/workloads/ \
   --out workspace/benchmark_output.json
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/benchmark_output.json \
+  || { echo "HALT: benchmark_output.json failed schema validation"; exit 1; }
 ```
 Exit 0 = PASS or INCONCLUSIVE (parse `mechanism_check_verdict` from JSON).
 **HALT if exit 1** (FAIL). **HALT if exit 2** (infrastructure error).
+
+```bash
+MECH_VERDICT=$(python -c "import json; print(json.load(open('workspace/benchmark_output.json'))['mechanism_check_verdict'])")
+if [ "$MECH_VERDICT" = "INCONCLUSIVE" ]; then
+  echo "OPERATOR REVIEW REQUIRED: mechanism_check_verdict is INCONCLUSIVE."
+  echo "Inspect workspace/benchmark_output.json, resolve ambiguity, then re-run or override manually."
+  echo "Do NOT proceed to generate-evidence or Stage 6 without explicit operator sign-off."
+  exit 1
+fi
+```
+
+### 5c-merge. Merge benchmark output into validation_results.json
+
+`generate-evidence` (Step 5d) reads `benchmark` from `workspace/validation_results.json`. This step merges `workspace/benchmark_output.json` into it.
+
+Note: `noise_cv` from `benchmark_output.json` must be placed at the top level of `validation_results.json` (not inside `benchmark`), because `validation_results.schema.json` places `noise_cv` at top level and has `additionalProperties: false` on the `benchmark` sub-object.
+
+```bash
+test -f workspace/validation_results.json \
+  || { echo "HALT: workspace/validation_results.json not found — ensure Suites A/B/C have run before Step 5c-merge"; exit 1; }
+.venv/bin/python - <<'EOF'
+import json, sys
+
+bench = json.loads(open('workspace/benchmark_output.json').read())
+val_path = 'workspace/validation_results.json'
+val = json.loads(open(val_path).read())
+
+# Copy all benchmark fields except noise_cv into val["benchmark"]
+val['benchmark'] = {k: v for k, v in bench.items() if k != 'noise_cv'}
+# noise_cv goes to top-level (per validation_results.schema.json)
+val['noise_cv'] = bench['noise_cv']
+
+mech = bench.get('mechanism_check_verdict', 'ERROR')
+if mech == 'PASS' and val.get('suite_a', {}).get('passed') and val.get('suite_c', {}).get('passed'):
+    val['overall_verdict'] = 'PASS'
+elif mech == 'INCONCLUSIVE':
+    val['overall_verdict'] = 'INCONCLUSIVE'
+else:
+    val['overall_verdict'] = 'FAIL'
+
+open(val_path, 'w').write(json.dumps(val, indent=2))
+print('Merged benchmark into validation_results.json — overall_verdict:', val['overall_verdict'])
+EOF
+```
+**HALT if exit non-zero.**
+
+```bash
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/validation_results.json \
+  || { echo "HALT: validation_results.json failed schema validation after benchmark merge"; exit 1; }
+```
 
 ### 5d. Generate evidence document
 ```bash
@@ -2469,6 +2814,61 @@ Exit 0 = PASS or INCONCLUSIVE (parse `mechanism_check_verdict` from JSON).
   --workspace workspace/ --out workspace/transfer_evidence.md
 ```
 **HALT if exit 1.**
+```
+
+- [ ] **Step 11.3b: Insert Step 4b — partial write of validation_results.json**
+
+In `prompts/validate.md`, find `## Step 5: Cluster Benchmarks` (the newly replaced step from Step 11.3) and insert the following **immediately before it** (between Step 4 and Step 5):
+
+```markdown
+## Step 4b: Write partial validation_results.json (suites A/B/C)
+
+Write `workspace/validation_results.json` with suite_a, suite_b, and suite_c results collected in Steps 2–4. Step 5c-merge will add `benchmark`, `noise_cv`, and `overall_verdict` after cluster pipelines complete.
+
+**Do not call validate-schema yet** — the partial file intentionally omits `benchmark`, `overall_verdict`, and `noise_cv` (all required by the schema). Schema validation will fail on the partial file; run it only after Step 5c-merge.
+
+```json
+{
+  "suite_a": {
+    "passed": <true|false>,
+    "kendall_tau": <mean_tau>,
+    "max_abs_error": <max_abs_err>,
+    "tuple_count": <tuple_count from Step 2 test output (may be < 200 if tuples were skipped)>
+  },
+  "suite_b": {
+    "passed": true,
+    "rank_stability_tau": <tau>,
+    "threshold_crossing_pct": 0.0,
+    "informational_only": true
+  },
+  "suite_c": {
+    "passed": <true|false>,
+    "deterministic": true,
+    "max_pile_on_ratio": <ratio>
+  }
+}
+```
+
+Save this (with actual values substituted) to `workspace/validation_results.json`.
+```
+
+- [ ] **Step 11.3c: Replace Step 6 in validate.md**
+
+Find `## Step 6: Write validation_results.json` (the entire block up to the next `## Step 7`) and replace with:
+
+```markdown
+## Step 6: Final artifact validation
+
+`workspace/validation_results.json` was completed by Step 5c-merge (which added `benchmark`, `noise_cv`, and `overall_verdict`). Run a final schema check:
+
+```bash
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/validation_results.json
+```
+
+**HALT if validate-schema exits non-zero.**
+
+**Manual verification (required — the lightweight validator cannot enforce `if/then` conditionals):**
+If `overall_verdict` is `"INCONCLUSIVE"`, verify that `operator_notes` is present and non-empty in `workspace/validation_results.json`. This is the audit trail for the Option 4 soft-pass path. **HALT if `overall_verdict` is `"INCONCLUSIVE"` and `operator_notes` is absent or empty.** Message: "HALT: operator_notes required for INCONCLUSIVE verdict (Option 4 soft-pass audit trail)."
 ```
 
 - [ ] **Step 11.4: Commit**
@@ -2488,10 +2888,19 @@ git commit -m "docs(prompts): update Stage 5 validate.md — automate noise and 
 
 - [ ] **Step 12.1: Add tekton artifact generation to `prompts/generate.md`**
 
-Find the end of the Stage 3 steps and add a new section **before** the final validation step:
+First, determine the next step number and locate the insertion point:
+
+```bash
+# Find existing step headings to determine the next step number
+grep -n "^## Step" prompts/generate.md
+# Identify the final validation step (insertion is BEFORE it)
+grep -n "^## Final\|^## Verification\|^## Step.*[Vv]alidat" prompts/generate.md
+```
+
+The new section heading is `## Step <N>` where `<N>` is the next integer after the last existing `## Step` in the file. Insert it immediately before the final validation step (or at end of Stage 3 steps if no validation step exists).
 
 ```markdown
-## Step N: Generate tekton artifacts
+## Step <N>: Generate tekton artifacts
 
 After generating the scorer plugin, generate the tekton benchmarking artifacts.
 
@@ -2504,9 +2913,19 @@ After generating the scorer plugin, generate the tekton benchmarking artifacts.
 
 **Resolve inference-sim image tag:**
 ```bash
-(cd inference-sim && git describe --tags)
+BLIS_IMAGE_TAG=$(cd inference-sim && git describe --tags 2>/dev/null)
+if [ -z "$BLIS_IMAGE_TAG" ]; then
+  echo "HALT: git describe --tags returned empty — no tags on inference-sim submodule"; exit 1
+fi
+if echo "$BLIS_IMAGE_TAG" | grep -qE -- '-g[0-9a-f]+$'; then
+  echo "HALT: '$BLIS_IMAGE_TAG' is an un-tagged commit (contains -g suffix). Bump the submodule to a release tag first."; exit 1
+fi
+if ! echo "$BLIS_IMAGE_TAG" | grep -qE '^v?[0-9]+\.[0-9]+'; then
+  echo "HALT: '$BLIS_IMAGE_TAG' does not match expected release-tag pattern v?N.N"; exit 1
+fi
+echo "Resolved tag: $BLIS_IMAGE_TAG"
 ```
-**HALT if command fails, returns empty, or returns a tag with `-g` suffix** (indicates un-tagged commit). The tag must match `^v?[0-9]+\.[0-9]+`. Record the result as `$BLIS_IMAGE_TAG`.
+Record `$BLIS_IMAGE_TAG` for use in `observe.image` below.
 
 **Generate `workspace/tekton/values.yaml`:**
 
@@ -2531,6 +2950,8 @@ for k in required:
 assert 'image' in v['observe'], 'missing observe.image'
 assert '<TAG>' not in v['observe']['image'], 'unresolved <TAG> in observe.image'
 assert v['observe'].get('noise_runs'), 'missing observe.noise_runs'
+wl = v['observe'].get('workloads', [])
+assert len(wl) > 0, 'observe.workloads must be non-empty (no workload files found in blis_router/workloads/)'
 print('OK')
 "
 ```
@@ -2570,17 +2991,34 @@ spec:
 {
   "tekton_artifacts": {
     "values_yaml": "workspace/tekton/values.yaml",
-    "pipelinerun_noise": "workspace/tekton/pipelinerun-noise.yaml",
-    "pipelinerun_baseline": "workspace/tekton/pipelinerun-baseline.yaml",
-    "pipelinerun_treatment": "workspace/tekton/pipelinerun-treatment.yaml"
+    "pipeline_stubs": [
+      "workspace/tekton/pipelinerun-noise.yaml",
+      "workspace/tekton/pipelinerun-baseline.yaml",
+      "workspace/tekton/pipelinerun-treatment.yaml"
+    ]
   }
 }
+```
+
+Note: `stage3_output.schema.json` defines `tekton_artifacts` with `additionalProperties: false` and only allows `values_yaml` (string) and `pipeline_stubs` (array). Individual keys per phase (`pipelinerun_noise`, etc.) are not permitted — use `pipeline_stubs` array. Stage 5 reads the stub paths from this array in phase order (noise, baseline, treatment).
+
+**Validate stage3_output.json after updating:**
+```bash
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/stage3_output.json \
+  || { echo "HALT: stage3_output.json failed schema validation after tekton_artifacts update"; exit 1; }
 ```
 ```
 
 - [ ] **Step 12.2: Update `CLAUDE.md`**
 
-Three changes:
+First, locate the relevant sections:
+
+```bash
+# Find noise-characterize row and benchmark entry in CLI commands table
+grep -n "noise-characterize\|benchmark\|## Development\|## Notes\|## CLI" CLAUDE.md | head -30
+```
+
+Four changes:
 
 1. In the CLI commands table, replace `noise-characterize` row with a note: "(removed — superseded by noise pipeline in Stage 5)"
 
@@ -2602,6 +3040,15 @@ python tools/transfer_cli.py benchmark \
 - `compile-pipeline` and `preflight` require `jinja2` and `PyYAML`.
   These are installed via `pip install -r requirements.txt`.
   The stdlib-only constraint does not apply to these subcommands.
+```
+
+4. Add Stage 5 exit-code table under the `## Notes` section (or append to it):
+```
+- Stage 5 validate.md exit codes (shell script level, not CLI):
+  - `0` = complete (all phases done, all suites passed)
+  - `1` = error/halt (context mismatch, ordering violation, suite failure)
+  - `2` = infrastructure error (missing artifact, parse failure)
+  - `3` = REENTER (noise phase not yet done; operator must jump to Step 5 and re-enter validate.md after noise completes). Automated harnesses must NOT treat exit 3 as a generic failure — it is a planned re-entry pause.
 ```
 
 - [ ] **Step 12.3: Commit**
@@ -2633,21 +3080,18 @@ class TestEndToEndLocal:
         ws = tmp_path / "workspace"
         ws.mkdir()
 
-        # algorithm_summary
+        # algorithm_summary — only schema-valid fields (additionalProperties: false)
+        # matched_workload is NOT in algorithm_summary.schema.json; generate-evidence
+        # derives the matched workload from validation_results.json benchmark data.
         (ws / "algorithm_summary.json").write_text(json.dumps({
             "algorithm_name": "blis-routing-v1",
             "evolve_block_source": "routing/",
-            "per_workload_results": [
-                {"workload_name": "glia-40qps", "improvement_pct": 12.0,
-                 "metric_name": "ttft_p99", "baseline_value": 100.0,
-                 "evolved_value": 88.0}
-            ],
-            "matched_workload": "glia-40qps",
         }))
 
-        # signal_coverage
+        # signal_coverage (prod_access_path required by signal_coverage.schema.json)
         (ws / "signal_coverage.json").write_text(json.dumps({
             "signals": [{"sim_name": "KVUtilization", "prod_name": "kv",
+                         "prod_access_path": "node.status.kv_utilization",
                          "fidelity_rating": "high", "staleness_window_ms": 0,
                          "mapped": True}],
             "unmapped_signals": [], "commit_hash": "abc", "coverage_complete": True,
@@ -2730,8 +3174,9 @@ class TestEndToEndLocal:
         assert bench_out["mechanism_check_verdict"] == "PASS"
 
         # Merge benchmark output into validation_results
+        # (matches Step 5c-merge: noise_cv at top level, not inside benchmark sub-object)
         val = json.loads((ws / "validation_results.json").read_text())
-        val["benchmark"] = bench_out
+        val["benchmark"] = {k: v for k, v in bench_out.items() if k != "noise_cv"}
         val["overall_verdict"] = "PASS"
         val["noise_cv"] = bench_out["noise_cv"]
         (ws / "validation_results.json").write_text(json.dumps(val))
@@ -2792,7 +3237,32 @@ grep -E "passed|failed|error" /tmp/test_results.txt | tail -3
 ```
 Expected: no failures, no errors.
 
+- [ ] **Step 14.2b: Run Go verification (required by pr-workflow.md Validation PR gate)**
+
+```bash
+go build ./tools/harness/...
+go test ./tools/harness/...
+```
+Expected: both exit 0 with no errors.
+
 - [ ] **Step 14.3: Compile all three pipeline templates against test values**
+
+Note: `/tmp/test-values.yaml` was written in Step 9.1 but may not persist across shell sessions (Tasks execute in separate commits). Recreate it if needed:
+```bash
+# Recreate test-values.yaml if it was lost between sessions
+test -f /tmp/test-values.yaml || python -c "
+import pathlib
+# Copy the content from Step 9.1 into /tmp/test-values.yaml
+content = pathlib.Path('docs/superpowers/plans/2026-03-17-tektonc-cluster-benchmarking.md').read_text()
+import re
+m = re.search(r\"cat > /tmp/test-values.yaml << 'EOF'\n(.*?)\nEOF\", content, re.DOTALL)
+if m:
+    pathlib.Path('/tmp/test-values.yaml').write_text(m.group(1))
+    print('Recreated /tmp/test-values.yaml')
+else:
+    print('ERROR: could not find test-values.yaml content in plan file')
+"
+```
 
 ```bash
 source .venv/bin/activate
@@ -2811,6 +3281,39 @@ grep "noise-characterize" CLAUDE.md
 ```
 Expected: either not found, or only appears in a "removed" note.
 
+- [ ] **Step 14.4b: Verify no unfilled placeholders remain in mapping artifact**
+
+```bash
+grep "<fill in" docs/transfer/blis_to_llmd_mapping.md \
+  && { echo "HALT: unfilled placeholder in blis_to_llmd_mapping.md — fill in the PR #704 minimum commit hash before merging this PR."; exit 1; } \
+  || echo "OK: no unfilled placeholders"
+```
+Expected: `OK: no unfilled placeholders`. If PR #704 has not yet merged, skip this step and add a TODO comment; the submodule bump is a prerequisite for Stage 5 cluster runs, not for this PR's unit tests.
+
+- [ ] **Step 14.4c: Confirm blis observe flags match merged PR #704**
+
+```bash
+# If PR #704 has merged and the submodule has been bumped, run:
+if grep -q "AddCommand(observeCmd)" inference-sim/cmd/root.go 2>/dev/null; then
+  echo "blis observe registered — verify CLI flags in run-workload-blis-observe.yaml:"
+  echo "  Expected: --endpoint, --workload-spec, --output-dir, --timeout"
+  echo "  Actual flags from binary:"
+  # Locate the main package (may be at inference-sim/main.go or inference-sim/cmd/*/main.go)
+  BLIS_MAIN=$(ls inference-sim/main.go inference-sim/cmd/blis/main.go 2>/dev/null | head -1)
+  if [ -n "$BLIS_MAIN" ]; then
+    go run "$BLIS_MAIN" observe --help 2>&1 | grep -E '^\s+--' \
+      || { echo "  go run failed — building binary instead:"; \
+           (cd inference-sim && go build -o /tmp/blis . 2>/dev/null || go build -o /tmp/blis ./cmd/blis/ 2>/dev/null) \
+           && /tmp/blis observe --help 2>&1 | grep -E '^\s+--'; }
+  else
+    echo "  Cannot locate main package — run 'ls inference-sim/' to find entry point, then run '<binary> observe --help'"
+  fi
+  echo "Manually confirm all four flags match and update the task YAML if they differ."
+else
+  echo "INFO: observeCmd not yet registered (PR #704 pending). Flags are provisional — no action needed until submodule is bumped."
+fi
+```
+
 - [ ] **Step 14.5: Commit final cleanup and open PR**
 
 ```bash
@@ -2828,5 +3331,5 @@ git commit -m "chore: final cleanup before PR — verify schemas, tests, templat
 - **Template validation:** Requires `source .venv/bin/activate` (jinja2/PyYAML)
 - **Cluster tests:** `preflight` and `compile-pipeline`→`kubectl apply` require a live cluster — these are tested manually after Task 5 and Task 9 respectively
 - **blis observe flags:** The `--endpoint`, `--workload-spec`, `--output-dir`, `--timeout` flags in `run-workload-blis-observe.yaml` are provisional until inference-sim PR #704 merges. Verify flag names against the merged `observeCmd` before deploying to a cluster.
-- **Ordering:** Complete Chunk 1 before Chunks 2–5 (schemas needed by tests). Chunks 2–5 can be done in parallel. Chunks 6–7 (YAML/templates) are independent of Chunks 2–5. Chunk 8 (prompts) depends on all previous chunks.
+- **Ordering:** Complete Chunk 1 before Chunks 2–5 (schemas needed by tests). **Task 6 (benchmark subcommand) has a hard dependency on Chunk 1**: `tools/workload_signal_mapping.json` must exist before `TestBenchmarkNew` tests can pass. Step 6.2 includes an explicit guard. Chunks 6–7 (YAML/templates) are independent of Chunks 2–5. Chunk 8 (prompts) depends on all previous chunks.
 
