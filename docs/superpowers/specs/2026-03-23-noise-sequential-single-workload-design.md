@@ -247,6 +247,66 @@ transfer_cli.py benchmark → noise_cv → T_eff
 | `prompts/validate.md` | Replace single noise submission with sequential loop; extractor runs once after loop |
 | `workspace/tekton/values.yaml` | Regenerate via Stage 3 Step 8 (auto-removes glia-40qps from workloads) |
 
+## Future Extension: Multiple Workloads
+
+When multiple workloads are reintroduced, cross-workload KV cache contamination
+becomes the same problem as cross-run contamination: workload A running before
+workload B on shared infrastructure pollutes the cache for B.
+
+The consistent solution is **one PipelineRun per (workload, run_index)** across all
+three phases. This requires finishing the shift of workload identity from compile-time
+(Jinja2) to runtime (Tekton params) — the work started by adding `runIndex` in this
+spec.
+
+**Pipeline template changes (all three phases):**
+
+Add `workloadName` and `workloadSpec` as Pipeline-level params and remove the
+`{% for workload in observe.workloads %}` Jinja2 loop. The pipeline unconditionally
+runs one workload:
+
+```yaml
+params:
+  - name: workloadName   # used in resultsDir path
+  - name: workloadSpec   # passed to run-workload-blis-observe task
+  - name: runIndex       # noise only; omit or default to "0" for baseline/treatment
+```
+
+`resultsDir` becomes `{phase}/{$(params.workloadName)}/run-$(params.runIndex)`.
+
+With the Jinja2 loop gone, all three pipeline templates become structurally identical
+except for their GAIE config (`stack.gaie.baseline` vs `stack.gaie.treatment`) and
+results path prefix. `compile-pipeline` still renders each template once before its
+submission loop — the compiled artifact is reused for all (workload, run) submissions
+of that phase.
+
+**validate.md loop structure for noise:**
+
+```bash
+for workload in workloads:          # outer: each workload gets fresh infra
+  for i in 0..noise_runs-1:        # inner: each repeat gets fresh infra
+    submit PipelineRun(workloadName=$workload.name,
+                       workloadSpec=$workload.spec,
+                       runIndex=$i)
+    wait
+    # results accumulate: noise/{workloadName}/run-{i}
+# single extractor pod after all loops
+```
+
+**validate.md loop structure for baseline and treatment:**
+
+```bash
+for workload in workloads:
+  submit PipelineRun(workloadName=$workload.name, workloadSpec=$workload.spec)
+  wait
+  # results: {phase}/{workloadName}/run-0
+# single extractor pod after loop
+```
+
+**No structural surprises:** with one workload the outer loop is a single iteration
+and behaviour is identical to this spec. The multi-workload change is additive: add
+two params to the pipeline templates, remove the Jinja2 loop, add the workload loop
+to validate.md submission blocks.
+
 ## Not Changed
 
 - `baseline-pipeline.yaml.j2`
