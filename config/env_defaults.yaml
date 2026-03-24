@@ -40,6 +40,20 @@ stack:
           - modelCommand: vllmServe  # Only supported value
 
   gaie:
+    # epp_image defines the EPP container images used per phase.
+    # Baseline/noise use the upstream llm-d image (contains load-aware-scorer).
+    # Treatment uses a developer-built image (contains the generated scorer plugin).
+    # merge-values injects these into gaie.{baseline,treatment}.helmValues and removes epp_image.
+    epp_image:
+      upstream:
+        hub: ghcr.io/llm-d
+        name: llm-d-inference-scheduler
+        tag: latest               # pin to a specific upstream release if needed
+      build:
+        hub: ghcr.io/REPLACE_ME   # set to developer's registry, e.g. ghcr.io/kalantar
+        name: llm-d-inference-scheduler
+        platform: linux/amd64     # target cluster architecture; cross-compiled on arm64 Mac
+
     # gaie.shared is merged into both baseline and treatment by merge-values.
     # The final values.yaml has no gaie.shared key — it is flattened away.
     shared:

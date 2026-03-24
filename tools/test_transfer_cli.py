@@ -1717,7 +1717,7 @@ class TestCompilePipeline:
         import argparse
         tdir = tmp_path / "tekton"
         tdir.mkdir()
-        (tdir / "baseline-pipeline.yaml.j2").write_text("{{ phase }}")
+        (tdir / "pipeline.yaml.j2").write_text("{{ phase }}")
         args = argparse.Namespace(
             template_dir=str(tdir),
             values=str(tmp_path / "nonexistent_values.yaml"),
@@ -1728,14 +1728,14 @@ class TestCompilePipeline:
         assert rc == 2
 
     def test_success_path_produces_output_file(self, tmp_path):
-        """compile-pipeline exit 0 and produces output file when template + values present."""
+        """compile-pipeline exit 0 and produces output file when unified template present."""
         import argparse, unittest.mock as mock
         from tools.transfer_cli import cmd_compile_pipeline
         tdir = tmp_path / "tekton"
         tdir.mkdir()
-        (tdir / "baseline-pipeline.yaml.j2").write_text("phase: {{ phase }}\n")
+        (tdir / "pipeline.yaml.j2").write_text("phase: {{ phase }}\n")
         vf = tmp_path / "values.yaml"
-        vf.write_text("phase: baseline\n")
+        vf.write_text("stack: {gaie: {baseline: {helmValues: {}}, treatment: {helmValues: {}}}}\n")
         out = tmp_path / "out"
         out.mkdir()
         args = argparse.Namespace(
@@ -1750,6 +1750,93 @@ class TestCompilePipeline:
             rc = cmd_compile_pipeline(args)
         assert rc == 0
 
+    def test_phase_and_gaie_config_injected_into_values(self, tmp_path):
+        """compile-pipeline injects 'phase' and 'gaie_config' into the augmented values
+        passed to tektonc. gaie_config uses baseline helmValues for noise/baseline phases
+        and treatment helmValues for the treatment phase."""
+        import argparse, unittest.mock as mock, yaml
+        from tools.transfer_cli import cmd_compile_pipeline
+        tdir = tmp_path / "tekton"
+        tdir.mkdir()
+        (tdir / "pipeline.yaml.j2").write_text("phase: {{ phase }}\n")
+        baseline_config = {"pluginsConfigFile": "baseline.yaml"}
+        treatment_config = {"pluginsConfigFile": "treatment.yaml"}
+        vf = tmp_path / "values.yaml"
+        vf.write_text(yaml.dump({
+            "stack": {
+                "gaie": {
+                    "baseline": {"helmValues": baseline_config},
+                    "treatment": {"helmValues": treatment_config},
+                }
+            }
+        }))
+        out = tmp_path / "out"
+        out.mkdir()
+
+        captured_calls = []
+
+        def fake_run(cmd, **kwargs):
+            # Capture the temp values file passed to tektonc (-f <file>)
+            idx = cmd.index("-f") + 1
+            captured_calls.append(yaml.safe_load(open(cmd[idx]).read()))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        # Baseline phase: gaie_config should be baseline helmValues
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            cmd_compile_pipeline(argparse.Namespace(
+                template_dir=str(tdir), values=str(vf),
+                phase="baseline", out=str(out),
+            ))
+        assert captured_calls[-1]["phase"] == "baseline"
+        assert captured_calls[-1]["gaie_config"] == baseline_config
+
+        # Noise phase: gaie_config should also be baseline helmValues
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            cmd_compile_pipeline(argparse.Namespace(
+                template_dir=str(tdir), values=str(vf),
+                phase="noise", out=str(out),
+            ))
+        assert captured_calls[-1]["phase"] == "noise"
+        assert captured_calls[-1]["gaie_config"] == baseline_config
+
+        # Treatment phase: gaie_config should be treatment helmValues
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            cmd_compile_pipeline(argparse.Namespace(
+                template_dir=str(tdir), values=str(vf),
+                phase="treatment", out=str(out),
+            ))
+        assert captured_calls[-1]["phase"] == "treatment"
+        assert captured_calls[-1]["gaie_config"] == treatment_config
+
+    def test_phase_template_fallback_when_no_unified_template(self, tmp_path):
+        """compile-pipeline falls back to {phase}-pipeline.yaml.j2 when pipeline.yaml.j2
+        does not exist (backward compatibility)."""
+        import argparse, unittest.mock as mock
+        from tools.transfer_cli import cmd_compile_pipeline
+        tdir = tmp_path / "tekton"
+        tdir.mkdir()
+        (tdir / "noise-pipeline.yaml.j2").write_text("fallback\n")
+        vf = tmp_path / "values.yaml"
+        vf.write_text("stack: {gaie: {baseline: {helmValues: {}}}}\n")
+        out = tmp_path / "out"
+        out.mkdir()
+        args = argparse.Namespace(
+            template_dir=str(tdir), values=str(vf),
+            phase="noise", out=str(out),
+        )
+        captured = []
+
+        def fake_run(cmd, **kwargs):
+            # Record which template was selected (-t <template>)
+            idx = cmd.index("-t") + 1
+            captured.append(cmd[idx])
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            rc = cmd_compile_pipeline(args)
+        assert rc == 0
+        assert captured and "noise-pipeline.yaml.j2" in captured[0]
+
     def test_tektonc_compilation_failure_returns_1(self, tmp_path):
         """compile-pipeline exits 1 (not 2) when tektonc runs but returns non-zero.
         Exit 1 = compilation failure; exit 2 = infrastructure failure (missing files)."""
@@ -1757,9 +1844,9 @@ class TestCompilePipeline:
         from tools.transfer_cli import cmd_compile_pipeline
         tdir = tmp_path / "tekton"
         tdir.mkdir()
-        (tdir / "noise-pipeline.yaml.j2").write_text("{{ undefined_var }}\n")
+        (tdir / "pipeline.yaml.j2").write_text("{{ undefined_var }}\n")
         vf = tmp_path / "values.yaml"
-        vf.write_text("some_key: value\n")
+        vf.write_text("stack: {gaie: {baseline: {helmValues: {}}, treatment: {helmValues: {}}}}\n")
         args = argparse.Namespace(
             template_dir=str(tdir),
             values=str(vf),
@@ -2861,6 +2948,386 @@ class TestMergeValues:
         assert isinstance(workloads, list) and len(workloads) > 0, (
             f"observe.workloads must be a non-empty list, got: {workloads}"
         )
+
+    def test_epp_image_upstream_propagated_to_baseline(self, tmp_path):
+        """merge-values sets inferenceExtension.image from epp_image.upstream in baseline."""
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        env = self._minimal_env_defaults()
+        env.setdefault("stack", {})["gaie"] = {
+            "epp_image": {
+                "upstream": {
+                    "hub": "ghcr.io/llm-d",
+                    "name": "llm-d-inference-scheduler",
+                    "tag": "v0.3.0",
+                },
+                "build": {
+                    "hub": "ghcr.io/dev",
+                    "name": "llm-d-inference-scheduler",
+                    "platform": "linux/amd64",
+                },
+            },
+            "shared": {"helmValues": {}},
+            "baseline": {"helmValues": {}},
+            "treatment": {"helmValues": {}},
+        }
+        self._write_yaml(env_file, env)
+        self._write_yaml(alg_file, self._minimal_algorithm_values())
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        baseline_img = (result["stack"]["gaie"]["baseline"]["helmValues"]
+                        .get("inferenceExtension", {}).get("image", {}))
+        assert baseline_img == {
+            "hub": "ghcr.io/llm-d",
+            "name": "llm-d-inference-scheduler",
+            "tag": "v0.3.0",
+        }, f"Expected upstream image in baseline, got: {baseline_img}"
+
+    def test_epp_image_treatment_preserved_if_set(self, tmp_path):
+        """merge-values does not overwrite treatment.inferenceExtension.image if already set."""
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        env = self._minimal_env_defaults()
+        env.setdefault("stack", {})["gaie"] = {
+            "epp_image": {
+                "upstream": {
+                    "hub": "ghcr.io/llm-d",
+                    "name": "llm-d-inference-scheduler",
+                    "tag": "latest",
+                },
+                "build": {},
+            },
+            "shared": {"helmValues": {}},
+            "baseline": {"helmValues": {}},
+            "treatment": {"helmValues": {}},
+        }
+        self._write_yaml(env_file, env)
+
+        alg = self._minimal_algorithm_values()
+        # Pre-inject a treatment image as build-push-epp would
+        (alg["stack"]["gaie"]["treatment"]["helmValues"]
+         .setdefault("inferenceExtension", {})
+         ["image"]) = {"hub": "ghcr.io/dev", "name": "llm-d-inference-scheduler",
+                       "tag": "sim2real-abc12345"}
+        self._write_yaml(alg_file, alg)
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        treatment_img = (result["stack"]["gaie"]["treatment"]["helmValues"]
+                         .get("inferenceExtension", {}).get("image", {}))
+        assert treatment_img == {
+            "hub": "ghcr.io/dev",
+            "name": "llm-d-inference-scheduler",
+            "tag": "sim2real-abc12345",
+        }, f"Expected preserved treatment image, got: {treatment_img}"
+
+    def test_epp_image_removed_from_output(self, tmp_path):
+        """merge-values removes the gaie.epp_image key from the output."""
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        env = self._minimal_env_defaults()
+        env.setdefault("stack", {})["gaie"] = {
+            "epp_image": {
+                "upstream": {
+                    "hub": "ghcr.io/llm-d",
+                    "name": "llm-d-inference-scheduler",
+                    "tag": "latest",
+                },
+                "build": {
+                    "hub": "ghcr.io/dev",
+                    "name": "llm-d-inference-scheduler",
+                    "platform": "linux/amd64",
+                },
+            },
+            "shared": {"helmValues": {}},
+            "baseline": {"helmValues": {}},
+            "treatment": {"helmValues": {}},
+        }
+        self._write_yaml(env_file, env)
+        self._write_yaml(alg_file, self._minimal_algorithm_values())
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        assert "epp_image" not in result.get("stack", {}).get("gaie", {}), (
+            "gaie.epp_image must be absent from merged output"
+        )
+
+
+class TestBuildPushEpp:
+    """Tests for the build-push-epp subcommand."""
+
+    def _write_yaml(self, path: Path, data: dict) -> None:
+        import yaml
+        path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
+
+    def _load_yaml(self, path: Path) -> dict:
+        import yaml
+        return yaml.safe_load(path.read_text()) or {}
+
+    def _env_defaults(self, hub="ghcr.io/testorg") -> dict:
+        return {
+            "stack": {
+                "gateway": {
+                    "helmValues": {
+                        "gateway": {"provider": "istio", "gatewayClassName": "istio"}
+                    }
+                },
+                "gaie": {
+                    "epp_image": {
+                        "upstream": {
+                            "hub": "ghcr.io/llm-d",
+                            "name": "llm-d-inference-scheduler",
+                            "tag": "latest",
+                        },
+                        "build": {
+                            "hub": hub,
+                            "name": "llm-d-inference-scheduler",
+                            "platform": "linux/amd64",
+                        },
+                    },
+                    "shared": {"helmValues": {}},
+                    "baseline": {"helmValues": {}},
+                    "treatment": {"helmValues": {"inferenceExtension": {
+                        "pluginsCustomConfig": {"custom-plugins.yaml": "cfg"}
+                    }}},
+                },
+            }
+        }
+
+    def _algo_values(self) -> dict:
+        return {
+            "stack": {
+                "model": {
+                    "modelName": "Org/Model-7B",
+                    "helmValues": {
+                        "modelArtifacts": {"name": "Org/Model-7B",
+                                           "uri": "pvc://model-pvc/models/Model-7B"},
+                        "decode": {"replicas": 1,
+                                   "containers": [{"image": "vllm/vllm-openai:v0.11.0"}]},
+                    },
+                },
+                "gaie": {
+                    "treatment": {"helmValues": {"inferenceExtension": {
+                        "pluginsCustomConfig": {"custom-plugins.yaml": "cfg"}
+                    }}}
+                },
+            },
+            "observe": {
+                "image": "ghcr.io/inference-sim/blis:v0.6.13",
+                "workloads": [{"name": "wl-a", "spec": "version: '1'"}],
+            },
+        }
+
+    def _make_ns(self, tmp_path, scheduler_dir, dry_run=False):
+        import argparse
+        return argparse.Namespace(
+            scheduler_dir=str(scheduler_dir),
+            env=str(tmp_path / "env.yaml"),
+            values=str(tmp_path / "alg.yaml"),
+            merged_values=str(tmp_path / "values.yaml"),
+            dry_run=dry_run,
+        )
+
+    def _mock_run(self, sha="abcd1234", build_rc=0, push_rc=0):
+        """Return a subprocess.run side_effect that mocks git + make calls."""
+        from unittest.mock import MagicMock
+
+        def _run(cmd, **kwargs):
+            m = MagicMock()
+            if "git" in cmd:
+                m.returncode = 0
+                m.stdout = f"{sha}\n"
+                m.stderr = ""
+            elif "make" in cmd:
+                if "image-push-epp" in cmd:
+                    m.returncode = push_rc
+                else:
+                    m.returncode = build_rc
+                m.stdout = ""
+                m.stderr = "build failed" if build_rc != 0 else ""
+            return m
+
+        return _run
+
+    def test_exits_2_missing_scheduler_dir(self, tmp_path):
+        """Exit 2 when --scheduler-dir does not exist."""
+        import argparse
+        sys.path.insert(0, str(Path(__file__).parent))
+        from transfer_cli import cmd_build_push_epp
+
+        self._write_yaml(tmp_path / "env.yaml", self._env_defaults())
+        self._write_yaml(tmp_path / "alg.yaml", self._algo_values())
+        ns = self._make_ns(tmp_path, tmp_path / "nonexistent")
+        rc = cmd_build_push_epp(ns)
+        assert rc == 2, f"Expected exit 2 for missing scheduler_dir, got {rc}"
+
+    def test_exits_2_no_container_runtime(self, tmp_path):
+        """Exit 2 when neither podman nor docker is on PATH."""
+        from unittest.mock import patch
+        sys.path.insert(0, str(Path(__file__).parent))
+        from transfer_cli import cmd_build_push_epp
+
+        scheduler_dir = tmp_path / "scheduler"
+        scheduler_dir.mkdir()
+        self._write_yaml(tmp_path / "env.yaml", self._env_defaults())
+        self._write_yaml(tmp_path / "alg.yaml", self._algo_values())
+        ns = self._make_ns(tmp_path, scheduler_dir)
+
+        with patch("shutil.which", return_value=None):
+            rc = cmd_build_push_epp(ns)
+        assert rc == 2, f"Expected exit 2 when no container runtime found, got {rc}"
+
+    def test_build_failure_exits_1(self, tmp_path):
+        """Exit 1 when make image-build-epp fails."""
+        from unittest.mock import patch
+        sys.path.insert(0, str(Path(__file__).parent))
+        from transfer_cli import cmd_build_push_epp
+
+        scheduler_dir = tmp_path / "scheduler"
+        scheduler_dir.mkdir()
+        self._write_yaml(tmp_path / "env.yaml", self._env_defaults())
+        self._write_yaml(tmp_path / "alg.yaml", self._algo_values())
+        ns = self._make_ns(tmp_path, scheduler_dir)
+
+        with patch("shutil.which", return_value="/usr/bin/podman"), \
+             patch("subprocess.run", side_effect=self._mock_run(build_rc=1)):
+            rc = cmd_build_push_epp(ns)
+        assert rc == 1, f"Expected exit 1 on build failure, got {rc}"
+
+    def test_dry_run_builds_but_skips_push_and_config(self, tmp_path):
+        """--dry-run: build runs, push skipped, algorithm_values.yaml not modified."""
+        from unittest.mock import patch
+        sys.path.insert(0, str(Path(__file__).parent))
+        from transfer_cli import cmd_build_push_epp
+
+        scheduler_dir = tmp_path / "scheduler"
+        scheduler_dir.mkdir()
+        self._write_yaml(tmp_path / "env.yaml", self._env_defaults())
+        self._write_yaml(tmp_path / "alg.yaml", self._algo_values())
+        ns = self._make_ns(tmp_path, scheduler_dir, dry_run=True)
+
+        make_calls = []
+
+        def tracking_run(cmd, **kwargs):
+            from unittest.mock import MagicMock
+            m = MagicMock()
+            if "git" in cmd:
+                m.returncode = 0
+                m.stdout = "abcd1234\n"
+                m.stderr = ""
+            elif "make" in cmd:
+                make_calls.append(list(cmd))
+                m.returncode = 0
+                m.stdout = ""
+                m.stderr = ""
+            return m
+
+        with patch("shutil.which", return_value="/usr/bin/podman"), \
+             patch("subprocess.run", side_effect=tracking_run):
+            rc = cmd_build_push_epp(ns)
+
+        assert rc == 0, f"Expected exit 0 for dry-run, got {rc}"
+        assert any("image-build-epp" in str(c) for c in make_calls), \
+            "image-build-epp should be called in dry-run"
+        assert not any("image-push-epp" in str(c) for c in make_calls), \
+            "image-push-epp must NOT be called in dry-run"
+        algo_data = self._load_yaml(tmp_path / "alg.yaml")
+        img = (algo_data.get("stack", {}).get("gaie", {})
+               .get("treatment", {}).get("helmValues", {})
+               .get("inferenceExtension", {}).get("image"))
+        assert img is None, f"algorithm_values.yaml must not be modified in dry-run, got image={img}"
+
+    def test_tag_derived_from_scheduler_commit(self, tmp_path):
+        """Tag passed to make is 'sim2real-<sha>' where sha comes from git rev-parse."""
+        from unittest.mock import patch
+        sys.path.insert(0, str(Path(__file__).parent))
+        from transfer_cli import cmd_build_push_epp
+
+        scheduler_dir = tmp_path / "scheduler"
+        scheduler_dir.mkdir()
+        self._write_yaml(tmp_path / "env.yaml", self._env_defaults())
+        self._write_yaml(tmp_path / "alg.yaml", self._algo_values())
+        ns = self._make_ns(tmp_path, scheduler_dir, dry_run=True)
+
+        observed_tags = []
+
+        def tracking_run(cmd, **kwargs):
+            from unittest.mock import MagicMock
+            m = MagicMock()
+            if "git" in cmd:
+                m.returncode = 0
+                m.stdout = "deadbeef\n"
+                m.stderr = ""
+            elif "make" in cmd:
+                for arg in cmd:
+                    if arg.startswith("EPP_TAG="):
+                        observed_tags.append(arg.split("=", 1)[1])
+                m.returncode = 0
+                m.stdout = ""
+                m.stderr = ""
+            return m
+
+        with patch("shutil.which", return_value="/usr/bin/docker"), \
+             patch("subprocess.run", side_effect=tracking_run):
+            rc = cmd_build_push_epp(ns)
+
+        assert rc == 0
+        assert observed_tags, "EPP_TAG= should have been passed to make"
+        assert observed_tags[0] == "sim2real-deadbeef", \
+            f"Expected tag 'sim2real-deadbeef', got '{observed_tags[0]}'"
+
+    def test_success_updates_algorithm_values(self, tmp_path):
+        """Success: algorithm_values.yaml gains inferenceExtension.image under treatment."""
+        from unittest.mock import patch
+        sys.path.insert(0, str(Path(__file__).parent))
+        from transfer_cli import cmd_build_push_epp
+
+        scheduler_dir = tmp_path / "scheduler"
+        scheduler_dir.mkdir()
+        self._write_yaml(tmp_path / "env.yaml", self._env_defaults(hub="ghcr.io/myorg"))
+        self._write_yaml(tmp_path / "alg.yaml", self._algo_values())
+        ns = self._make_ns(tmp_path, scheduler_dir, dry_run=False)
+
+        with patch("shutil.which", return_value="/usr/bin/podman"), \
+             patch("subprocess.run", side_effect=self._mock_run(sha="cafebabe")):
+            rc = cmd_build_push_epp(ns)
+
+        assert rc == 0, f"Expected exit 0, got {rc}"
+        algo_data = self._load_yaml(tmp_path / "alg.yaml")
+        img = (algo_data.get("stack", {}).get("gaie", {})
+               .get("treatment", {}).get("helmValues", {})
+               .get("inferenceExtension", {}).get("image", {}))
+        assert img.get("hub") == "ghcr.io/myorg", f"hub mismatch: {img}"
+        assert img.get("name") == "llm-d-inference-scheduler", f"name mismatch: {img}"
+        assert img.get("tag") == "sim2real-cafebabe", f"tag mismatch: {img}"
+        # merge-values should have produced a values.yaml
+        assert (tmp_path / "values.yaml").exists(), \
+            "merged values.yaml should be written after push"
 
 
 # ---------------------------------------------------------------------------

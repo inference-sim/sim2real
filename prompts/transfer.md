@@ -17,8 +17,9 @@ Stages 1 through 6, verifying prerequisite artifacts between each stage.
 | 1     | Extract   | `prompts/extract.md`  | `blis_router/best/best_program.go`, `blis_router/best/best_program_info.json` | `workspace/algorithm_summary.json` |
 | 2     | Translate | `prompts/translate.md`| `workspace/algorithm_summary.json`, `docs/transfer/blis_to_llmd_mapping.md` | `workspace/signal_coverage.json` |
 | 3     | Generate  | `prompts/generate.md` | `workspace/algorithm_summary.json`, `workspace/signal_coverage.json`, `docs/transfer/scorer_template.go.md` | scorer files + `workspace/stage3_output.json` |
-| 4     | Test      | `prompts/test.md`     | `workspace/stage3_output.json`               | build + test pass (no artifact)    |
-| 5     | Validate  | `prompts/validate.md` | `workspace/stage3_output.json` (generated scorer files) | `workspace/validation_results.json` |
+| 4     | Test      | `prompts/test.md`       | `workspace/stage3_output.json`               | build + test pass (no artifact)    |
+| 4.5   | Build & Push EPP | `prompts/build-push.md` | `workspace/tekton/algorithm_values.yaml`, `config/env_defaults.yaml` | treatment EPP image in registry; updated `workspace/tekton/values.yaml` |
+| 5     | Validate  | `prompts/validate.md`   | `workspace/stage3_output.json` (generated scorer files) | `workspace/validation_results.json` |
 | 6     | PR        | *Defined in PR6*      | all artifacts                                | PRs in target repos                |
 
 ## Prerequisites
@@ -141,6 +142,35 @@ test -f "$SCORER_FILE" || { echo "HALT: generated scorer file missing: $SCORER_F
 
 # Final build + vet verification
 cd llm-d-inference-scheduler && go build ./... && go vet ./... && go test -timeout 10m ./pkg/plugins/scorer/... -v && cd .. || { echo "HALT: Stage 4 build/vet/test verification failed"; exit 1; }
+```
+
+**HALT if any validation fails.** Do not proceed to Stage 4.5.
+
+---
+
+### Stage 4.5: Build & Push EPP Image
+
+**Prompt:** `prompts/build-push.md`
+
+Follow the Stage 4.5 prompt to build the treatment EPP image from the
+`llm-d-inference-scheduler` submodule and push it to the developer's registry.
+
+**Between-stage validation:**
+
+```bash
+# Verify treatment image reference is set in algorithm_values.yaml
+.venv/bin/python -c "
+import yaml, sys
+d = yaml.safe_load(open('workspace/tekton/algorithm_values.yaml'))
+img = (d.get('stack',{}).get('gaie',{}).get('treatment',{})
+        .get('helmValues',{}).get('inferenceExtension',{}).get('image',{}))
+if not img.get('hub') or not img.get('tag'):
+    print('HALT: treatment EPP image not set'); sys.exit(1)
+print(f\"EPP image: {img['hub']}/{img['name']}:{img['tag']}\")
+" || { echo "HALT: Stage 4.5 validation failed"; exit 1; }
+
+# Verify values.yaml was regenerated
+test -f workspace/tekton/values.yaml || { echo "HALT: workspace/tekton/values.yaml missing"; exit 1; }
 ```
 
 **HALT if any validation fails.** Do not proceed to Stage 5.
