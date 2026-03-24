@@ -236,6 +236,9 @@ Key translation rules from `blis_router/llm_config.yaml`:
 - `stack.model.helmValues.decode.replicas`: `cluster.num_instances`
 - `stack.model.helmValues.decode.parallelism.tensor`: `serving.tensor_parallel_size`
 - `stack.model.helmValues.decode.containers[0].image`: `vllm/vllm-openai:<serving.vllm_version>`
+  *(Note: `merge-values` will replace this with `stack.model.vllm_image` from `config/env_defaults.yaml`
+  if that field is set — e.g. to substitute a llm-d custom vLLM build. Record the original sim image
+  here regardless; the override applies at merge time.)*
 - `stack.model.helmValues.decode.containers[0].extraConfig.vllm.gpuMemoryUtilization`: `serving.gpu_memory_utilization`
 - `stack.model.helmValues.decode.containers[0].extraConfig.vllm.maxNumSeqs`: `vllm_config.max_num_running_reqs`
 - `stack.model.helmValues.decode.containers[0].extraConfig.vllm.maxNumBatchedTokens`: `vllm_config.max_num_scheduled_tokens`

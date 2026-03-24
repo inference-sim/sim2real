@@ -1838,6 +1838,29 @@ def _flatten_gaie_shared(merged: dict) -> dict:
     return merged
 
 
+def _apply_vllm_image_override(merged: dict) -> dict:
+    """Apply stack.model.vllm_image override to decode.containers[0].image.
+
+    If stack.model.vllm_image is set, replaces decode.containers[0].image with that
+    value and removes the vllm_image key from the output. If not set, no-op.
+    """
+    model = merged.get("stack", {}).get("model", {})
+    override = model.get("vllm_image")
+    if not override:
+        return merged
+
+    containers = (
+        model.get("helmValues", {})
+        .get("decode", {})
+        .get("containers")
+    )
+    if containers and isinstance(containers, list) and len(containers) > 0:
+        containers[0]["image"] = override
+
+    model.pop("vllm_image", None)
+    return merged
+
+
 def cmd_merge_values(args: "argparse.Namespace") -> int:
     """Merge env_defaults.yaml and algorithm_values.yaml into values.yaml.
 
@@ -1872,6 +1895,9 @@ def cmd_merge_values(args: "argparse.Namespace") -> int:
 
     # Flatten gaie.shared into each phase, then remove gaie.shared
     merged = _flatten_gaie_shared(merged)
+
+    # Apply vllm_image override if set in env_defaults
+    merged = _apply_vllm_image_override(merged)
 
     # Validate required keys in merged output
     def _get_nested(d: dict, *keys):

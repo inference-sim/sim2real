@@ -3078,6 +3078,71 @@ class TestMergeValues:
         )
 
 
+    def test_vllm_image_override_applied(self, tmp_path):
+        """When stack.model.vllm_image is set in env_defaults, decode.containers[0].image is replaced."""
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        env = self._minimal_env_defaults()
+        env.setdefault("stack", {}).setdefault("model", {})["vllm_image"] = (
+            "ghcr.io/llm-d/llm-d-cuda:v0.5.1"
+        )
+        self._write_yaml(env_file, env)
+
+        alg = self._minimal_algorithm_values()
+        # algorithm carries the original sim image
+        alg["stack"]["model"]["helmValues"]["decode"]["containers"] = [
+            {"image": "vllm/vllm-openai:v0.11.0"}
+        ]
+        self._write_yaml(alg_file, alg)
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        containers = result["stack"]["model"]["helmValues"]["decode"]["containers"]
+        assert containers[0]["image"] == "ghcr.io/llm-d/llm-d-cuda:v0.5.1", (
+            f"Expected override image, got: {containers[0]['image']}"
+        )
+        # vllm_image key must be absent from output
+        assert "vllm_image" not in result["stack"]["model"], (
+            "stack.model.vllm_image must be removed from output"
+        )
+
+    def test_vllm_image_override_absent_passthrough(self, tmp_path):
+        """When stack.model.vllm_image is absent, original sim image passes through unchanged."""
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        # env_defaults has no vllm_image
+        self._write_yaml(env_file, self._minimal_env_defaults())
+
+        alg = self._minimal_algorithm_values()
+        alg["stack"]["model"]["helmValues"]["decode"]["containers"] = [
+            {"image": "vllm/vllm-openai:v0.11.0"}
+        ]
+        self._write_yaml(alg_file, alg)
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        containers = result["stack"]["model"]["helmValues"]["decode"]["containers"]
+        assert containers[0]["image"] == "vllm/vllm-openai:v0.11.0", (
+            f"Expected original sim image to pass through, got: {containers[0]['image']}"
+        )
+
+
 class TestBuildPushEpp:
     """Tests for the build-push-epp subcommand."""
 

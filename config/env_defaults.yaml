@@ -26,6 +26,10 @@ stack:
             accessLogging: false
 
   model:
+    # vllm_image overrides the vLLM serving image from blis_router/llm_config.yaml.
+    # When set, merge-values replaces decode.containers[0].image with this value.
+    # Comment out or remove to use the original simulation image.
+    vllm_image: "ghcr.io/llm-d/llm-d-cuda:v0.5.1"
     helmValues:
       modelArtifacts:
         authSecretName: "hf-secret"
@@ -34,6 +38,7 @@ stack:
       prefill:
         create: false
       decode:
+        create: true
         acceleratorTypes:
           labelKey: "nvidia.com/gpu.product"
         containers:
@@ -50,7 +55,7 @@ stack:
         name: llm-d-inference-scheduler
         tag: latest               # pin to a specific upstream release if needed
       build:
-        hub: ghcr.io/REPLACE_ME   # set to developer's registry, e.g. ghcr.io/kalantar
+        hub: ghcr.io/kalantar   # set to developer's registry, e.g. ghcr.io/kalantar
         name: llm-d-inference-scheduler
         platform: linux/amd64     # target cluster architecture; cross-compiled on arm64 Mac
 
