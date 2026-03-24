@@ -43,6 +43,7 @@ stack:
           labelKey: "nvidia.com/gpu.product"
         containers:
           - modelCommand: vllmServe  # Only supported value
+            mountModelVolume: true   # Must be set explicitly — lost when algorithm_values.yaml overrides the containers list (Helm replaces lists, not merges)
 
   gaie:
     # epp_image defines the EPP container images used per phase.
