@@ -225,7 +225,7 @@ If the user specified an override at prompt time (e.g., "use kgateway instead of
 
 **Generate `workspace/tekton/algorithm_values.yaml`** containing only the BLIS-derived values.
 
-Using `blis_router/llm_config.yaml`, `blis_router/hardware_config.json`, and `workspace/stage3_output.json` (for `scorer_type`), generate ONLY the BLIS-derived values. The output must match the `algorithm_values.schema.json` schema.
+Using `blis_router/llm_config.yaml`, `blis_router/CLUSTER.md`, and `workspace/stage3_output.json` (for `scorer_type`), generate ONLY the BLIS-derived values. The output must match the `algorithm_values.schema.json` schema.
 
 Key translation rules from `blis_router/llm_config.yaml`:
 - `stack.model.modelName`: model HF repo ID (e.g. `Qwen/Qwen2.5-7B-Instruct`)
@@ -235,6 +235,14 @@ Key translation rules from `blis_router/llm_config.yaml`:
   e.g. `Qwen/Qwen2.5-7B-Instruct` → `qwen-qwen2.5-7b-instruct`)
 - `stack.model.helmValues.decode.replicas`: `cluster.num_instances`
 - `stack.model.helmValues.decode.parallelism.tensor`: `serving.tensor_parallel_size`
+- `stack.model.helmValues.decode.containers[0].modelCommand`: `vllmServe`
+  *(Required — specifying the `containers` array in values replaces the chart default entirely, dropping
+  `modelCommand`. Without it the Helm chart requires an explicit `command`, causing a render error:
+  "When .container.modelCommand not set or `custom`, a `command` is required.")*
+- `stack.model.helmValues.decode.containers[0].mountModelVolume`: `true`
+  *(Required — same reason: specifying the `containers` array replaces the chart default entirely.
+  Omitting this field causes the model PVC to not be mounted in the vllm pod,
+  resulting in a startup crash when vllm cannot find the model path.)*
 - `stack.model.helmValues.decode.containers[0].image`: `vllm/vllm-openai:<serving.vllm_version>`
   *(Note: `merge-values` will replace this with `stack.model.vllm_image` from `config/env_defaults.yaml`
   if that field is set — e.g. to substitute a llm-d custom vLLM build. Record the original sim image
@@ -242,8 +250,9 @@ Key translation rules from `blis_router/llm_config.yaml`:
 - `stack.model.helmValues.decode.containers[0].extraConfig.vllm.gpuMemoryUtilization`: `serving.gpu_memory_utilization`
 - `stack.model.helmValues.decode.containers[0].extraConfig.vllm.maxNumSeqs`: `vllm_config.max_num_running_reqs`
 - `stack.model.helmValues.decode.containers[0].extraConfig.vllm.maxNumBatchedTokens`: `vllm_config.max_num_scheduled_tokens`
-- `stack.model.helmValues.decode.acceleratorTypes.labelValues`: map `hardware.gpu_type` to k8s label
-  (e.g. `H100-80GB` → `["NVIDIA-H100-80GB-HBM3"]`)
+- `stack.model.helmValues.decode.acceleratorTypes.labelValues`: derive from `hardware.gpu` in
+  `blis_router/llm_config.yaml` and the node selector label documented in `blis_router/CLUSTER.md`
+  (e.g. `hardware.gpu: H100` + CLUSTER.md node selector → `["NVIDIA-H100-80GB-HBM3"]`)
 - `stack.gaie.treatment.helmValues.inferenceExtension.pluginsCustomConfig`: use `scorer_type` from
   `workspace/stage3_output.json` in the EndpointPickerConfig:
   ```yaml
@@ -333,6 +342,8 @@ print('OK')
 
 Each stub must include:
 ```yaml
+apiVersion: tekton.dev/v1
+kind: PipelineRun
 metadata:
   name: $PIPELINERUN_NAME
   namespace: $NAMESPACE
