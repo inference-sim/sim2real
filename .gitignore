@@ -33,6 +33,7 @@ Thumbs.db
 __pycache__/
 *.pyc
 .venv/
+pytest-of-*/
 
 # Build artifacts
 *.o

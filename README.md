@@ -17,6 +17,7 @@ Run stages using prompt templates in `prompts/`. Use `prompts/transfer.md` as th
 | 2 Translate | `prompts/translate.md` | `workspace/signal_coverage.json` |
 | 3 Generate | `prompts/generate.md` | Go scorer plugin source |
 | 4 Test | `prompts/test.md` | Build + test pass |
+| 4.5 Build & Push | `prompts/build-push.md` | Treatment EPP image in registry |
 | 5 Validate | `prompts/validate.md` | `workspace/validation_results.json` |
 | 6 PR | `prompts/pr.md` | PRs in llm-d repos + calibration log |
 
@@ -29,6 +30,27 @@ python -m pytest tools/ -v
 ```
 
 See `CLAUDE.md` for CLI reference, artifact contracts, and exit code semantics.
+
+## Stage 4.5 Prerequisites (Build & Push EPP Image)
+
+Stage 4.5 (`prompts/build-push.md`) builds the treatment EPP image and pushes it to a container registry. Before running it, complete these one-time steps:
+
+**Configure your registry hub** in `config/env_defaults.yaml`:
+```yaml
+stack:
+  gaie:
+    epp_image:
+      build:
+        hub: ghcr.io/<your-org>   # e.g. ghcr.io/kalantar
+```
+
+**Create a GitHub PAT** with `write:packages` scope and log in to the registry:
+```bash
+echo $GITHUB_PAT | podman login ghcr.io -u <your-github-username> --password-stdin
+# or: docker login ghcr.io
+```
+
+**Container runtime** (`podman` or `docker`) must be on `PATH`.
 
 ## Stage 5 Prerequisites (Cluster Benchmarks)
 
