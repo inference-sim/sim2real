@@ -1864,6 +1864,80 @@ def _apply_vllm_image_override(merged: dict) -> dict:
     return merged
 
 
+def _apply_request_multiplier(merged: dict) -> dict:
+    """Scale num_requests in each observe.workloads[].spec by observe.request_multiplier.
+
+    If observe.request_multiplier is present and > 1, parses each workload's spec
+    string as YAML, multiplies num_requests (if present), and re-serializes.
+    The request_multiplier key is stripped from the output regardless.
+
+    Specs that fail YAML parsing are left unchanged (warning emitted to stderr).
+    Specs without a num_requests field are left unchanged.
+    """
+    import yaml
+
+    observe = merged.get("observe", {})
+    multiplier = observe.pop("request_multiplier", None)
+
+    if multiplier is None:
+        return merged
+
+    if not isinstance(multiplier, (int, float)):
+        print(
+            f"ERROR: observe.request_multiplier must be a number, "
+            f"got {type(multiplier).__name__!r} (value: {multiplier!r}).",
+            file=sys.stderr,
+        )
+        return merged
+
+    if multiplier <= 1:
+        return merged
+
+    workloads = observe.get("workloads", [])
+    for wl in workloads:
+        spec_str = wl.get("spec")
+        if not spec_str or not isinstance(spec_str, str):
+            continue
+        try:
+            spec_data = yaml.safe_load(spec_str)
+        except yaml.YAMLError:
+            print(
+                f"WARNING: could not parse spec YAML for workload "
+                f"'{wl.get('name', '?')}', skipping request_multiplier scaling.",
+                file=sys.stderr,
+            )
+            continue
+        if not isinstance(spec_data, dict):
+            print(
+                f"WARNING: workload '{wl.get('name', '?')}' spec parsed to "
+                f"{type(spec_data).__name__!r} (expected dict), "
+                f"skipping request_multiplier scaling.",
+                file=sys.stderr,
+            )
+            continue
+        if "num_requests" in spec_data:
+            raw = spec_data["num_requests"]
+            if not isinstance(raw, (int, float)):
+                print(
+                    f"WARNING: workload '{wl.get('name', '?')}' num_requests is not a number "
+                    f"(got {type(raw).__name__!r}: {raw!r}), "
+                    f"skipping request_multiplier scaling.",
+                    file=sys.stderr,
+                )
+                continue
+            spec_data["num_requests"] = int(round(raw * multiplier))
+            try:
+                wl["spec"] = yaml.dump(spec_data, default_flow_style=False, sort_keys=False)
+            except yaml.YAMLError as e:
+                print(
+                    f"WARNING: could not re-serialize spec YAML for workload "
+                    f"'{wl.get('name', '?')}' after scaling, skipping: {e}",
+                    file=sys.stderr,
+                )
+
+    return merged
+
+
 def cmd_merge_values(args: "argparse.Namespace") -> int:
     """Merge env_defaults.yaml and algorithm_values.yaml into values.yaml.
 
@@ -1908,6 +1982,9 @@ def cmd_merge_values(args: "argparse.Namespace") -> int:
 
     # Apply vllm_image override if set in env_defaults
     merged = _apply_vllm_image_override(merged)
+
+    # Apply request_multiplier scaling to workload specs
+    merged = _apply_request_multiplier(merged)
 
     # Validate required keys in merged output
     def _get_nested(d: dict, *keys):
