@@ -67,8 +67,7 @@ stack:
         inferenceExtension:
           pluginsConfigFile: "custom-plugins.yaml"
           flags:
-            - name: v
-              value: 1
+            v: 1
         provider:
           name: istio           # Must match stack.gateway.helmValues.gateway.provider
         istio:
@@ -90,7 +89,7 @@ stack:
         inferenceExtension:
           pluginsCustomConfig:
             custom-plugins.yaml: |
-              apiVersion: inference.networking.k8s.io/v1alpha1
+              apiVersion: inference.networking.x-k8s.io/v1alpha1
               kind: EndpointPickerConfig
               plugins:
               - type: load-aware-scorer
@@ -109,6 +108,6 @@ observe:
   noise_runs: 5
 
 pipeline:
-  fast_iteration: true   # When true: Suites A/B/C still run, but noise gate and cluster benchmarks
-                         # (Stage 5) and PR creation (Stage 6) are skipped.
-                         # Set to false when algorithm is ready for full validation.
+  fast_iteration: true   # When true: Suites A/B/C + baseline/treatment cluster pipelines run,
+                         # but noise gate and mechanism check are skipped, and PR creation (Stage 6)
+                         # is skipped. Set to false when algorithm is ready for full validation.
