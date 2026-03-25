@@ -69,9 +69,9 @@ print('true' if val else 'false')
 
 **If `FAST_ITER` is `"true"`:**
 
-> All prerequisite checks above have already run and passed. Suites A/B/C still run in fast mode.
+> All prerequisite checks above have already run and passed. Suites A/B/C and the baseline/treatment cluster pipelines run in fast mode; noise and mechanism check are skipped.
 
-1. Print: `"FAST MODE: Skipping noise gate and cluster benchmarks (pipeline.fast_iteration=true)"`
+1. Print: `"FAST MODE: Skipping noise gate and mechanism check (pipeline.fast_iteration=true)"`
 2. Skip Step 1 (Noise Characterization Gate) entirely — jump directly to Step 2 (Suite A).
 3. Complete Steps 2, 3, and 4 (Suites A, B, C) as normal.
 4. Write `workspace/validation_results.json` per Step 4b, adding an `overall_verdict` field:
@@ -79,12 +79,14 @@ print('true' if val else 'false')
    - `"FAIL"` otherwise
    - Suite B is informational-only (v1) and does not affect `overall_verdict`.
    - Do not schema-validate this file (it intentionally omits `benchmark`, `noise_cv`).
-5. Print: `"FAST MODE: Cluster benchmarks skipped. Set pipeline.fast_iteration=false to run full validation."`
-6. **Exit 0.** Do not proceed to Step 5 or beyond.
+5. Run Step 5a (initialize benchmark state), then run **baseline then treatment sequentially** using the `for phase in baseline treatment` loop from Step 5b — skip the noise loop entirely. Baseline must complete (Succeeded, extracted, converted, marked done) before treatment is submitted.
+6. Run Step 5e (comparison table) once baseline and treatment results are available.
+7. Print: `"FAST MODE: Noise gate and mechanism check skipped. Set pipeline.fast_iteration=false to run full validation."`
+8. **Exit 0.** Do not proceed to Step 5c, 5c-merge, 5d, or Step 6.
 
 **If `FAST_ITER` is `"false"`:** proceed with Step 1 (Noise Characterization Gate) and the full pipeline as today.
 
-> **Stale artifact note:** Fast mode overwrites any prior `validation_results.json` with a partial file. If you flip `fast_iteration` to `false`, you must re-run Stage 5 from Step 1 before proceeding to Stage 6. Proceeding directly to Stage 6 will fail at its prerequisite schema check — this is the expected enforcement gate.
+> **Stale artifact note:** Fast mode writes a partial `validation_results.json` (no `benchmark` or `noise_cv`). If you flip `fast_iteration` to `false`, you must re-run Stage 5 from Step 1 (including noise) before proceeding to Stage 6. Proceeding directly to Stage 6 will fail at its prerequisite schema check — this is the expected enforcement gate.
 
 ## Step 1: Noise Characterization Gate
 
