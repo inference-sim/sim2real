@@ -1493,7 +1493,9 @@ def cmd_preflight(args: "argparse.Namespace") -> int:
         scheduler_dir = REPO_ROOT / "llm-d-inference-scheduler"
         if scheduler_dir.is_dir():
             try:
-                env = {**__import__("os").environ, "GOWORK": "off"}
+                import tempfile
+                _gocache = __import__("os").environ.get("GOCACHE") or __import__("os").path.join(tempfile.gettempdir(), "go-cache")
+                env = {**__import__("os").environ, "GOWORK": "off", "GOCACHE": _gocache}
                 r = subprocess.run(
                     ["go", "build", "./pkg/plugins/scorer/..."],
                     capture_output=True, text=True, cwd=str(scheduler_dir),

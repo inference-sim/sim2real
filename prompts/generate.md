@@ -250,6 +250,38 @@ Key translation rules from `blis_router/llm_config.yaml`:
 - `stack.model.helmValues.decode.containers[0].extraConfig.vllm.gpuMemoryUtilization`: `serving.gpu_memory_utilization`
 - `stack.model.helmValues.decode.containers[0].extraConfig.vllm.maxNumSeqs`: `vllm_config.max_num_running_reqs`
 - `stack.model.helmValues.decode.containers[0].extraConfig.vllm.maxNumBatchedTokens`: `vllm_config.max_num_scheduled_tokens`
+- `stack.model.helmValues.decode.containers[0].extraConfig.startupProbe`,
+  `stack.model.helmValues.decode.containers[0].extraConfig.livenessProbe`,
+  `stack.model.helmValues.decode.containers[0].extraConfig.readinessProbe`: always include the
+  following probes. The probe port depends on `routing.proxy.enabled` in the Helm chart:
+  - **Port 8200** (default) — when `routing.proxy` is enabled (chart default), vLLM listens on
+    `routing.proxy.targetPort` (default 8200) and the proxy fronts it on `routing.servicePort` (8000).
+  - **Port 8000** — when proxy is disabled, vLLM listens on `routing.servicePort` directly.
+  Since `env_defaults.yaml` does not disable the proxy, use **port 8200**:
+  ```yaml
+  extraConfig:
+    startupProbe:
+      httpGet:
+        path: /health
+        port: 8200
+      failureThreshold: 60
+      initialDelaySeconds: 30
+      periodSeconds: 30
+      timeoutSeconds: 5
+    livenessProbe:
+      tcpSocket:
+        port: 8200
+      failureThreshold: 3
+      periodSeconds: 5
+    readinessProbe:
+      httpGet:
+        path: /health
+        port: 8200
+      failureThreshold: 3
+      periodSeconds: 5
+  ```
+  *(Required — same list-replacement issue as `modelCommand`: these must be explicit in
+  `algorithm_values.yaml` or they will be absent from the merged output. Tracked in issue #18.)*
 - `stack.model.helmValues.decode.acceleratorTypes.labelValues`: derive from `hardware.gpu` in
   `blis_router/llm_config.yaml` and the node selector label documented in `blis_router/CLUSTER.md`
   (e.g. `hardware.gpu: H100` + CLUSTER.md node selector → `["NVIDIA-H100-80GB-HBM3"]`)
@@ -262,7 +294,7 @@ Key translation rules from `blis_router/llm_config.yaml`:
         inferenceExtension:
           pluginsCustomConfig:
             custom-plugins.yaml: |
-              apiVersion: inference.networking.x-k8s.io/v1alpha1
+              apiVersion: inference.networking.k8s.io/v1alpha1
               kind: EndpointPickerConfig
               plugins:
               - type: <scorer_type from stage3_output.json>
