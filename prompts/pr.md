@@ -16,6 +16,36 @@ outputs:
 You are running Stage 6 of the sim-to-production transfer pipeline. This stage
 creates PRs in the llm-d target repositories and records a calibration log entry.
 
+## Fast-Iteration Check
+
+> **Ordering invariant:** This check MUST run before any prerequisite validation. In fast mode, `validation_results.json` is a partial artifact that will fail schema validation.
+
+```bash
+FAST_ITER=$(.venv/bin/python -c "
+import sys, yaml
+try:
+    d = yaml.safe_load(open('config/env_defaults.yaml'))
+except Exception as e:
+    print(f'ERROR: cannot read config/env_defaults.yaml: {e}', file=sys.stderr)
+    sys.exit(2)
+val = d.get('pipeline', {}).get('fast_iteration', True)
+if not isinstance(val, bool):
+    print(f'ERROR: pipeline.fast_iteration must be a boolean, got {type(val).__name__}: {val!r}', file=sys.stderr)
+    sys.exit(2)
+print('true' if val else 'false')
+") || { echo "HALT: failed to read pipeline.fast_iteration from config/env_defaults.yaml"; exit 2; }
+
+if [ "$FAST_ITER" = "true" ]; then
+  echo "FAST MODE: PR creation skipped (pipeline.fast_iteration=true)."
+  echo "Set pipeline.fast_iteration=false and re-run Stage 6 when ready to create PRs."
+  exit 0
+fi
+```
+
+**If `FAST_ITER` is `"true"`:** exit 0 immediately. Do not run prerequisites or any subsequent steps.
+
+**If `FAST_ITER` is `"false"`:** proceed to Prerequisites below.
+
 ## Prerequisites
 
 Verify all predecessor artifacts exist and are valid:

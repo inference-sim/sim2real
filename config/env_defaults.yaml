@@ -107,3 +107,8 @@ stack:
 
 observe:
   noise_runs: 5
+
+pipeline:
+  fast_iteration: true   # When true: Suites A/B/C still run, but noise gate and cluster benchmarks
+                         # (Stage 5) and PR creation (Stage 6) are skipped.
+                         # Set to false when algorithm is ready for full validation.
