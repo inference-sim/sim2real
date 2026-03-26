@@ -2060,9 +2060,13 @@ def _flatten_gaie_shared(merged: dict) -> dict:
             if phase == "treatment" and build_img.get("hub") and build_img.get("tag"):
                 img = {"hub": build_img["hub"], "name": build_img["name"],
                        "tag": build_img["tag"]}
+                if build_img.get("pullPolicy") is not None:
+                    img["pullPolicy"] = build_img["pullPolicy"]
             else:
                 img = {"hub": upstream_img["hub"], "name": upstream_img["name"],
                        "tag": upstream_img["tag"]}
+                if upstream_img.get("pullPolicy") is not None:
+                    img["pullPolicy"] = upstream_img["pullPolicy"]
             ie = gaie[phase]["helmValues"].setdefault("inferenceExtension", {})
             # Only set if not already explicitly provided in algorithm values
             ie.setdefault("image", img)
