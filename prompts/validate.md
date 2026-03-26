@@ -178,7 +178,9 @@ print('Wrote validation_results.json from equivalence_results.json')
 " || { echo "HALT: failed to construct validation_results.json from equivalence_results.json"; exit 1; }
 ```
 
-In fast mode, add `overall_verdict`:
+**Skip the following block if `FAST_ITER` is `false`** — `overall_verdict` will be set later by Step 5c-merge after the mechanism check.
+
+In fast mode (`FAST_ITER` is `true`), add `overall_verdict`:
 
 ```bash
 .venv/bin/python -c "

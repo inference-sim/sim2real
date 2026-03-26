@@ -29,6 +29,9 @@ test -f workspace/algorithm_summary.json || { echo "HALT: workspace/algorithm_su
 
 # Scorer builds (verifies Stage 4 completed)
 SCORER_FILE=$(.venv/bin/python -c "import json; print(json.load(open('workspace/stage3_output.json'))['scorer_file'])")
+if [ $? -ne 0 ] || [ -z "$SCORER_FILE" ]; then
+  echo "HALT: failed to extract scorer_file from workspace/stage3_output.json"; exit 1
+fi
 test -f "$SCORER_FILE" || { echo "HALT: scorer file missing: $SCORER_FILE"; exit 1; }
 (cd llm-d-inference-scheduler && GOWORK=off go build ./pkg/plugins/scorer/... && GOWORK=off go vet ./pkg/plugins/scorer/...) \
   || { echo "HALT: scorer does not build — run Stage 4 first"; exit 1; }
@@ -40,17 +43,22 @@ Remove any prior equivalence results and Stage 4.5 escalation artifacts:
 
 ```bash
 rm -f workspace/equivalence_results.json
+rm -f workspace/validation_results.json
 .venv/bin/python -c "
-import json, os
+import json, os, sys
 esc = 'workspace/escalation.json'
 if os.path.isfile(esc):
     try:
         d = json.load(open(esc))
+        # NOTE: substring match on 'equivalence' assumes no Stage 4 halt_reason
+        # contains that word. See escalation.schema.json halt_reason enum.
         if d.get('stage') == 4 and 'equivalence' in d.get('halt_reason', ''):
             os.remove(esc)
             print('Removed stale Stage 4.5 escalation artifact')
-    except (json.JSONDecodeError, KeyError):
-        pass
+    except json.JSONDecodeError:
+        print(f'WARNING: {esc} is malformed JSON — cannot check for stale Stage 4.5 escalation. Remove manually if stale.', file=sys.stderr)
+    except OSError as e:
+        print(f'WARNING: could not read/remove {esc}: {e}', file=sys.stderr)
 "
 ```
 
@@ -79,12 +87,19 @@ set -o pipefail
 go test ./tools/harness/... -tags suitea -run TestSuiteA_KendallTau -v -timeout 60s -json 2>&1 \
   | tee /tmp/suite_a_output.json
 SUITE_A_EXIT=${PIPESTATUS[0]:-${pipestatus[1]}}
+if [ -z "$SUITE_A_EXIT" ]; then
+  echo "HALT: could not capture go test exit code (PIPESTATUS/pipestatus unavailable — requires bash or zsh)"; exit 1
+fi
 ```
 
 If `SUITE_A_EXIT == 0`: extract numerical results and proceed to Step 2.
 
 ```bash
-grep -oE 'mean_kendall_tau=[0-9]+\.[0-9]+|max_abs_error=[0-9]+\.[0-9]+|tuple_count=[0-9]+' /tmp/suite_a_output.json
+SUITE_A_METRICS=$(grep -oE 'mean_kendall_tau=[0-9]+\.[0-9]+|max_abs_error=[0-9]+\.[0-9]+|tuple_count=[0-9]+' /tmp/suite_a_output.json)
+if [ -z "$SUITE_A_METRICS" ]; then
+  echo "HALT: Suite A passed but metric extraction failed — check test output format in /tmp/suite_a_output.json"; exit 1
+fi
+echo "$SUITE_A_METRICS"
 ```
 
 Record: `mean_kendall_tau`, `max_abs_error`, `tuple_count`.
@@ -104,7 +119,11 @@ Note: Suite B has no build constraint; `-tags suiteb` is included for consistenc
 Do NOT halt on Suite B results (informational only in v1). Extract:
 
 ```bash
-grep -oE 'rank_stability_tau=[0-9]+\.[0-9]+|threshold_crossing_pct=[0-9]+\.[0-9]+' /tmp/suite_b_output.json
+SUITE_B_METRICS=$(grep -oE 'rank_stability_tau=[0-9]+\.[0-9]+|threshold_crossing_pct=[0-9]+\.[0-9]+' /tmp/suite_b_output.json)
+if [ -z "$SUITE_B_METRICS" ]; then
+  echo "WARNING: Suite B metric extraction found nothing — results may be incomplete (informational only, not halting)"
+fi
+echo "$SUITE_B_METRICS"
 ```
 
 Record: `rank_stability_tau`, `threshold_crossing_pct` (value is directly usable as a number — no `%` stripping needed).
@@ -116,12 +135,19 @@ set -o pipefail
 go test ./tools/harness/... -tags suitec -run TestSuiteC -v -race -timeout 60s -json 2>&1 \
   | tee /tmp/suite_c_output.json
 SUITE_C_EXIT=${PIPESTATUS[0]:-${pipestatus[1]}}
+if [ -z "$SUITE_C_EXIT" ]; then
+  echo "HALT: could not capture go test exit code (PIPESTATUS/pipestatus unavailable — requires bash or zsh)"; exit 1
+fi
 ```
 
 If `SUITE_C_EXIT == 0`: extract results and proceed to Step 5 (Completion).
 
 ```bash
-grep -oE 'max_pile_on_ratio=[0-9]+\.[0-9]+' /tmp/suite_c_output.json
+SUITE_C_METRICS=$(grep -oE 'max_pile_on_ratio=[0-9]+\.[0-9]+' /tmp/suite_c_output.json)
+if [ -z "$SUITE_C_METRICS" ]; then
+  echo "HALT: Suite C passed but metric extraction failed — check test output format in /tmp/suite_c_output.json"; exit 1
+fi
+echo "$SUITE_C_METRICS"
 ```
 
 Extract: `deterministic` = `true` if `TestSuiteC_ConcurrentDeterminism` has `"Action":"pass"` in output; `false` if it has `"Action":"fail"`.
@@ -168,6 +194,9 @@ If all checks pass:
 
 ```bash
 SCORER_FILE=$(.venv/bin/python -c "import json; print(json.load(open('workspace/stage3_output.json'))['scorer_file'])")
+if [ $? -ne 0 ] || [ -z "$SCORER_FILE" ]; then
+  echo "HALT: failed to extract scorer_file from workspace/stage3_output.json"; exit 1
+fi
 .venv/bin/python tools/transfer_cli.py validate-translation \
   --algorithm workspace/algorithm_summary.json \
   --signal-coverage workspace/signal_coverage.json \
@@ -182,6 +211,9 @@ translation issue, then re-run `validate-translation`:
 
 ```bash
 SCORER_FILE=$(.venv/bin/python -c "import json; print(json.load(open('workspace/stage3_output.json'))['scorer_file'])")
+if [ $? -ne 0 ] || [ -z "$SCORER_FILE" ]; then
+  echo "HALT: failed to extract scorer_file from workspace/stage3_output.json"; exit 1
+fi
 .venv/bin/python tools/transfer_cli.py validate-translation \
   --algorithm workspace/algorithm_summary.json \
   --signal-coverage workspace/signal_coverage.json \
@@ -207,29 +239,40 @@ If it fails again, **HALT** with `halt_reason: "equivalence_build_test_revalidat
 
 ## Step 5: Completion
 
-Write `workspace/equivalence_results.json`:
+Write `workspace/equivalence_results.json` using the metrics recorded from Steps 1-3:
 
-```json
-{
-  "suite_a": {
-    "passed": <true|false>,
-    "kendall_tau": <mean_tau>,
-    "max_abs_error": <max_abs_err>,
-    "tuple_count": <tuple_count>
-  },
-  "suite_b": {
-    "passed": true,
-    "rank_stability_tau": <tau>,
-    "threshold_crossing_pct": <pct as number — value from grep is directly usable, no % stripping needed>,
-    "informational_only": true
-  },
-  "suite_c": {
-    "passed": <true|false>,
-    "deterministic": <true if TestSuiteC_ConcurrentDeterminism passed>,
-    "max_pile_on_ratio": <ratio>
-  }
+```bash
+.venv/bin/python -c "
+import json, sys
+data = {
+    'suite_a': {
+        'passed': True,  # only reaches Step 5 if Suite A passed
+        'kendall_tau': <mean_tau>,
+        'max_abs_error': <max_abs_err>,
+        'tuple_count': <tuple_count>
+    },
+    'suite_b': {
+        'passed': True,
+        'rank_stability_tau': <tau>,
+        'threshold_crossing_pct': <pct>,
+        'informational_only': True
+    },
+    'suite_c': {
+        'passed': True,  # only reaches Step 5 if Suite C passed
+        'deterministic': <true if TestSuiteC_ConcurrentDeterminism passed>,
+        'max_pile_on_ratio': <ratio>
+    }
 }
+try:
+    open('workspace/equivalence_results.json', 'w').write(json.dumps(data, indent=2))
+except OSError as e:
+    print(f'HALT: failed to write equivalence_results.json: {e}', file=sys.stderr)
+    sys.exit(1)
+print('Wrote workspace/equivalence_results.json')
+" || { echo "HALT: failed to write equivalence_results.json"; exit 1; }
 ```
+
+Replace `<mean_tau>`, `<max_abs_err>`, `<tuple_count>`, `<tau>`, `<pct>`, `<ratio>`, and the `deterministic` placeholder with the actual values recorded from Steps 1-3.
 
 Validate the output:
 

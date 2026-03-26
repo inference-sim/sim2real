@@ -17,7 +17,7 @@ is statically compiled into the binary and the upstream image does not contain i
 
 ## Prerequisites
 
-Verify Stage 4 passed and the registry is configured. **HALT if any check fails.**
+Verify Stage 4 passed, the equivalence gate (Stage 4.5) passed, and the registry is configured. **HALT if any check fails.**
 
 ```bash
 # Stage 3 output still valid
@@ -25,8 +25,12 @@ test -f workspace/stage3_output.json || { echo "HALT: missing stage3_output.json
 
 # Scorer is still present and builds
 SCORER_FILE=$(.venv/bin/python -c "import json; print(json.load(open('workspace/stage3_output.json'))['scorer_file'])")
+if [ $? -ne 0 ] || [ -z "$SCORER_FILE" ]; then
+  echo "HALT: failed to extract scorer_file from workspace/stage3_output.json"; exit 1
+fi
 test -f "$SCORER_FILE" || { echo "HALT: scorer file missing: $SCORER_FILE"; exit 1; }
-cd llm-d-inference-scheduler && GOWORK=off go build ./... && cd .. || { echo "HALT: scorer does not build"; exit 1; }
+(cd llm-d-inference-scheduler && GOWORK=off go build ./...) \
+  || { echo "HALT: scorer does not build"; exit 1; }
 
 # Equivalence gate passed (Stage 4.5)
 test -f workspace/equivalence_results.json || { echo "HALT: Stage 4.5 equivalence gate not run — run prompts/equivalence-gate.md first"; exit 1; }
