@@ -100,6 +100,7 @@ attempts.
 | `retries_total` | 0 | >= 6 (5 retries done) | HALT: `total_retry_limit_exceeded` |
 | `error_signatures` | [] | 3 occurrences of same signature | HALT: `oscillating_errors` |
 | `last_error_signature` | null | same as current → immediate halt | HALT: `identical_consecutive_errors` |
+| `scorer_modified` | false | (not a halt counter) | Triggers translation re-validation in Step 3b |
 
 **Error signature** = `(error_class, first_error_message)` where `first_error_message`
 is the `message` field of the first entry in `test-status` output `errors[]`.
@@ -187,7 +188,7 @@ TEST_EXIT=${PIPESTATUS[0]:-${pipestatus[1]}}
 cd ..
 ```
 
-If `TEST_EXIT == 0`: **Stage 4 PASSES.** Proceed to Step 5 (Completion).
+If `TEST_EXIT == 0`: proceed to **Step 3b: Translation Re-validation**.
 
 If `TEST_EXIT != 0`, classify the error:
 
@@ -202,6 +203,30 @@ Read the JSON output from `/tmp/stage4_test_status.json`:
 - If `error_class == "infrastructure"`: **HALT immediately**. Write escalation.json with `halt_reason: "infrastructure_error_stage4"`.
 - If `error_class == "test_failure"` or `error_class == "compilation"`: proceed to **Step 4: Retry**.
 - Otherwise (including `error_class == "none"`): classify as test failure and proceed to **Step 4: Retry**.
+
+## Step 3b: Translation Re-validation (conditional)
+
+**Skip this step if `scorer_modified` is `false`** (scorer was not changed during Stage 4 retries).
+
+If `scorer_modified` is `true`, the scorer file was modified during the retry loop.
+Re-run the Stage 3.5 mechanical checks to verify translation fidelity is preserved:
+
+```bash
+SCORER_FILE=$(.venv/bin/python -c "import json; print(json.load(open('workspace/stage3_output.json'))['scorer_file'])")
+.venv/bin/python tools/transfer_cli.py validate-translation \
+  --algorithm workspace/algorithm_summary.json \
+  --signal-coverage workspace/signal_coverage.json \
+  --scorer-file "$SCORER_FILE"
+VALIDATION_EXIT=$?
+```
+
+If `VALIDATION_EXIT == 0`: proceed to Step 5 (Completion). Translation fidelity confirmed after scorer changes.
+
+If `VALIDATION_EXIT != 0`: the scorer change broke translation fidelity. Treat this as a test failure:
+increment `retries_test_failure` and `retries_total`, compute error signature
+`("translation_revalidation", first line of validate-translation stderr)`,
+and proceed to **Step 4: Retry** (which will check halt conditions, then re-apply a fix and
+return to Step 1 for a full rebuild cycle).
 
 ## Step 4: Retry
 
@@ -268,6 +293,7 @@ If all checks pass:
 5. Apply the fix to the generated code. **Only modify files listed in
    `workspace/stage3_output.json`** (`scorer_file`, `test_file`, `register_file`).
    Do NOT modify other submodule files.
+5b. If the scorer file (`scorer_file` from `stage3_output.json`) was modified, set `scorer_modified = true`.
 6. Return to **Step 1** (full rebuild — do NOT skip ahead to Step 3 even if
    only test files were changed, since compilation must be re-verified).
 
@@ -277,6 +303,7 @@ Stage 4 passes when:
 - `go build ./...` exits 0
 - `go vet ./...` exits 0
 - `go test -timeout 10m ./pkg/plugins/scorer/... -v` exits 0
+- If `scorer_modified`: `validate-translation` exits 0 (Step 3b)
 
 No output artifact is written. Stage 4 success is verified by the orchestrator's
 between-stage validation (re-runs `go build ./...`, `go vet ./...`, and
@@ -297,6 +324,7 @@ between-stage validation (re-runs `go build ./...`, `go vet ./...`, and
 | Total retries >= 6 (5 retries done) | `total_retry_limit_exceeded` | No | Write escalation.json, HALT |
 | Identical consecutive errors | `identical_consecutive_errors` | No | Write escalation.json, HALT |
 | Same error signature 3 times | `oscillating_errors` | No | Write escalation.json, HALT |
+| Translation re-validation failed after retries | `translation_revalidation_failed_stage4` | No | Write escalation.json, HALT |
 
 On any halt, write `workspace/escalation.json`:
 
@@ -314,6 +342,7 @@ On any halt, write `workspace/escalation.json`:
 - `infrastructure_error_stage4`: The Go build environment is broken. Check: `go env`, `go mod download` in the submodule, network access to module proxy.
 - `identical_consecutive_errors` / `oscillating_errors`: The LLM is stuck in a loop. The fix attempt is not addressing the root cause. Manually review the error and the attempted fix.
 - `total_retry_limit_exceeded`: Too many errors of different types. The generated code likely has fundamental issues. Consider re-running Stage 3 (regenerate).
+- `translation_revalidation_failed_stage4`: The LLM's fix to resolve build/test errors broke translation fidelity (signal presence, constants, or normalization). Review the fix against `workspace/algorithm_summary.json` and `workspace/signal_coverage.json`.
 
 ## Expected Outputs
 
