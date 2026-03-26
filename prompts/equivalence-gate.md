@@ -172,10 +172,26 @@ SCORER_FILE=$(.venv/bin/python -c "import json; print(json.load(open('workspace/
   --algorithm workspace/algorithm_summary.json \
   --signal-coverage workspace/signal_coverage.json \
   --scorer-file "$SCORER_FILE"
+VALIDATION_EXIT=$?
 ```
 
-If `validate-translation` exits non-zero, the fix broke translation fidelity. Attempt to fix the
-translation issue, then re-run `validate-translation`. If it fails again, **HALT** with
+If `VALIDATION_EXIT == 0`: proceed to step 6.
+
+If `VALIDATION_EXIT != 0`: the fix broke translation fidelity. Attempt to fix the
+translation issue, then re-run `validate-translation`:
+
+```bash
+SCORER_FILE=$(.venv/bin/python -c "import json; print(json.load(open('workspace/stage3_output.json'))['scorer_file'])")
+.venv/bin/python tools/transfer_cli.py validate-translation \
+  --algorithm workspace/algorithm_summary.json \
+  --signal-coverage workspace/signal_coverage.json \
+  --scorer-file "$SCORER_FILE"
+VALIDATION_EXIT=$?
+```
+
+If `VALIDATION_EXIT == 0` after the fix: proceed to step 6.
+
+If `VALIDATION_EXIT != 0` after the fix: **HALT** with
 `halt_reason: "equivalence_translation_revalidation_failed"`.
 
 6. **Re-run Stage 4 build/vet/test steps** (inline, not re-entering Stage 4 prompt):
@@ -207,7 +223,6 @@ Write `workspace/equivalence_results.json`:
     "threshold_crossing_pct": <pct as number — value from grep is directly usable, no % stripping needed>,
     "informational_only": true
   },
-  // suite_b.passed is always true: Suite B is informational-only in v1 and never gates the pipeline.
   "suite_c": {
     "passed": <true|false>,
     "deterministic": <true if TestSuiteC_ConcurrentDeterminism passed>,

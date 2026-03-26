@@ -175,7 +175,7 @@ val = {
 }
 open('workspace/validation_results.json', 'w').write(json.dumps(val, indent=2))
 print('Wrote validation_results.json from equivalence_results.json')
-"
+" || { echo "HALT: failed to construct validation_results.json from equivalence_results.json"; exit 1; }
 ```
 
 In fast mode, add `overall_verdict`:
@@ -188,7 +188,7 @@ passed = val.get('suite_a', {}).get('passed') and val.get('suite_c', {}).get('pa
 val['overall_verdict'] = 'PASS' if passed else 'FAIL'
 open('workspace/validation_results.json', 'w').write(json.dumps(val, indent=2))
 print('overall_verdict:', val['overall_verdict'])
-"
+" || { echo "HALT: failed to set overall_verdict in validation_results.json"; exit 1; }
 ```
 
 **Do not call validate-schema yet** — the partial file intentionally omits `benchmark` and `noise_cv`.
