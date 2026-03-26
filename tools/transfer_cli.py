@@ -1386,7 +1386,7 @@ def _parse_tracev2_dir(directory: "Path") -> dict:
         raise FileNotFoundError(
             f"missing trace_data.csv in {directory} — blis observe may have crashed mid-write."
         )
-    ttft_vals, tpot_vals = [], []
+    ttft_vals, tpot_vals, e2e_vals = [], [], []
     try:
         with open(data_path, newline="") as f:
             reader = csv_mod.DictReader(f)
@@ -1399,6 +1399,7 @@ def _parse_tracev2_dir(directory: "Path") -> dict:
                 chunks = max(int(row["num_chunks"]) - 1, 1)
                 ttft_vals.append((first - send) / 1000.0)
                 tpot_vals.append((last - first) / chunks / 1000.0)
+                e2e_vals.append((last - send) / 1000.0)
     except (ValueError, KeyError) as e:
         raise ValueError(
             f"malformed CSV in {data_path}: {e} — check that all numeric columns "
@@ -1406,10 +1407,15 @@ def _parse_tracev2_dir(directory: "Path") -> dict:
             "contain valid integers for rows with status='ok'"
         ) from e
     return {
+        "ttft_mean": (sum(ttft_vals) / len(ttft_vals)) if ttft_vals else None,
         "ttft_p50": _percentile(ttft_vals, 50),
         "ttft_p99": _percentile(ttft_vals, 99),
+        "tpot_mean": (sum(tpot_vals) / len(tpot_vals)) if tpot_vals else None,
         "tpot_p50": _percentile(tpot_vals, 50),
         "tpot_p99": _percentile(tpot_vals, 99),
+        "e2e_mean": (sum(e2e_vals) / len(e2e_vals)) if e2e_vals else None,
+        "e2e_p50": _percentile(e2e_vals, 50),
+        "e2e_p99": _percentile(e2e_vals, 99),
         "_valid_rows": len(ttft_vals),
     }
 
@@ -2679,10 +2685,15 @@ def cmd_compare(args: "argparse.Namespace") -> int:
         return 1
 
     METRICS = [
+        ("ttft_mean", "TTFT mean"),
         ("ttft_p50", "TTFT p50"),
         ("ttft_p99", "TTFT p99"),
+        ("tpot_mean", "TPOT mean"),
         ("tpot_p50", "TPOT p50"),
         ("tpot_p99", "TPOT p99"),
+        ("e2e_mean", "E2E mean"),
+        ("e2e_p50", "E2E p50"),
+        ("e2e_p99", "E2E p99"),
     ]
 
     all_names = sorted(set(baseline) | set(treatment))
