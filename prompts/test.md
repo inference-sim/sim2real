@@ -224,9 +224,12 @@ If `VALIDATION_EXIT == 0`: proceed to Step 5 (Completion). Translation fidelity 
 
 If `VALIDATION_EXIT != 0`: the scorer change broke translation fidelity. Attempt to fix the
 translation issue (review the change against `workspace/algorithm_summary.json` and
-`workspace/signal_coverage.json`). Then re-run `validate-translation`:
+`workspace/signal_coverage.json`). Only modify the scorer file (`scorer_file` from
+`stage3_output.json`); do not touch test files or registration files to satisfy translation checks.
+Then re-run `validate-translation`:
 
 ```bash
+SCORER_FILE=$(.venv/bin/python -c "import json; print(json.load(open('workspace/stage3_output.json'))['scorer_file'])")
 .venv/bin/python tools/transfer_cli.py validate-translation \
   --algorithm workspace/algorithm_summary.json \
   --signal-coverage workspace/signal_coverage.json \
