@@ -140,10 +140,14 @@ test -f workspace/stage3_output.json || { echo "HALT: Stage 3 output missing"; e
 
 # Verify generated scorer file exists and builds
 SCORER_FILE=$(.venv/bin/python -c "import json; print(json.load(open('workspace/stage3_output.json'))['scorer_file'])")
+if [ $? -ne 0 ] || [ -z "$SCORER_FILE" ]; then
+  echo "HALT: failed to extract scorer_file from workspace/stage3_output.json"; exit 1
+fi
 test -f "$SCORER_FILE" || { echo "HALT: generated scorer file missing: $SCORER_FILE"; exit 1; }
 
 # Final build + vet verification
-cd llm-d-inference-scheduler && GOWORK=off go build ./... && GOWORK=off go vet ./... && GOWORK=off go test -timeout 10m ./pkg/plugins/scorer/... -v && cd .. || { echo "HALT: Stage 4 build/vet/test verification failed"; exit 1; }
+(cd llm-d-inference-scheduler && GOWORK=off go build ./... && GOWORK=off go vet ./... && GOWORK=off go test -timeout 10m ./pkg/plugins/scorer/... -v) \
+  || { echo "HALT: Stage 4 build/vet/test verification failed"; exit 1; }
 ```
 
 **HALT if any validation fails.** Do not proceed to Stage 4.5 (Equivalence Gate).

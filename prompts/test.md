@@ -213,6 +213,9 @@ Re-run the Stage 3.5 mechanical checks to verify translation fidelity is preserv
 
 ```bash
 SCORER_FILE=$(.venv/bin/python -c "import json; print(json.load(open('workspace/stage3_output.json'))['scorer_file'])")
+if [ $? -ne 0 ] || [ -z "$SCORER_FILE" ]; then
+  echo "HALT: failed to extract scorer_file from workspace/stage3_output.json"; exit 1
+fi
 .venv/bin/python tools/transfer_cli.py validate-translation \
   --algorithm workspace/algorithm_summary.json \
   --signal-coverage workspace/signal_coverage.json \
@@ -230,6 +233,9 @@ Then re-run `validate-translation`:
 
 ```bash
 SCORER_FILE=$(.venv/bin/python -c "import json; print(json.load(open('workspace/stage3_output.json'))['scorer_file'])")
+if [ $? -ne 0 ] || [ -z "$SCORER_FILE" ]; then
+  echo "HALT: failed to extract scorer_file from workspace/stage3_output.json"; exit 1
+fi
 .venv/bin/python tools/transfer_cli.py validate-translation \
   --algorithm workspace/algorithm_summary.json \
   --signal-coverage workspace/signal_coverage.json \
