@@ -75,7 +75,7 @@ stack:
 
 **Cause:** Exit 3 means **REENTER** — the noise characterization phase has not yet completed. This is a planned pause built into the two-pass Stage 5 flow, not an error.
 
-**Fix:** Complete the noise phase (Steps 5a–5b in `prompts/validate.md`), then re-run `prompts/validate.md` from Step 1. This is a fresh invocation of the prompt, not a continuation of the previous session.
+**Fix:** Complete the noise phase (Steps 5a–5b in `prompts/validate.md`), then re-enter `prompts/validate.md` at Step 5. This is a fresh invocation of the prompt, not a continuation of the previous session.
 
 ---
 
