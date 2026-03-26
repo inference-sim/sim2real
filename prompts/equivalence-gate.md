@@ -78,7 +78,7 @@ Run Suite A with `-json -v` and the `suitea` build tag:
 set -o pipefail
 go test ./tools/harness/... -tags suitea -run TestSuiteA_KendallTau -v -timeout 60s -json 2>&1 \
   | tee /tmp/suite_a_output.json
-SUITE_A_EXIT=${PIPESTATUS[0]}
+SUITE_A_EXIT=${PIPESTATUS[0]:-${pipestatus[1]}}
 ```
 
 If `SUITE_A_EXIT == 0`: extract numerical results and proceed to Step 2.
@@ -96,15 +96,18 @@ If `SUITE_A_EXIT != 0`: proceed to **Step 4: Retry** with `failing_suite = "suit
 ```bash
 go test ./tools/harness/... -tags suiteb -run TestSuiteB_StalenessStability -v -timeout 30s -json 2>&1 \
   | tee /tmp/suite_b_output.json
+# No exit code check — Suite B is informational only
 ```
+
+Note: Suite B has no build constraint; `-tags suiteb` is included for consistency but is not required for the test to run.
 
 Do NOT halt on Suite B results (informational only in v1). Extract:
 
 ```bash
-grep -oE 'rank_stability_tau=[0-9]+\.[0-9]+|threshold_crossing_pct=[0-9]+\.[0-9]+%' /tmp/suite_b_output.json
+grep -oE 'rank_stability_tau=[0-9]+\.[0-9]+|threshold_crossing_pct=[0-9]+\.[0-9]+' /tmp/suite_b_output.json
 ```
 
-Record: `rank_stability_tau`, `threshold_crossing_pct` (as a number, strip the `%` when writing to JSON).
+Record: `rank_stability_tau`, `threshold_crossing_pct` (value is directly usable as a number — no `%` stripping needed).
 
 ## Step 3: Suite C — Concurrent Safety and Pile-On
 
@@ -112,7 +115,7 @@ Record: `rank_stability_tau`, `threshold_crossing_pct` (as a number, strip the `
 set -o pipefail
 go test ./tools/harness/... -tags suitec -run TestSuiteC -v -race -timeout 60s -json 2>&1 \
   | tee /tmp/suite_c_output.json
-SUITE_C_EXIT=${PIPESTATUS[0]}
+SUITE_C_EXIT=${PIPESTATUS[0]:-${pipestatus[1]}}
 ```
 
 If `SUITE_C_EXIT == 0`: extract results and proceed to Step 5 (Completion).
@@ -121,7 +124,9 @@ If `SUITE_C_EXIT == 0`: extract results and proceed to Step 5 (Completion).
 grep -oE 'max_pile_on_ratio=[0-9]+\.[0-9]+' /tmp/suite_c_output.json
 ```
 
-Record: `deterministic` (true if TestSuiteC_ConcurrentDeterminism passes), `max_pile_on_ratio`.
+Extract: `deterministic` = `true` if `TestSuiteC_ConcurrentDeterminism` has `"Action":"pass"` in output; `false` if it has `"Action":"fail"`.
+
+Record: `deterministic`, `max_pile_on_ratio`.
 
 If `SUITE_C_EXIT != 0`: proceed to **Step 4: Retry** with `failing_suite = "suite_c"`.
 
@@ -199,9 +204,10 @@ Write `workspace/equivalence_results.json`:
   "suite_b": {
     "passed": true,
     "rank_stability_tau": <tau>,
-    "threshold_crossing_pct": <pct as number, not string — strip the % from grep output>,
+    "threshold_crossing_pct": <pct as number — value from grep is directly usable, no % stripping needed>,
     "informational_only": true
   },
+  // suite_b.passed is always true: Suite B is informational-only in v1 and never gates the pipeline.
   "suite_c": {
     "passed": <true|false>,
     "deterministic": <true if TestSuiteC_ConcurrentDeterminism passed>,
