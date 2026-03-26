@@ -64,7 +64,6 @@ The pipeline's staleness guard (Stage 2) detects when the submodule HEAD differs
 
 ---
 
-
 ## Prompt to use with Claude Code
 
 When bumping any submodule, paste this prompt (fill in the placeholders):
