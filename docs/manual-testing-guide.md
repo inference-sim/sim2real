@@ -1,6 +1,6 @@
 # Manual Testing Guide — sim2real Transfer Pipeline
 
-**Date:** 2026-03-17
+**Date:** 2026-03-26
 **Purpose:** What to manually test after each PR lands, and how.
 
 All commands assume you are in the repo root (`sim2real/`).
@@ -201,8 +201,11 @@ go test ./tools/harness/... -v
 - `TestEvolvedAlgorithmKVPenaltyBoundary` — equal scores at exactly KV=0.9 (boundary, penalty does not fire)
 - `TestEvolvedAlgorithmInflightTiebreaker` — idle (InFlight=0) scores higher than busy (InFlight=5)
 - `TestEvolvedScorerScoresCorrectly` — metric translation correct, evolved algorithm scores returned
+- `TestEvolvedScorerNilMetrics` — nil metrics handled without panic
 - `TestKendallTau` — rank correlation utility verified
 - `TestMaxAbsDiff` — max absolute difference utility verified
+- `TestKnownAnswer` — synthetic algorithm with known-answer verification
+- `TestLoadAlgorithmReturnsEvolved` — algorithm loading sanity check
 
 ### 3.6 Cross-language content hash contract
 
@@ -254,6 +257,161 @@ This is the key integration test. Run Claude Code interactively:
 ```
 
 **Verify:** All Python tests pass. No regressions.
+
+---
+
+## PR7 — Stage 3.5 (Translation Validation)
+
+Stage 3.5 verifies the generated scorer faithfully implements the EVOLVE-BLOCK algorithm.
+It runs **in a fresh LLM session** (not the generator session) to avoid self-review bias.
+Three layers: mechanical pre-checks (CLI) → LLM logic trace → fix-and-retry loop.
+
+### 7.1 Prerequisites check
+
+After Stages 1–3 have run:
+
+```bash
+# All three upstream artifacts exist and are schema-valid
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/stage3_output.json
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/algorithm_summary.json
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/signal_coverage.json
+```
+
+**Verify:** All three commands exit 0. If any fail, re-run the corresponding earlier stage.
+
+### 7.2 Stale artifact guard
+
+```bash
+rm -f workspace/translation_validation.json
+```
+
+**Verify:** Any prior `translation_validation.json` is removed before starting.
+
+### 7.3 EVOLVE-BLOCK hash re-verification (Step 1)
+
+Stage 3.5 re-computes the EVOLVE-BLOCK SHA-256 independently of Stage 1 to guard against
+source drift between stages.
+
+Run Stage 3.5 via Claude Code in a fresh session:
+
+```
+> Read prompts/validate-translation.md and execute Stage 3.5
+```
+
+**Verify at Step 1:** The hash recomputed from source matches `algorithm_summary.json`.
+Any mismatch produces `halt_reason: "evolve_block_hash_mismatch_stage3_5"`.
+
+### 7.4 Mechanical pre-checks (Step 2) — standalone
+
+```bash
+SCORER_FILE=$(.venv/bin/python -c "import json; print(json.load(open('workspace/stage3_output.json'))['scorer_file'])")
+.venv/bin/python tools/transfer_cli.py validate-translation \
+  --algorithm workspace/algorithm_summary.json \
+  --signal-coverage workspace/signal_coverage.json \
+  --scorer-file "$SCORER_FILE"
+echo "Exit code: $?"
+```
+
+**Verify:**
+- Exit code 0 — all mechanical checks pass (signals present, constants present, normalization applied)
+- Output JSON contains `signal_checks` and `constant_checks` arrays
+- Each check has `status: "pass"` or `status: "fail"` and a `description`
+
+### 7.5 Mechanical pre-checks — negative test (missing signal)
+
+```bash
+# Create a temporary scorer with a signal name replaced
+SCORER_FILE=$(.venv/bin/python -c "import json; print(json.load(open('workspace/stage3_output.json'))['scorer_file'])")
+cp "$SCORER_FILE" /tmp/scorer_broken.go
+sed -i '' 's/KVCacheUsagePercent/KVCacheUsagePct_BROKEN/' /tmp/scorer_broken.go
+.venv/bin/python tools/transfer_cli.py validate-translation \
+  --algorithm workspace/algorithm_summary.json \
+  --signal-coverage workspace/signal_coverage.json \
+  --scorer-file /tmp/scorer_broken.go
+echo "Exit code: $?"
+```
+
+**Verify:** Exit code 1. Output JSON contains at least one `signal_checks` entry with `status: "fail"`.
+
+### 7.6 LLM logic trace — happy path (Step 3)
+
+This is the key integration test. Run Stage 3.5 via Claude Code in a fresh session
+(not the session that ran Stage 3):
+
+```
+> Read prompts/validate-translation.md and execute Stage 3.5
+```
+
+**Verify at each step:**
+
+| Step | Check | Expected |
+|------|-------|----------|
+| Step 1 | EVOLVE-BLOCK hash verified | Matches `algorithm_summary.json` hash |
+| Step 2 | Mechanical pre-checks | Exit 0, all checks pass |
+| Step 3 | Logic trace 3a–3h | All 8 checks have `status: pass`, `deviation`, or `intentional_gap` |
+| Step 4 | Known gaps documented | `argmax_delegation` and `multi_scorer_loop` in `known_gaps` |
+| Step 6 | Output artifact | `workspace/translation_validation.json` created |
+| Step 7 | Verdict | `"pass"` or `"pass_with_known_gaps"` |
+
+### 7.7 Output artifact schema validation
+
+```bash
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/translation_validation.json
+```
+
+**Verify:** Exit code 0. Artifact contains:
+- `evolve_block_hash` — non-empty string matching Step 1 hash
+- `scorer_file` — path to the scorer that was validated
+- `signal_checks` and `constant_checks` arrays from CLI
+- `logic_trace_checks` array with 8 entries (3a–3h), each with `check_id`, `status`, `description`
+- `known_gaps` array (at minimum: `argmax_delegation`, `multi_scorer_loop`)
+- `deviations` array (empty or non-empty)
+- `fix_attempts` object with `retries_translation` and `retries_total` counters
+- `verdict` is one of: `"pass"`, `"pass_with_known_gaps"`, `"fail"`
+
+### 7.8 Fix-and-retry — simulate a critical deviation
+
+Introduce a deliberate normalization error: remove the `/100.0` divisor for KVCacheUsagePercent
+in the generated scorer. Run Stage 3.5. The LLM should detect the deviation in Check 3f and fix it.
+
+**Verify:**
+- Step 3 check `logic_3f_kv_penalty` has `status: "deviation"`, `severity: "critical"`
+- Stage 3.5 applies a fix (modifies scorer file)
+- `fix_attempts.retries_translation` incremented
+- After fix, Step 2 re-run shows normalization check passing
+- Final verdict: `"pass"` or `"pass_with_known_gaps"`
+- Fix committed as `[transfer] Fix: translation — <description>`
+
+### 7.9 Retry limit — halt on unfixable deviation
+
+Introduce a deviation the LLM cannot fix (e.g., reference a non-existent production metric
+field that has no equivalent). Run Stage 3.5.
+
+**Verify:**
+- Halts after retry limit (`retries_translation >= 3` or `retries_total >= 4`)
+- `workspace/escalation.json` written with `stage: 3` and one of:
+  - `halt_reason: "translation_fix_limit_exceeded_stage3_5"`
+  - `halt_reason: "translation_total_retry_limit_exceeded_stage3_5"`
+- Escalation passes schema validation:
+  ```bash
+  .venv/bin/python tools/transfer_cli.py validate-schema workspace/escalation.json
+  ```
+
+### 7.10 Identical consecutive deviation halt
+
+If two consecutive fix attempts produce the exact same deviation, Stage 3.5 halts immediately
+(loop detection). Test by introducing a deviation that generates a fix but the fix doesn't
+change the deviation.
+
+**Verify:** `workspace/escalation.json` has `halt_reason: "identical_consecutive_deviations_stage3_5"`.
+
+### 7.11 Automated tests
+
+```bash
+.venv/bin/python -m pytest tools/ -v
+```
+
+**Verify:** All Python tests pass, including any new tests for the `validate-translation` subcommand.
 
 ---
 
@@ -393,11 +551,176 @@ cat workspace/escalation.json | jq .
 cat workspace/stage3_output.json | jq .
 ```
 
-Contains `scorer_file`, `test_file`, `register_file`, `scorer_type`, and (as of PR5) `tekton_artifacts` with `values_yaml` and `pipeline_stubs`. This file is not updated by Stage 4.
+Contains `scorer_file`, `test_file`, `register_file`, `scorer_type`, and `tekton_artifacts` with `values_yaml` and `pipeline_stubs`. This file is not updated by Stage 4.
+
+---
+
+## Stage 4.5 — Build & Push EPP Image
+
+Stage 4.5 builds the `llm-d-inference-scheduler` container image containing the generated
+scorer and pushes it to the developer registry. The treatment phase in Stage 5 requires this
+custom image (baseline and noise use upstream `ghcr.io/llm-d` images).
+
+### 4.5.1 Configure registry (one-time)
+
+Edit `config/env_defaults.yaml` to set your registry:
+
+```yaml
+stack:
+  gaie:
+    epp_image:
+      build:
+        hub: ghcr.io/<your-org>   # e.g. ghcr.io/kalantar
+```
+
+Then log in:
+
+```bash
+podman login ghcr.io   # or: docker login ghcr.io
+```
+
+**Verify:** Login succeeds.
+
+### 4.5.2 Prerequisites check
+
+```bash
+# Stage 3 output and scorer still present
+test -f workspace/stage3_output.json && echo "OK: stage3_output.json"
+SCORER_FILE=$(.venv/bin/python -c "import json; print(json.load(open('workspace/stage3_output.json'))['scorer_file'])")
+test -f "$SCORER_FILE" && echo "OK: scorer file exists"
+
+# Scorer builds
+cd llm-d-inference-scheduler && GOWORK=off go build ./... && cd .. && echo "OK: scorer builds"
+
+# Registry configured
+.venv/bin/python -c "
+import yaml, sys
+cfg = yaml.safe_load(open('config/env_defaults.yaml'))
+hub = cfg.get('stack',{}).get('gaie',{}).get('epp_image',{}).get('build',{}).get('hub','')
+if not hub or 'REPLACE_ME' in hub:
+    print('HALT: epp_image.build.hub not configured'); sys.exit(1)
+print(f'Registry: {hub}')
+"
+```
+
+**Verify:** All checks print OK or a registry URL.
+
+### 4.5.3 Dry-run build (smoke test)
+
+```bash
+.venv/bin/python tools/transfer_cli.py build-push-epp \
+  --scheduler-dir llm-d-inference-scheduler \
+  --env config/env_defaults.yaml \
+  --values workspace/tekton/algorithm_values.yaml \
+  --merged-values workspace/tekton/values.yaml \
+  --dry-run
+echo "Exit code: $?"
+```
+
+**Verify:** Exit code 0. Image builds locally without errors. `algorithm_values.yaml` is NOT
+updated (dry-run skips push and config update).
+
+### 4.5.4 Full build and push
+
+```bash
+.venv/bin/python tools/transfer_cli.py build-push-epp \
+  --scheduler-dir llm-d-inference-scheduler \
+  --env config/env_defaults.yaml \
+  --values workspace/tekton/algorithm_values.yaml \
+  --merged-values workspace/tekton/values.yaml
+echo "Exit code: $?"
+```
+
+**Verify:** Exit code 0. Stdout shows the image reference (`<hub>/llm-d-inference-scheduler:sim2real-<sha>`).
+
+### 4.5.5 Between-stage validation
+
+```bash
+# Image reference injected into algorithm_values.yaml
+.venv/bin/python -c "
+import yaml, sys
+d = yaml.safe_load(open('workspace/tekton/algorithm_values.yaml'))
+img = (d.get('stack',{}).get('gaie',{}).get('treatment',{})
+        .get('helmValues',{}).get('inferenceExtension',{}).get('image',{}))
+if not img.get('hub') or not img.get('tag'):
+    print('FAIL: image not injected'); sys.exit(1)
+print(f'Treatment EPP image: {img[\"hub\"]}/{img[\"name\"]}:{img[\"tag\"]}')
+"
+
+# values.yaml re-merged and compiled pipeline references image
+grep -q "inferenceExtension" workspace/tekton/compiled/treatment-pipeline.yaml && \
+  echo "OK: treatment pipeline references inferenceExtension config"
+```
+
+**Verify:**
+- Treatment image hub and tag are both non-empty
+- Tag starts with `sim2real-` followed by a git SHA
+- `workspace/tekton/values.yaml` modified time is newer than `algorithm_values.yaml`
+- `treatment-pipeline.yaml` references `inferenceExtension`
+
+### 4.5.6 Merge-values request_multiplier
+
+`config/env_defaults.yaml` contains `observe.request_multiplier` (default 10). This scales
+workload `num_requests` in `algorithm_values.yaml` when `merge-values` runs.
+
+```bash
+# Check the multiplier is applied in values.yaml
+.venv/bin/python -c "
+import yaml
+orig = yaml.safe_load(open('workspace/tekton/algorithm_values.yaml'))
+merged = yaml.safe_load(open('workspace/tekton/values.yaml'))
+env = yaml.safe_load(open('config/env_defaults.yaml'))
+mult = env.get('observe', {}).get('request_multiplier', 1)
+print(f'request_multiplier: {mult}')
+# Verify multiplier key is stripped from values.yaml
+assert 'request_multiplier' not in str(merged.get('observe',{})), \
+    'FAIL: request_multiplier should be stripped from values.yaml'
+print('OK: request_multiplier stripped from values.yaml')
+"
+```
+
+**Verify:** The multiplier key is not present in `workspace/tekton/values.yaml` output.
 
 ---
 
 ## PR5 — Validation Pipeline (Stage 5)
+
+### 5.0 Fast-iteration mode
+
+`config/env_defaults.yaml` contains `pipeline.fast_iteration` (boolean, default `true`).
+
+| Mode | Effect on Stage 5 | Effect on Stage 6 |
+|------|-------------------|-------------------|
+| `fast_iteration: true` | Skips noise gate and mechanism check. Runs Suites A/B/C + baseline/treatment pipelines + comparison table. | Skips PR creation entirely. |
+| `fast_iteration: false` | Full pipeline: noise → suites → baseline/treatment → mechanism check → evidence doc. | Creates PR if verdict is PASS. |
+
+**To test fast-iteration mode:**
+
+```bash
+# Verify the key is present and set to true (default)
+.venv/bin/python -c "
+import yaml
+cfg = yaml.safe_load(open('config/env_defaults.yaml'))
+v = cfg.get('pipeline', {}).get('fast_iteration', None)
+print(f'pipeline.fast_iteration = {v}')
+"
+```
+
+**Verify:** The key exists and is `True` by default.
+
+```bash
+# Verify key is stripped from merged values.yaml (must not propagate to Tekton)
+.venv/bin/python -c "
+import yaml
+merged = yaml.safe_load(open('workspace/tekton/values.yaml'))
+assert 'fast_iteration' not in str(merged.get('pipeline', {})), \
+    'FAIL: fast_iteration must be stripped from values.yaml'
+print('OK: fast_iteration stripped from values.yaml')
+"
+```
+
+**To test full-validation mode:** Set `pipeline.fast_iteration: false` in `config/env_defaults.yaml`
+before running Stage 5. Verify the noise gate runs and mechanism check produces a verdict.
 
 ### 5.1 Stage 5 prompt and schema exist
 
@@ -592,7 +915,40 @@ Verify the final merged file:
 cat workspace/validation_results.json | jq '{overall_verdict, suite_a_tau: .suite_a.kendall_tau, suite_c_passed: .suite_c.passed, noise_cv}'
 ```
 
-### 5.7 Evidence document
+### 5.7 Comparison table (fast-iteration and full-validation modes)
+
+After baseline and treatment pipelines complete, Stage 5 Step 5e produces a latency comparison
+table. This runs in both fast-iteration and full-validation modes.
+
+```bash
+.venv/bin/python tools/transfer_cli.py compare \
+  --baseline workspace/baseline_results.json \
+  --treatment workspace/treatment_results.json \
+  --out workspace/comparison_table.txt
+echo "Exit code: $?"
+```
+
+**Verify:**
+- Exit code 0
+- `workspace/comparison_table.txt` created
+- Table rows show paired baseline vs treatment latency values by endpoint/workload
+- Stdout shows the same table (plain text, not JSON — `compare` is the only CLI command that outputs plain text)
+
+**Negative test — missing or mismatched files:**
+
+```bash
+.venv/bin/python tools/transfer_cli.py compare \
+  --baseline /tmp/nonexistent.json \
+  --treatment workspace/treatment_results.json
+echo "Exit code: $?"
+```
+
+**Verify:** Exit code 1. Clear error message about missing or unpaired workloads.
+
+### 5.8 Evidence document (full-validation mode only)
+
+In fast-iteration mode, `generate-evidence` is skipped. Set `pipeline.fast_iteration: false`
+and re-run Stage 5 through completion before testing this section.
 
 ```bash
 .venv/bin/python tools/transfer_cli.py generate-evidence \
@@ -605,6 +961,10 @@ cat workspace/transfer_evidence.md
 ---
 
 ## PR6 — Stage 6 (PR Creation + Self-Verification + Calibration)
+
+> **Note:** When `pipeline.fast_iteration: true` (the default), Stage 6 skips PR creation
+> entirely. Set `pipeline.fast_iteration: false` in `config/env_defaults.yaml` before
+> testing this section.
 
 ### 6.1 Stage 6 prompt exists
 
@@ -703,6 +1063,25 @@ go test ./tools/harness/... -race -timeout 120s -v
 
 # Scorer template freshness
 bash tools/check_scorer_template.sh
+```
+
+After PR7+ (Stage 3.5), also:
+
+```bash
+# validate-translation subcommand works (mechanical pre-checks)
+SCORER_FILE=$(.venv/bin/python -c "import json; print(json.load(open('workspace/stage3_output.json'))['scorer_file'])" 2>/dev/null || echo "")
+if [ -n "$SCORER_FILE" ] && [ -f "$SCORER_FILE" ]; then
+  .venv/bin/python tools/transfer_cli.py validate-translation \
+    --algorithm workspace/algorithm_summary.json \
+    --signal-coverage workspace/signal_coverage.json \
+    --scorer-file "$SCORER_FILE"
+  echo "validate-translation exit: $?"
+fi
+
+# translation_validation.json schema still valid (if it exists from a prior run)
+if [ -f workspace/translation_validation.json ]; then
+  .venv/bin/python tools/transfer_cli.py validate-schema workspace/translation_validation.json
+fi
 ```
 
 After PR5+, Suite A (requires pipeline artifacts and Stage 3 output):
