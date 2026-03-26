@@ -18,7 +18,8 @@ Run stages using prompt templates in `prompts/`. Use `prompts/transfer.md` as th
 | 3 Generate | `prompts/generate.md` | Go scorer plugin source |
 | 3.5 Validate Translation | `prompts/validate-translation.md` | `workspace/translation_validation.json` |
 | 4 Test | `prompts/test.md` | Build + test pass |
-| 4.5 Build & Push | `prompts/build-push.md` | Treatment EPP image in registry |
+| 4.5 Equivalence Gate | `prompts/equivalence-gate.md` | `workspace/equivalence_results.json` |
+| 4.75 Build & Push | `prompts/build-push.md` | Treatment EPP image in registry |
 | 5 Validate | `prompts/validate.md` | `workspace/validation_results.json` |
 | 6 PR | `prompts/pr.md` | PRs in llm-d repos + calibration log |
 
@@ -34,9 +35,9 @@ See `CLAUDE.md` for CLI reference, artifact contracts, and exit code semantics.
 
 > For help when things go wrong, see [Troubleshooting](docs/contributing/troubleshooting.md).
 
-## Stage 4.5 Prerequisites (Build & Push EPP Image)
+## Stage 4.75 Prerequisites (Build & Push EPP Image)
 
-Stage 4.5 (`prompts/build-push.md`) builds the treatment EPP image and pushes it to a container registry. Before running it, complete these one-time steps:
+Stage 4.75 (`prompts/build-push.md`) builds the treatment EPP image and pushes it to a container registry. Before running it, complete these one-time steps:
 
 **Configure your registry hub** in `config/env_defaults.yaml`:
 ```yaml

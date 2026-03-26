@@ -24,13 +24,15 @@ inference-sim to production llm-d-inference-scheduler scorer plugins.
 
 ## Transfer Pipeline
 
-7-stage prompt-driven pipeline:
+9-stage prompt-driven pipeline:
 1. **Extract** — Parse EVOLVE-BLOCK, produce algorithm_summary.json
 2. **Translate** — Map sim signals to production equivalents
 3. **Generate** — LLM produces scorer plugin code
 3.5. **Validate Translation** — Verify generated code faithfully implements EVOLVE-BLOCK logic
-4. **Test** — Build + test with retry logic
-5. **Validate** — 3-suite equivalence + cluster benchmarks
+4. **Test** — Build + test with retry logic; re-validates translation if scorer changes
+4.5. **Equivalence Gate** — Suite A/B/C rank correlation against simulation reference
+4.75. **Build & Push EPP** — Build treatment container image (only after equivalence gate passes)
+5. **Validate** — Cluster benchmarks (suite results consumed from Stage 4.5)
 6. **PR** — Create PRs in target repos
 
 ## CLI Commands
@@ -137,7 +139,7 @@ Stage 3 Step 8 generates Tekton benchmarking artifacts using a two-layer config 
 Infrastructure choices that BLIS doesn't model: gateway type and sizing, connection pool settings, baseline (load-aware) scorer config, model deployment constants (auth secret, service port, `prefill.create`), and `observe.noise_runs`. Also contains image overrides applied at merge time:
 - `stack.model.vllm_image` — when set, replaces the vLLM serving image from `blis_router/llm_config.yaml` (e.g. substitute a llm-d custom vLLM build like `ghcr.io/llm-d/llm-d-cuda:v0.5.1`); comment out to use the original simulation image.
 
-Also contains `pipeline.fast_iteration` (boolean, default `true`): when `true`, Stage 5 runs Suites A/B/C plus the baseline and treatment cluster pipelines and comparison table, but skips the noise gate and mechanism check. Stage 6 skips PR creation entirely. Set to `false` when the algorithm is ready for full validation (including noise characterization and mechanism check) and PR submission. This key is stripped by `merge-values` and does not appear in `workspace/tekton/values.yaml`.
+Also contains `pipeline.fast_iteration` (boolean, default `true`): when `true`, Stage 5 reads Suite A/B/C results from Stage 4.5, runs the baseline and treatment cluster pipelines and comparison table, but skips the noise gate and mechanism check. Stage 6 skips PR creation entirely. Set to `false` when the algorithm is ready for full validation (including noise characterization and mechanism check) and PR submission. This key is stripped by `merge-values` and does not appear in `workspace/tekton/values.yaml`.
 
 Also contains `observe.request_multiplier` (number, default `10`): when present and > 1, `merge-values` parses each workload's embedded YAML spec and multiplies `num_requests` by this factor (rounded to int). The key is stripped from `workspace/tekton/values.yaml`. This scales simulation workloads (e.g. 1500 requests) up for real-cluster benchmarks without modifying the source workload files. Set to `1` or remove the key to disable scaling.
 

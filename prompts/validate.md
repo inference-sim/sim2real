@@ -1,11 +1,12 @@
 ---
 stage: 5
 name: validate
-description: Validate the generated scorer plugin against the simulation algorithm using 3-suite equivalence testing, noise characterization, and cluster benchmarks.
+description: Validate the generated scorer plugin against the simulation algorithm. Suite A/B/C results come from Stage 4.5 (equivalence gate); this stage adds noise characterization and cluster benchmarks.
 inputs:
   - workspace/algorithm_summary.json
   - workspace/signal_coverage.json
   - workspace/stage3_output.json
+  - workspace/equivalence_results.json
   - (Stage 4 success verified via go build/go vet — no workspace artifact)
 outputs:
   - workspace/validation_results.json
@@ -31,21 +32,39 @@ Before proceeding, verify all predecessor artifacts exist and are valid:
 Verify Stage 4 completed successfully (scorer builds and tests pass):
 
 ```bash
-(cd llm-d-inference-scheduler && go build ./pkg/plugins/scorer/... && go vet ./pkg/plugins/scorer/...)
+(cd llm-d-inference-scheduler && GOWORK=off go build ./pkg/plugins/scorer/... && GOWORK=off go vet ./pkg/plugins/scorer/...)
 ```
 
 **HALT if either command exits non-zero.** Message: "HALT: Stage 4 prerequisite failed — generated scorer does not build cleanly. Run Stage 4 first."
 
 > **Note:** Stage 4 does not write a workspace artifact on success (success is implicit in the build/test passing). This prerequisite verifies the scorer builds by re-running `go build` and `go vet` scoped to the scorer package only — using `./...` would build all packages in the module and may fail for unrelated reasons (see Section H cross-system invariants).
 
-Verify Stage 1 extract artifact exists (required by Suite A `t.Skip` guard):
+Verify Stage 1 extract artifact exists (referenced by cluster benchmark steps):
 
 ```bash
 test -f workspace/algorithm_summary.json || { echo "HALT: workspace/algorithm_summary.json missing (run extract first)"; exit 1; }
 .venv/bin/python tools/transfer_cli.py validate-schema workspace/algorithm_summary.json || { echo "HALT: workspace/algorithm_summary.json schema validation failed"; exit 1; }
 ```
 
-**HALT if `workspace/algorithm_summary.json` is absent or invalid.** Without it, Suite A silently skips (exits 0/PASS) without running any equivalence checks — this would bypass the go/no-go gate.
+**HALT if `workspace/algorithm_summary.json` is absent or invalid.** This artifact is required by the cluster benchmark steps and the mechanism check in this stage.
+
+Verify Stage 4.5 equivalence gate passed:
+
+```bash
+test -f workspace/equivalence_results.json || { echo "HALT: workspace/equivalence_results.json missing (run Stage 4.5 equivalence gate first)"; exit 1; }
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/equivalence_results.json || { echo "HALT: workspace/equivalence_results.json schema validation failed"; exit 1; }
+.venv/bin/python -c "
+import json, sys
+d = json.load(open('workspace/equivalence_results.json'))
+if not d.get('suite_a', {}).get('passed'):
+    print('HALT: Suite A did not pass in Stage 4.5'); sys.exit(1)
+if not d.get('suite_c', {}).get('passed'):
+    print('HALT: Suite C did not pass in Stage 4.5'); sys.exit(1)
+print('Stage 4.5 equivalence gate verified')
+" || exit 1
+```
+
+**HALT if equivalence_results.json is absent, invalid, or shows suite failures.**
 
 ## Fast-Iteration Check
 
@@ -72,9 +91,9 @@ print('true' if val else 'false')
 > All prerequisite checks above have already run and passed. Suites A/B/C and the baseline/treatment cluster pipelines run in fast mode; noise and mechanism check are skipped.
 
 1. Print: `"FAST MODE: Skipping noise gate and mechanism check (pipeline.fast_iteration=true)"`
-2. Skip Step 1 (Noise Characterization Gate) entirely — jump directly to Step 2 (Suite A).
-3. Complete Steps 2, 3, and 4 (Suites A, B, C) as normal.
-4. Write `workspace/validation_results.json` per Step 4b, adding an `overall_verdict` field:
+2. Skip Step 1 (Noise Characterization Gate) entirely.
+3. Suite A/B/C results already available from Stage 4.5 (`workspace/equivalence_results.json`).
+4. Write `workspace/validation_results.json` per Step 4b (construct from equivalence_results.json), adding an `overall_verdict` field:
    - `"PASS"` if `suite_a.passed` is true AND `suite_c.passed` is true
    - `"FAIL"` otherwise
    - Suite B is informational-only (v1) and does not affect `overall_verdict`.
@@ -132,96 +151,49 @@ Automated harnesses should treat exit 3 as a planned re-entry pause (not an erro
 T_eff is computed internally by `transfer_cli.py benchmark` from `workspace/noise_results.json`.
 The old `baseline_runs.json` format and `noise-characterize` subcommand are superseded.
 
-## Step 2: Suite A — Rank Correlation Equivalence
+## Steps 2-4: Suite Results (from Stage 4.5)
 
-Run Suite A once with `-json -v` to get both pass/fail verdict (from exit code) and structured numerical output (from JSON-wrapped `t.Logf` lines):
+Suite A/B/C execution has moved to Stage 4.5 (Equivalence Gate). This stage reads the
+results from `workspace/equivalence_results.json` rather than running suites directly.
 
-```bash
-set -o pipefail
-go test ./tools/harness/... -run TestSuiteA_KendallTau -v -timeout 60s -json 2>&1 | tee /tmp/suite_a_output.json
-SUITE_A_EXIT=${PIPESTATUS[0]}
-```
+> **Why suites moved:** Suite A is the primary detector of scoring formula bugs. Running it
+> before the image build (Stage 4.75) prevents building images with buggy scorers and enables
+> re-validation loops when the scorer is fixed.
 
-**HALT if `SUITE_A_EXIT` is non-zero** (or if `set -o pipefail` is unavailable, check for `"Action":"fail"` in `/tmp/suite_a_output.json`). Message: "HALT: Suite A FAIL — check test output for root cause (rank divergence if mean tau ≤ 0.8, or key-format mismatch if t.Fatalf reports missing keys)."
+## Step 4b: Write partial validation_results.json
 
-Extract numerical results from the same output:
-
-```bash
-grep -oE 'mean_kendall_tau=[0-9]+\.[0-9]+|max_abs_error=[0-9]+\.[0-9]+|tuple_count=[0-9]+' /tmp/suite_a_output.json
-```
-
-Record: mean_kendall_tau, max_abs_error, tuple_count from test output. Parse the `t.Logf` line: `Suite A: mean_kendall_tau=X.XXXX, max_abs_error=X.XXXXXX, tuple_count=NNN`.
-
-## Step 3: Suite B — Staleness Rank Stability (Informational)
-
-Run Suite B with `-json -v` and tee to capture structured output (same pattern as Steps 2 and 4):
+Construct `workspace/validation_results.json` from the Stage 4.5 equivalence results:
 
 ```bash
-go test ./tools/harness/... -run TestSuiteB_StalenessStability -v -timeout 30s -json 2>&1 | tee /tmp/suite_b_output.json
-```
-
-Suite B results are informational_only=true for v1 (all signals have staleness_window_ms=0).
-Do NOT halt on Suite B results.
-
-Extract numerical results from the captured output:
-
-```bash
-grep -oE 'rank_stability_tau=[0-9]+\.[0-9]+|threshold_crossing_pct=[0-9]+\.[0-9]+%' /tmp/suite_b_output.json
-```
-
-> **Note:** The `%` is part of the logged format (`"%.1f%%"` in the Go test), so `threshold_crossing_pct` appears as e.g. `threshold_crossing_pct=0.0%` in the output. The grep pattern above includes the trailing `%`.
-
-Record: rank_stability_tau, threshold_crossing_pct from test output. Parse the `t.Logf` line: `Suite B: rank_stability_tau=X.XXXX, threshold_crossing_pct=X.XX%`.
-
-## Step 4: Suite C — Concurrent Safety and Pile-On
-
-Run Suite C once with `-json -v` and tee to capture both pass/fail verdict and structured output (same pattern as Step 2):
-
-```bash
-set -o pipefail
-go test ./tools/harness/... -run TestSuiteC -v -race -timeout 60s -json 2>&1 | tee /tmp/suite_c_output.json
-SUITE_C_EXIT=${PIPESTATUS[0]}
-```
-
-**HALT if `SUITE_C_EXIT` is non-zero** (or if `set -o pipefail` is unavailable, check for `"Action":"fail"` in `/tmp/suite_c_output.json`). Message: "HALT: Suite C FAIL."
-
-Extract structured results from the captured output:
-
-```bash
-grep -oE 'max_pile_on_ratio=[0-9]+\.[0-9]+' /tmp/suite_c_output.json
-```
-
-Record: deterministic (true if TestSuiteC_ConcurrentDeterminism passes), max_pile_on_ratio from `t.Logf` line: `Suite C pile-on: max_pile_on_ratio=X.XX`.
-
-## Step 4b: Write partial validation_results.json (suites A/B/C)
-
-Write `workspace/validation_results.json` with suite_a, suite_b, and suite_c results collected in Steps 2–4. Step 5c-merge will add `benchmark`, `noise_cv`, and `overall_verdict` after cluster pipelines complete.
-
-**Do not call validate-schema yet** — the partial file intentionally omits `benchmark`, `overall_verdict`, and `noise_cv` (all required by the schema). Schema validation will fail on the partial file; run it only after Step 5c-merge.
-
-```json
-{
-  "suite_a": {
-    "passed": <true|false>,
-    "kendall_tau": <mean_tau>,
-    "max_abs_error": <max_abs_err>,
-    "tuple_count": <tuple_count from Step 2 test output (may be < 200 if tuples were skipped)>
-  },
-  "suite_b": {
-    "passed": true,
-    "rank_stability_tau": <tau>,
-    "threshold_crossing_pct": 0.0,
-    "informational_only": true
-  },
-  "suite_c": {
-    "passed": <true|false>,
-    "deterministic": true,
-    "max_pile_on_ratio": <ratio>
-  }
+.venv/bin/python -c "
+import json
+eq = json.load(open('workspace/equivalence_results.json'))
+val = {
+    'suite_a': eq['suite_a'],
+    'suite_b': eq['suite_b'],
+    'suite_c': eq['suite_c']
 }
+open('workspace/validation_results.json', 'w').write(json.dumps(val, indent=2))
+print('Wrote validation_results.json from equivalence_results.json')
+" || { echo "HALT: failed to construct validation_results.json from equivalence_results.json"; exit 1; }
 ```
 
-Save this (with actual values substituted) to `workspace/validation_results.json`.
+**Skip the following block if `FAST_ITER` is `false`** — `overall_verdict` will be set later by Step 5c-merge after the mechanism check.
+
+In fast mode (`FAST_ITER` is `true`), add `overall_verdict`:
+
+```bash
+.venv/bin/python -c "
+import json
+val = json.load(open('workspace/validation_results.json'))
+passed = val.get('suite_a', {}).get('passed') and val.get('suite_c', {}).get('passed')
+val['overall_verdict'] = 'PASS' if passed else 'FAIL'
+open('workspace/validation_results.json', 'w').write(json.dumps(val, indent=2))
+print('overall_verdict:', val['overall_verdict'])
+" || { echo "HALT: failed to set overall_verdict in validation_results.json"; exit 1; }
+```
+
+**Do not call validate-schema yet** — the partial file intentionally omits `benchmark` and `noise_cv`.
 
 ## Step 5: Cluster Benchmarks
 
@@ -577,7 +549,7 @@ If overall_verdict == "FAIL", do NOT proceed — stop and document the failure.
 | Condition | Trigger | Action |
 |-----------|---------|--------|
 | Missing prerequisite artifact | algorithm_summary.json, signal_coverage.json, or stage3_output.json absent/invalid; or Stage 4 `go build`/`go vet` fails | HALT: "Stage [N] prerequisite missing" |
-| Suite A SKIP (false pass) | algorithm_summary.json absent → `t.Skip` → exit 0 without running equivalence | Caught by prerequisite check above; algorithm_summary.json must exist before Suite A runs |
+| Missing equivalence gate | equivalence_results.json absent, invalid, or suite_a/suite_c not passed | Caught by prerequisite check above; Stage 4.5 must pass before Stage 5 runs |
 | Noise not done (Step 1) | benchmark-state exit 0 but noise phase != "done" | Exit 3 (REENTER): jump to Step 5, run noise phase, then re-enter from Step 1 |
 | benchmark-state infrastructure error | benchmark-state exit 2 (missing algorithm_summary.json) | HALT: "benchmark-state failed — missing workspace/algorithm_summary.json" |
 | Cluster context mismatch | benchmark-state exit 1 (kubectl context changed) | HALT: "benchmark-state failed — check cluster context" |
@@ -589,8 +561,8 @@ If overall_verdict == "FAIL", do NOT proceed — stop and document the failure.
 | Results schema validation failure | validate-schema exits non-zero on phase_results.json | HALT: "schema validation failed for workspace/${phase}_results.json — do not mark phase done" |
 | Benchmark input failure | benchmark exit 2 with no JSON output (file missing or invalid JSON) — check stderr only | HALT: "benchmark infrastructure error — see stderr" |
 | Benchmark ERROR verdict | benchmark exit 2 with JSON output written — `mechanism_check_verdict` is ERROR (all workloads skipped due to name mismatch, or no matched signal classifications) | HALT: "benchmark ERROR — check workload names and signal_coverage.json" |
-| Suite A FAIL | PIPESTATUS[0] non-zero or `"Action":"fail"` in JSON output (rank divergence or key-format mismatch) | HALT: "Suite A FAIL — check test output for root cause" |
-| Suite C FAIL | PIPESTATUS[0] non-zero or `"Action":"fail"` in JSON output (determinism violated or pile-on > 2.0) | HALT: "Suite C FAIL" |
+| Suite A FAIL (Stage 4.5 gate) | equivalence_results.json missing, invalid, or suite_a.passed=false | HALT at prerequisite check: "HALT: Suite A did not pass in Stage 4.5" |
+| Suite C FAIL (Stage 4.5 gate) | equivalence_results.json missing, invalid, or suite_c.passed=false | HALT at prerequisite check: "HALT: Suite C did not pass in Stage 4.5" |
 | Mechanism FAIL | no matched workload improvement ≥ T_eff | HALT: "Mechanism check FAIL" |
 | Mechanism INCONCLUSIVE | improvement > 0 but < T_eff | HALT: "Mechanism check INCONCLUSIVE" — **unless** operator manually overrides (soft-pass with sign-off). If override chosen, set `overall_verdict: "INCONCLUSIVE"` and populate `operator_notes` with rationale. See Step 5c and Step 7 for details. |
 | Specificity check failures | Unmatched workload(s) with \|change\|/baseline ≥ T_eff | No halt — informational only. Recorded in `specificity_notes` of benchmark output for audit trail. Does not affect mechanism_check_verdict. |

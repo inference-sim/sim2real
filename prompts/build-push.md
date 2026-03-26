@@ -1,11 +1,11 @@
 ---
-stage: 4.5
+stage: 4.75
 version: "1.0"
 pipeline_commit: "set-at-runtime"
-description: "Stage 4.5 — Build and push treatment EPP image to developer registry"
+description: "Stage 4.75 — Build and push treatment EPP image to developer registry"
 ---
 
-# Stage 4.5: Build & Push EPP Image
+# Stage 4.75: Build & Push EPP Image
 
 Build the `llm-d-inference-scheduler` container image from the local submodule
 (which contains the generated scorer plugin) and push it to the developer's
@@ -17,7 +17,7 @@ is statically compiled into the binary and the upstream image does not contain i
 
 ## Prerequisites
 
-Verify Stage 4 passed and the registry is configured. **HALT if any check fails.**
+Verify Stage 4 passed, the equivalence gate (Stage 4.5) passed, and the registry is configured. **HALT if any check fails.**
 
 ```bash
 # Stage 3 output still valid
@@ -25,8 +25,26 @@ test -f workspace/stage3_output.json || { echo "HALT: missing stage3_output.json
 
 # Scorer is still present and builds
 SCORER_FILE=$(.venv/bin/python -c "import json; print(json.load(open('workspace/stage3_output.json'))['scorer_file'])")
+if [ $? -ne 0 ] || [ -z "$SCORER_FILE" ]; then
+  echo "HALT: failed to extract scorer_file from workspace/stage3_output.json"; exit 1
+fi
 test -f "$SCORER_FILE" || { echo "HALT: scorer file missing: $SCORER_FILE"; exit 1; }
-cd llm-d-inference-scheduler && go build ./... && cd .. || { echo "HALT: scorer does not build"; exit 1; }
+(cd llm-d-inference-scheduler && GOWORK=off go build ./...) \
+  || { echo "HALT: scorer does not build"; exit 1; }
+
+# Equivalence gate passed (Stage 4.5)
+test -f workspace/equivalence_results.json || { echo "HALT: Stage 4.5 equivalence gate not run — run prompts/equivalence-gate.md first"; exit 1; }
+.venv/bin/python -c "
+import json, sys
+d = json.load(open('workspace/equivalence_results.json'))
+if not d.get('suite_a', {}).get('passed'):
+    print('HALT: Suite A did not pass — scorer formula does not match simulation reference')
+    sys.exit(1)
+if not d.get('suite_c', {}).get('passed'):
+    print('HALT: Suite C did not pass — scorer is not concurrency-safe')
+    sys.exit(1)
+print('Equivalence gate: Suite A and C passed')
+" || exit 1
 
 # Registry is configured (not the placeholder value)
 .venv/bin/python -c "
