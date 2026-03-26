@@ -111,13 +111,13 @@ START_LINE=$(echo "$LINE_RANGE" | cut -d- -f1)
 END_LINE=$(echo "$LINE_RANGE" | cut -d- -f2)
 
 # Compute SHA-256 of the EVOLVE-BLOCK region (inclusive of marker lines)
+# Uses the same method as the extract CLI: split by \n, slice, join with \n (no trailing newline)
 ACTUAL_HASH=$(.venv/bin/python -c "
-import hashlib, sys
-with open('$EVOLVE_FILE') as f:
-    lines = f.readlines()
-block = lines[$((START_LINE - 1)):$END_LINE]
-content = ''.join(block)
-print(hashlib.sha256(content.encode()).hexdigest())
+import hashlib
+source = open('$EVOLVE_FILE').read()
+lines = source.split('\n')
+block = '\n'.join(lines[$((START_LINE - 1)):$END_LINE])
+print(hashlib.sha256(block.encode()).hexdigest())
 ")
 
 [ "$ACTUAL_HASH" = "$EXPECTED_HASH" ] || {
