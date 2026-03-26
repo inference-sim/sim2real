@@ -17,9 +17,11 @@ Stages 1 through 6, verifying prerequisite artifacts between each stage.
 | 1     | Extract   | `prompts/extract.md`  | `blis_router/best/best_program.go`, `blis_router/best/best_program_info.json` | `workspace/algorithm_summary.json` |
 | 2     | Translate | `prompts/translate.md`| `workspace/algorithm_summary.json`, `docs/transfer/blis_to_llmd_mapping.md` | `workspace/signal_coverage.json` |
 | 3     | Generate  | `prompts/generate.md` | `workspace/algorithm_summary.json`, `workspace/signal_coverage.json`, `docs/transfer/scorer_template.go.md` | scorer files + `workspace/stage3_output.json` |
+| 3.5   | Validate Translation | `prompts/validate-translation.md` | `workspace/stage3_output.json`, `workspace/algorithm_summary.json`, `workspace/signal_coverage.json` | `workspace/translation_validation.json` |
 | 4     | Test      | `prompts/test.md`       | `workspace/stage3_output.json`               | build + test pass (no artifact)    |
-| 4.5   | Build & Push EPP | `prompts/build-push.md` | `workspace/tekton/algorithm_values.yaml`, `config/env_defaults.yaml` | treatment EPP image in registry; updated `workspace/tekton/values.yaml` |
-| 5     | Validate  | `prompts/validate.md`   | `workspace/stage3_output.json` (generated scorer files) | `workspace/validation_results.json` |
+| 4.5   | Equivalence Gate | `prompts/equivalence-gate.md` | `workspace/stage3_output.json`, `workspace/algorithm_summary.json` | `workspace/equivalence_results.json` |
+| 4.75  | Build & Push EPP | `prompts/build-push.md` | `workspace/tekton/algorithm_values.yaml`, `config/env_defaults.yaml`, `workspace/equivalence_results.json` | treatment EPP image in registry; updated `workspace/tekton/values.yaml` |
+| 5     | Validate  | `prompts/validate.md`   | `workspace/equivalence_results.json`, `workspace/stage3_output.json` | `workspace/validation_results.json` |
 | 6     | PR        | *Defined in PR6*      | all artifacts                                | PRs in target repos                |
 
 ## Prerequisites
@@ -144,15 +146,45 @@ test -f "$SCORER_FILE" || { echo "HALT: generated scorer file missing: $SCORER_F
 cd llm-d-inference-scheduler && go build ./... && go vet ./... && go test -timeout 10m ./pkg/plugins/scorer/... -v && cd .. || { echo "HALT: Stage 4 build/vet/test verification failed"; exit 1; }
 ```
 
-**HALT if any validation fails.** Do not proceed to Stage 4.5.
+**HALT if any validation fails.** Do not proceed to Stage 4.5 (Equivalence Gate).
 
 ---
 
-### Stage 4.5: Build & Push EPP Image
+### Stage 4.5: Equivalence Gate
+
+**Prompt:** `prompts/equivalence-gate.md`
+
+Run Suite A/B/C to validate the generated scorer against the simulation reference.
+This gate prevents building an image with a scorer that doesn't match the evolved algorithm.
+
+**Between-stage validation:**
+
+```bash
+# Verify equivalence results exist and are valid
+test -f workspace/equivalence_results.json || { echo "HALT: Stage 4.5 output missing"; exit 1; }
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/equivalence_results.json || { echo "HALT: Stage 4.5 schema validation failed"; exit 1; }
+
+# Verify suites passed
+.venv/bin/python -c "
+import json, sys
+d = json.load(open('workspace/equivalence_results.json'))
+if not d.get('suite_a', {}).get('passed'):
+    print('HALT: Suite A did not pass'); sys.exit(1)
+if not d.get('suite_c', {}).get('passed'):
+    print('HALT: Suite C did not pass'); sys.exit(1)
+print('Equivalence gate: PASS (tau=' + str(d['suite_a']['kendall_tau']) + ')')
+" || { echo "HALT: Stage 4.5 validation failed"; exit 1; }
+```
+
+**HALT if any validation fails.** Do not proceed to Stage 4.75.
+
+---
+
+### Stage 4.75: Build & Push EPP Image
 
 **Prompt:** `prompts/build-push.md`
 
-Follow the Stage 4.5 prompt to build the treatment EPP image from the
+Follow the Stage 4.75 prompt to build the treatment EPP image from the
 `llm-d-inference-scheduler` submodule and push it to the developer's registry.
 
 **Between-stage validation:**
@@ -167,7 +199,7 @@ img = (d.get('stack',{}).get('gaie',{}).get('treatment',{})
 if not img.get('hub') or not img.get('tag'):
     print('HALT: treatment EPP image not set'); sys.exit(1)
 print(f\"EPP image: {img['hub']}/{img['name']}:{img['tag']}\")
-" || { echo "HALT: Stage 4.5 validation failed"; exit 1; }
+" || { echo "HALT: Stage 4.75 validation failed"; exit 1; }
 
 # Verify values.yaml was regenerated
 test -f workspace/tekton/values.yaml || { echo "HALT: workspace/tekton/values.yaml missing"; exit 1; }
@@ -228,4 +260,5 @@ After a complete pipeline run:
 - `workspace/signal_coverage.json` — Stage 2 output
 - `workspace/stage3_output.json` — Stage 3 output
 - Generated scorer files in `llm-d-inference-scheduler/pkg/plugins/scorer/`
+- `workspace/equivalence_results.json` — Stage 4.5 output
 - `workspace/pipeline_commit.txt` — Pipeline commit record
