@@ -198,37 +198,6 @@ cd ..
 
 **HALT if gh pr create fails — report the pushed branch name for manual recovery.**
 
-## Step 6: llm-d-benchmark PR (conditional)
-
-If this transfer involved benchmark config changes in the llm-d-benchmark submodule, push a branch and create a PR there too. **If no benchmark config changes exist, skip this step.**
-
-```bash
-# Check for uncommitted changes in llm-d-benchmark
-if ! git -C llm-d-benchmark diff --quiet HEAD; then
-  BENCH_BRANCH="transfer/${ALG_NAME}"
-  if git -C llm-d-benchmark ls-remote --exit-code --heads origin "$BENCH_BRANCH" 2>/dev/null; then
-    TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-    BENCH_BRANCH="${BENCH_BRANCH}-${TIMESTAMP}"
-  fi
-  git -C llm-d-benchmark checkout -b "$BENCH_BRANCH"
-  git -C llm-d-benchmark push origin "$BENCH_BRANCH" \
-    || { echo "HALT: git push failed for llm-d-benchmark branch $BENCH_BRANCH"; exit 1; }
-  cd llm-d-benchmark
-  gh pr create \
-    --title "feat(benchmark): add ${ALG_NAME} benchmark configs" \
-    --base main \
-    --head "$BENCH_BRANCH" \
-    --body "Benchmark configs for sim-to-production transfer: \`${ALG_NAME}\`. See llm-d-inference-scheduler PR: ${SCHEDULER_PR_URL}" \
-    || { echo "HALT: gh pr create failed for llm-d-benchmark. Branch '$BENCH_BRANCH' is pushed."; cd ..; exit 1; }
-  BENCHMARK_PR_URL=$(gh pr view --json url -q .url)
-  echo "Created benchmark PR: $BENCHMARK_PR_URL"
-  cd ..
-else
-  echo "No benchmark config changes — skipping llm-d-benchmark PR."
-  BENCHMARK_PR_URL="(none)"
-fi
-```
-
 ## Halt Conditions Summary
 
 | Condition | Trigger | Action |
@@ -237,14 +206,13 @@ fi
 | overall_verdict == FAIL | Step 1 check | HALT: "Do not create PRs" |
 | INCONCLUSIVE without operator_notes | Step 1 check | HALT: "Add operator_notes to validation_results.json" |
 | gh auth not configured | Step 2 | HALT: "Run gh auth login" |
-| git push fails | Step 3 or 6 | HALT: report branch name |
+| git push fails | Step 3 | HALT: report branch name |
 | append-calibration-log fails | Step 4 | HALT: "Inspect calibration_log.md before continuing" |
-| gh pr create fails | Step 5 or 6 | HALT: report pushed branch for manual recovery |
+| gh pr create fails | Step 5 | HALT: report pushed branch for manual recovery |
 
 ## Expected Outputs
 
 - `docs/transfer/calibration_log.md` entry: appended by Step 4
 - `llm-d-inference-scheduler` PR URL: printed by Step 5
-- `llm-d-benchmark` PR URL (or "none"): printed by Step 6
 
 > **Note:** Stage 6 ends the interactive pipeline session. The generated scorer is now under review by llm-d maintainers. If they request changes, re-run Stages 3→4 to address feedback and push an updated branch.
