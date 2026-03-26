@@ -118,7 +118,7 @@ scheduler: fcfs
 **Step 3: Run workloads and measure**
 ```bash
 # Run workload_glia_40qps first, then workload_glia_prefix_heavy
-# Use a load generator (e.g., llm-d-benchmark, vegeta, or custom client)
+# Use a load generator (e.g., vegeta, or custom client)
 # that matches the workload spec (arrival rate, token distributions)
 
 # For workload_glia_40qps:
