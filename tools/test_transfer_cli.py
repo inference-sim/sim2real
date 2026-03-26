@@ -3131,6 +3131,93 @@ class TestMergeValues:
         )
 
 
+    def test_epp_image_pullpolicy_propagated_to_treatment(self, tmp_path):
+        """pullPolicy from epp_image.build is included in treatment inferenceExtension.image."""
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        env = self._minimal_env_defaults()
+        env.setdefault("stack", {})["gaie"] = {
+            "epp_image": {
+                "upstream": {
+                    "hub": "ghcr.io/llm-d",
+                    "name": "llm-d-inference-scheduler",
+                    "tag": "latest",
+                    "pullPolicy": "IfNotPresent",
+                },
+                "build": {
+                    "hub": "ghcr.io/dev",
+                    "name": "llm-d-inference-scheduler",
+                    "tag": "sim2real-abc12345",
+                    "platform": "linux/amd64",
+                    "pullPolicy": "Always",
+                },
+            },
+            "shared": {"helmValues": {}},
+            "baseline": {"helmValues": {}},
+            "treatment": {"helmValues": {}},
+        }
+        self._write_yaml(env_file, env)
+        self._write_yaml(alg_file, self._minimal_algorithm_values())
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        treatment_img = (result["stack"]["gaie"]["treatment"]["helmValues"]
+                         .get("inferenceExtension", {}).get("image", {}))
+        assert treatment_img.get("pullPolicy") == "Always", (
+            f"Expected pullPolicy=Always in treatment image, got: {treatment_img}"
+        )
+
+    def test_epp_image_pullpolicy_propagated_to_baseline(self, tmp_path):
+        """pullPolicy from epp_image.upstream is included in baseline inferenceExtension.image."""
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        env = self._minimal_env_defaults()
+        env.setdefault("stack", {})["gaie"] = {
+            "epp_image": {
+                "upstream": {
+                    "hub": "ghcr.io/llm-d",
+                    "name": "llm-d-inference-scheduler",
+                    "tag": "v0.3.0",
+                    "pullPolicy": "IfNotPresent",
+                },
+                "build": {
+                    "hub": "ghcr.io/dev",
+                    "name": "llm-d-inference-scheduler",
+                    "platform": "linux/amd64",
+                    "pullPolicy": "Always",
+                },
+            },
+            "shared": {"helmValues": {}},
+            "baseline": {"helmValues": {}},
+            "treatment": {"helmValues": {}},
+        }
+        self._write_yaml(env_file, env)
+        self._write_yaml(alg_file, self._minimal_algorithm_values())
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        baseline_img = (result["stack"]["gaie"]["baseline"]["helmValues"]
+                        .get("inferenceExtension", {}).get("image", {}))
+        assert baseline_img.get("pullPolicy") == "IfNotPresent", (
+            f"Expected pullPolicy=IfNotPresent in baseline image, got: {baseline_img}"
+        )
+
     def test_vllm_image_override_applied(self, tmp_path):
         """When stack.model.vllm_image is set in env_defaults, decode.containers[0].image is replaced."""
         env_file = tmp_path / "env.yaml"

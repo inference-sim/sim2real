@@ -55,10 +55,12 @@ stack:
         hub: ghcr.io/llm-d
         name: llm-d-inference-scheduler
         tag: latest               # pin to a specific upstream release if needed
+        pullPolicy: IfNotPresent  # stable upstream images; IfNotPresent avoids unnecessary pulls
       build:
         hub: ghcr.io/kalantar   # set to developer's registry, e.g. ghcr.io/kalantar
         name: llm-d-inference-scheduler
         platform: linux/amd64     # target cluster architecture; cross-compiled on arm64 Mac
+        pullPolicy: Always        # dev images may be rebuilt and pushed with the same tag
 
     # gaie.shared is merged into both baseline and treatment by merge-values.
     # The final values.yaml has no gaie.shared key — it is flattened away.
