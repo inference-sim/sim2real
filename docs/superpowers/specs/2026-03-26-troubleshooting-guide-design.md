@@ -14,10 +14,18 @@ Content is sourced from past Claude sessions, embedded codebase comments, and th
 
 ## README.md Change
 
-Add one line after the Tests section:
+Add one line after the `See \`CLAUDE.md\` for CLI reference...` line (currently line 34), before the `## Stage 4.5 Prerequisites` section:
 
 ```markdown
 > For help when things go wrong, see [Troubleshooting](docs/contributing/troubleshooting.md).
+```
+
+## docs/contributing/index.md Change
+
+Add a row to the Development Workflows table:
+
+```markdown
+| [Troubleshooting](troubleshooting.md) | Common failure modes and fixes for pipeline operators |
 ```
 
 ## Content Structure
@@ -57,7 +65,7 @@ Sections are ordered by pipeline stage so operators can find issues in context.
 **2.1 Exit code 3 is not an error**
 - Symptom: Stage 5 exits 3; operator treats it as a failure
 - Cause: Exit 3 = REENTER — the noise characterization phase is not yet complete; this is a planned pause, not an error
-- Fix: Complete the noise phase (Steps 5a–5b in `prompts/validate.md`), then re-enter Stage 5
+- Fix: Complete the noise phase (Steps 5a–5b in `prompts/validate.md`), then re-run `prompts/validate.md` from the beginning (re-entering the prompt, not continuing the previous session)
 
 **2.2 Wrong kubectl context**
 - Symptom: Pipeline submits to wrong cluster; pods appear in unexpected namespace or not at all
@@ -74,17 +82,17 @@ Sections are ordered by pipeline stage so operators can find issues in context.
 ### Section 3: Stage 5 — Comparison Results
 
 **3.1 Comparison table shows all N/A**
-- Symptom: `compare` subcommand produces a table where every metric cell is `N/A`; exits 0
-- Cause: Metric values in the results JSON are stored as strings (`"123.4"`) instead of numbers (`123.4`); the tool silently substitutes N/A for non-numeric values
-- Fix: Inspect the raw results files (`workspace/baseline_results.json`, `workspace/treatment_results.json`) and confirm metric values are JSON numbers, not strings. If they are strings, the issue is in how the benchmark pipeline serialized results — re-run the affected pipeline phase.
+- Symptom: `compare` subcommand produces a table where every metric cell is `N/A`; exits 0; WARN lines appear on stderr
+- Cause: Metric values in the results JSON are stored as strings (`"123.4"`) instead of numbers (`123.4`); the tool catches the resulting `TypeError` and substitutes N/A, emitting a warning to stderr
+- Fix: Check stderr output for `WARN:` lines identifying the affected workload and metric. Then inspect the raw results files (`workspace/baseline_results.json`, `workspace/treatment_results.json`) and confirm metric values are JSON numbers, not strings. If they are strings, the issue is in how the benchmark pipeline serialized results — re-run the affected pipeline phase.
 
 ---
 
 ### Section 4: Config Gotchas
 
 **4.1 `fast_iteration: "false"` quoted string**
-- Symptom: Stage 5 skips noise gate and mechanism check; Stage 6 skips PR creation, even though you intended full validation
-- Cause: `pipeline.fast_iteration: "false"` — the quoted string `"false"` is truthy in Python and is treated as `true`
+- Symptom: Stage 5 halts immediately with `ERROR: pipeline.fast_iteration must be a boolean, got str: 'false'` (exit 2)
+- Cause: `pipeline.fast_iteration: "false"` — a quoted string fails the type guard (`isinstance(val, bool)`) and causes an infrastructure error before any stage logic runs
 - Fix: Use an unquoted boolean: `pipeline.fast_iteration: false`
 
 ---
