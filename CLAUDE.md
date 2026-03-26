@@ -20,7 +20,6 @@ inference-sim to production llm-d-inference-scheduler scorer plugins.
 
 - `inference-sim/` — Discrete-event LLM inference simulator (source of evolved algorithms)
 - `llm-d-inference-scheduler/` — Production scheduler with scorer plugin system (target)
-- `llm-d-benchmark/` — Benchmark harness for cluster-level validation (target)
 - `tektonc-data-collection/` — Tekton-based cluster data collection pipeline (used by `compile-pipeline` subcommand)
 
 ## Transfer Pipeline
