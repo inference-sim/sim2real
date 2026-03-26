@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Equivalence Results",
+  "description": "Output of Stage 4.5 (Equivalence Gate). Suite A/B/C results from the Go test harness. Consumed by Stage 4.75 (Build & Push) as a prerequisite gate and by Stage 5 (Validate) for validation_results.json construction.",
+  "type": "object",
+  "required": ["suite_a", "suite_b", "suite_c"],
+  "additionalProperties": false,
+  "properties": {
+    "suite_a": {
+      "type": "object",
+      "required": ["passed", "kendall_tau", "max_abs_error", "tuple_count"],
+      "additionalProperties": false,
+      "description": "Numeric fidelity and rank correlation results. passed=true when mean Kendall-tau > 0.8.",
+      "properties": {
+        "passed":        {"type": "boolean"},
+        "kendall_tau":   {"type": "number", "minimum": -1, "maximum": 1},
+        "max_abs_error": {"type": "number", "minimum": 0, "description": "Informational: max |sim_score - prod_score| across all tuples and endpoints"},
+        "tuple_count":   {"type": "integer", "minimum": 0}
+      }
+    },
+    "suite_b": {
+      "type": "object",
+      "required": ["passed", "rank_stability_tau", "threshold_crossing_pct", "informational_only"],
+      "additionalProperties": false,
+      "description": "Staleness rank stability. informational_only=true for all v1 transfers (staleness_window_ms=0).",
+      "properties": {
+        "passed":                  {"type": "boolean"},
+        "rank_stability_tau":      {"type": "number", "minimum": -1, "maximum": 1},
+        "threshold_crossing_pct":  {"type": "number", "minimum": 0, "maximum": 100},
+        "informational_only":      {"type": "boolean", "description": "true for v1 (all signals have staleness_window_ms=0)"}
+      }
+    },
+    "suite_c": {
+      "type": "object",
+      "required": ["passed", "deterministic", "max_pile_on_ratio"],
+      "additionalProperties": false,
+      "description": "Concurrent safety and pile-on check.",
+      "properties": {
+        "passed":            {"type": "boolean"},
+        "deterministic":     {"type": "boolean", "description": "true if all 20 concurrent calls produced identical results"},
+        "max_pile_on_ratio": {"type": "number", "minimum": 0, "description": "max selections / fair_share across 100 routing decisions"}
+      }
+    }
+  }
+}
