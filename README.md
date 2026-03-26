@@ -32,6 +32,8 @@ python -m pytest tools/ -v
 
 See `CLAUDE.md` for CLI reference, artifact contracts, and exit code semantics.
 
+> For help when things go wrong, see [Troubleshooting](docs/contributing/troubleshooting.md).
+
 ## Stage 4.5 Prerequisites (Build & Push EPP Image)
 
 Stage 4.5 (`prompts/build-push.md`) builds the treatment EPP image and pushes it to a container registry. Before running it, complete these one-time steps:
