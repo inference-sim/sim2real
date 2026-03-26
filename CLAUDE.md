@@ -24,13 +24,15 @@ inference-sim to production llm-d-inference-scheduler scorer plugins.
 
 ## Transfer Pipeline
 
-7-stage prompt-driven pipeline:
+9-stage prompt-driven pipeline:
 1. **Extract** — Parse EVOLVE-BLOCK, produce algorithm_summary.json
 2. **Translate** — Map sim signals to production equivalents
 3. **Generate** — LLM produces scorer plugin code
 3.5. **Validate Translation** — Verify generated code faithfully implements EVOLVE-BLOCK logic
-4. **Test** — Build + test with retry logic
-5. **Validate** — 3-suite equivalence + cluster benchmarks
+4. **Test** — Build + test with retry logic; re-validates translation if scorer changes
+4.5. **Equivalence Gate** — Suite A/B/C rank correlation against simulation reference
+4.75. **Build & Push EPP** — Build treatment container image (only after equivalence gate passes)
+5. **Validate** — Cluster benchmarks (suite results consumed from Stage 4.5)
 6. **PR** — Create PRs in target repos
 
 ## CLI Commands
