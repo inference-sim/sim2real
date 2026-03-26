@@ -30,6 +30,7 @@ The lightest extension type is **adding a new signal mapping** to the mapping ar
 | [Macro Planning](macro-planning.md) | Multi-PR features requiring decomposition |
 | [Transfer Validation](transfer-validation.md) | Validating that a transfer preserves algorithm behavior |
 | [Convergence Protocol](convergence.md) | Review gate used by all workflows above |
+| [Troubleshooting](troubleshooting.md) | Common failure modes and fixes for pipeline operators |
 
 ## Extension Recipes
 
