@@ -222,11 +222,21 @@ VALIDATION_EXIT=$?
 
 If `VALIDATION_EXIT == 0`: proceed to Step 5 (Completion). Translation fidelity confirmed after scorer changes.
 
-If `VALIDATION_EXIT != 0`: the scorer change broke translation fidelity. Treat this as a test failure:
-increment `retries_test_failure` and `retries_total`, compute error signature
-`("translation_revalidation", first line of validate-translation stderr)`,
-and proceed to **Step 4: Retry** (which will check halt conditions, then re-apply a fix and
-return to Step 1 for a full rebuild cycle).
+If `VALIDATION_EXIT != 0`: the scorer change broke translation fidelity. Attempt to fix the
+translation issue (review the change against `workspace/algorithm_summary.json` and
+`workspace/signal_coverage.json`). Then re-run `validate-translation`:
+
+```bash
+.venv/bin/python tools/transfer_cli.py validate-translation \
+  --algorithm workspace/algorithm_summary.json \
+  --signal-coverage workspace/signal_coverage.json \
+  --scorer-file "$SCORER_FILE"
+VALIDATION_EXIT=$?
+```
+
+If `VALIDATION_EXIT == 0` after the fix: proceed to Step 5 (Completion).
+
+If `VALIDATION_EXIT != 0` after the fix: **HALT** with `halt_reason: "translation_revalidation_failed_stage4"`. Write `workspace/escalation.json`.
 
 ## Step 4: Retry
 
