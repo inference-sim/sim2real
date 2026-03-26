@@ -32,7 +32,7 @@ Before proceeding, verify all predecessor artifacts exist and are valid:
 Verify Stage 4 completed successfully (scorer builds and tests pass):
 
 ```bash
-(cd llm-d-inference-scheduler && go build ./pkg/plugins/scorer/... && go vet ./pkg/plugins/scorer/...)
+(cd llm-d-inference-scheduler && GOWORK=off go build ./pkg/plugins/scorer/... && GOWORK=off go vet ./pkg/plugins/scorer/...)
 ```
 
 **HALT if either command exits non-zero.** Message: "HALT: Stage 4 prerequisite failed — generated scorer does not build cleanly. Run Stage 4 first."
