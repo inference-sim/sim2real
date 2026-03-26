@@ -64,17 +64,6 @@ The pipeline's staleness guard (Stage 2) detects when the submodule HEAD differs
 
 ---
 
-## `llm-d-benchmark` — no pinned artifacts
-
-### What pins it
-
-Nothing. No commit hash in any artifact.
-
-### Process
-
-No artifact updates required. Verify Stage 5/6 benchmark tooling still works after the bump, particularly if CLI flag names for `noise-characterize` or `benchmark` commands changed.
-
----
 
 ## Prompt to use with Claude Code
 
@@ -97,4 +86,3 @@ Substitute `<relevant-paths>` per submodule:
 |-----------|---------------|
 | `llm-d-inference-scheduler` | `pkg/plugins/ vendor/sigs.k8s.io/gateway-api-inference-extension/` |
 | `inference-sim` | `sim/routing.go` |
-| `llm-d-benchmark` | _(no pinned artifacts — verify tooling manually)_ |
