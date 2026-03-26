@@ -143,7 +143,7 @@ SCORER_FILE=$(.venv/bin/python -c "import json; print(json.load(open('workspace/
 test -f "$SCORER_FILE" || { echo "HALT: generated scorer file missing: $SCORER_FILE"; exit 1; }
 
 # Final build + vet verification
-cd llm-d-inference-scheduler && go build ./... && go vet ./... && go test -timeout 10m ./pkg/plugins/scorer/... -v && cd .. || { echo "HALT: Stage 4 build/vet/test verification failed"; exit 1; }
+cd llm-d-inference-scheduler && GOWORK=off go build ./... && GOWORK=off go vet ./... && GOWORK=off go test -timeout 10m ./pkg/plugins/scorer/... -v && cd .. || { echo "HALT: Stage 4 build/vet/test verification failed"; exit 1; }
 ```
 
 **HALT if any validation fails.** Do not proceed to Stage 4.5 (Equivalence Gate).

@@ -26,7 +26,7 @@ test -f workspace/stage3_output.json || { echo "HALT: missing stage3_output.json
 # Scorer is still present and builds
 SCORER_FILE=$(.venv/bin/python -c "import json; print(json.load(open('workspace/stage3_output.json'))['scorer_file'])")
 test -f "$SCORER_FILE" || { echo "HALT: scorer file missing: $SCORER_FILE"; exit 1; }
-cd llm-d-inference-scheduler && go build ./... && cd .. || { echo "HALT: scorer does not build"; exit 1; }
+cd llm-d-inference-scheduler && GOWORK=off go build ./... && cd .. || { echo "HALT: scorer does not build"; exit 1; }
 
 # Equivalence gate passed (Stage 4.5)
 test -f workspace/equivalence_results.json || { echo "HALT: Stage 4.5 equivalence gate not run — run prompts/equivalence-gate.md first"; exit 1; }

@@ -39,14 +39,14 @@ Verify Stage 4 completed successfully (scorer builds and tests pass):
 
 > **Note:** Stage 4 does not write a workspace artifact on success (success is implicit in the build/test passing). This prerequisite verifies the scorer builds by re-running `go build` and `go vet` scoped to the scorer package only — using `./...` would build all packages in the module and may fail for unrelated reasons (see Section H cross-system invariants).
 
-Verify Stage 1 extract artifact exists (required by Suite A `t.Skip` guard):
+Verify Stage 1 extract artifact exists (referenced by cluster benchmark steps):
 
 ```bash
 test -f workspace/algorithm_summary.json || { echo "HALT: workspace/algorithm_summary.json missing (run extract first)"; exit 1; }
 .venv/bin/python tools/transfer_cli.py validate-schema workspace/algorithm_summary.json || { echo "HALT: workspace/algorithm_summary.json schema validation failed"; exit 1; }
 ```
 
-**HALT if `workspace/algorithm_summary.json` is absent or invalid.** Without it, Suite A silently skips (exits 0/PASS) without running any equivalence checks — this would bypass the go/no-go gate.
+**HALT if `workspace/algorithm_summary.json` is absent or invalid.** This artifact is required by the cluster benchmark steps and the mechanism check in this stage.
 
 Verify Stage 4.5 equivalence gate passed:
 
@@ -547,7 +547,7 @@ If overall_verdict == "FAIL", do NOT proceed — stop and document the failure.
 | Condition | Trigger | Action |
 |-----------|---------|--------|
 | Missing prerequisite artifact | algorithm_summary.json, signal_coverage.json, or stage3_output.json absent/invalid; or Stage 4 `go build`/`go vet` fails | HALT: "Stage [N] prerequisite missing" |
-| Suite A SKIP (false pass) | algorithm_summary.json absent → `t.Skip` → exit 0 without running equivalence | Caught by prerequisite check above; algorithm_summary.json must exist before Suite A runs |
+| Missing equivalence gate | equivalence_results.json absent, invalid, or suite_a/suite_c not passed | Caught by prerequisite check above; Stage 4.5 must pass before Stage 5 runs |
 | Noise not done (Step 1) | benchmark-state exit 0 but noise phase != "done" | Exit 3 (REENTER): jump to Step 5, run noise phase, then re-enter from Step 1 |
 | benchmark-state infrastructure error | benchmark-state exit 2 (missing algorithm_summary.json) | HALT: "benchmark-state failed — missing workspace/algorithm_summary.json" |
 | Cluster context mismatch | benchmark-state exit 1 (kubectl context changed) | HALT: "benchmark-state failed — check cluster context" |
