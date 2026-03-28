@@ -27,6 +27,14 @@ your cluster environment and deploys all required Tekton resources.
 
 ## Execution
 
+> **Standalone option:** Users who prefer not to invoke Claude can run the
+> script directly from the repo root:
+> ```bash
+> python scripts/setup.py --help
+> python scripts/setup.py --namespace <NS> --hf-token <TOKEN> --registry <REG>
+> ```
+> The script is interactive — it prompts for any missing values.
+
 **Run the setup script directly inside this Claude session.** Do not ask the
 user to open a separate terminal.
 
