@@ -18,8 +18,9 @@
             "required": ["ttft_p50", "ttft_p99", "tpot_p50", "tpot_p99"],
             "additionalProperties": false,
             "properties": {
-              "ttft_p50": {"type": "number"}, "ttft_p99": {"type": "number"},
-              "tpot_p50": {"type": "number"}, "tpot_p99": {"type": "number"}
+              "ttft_mean": {"type": "number"}, "ttft_p50": {"type": "number"}, "ttft_p99": {"type": "number"},
+              "tpot_mean": {"type": "number"}, "tpot_p50": {"type": "number"}, "tpot_p99": {"type": "number"},
+              "e2e_mean": {"type": "number"}, "e2e_p50": {"type": "number"}, "e2e_p99": {"type": "number"}
             }
           }
         }

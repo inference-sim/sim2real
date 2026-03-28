@@ -2206,12 +2206,15 @@ def cmd_merge_values(args: "argparse.Namespace") -> int:
     # Deep-merge: algorithm_values overlays env_defaults
     merged = _deep_merge(env_data, alg_data)
 
-    # Strip pipeline config from merged output — not consumed by Tekton templates.
-    # Stripping after merge (not just env_data) ensures the key is absent regardless
-    # of which input file contains it. Only env_data carries this key in practice;
-    # algorithm_values pipeline keys (unusual) also pass through _deep_merge and are
-    # removed here.
-    merged.pop("pipeline", None)
+    # Strip pipeline config from merged output, preserving keys consumed by Tekton
+    # templates (sleepDuration). fast_iteration is sim2real-internal only and must not
+    # appear in the compiled pipeline values.
+    pipeline_config = merged.pop("pipeline", {})
+    template_keys = {
+        k: v for k, v in pipeline_config.items() if k == "sleepDuration"
+    }
+    if template_keys:
+        merged["pipeline"] = template_keys
 
     # Flatten gaie.shared into each phase, then remove gaie.shared
     merged = _flatten_gaie_shared(merged)

@@ -41,6 +41,15 @@ stack:
         create: true
         acceleratorTypes:
           labelKey: "nvidia.com/gpu.product"
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: kubernetes.io/hostname
+                      operator: NotIn
+                      values:
+                        - pokprod-b93r39s0
         containers:
           - modelCommand: vllmServe  # Only supported value
             mountModelVolume: true   # Must be set explicitly — lost when algorithm_values.yaml overrides the containers list (Helm replaces lists, not merges)
@@ -57,8 +66,9 @@ stack:
         tag: latest               # pin to a specific upstream release if needed
         pullPolicy: IfNotPresent  # stable upstream images; IfNotPresent avoids unnecessary pulls
       build:
-        hub: ghcr.io/kalantar   # set to developer's registry, e.g. ghcr.io/kalantar
-        name: llm-d-inference-scheduler
+        hub: quay.io/jgchen     # set to developer's registry
+        name: blis-inference-scheduler
+        tag: sim2real-test3       # built by BuildKit in-cluster
         platform: linux/amd64     # target cluster architecture; cross-compiled on arm64 Mac
         pullPolicy: Always        # dev images may be rebuilt and pushed with the same tag
 
@@ -69,7 +79,8 @@ stack:
         inferenceExtension:
           pluginsConfigFile: "custom-plugins.yaml"
           flags:
-            v: 1
+            - name: v
+              value: 1
         provider:
           name: istio           # Must match stack.gateway.helmValues.gateway.provider
         istio:
@@ -116,3 +127,5 @@ pipeline:
   fast_iteration: true   # When true: Suites A/B/C + baseline/treatment cluster pipelines run,
                          # but noise gate and mechanism check are skipped, and PR creation (Stage 6)
                          # is skipped. Set to false when algorithm is ready for full validation.
+  sleepDuration: "30s"   # Post-model-deploy pause. deploy-model already waits for Ready;
+                         # this is a safety buffer only. Reduced from default 5m.
