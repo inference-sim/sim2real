@@ -15,7 +15,7 @@ def _make_workspace(tmp_path, run_name="test-run", has_run_dir=True):
     """Helper: create a minimal workspace directory structure."""
     ws = tmp_path / "workspace"
     ws.mkdir()
-    cfg = {"run_name": run_name}
+    cfg = {"current_run": run_name}
     (ws / "setup_config.json").write_text(json.dumps(cfg))
     if has_run_dir:
         run_dir = ws / "runs" / run_name
@@ -123,10 +123,9 @@ def _load_validation():
     return json.loads((FIXTURES / "deploy_validation_results.json").read_text())
 
 
-def test_print_summary_shows_verdict(capsys):
+def test_print_summary_shows_run_name(capsys):
     analyze.print_summary("my-run", _load_validation())
     out = capsys.readouterr().out
-    assert "PASS" in out
     assert "my-run" in out
 
 
@@ -145,12 +144,11 @@ def test_print_summary_shows_workload_classifications(capsys):
     assert "12.1%" in out   # 0.1210 * 100
 
 
-def test_print_summary_no_validation_omits_verdict(capsys):
+def test_print_summary_no_validation_shows_run_name_only(capsys):
     analyze.print_summary("my-run", None)
     out = capsys.readouterr().out
     assert "my-run" in out
-    assert "PASS" not in out
-    assert "Verdict" not in out
+    assert "Noise CV" not in out
 
 
 # ── plot_workload_chart ───────────────────────────────────────────────
@@ -171,9 +169,9 @@ def test_workload_chart_creates_png(tmp_path):
     assert out.stat().st_size > 1000
 
 
-def test_workload_chart_with_verdict(tmp_path):
+def test_workload_chart_no_verdict_in_title(tmp_path):
     out = tmp_path / "workload_chat-short.png"
-    analyze.plot_workload_chart("chat-short", _load_b_metrics(), _load_t_metrics(), out, verdict="PASS")
+    analyze.plot_workload_chart("chat-short", _load_b_metrics(), _load_t_metrics(), out)
     assert out.exists()
 
 
@@ -215,10 +213,10 @@ def test_heatmap_creates_png(tmp_path):
     assert out.stat().st_size > 1000
 
 
-def test_heatmap_with_verdict(tmp_path):
+def test_heatmap_no_verdict_in_title(tmp_path):
     names, data = _two_workload_data()
     out = tmp_path / "heatmap.png"
-    analyze.plot_heatmap(names, data, out, "test-run", verdict="PASS")
+    analyze.plot_heatmap(names, data, out, "test-run")
     assert out.exists()
 
 
@@ -262,13 +260,13 @@ def test_main_without_validation_still_produces_charts(tmp_path, monkeypatch):
     assert (run_dir / "results_charts" / "summary_heatmap.png").exists()
 
 
-def test_main_shows_verdict_in_output(tmp_path, monkeypatch, capsys):
+def test_main_shows_summary_in_output(tmp_path, monkeypatch, capsys):
     ws, run_dir = _make_full_workspace(tmp_path)
     monkeypatch.setattr(analyze, "REPO_ROOT", tmp_path)
     analyze.main_with_args(["--run", "test-run"])
     out = capsys.readouterr().out
-    assert "PASS" in out
     assert "test-run" in out
+    assert "12.1%" in out  # workload classification improvement
 
 
 def test_main_missing_baseline_exits_1(tmp_path, monkeypatch):

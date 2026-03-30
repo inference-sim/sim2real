@@ -191,16 +191,16 @@ def update_run_metadata(run_dir: Path, stage: str = "deploy", **fields) -> None:
 # ── Setup config ──────────────────────────────────────────────────────────────
 
 def load_setup_config() -> tuple[dict, str, Path]:
-    """Load workspace/setup_config.json. Returns (cfg, run_name, run_dir)."""
+    """Load workspace/setup_config.json. Returns (cfg, current_run, run_dir)."""
     cfg_path = REPO_ROOT / "workspace" / "setup_config.json"
     if not cfg_path.exists():
         err("workspace/setup_config.json not found — run python scripts/setup.py first")
         sys.exit(1)
     cfg = json.loads(cfg_path.read_text())
-    run_name = cfg["current_run"]
-    run_dir = REPO_ROOT / "workspace" / "runs" / run_name
-    ok(f"Run: {run_name}  ({run_dir})")
-    return cfg, run_name, run_dir
+    current_run = cfg["current_run"]
+    run_dir = REPO_ROOT / "workspace" / "runs" / current_run
+    ok(f"Run: {current_run}  ({run_dir})")
+    return cfg, current_run, run_dir
 
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
@@ -296,7 +296,7 @@ def check_prerequisites(run_dir: Path) -> tuple[str, bool]:
 
 # ── Stage 1: Build EPP ────────────────────────────────────────────────────────
 
-def stage_build_epp(run_dir: Path, run_name: str, namespace: str) -> str:
+def stage_build_epp(run_dir: Path, current_run: str, namespace: str) -> str:
     """Build EPP image on-cluster, update algorithm_values, re-merge, compile+apply pipelines.
 
     Returns the full image reference (e.g. quay.io/me/llm-d:run-name).
@@ -313,7 +313,7 @@ def stage_build_epp(run_dir: Path, run_name: str, namespace: str) -> str:
     result = run(
         ["bash", str(build_script),
          "--run-dir", str(run_dir),
-         "--run-name", run_name,
+         "--run-name", current_run,
          "--namespace", namespace],
         check=False,
         cwd=REPO_ROOT,
@@ -343,7 +343,7 @@ def stage_build_epp(run_dir: Path, run_name: str, namespace: str) -> str:
                         .get("epp_image", {}).get("build", {}))
     epp_hub  = build_cfg.get("hub", "")
     epp_name = build_cfg.get("name", "")
-    epp_tag  = full_image.rsplit(":", 1)[1] if ":" in full_image else run_name
+    epp_tag  = full_image.rsplit(":", 1)[1] if ":" in full_image else current_run
     alg_values = _inject_image_reference(alg_values, epp_hub, epp_name, epp_tag)
     alg_values_path.write_text(yaml.dump(alg_values, default_flow_style=False, sort_keys=False))
     ok("algorithm_values.yaml updated")
@@ -379,7 +379,7 @@ def stage_build_epp(run_dir: Path, run_name: str, namespace: str) -> str:
 
 # ── Stage 2 helpers: pipeline runner + result extractor ───────────────────────
 
-def _run_pipeline_phase(phase: str, pipelinerun_name: str, namespace: str,
+def _run_pipeline_phase(phase: str, pipelinecurrent_run: str, namespace: str,
                         run_dir: Path, run_index: int = 0) -> None:
     """Submit a Tekton PipelineRun and wait for it to complete.
 
@@ -402,7 +402,7 @@ def _run_pipeline_phase(phase: str, pipelinerun_name: str, namespace: str,
     pipelinerun_manifest = f"""apiVersion: tekton.dev/v1
 kind: PipelineRun
 metadata:
-  name: {pipelinerun_name}
+  name: {pipelinecurrent_run}
   namespace: {namespace}
   labels:
     sim2real-phase: {phase}
@@ -416,7 +416,7 @@ spec:
         runAsUser: 0
   params:
     - name: experimentId
-      value: {pipelinerun_name}
+      value: {pipelinecurrent_run}
     - name: namespace
       value: {namespace}
   workspaces:
@@ -442,16 +442,16 @@ spec:
     run([VENV_PYTHON, CLI, "benchmark-state",
          "--workspace", str(run_dir.parent.parent),
          "--set-phase", phase, "--status", "running",
-         "--pipelinerun", pipelinerun_name],
+         "--pipelinerun", pipelinecurrent_run],
         check=False, cwd=REPO_ROOT)
 
     # Poll until terminal state
-    info(f"Waiting for {phase} PipelineRun: {pipelinerun_name} (timeout {PIPELINE_TIMEOUT_SECS}s)...")
-    info(f"  To tail logs: tkn pr logs {pipelinerun_name} -n {namespace} -f")
+    info(f"Waiting for {phase} PipelineRun: {pipelinecurrent_run} (timeout {PIPELINE_TIMEOUT_SECS}s)...")
+    info(f"  To tail logs: tkn pr logs {pipelinecurrent_run} -n {namespace} -f")
     elapsed = 0
     while True:
         result = run(
-            ["tkn", "pr", "describe", pipelinerun_name,
+            ["tkn", "pr", "describe", pipelinecurrent_run,
              "-o", "jsonpath={.status.conditions[0].reason}",
              "-n", namespace],
             check=False, capture=True,
@@ -472,7 +472,7 @@ spec:
 
     if "Succeeded" not in reason:
         fail_result = run(
-            ["tkn", "pr", "describe", pipelinerun_name,
+            ["tkn", "pr", "describe", pipelinecurrent_run,
              "-o", "jsonpath={.status.conditions[0].message}",
              "-n", namespace],
             check=False, capture=True,
@@ -486,7 +486,7 @@ spec:
         err(f"{phase} run {run_index} failed: {fail_reason}")
         sys.exit(1)
 
-    ok(f"{phase} PipelineRun succeeded: {pipelinerun_name}")
+    ok(f"{phase} PipelineRun succeeded: {pipelinecurrent_run}")
 
 
 def _extract_phase_results(phase: str, namespace: str, run_dir: Path) -> Path:
@@ -574,8 +574,8 @@ def _run_noise_phase(run_dir: Path, namespace: str, workspace_dir: Path) -> None
     info(f"Running {noise_runs} noise characterization run(s)...")
 
     for i in range(noise_runs):
-        pipelinerun_name = f"sim2real-noise-run{i}-{int(time.time())}"
-        info(f"Noise run {i} of {noise_runs - 1}: {pipelinerun_name}")
+        pipelinecurrent_run = f"sim2real-noise-run{i}-{int(time.time())}"
+        info(f"Noise run {i} of {noise_runs - 1}: {pipelinecurrent_run}")
 
         # Pre-flight (retry once if prior run's teardown is still completing)
         for attempt in range(2):
@@ -595,7 +595,7 @@ def _run_noise_phase(run_dir: Path, namespace: str, workspace_dir: Path) -> None
                 err("Preflight failed for noise phase")
                 sys.exit(1)
 
-        _run_pipeline_phase("noise", pipelinerun_name, namespace, run_dir, run_index=i)
+        _run_pipeline_phase("noise", pipelinecurrent_run, namespace, run_dir, run_index=i)
 
     # Extract all noise runs at once via a single extractor pod
     _extract_phase_results("noise", namespace, run_dir)
@@ -669,8 +669,8 @@ def stage_benchmarks(run_dir: Path, namespace: str, fast_iter: bool, force_rerun
                 err(f"Preflight failed for {phase}")
                 sys.exit(1)
 
-            pipelinerun_name = f"sim2real-{phase}-{int(time.time())}"
-            _run_pipeline_phase(phase, pipelinerun_name, namespace, run_dir)
+            pipelinecurrent_run = f"sim2real-{phase}-{int(time.time())}"
+            _run_pipeline_phase(phase, pipelinecurrent_run, namespace, run_dir)
             _extract_phase_results(phase, namespace, run_dir)
 
     # ── Mechanism check (full mode only) ─────────────────────────────────────
@@ -896,7 +896,7 @@ def main() -> int:
     args = build_parser().parse_args()
     print(_c("36", "\n━━━ sim2real-deploy ━━━\n"))
 
-    cfg, run_name, run_dir = load_setup_config()
+    cfg, current_run, run_dir = load_setup_config()
     namespace = os.environ.get("NAMESPACE", cfg["namespace"])
 
     update_run_metadata(run_dir, status="in_progress",
@@ -905,7 +905,7 @@ def main() -> int:
     scorer_file, fast_iter = check_prerequisites(run_dir)
 
     if not args.skip_build_epp:
-        full_image = stage_build_epp(run_dir, run_name, namespace)
+        full_image = stage_build_epp(run_dir, current_run, namespace)
     else:
         meta = json.loads((run_dir / "run_metadata.json").read_text())
         full_image = meta.get("epp_image", "")
@@ -944,6 +944,8 @@ def main() -> int:
         print("PR: skipped (use --pr to create)")
     else:
         print(f"PR: {pr_url or 'skipped (fast_iteration mode)'}")
+    print()
+    print("Next: python scripts/analyze.py  OR  /sim2real-analyze in Claude")
     return 0
 
 

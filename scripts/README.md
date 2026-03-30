@@ -4,12 +4,23 @@ Three scripts drive the sim2real transfer pipeline. Each is an **interactive, st
 
 ## Getting Started
 
-Run in order, once per algorithm transfer:
+**First time only — clone the repo and its submodules:**
+
+```bash
+git clone https://github.com/kalantar/sim2real.git
+cd sim2real
+git submodule update --init inference-sim llm-d-inference-scheduler tektonc-data-collection
+```
+
+> `setup.py` also runs the submodule init step automatically, so this is just a safety net for cases where you need the submodules before running setup.
+
+**Then run in order, once per algorithm transfer:**
 
 ```bash
 python scripts/setup.py      # one-time cluster + environment bootstrap
 python scripts/prepare.py    # Extract → Translate → Generate → Build/Test → Review
 python scripts/deploy.py     # Build EPP image → Cluster benchmarks → (optional) PR
+python scripts/analyze.py    # Latency charts + comparison table from run artifacts
 ```
 
 Each script walks you through its steps interactively. When in doubt, accept the defaults.
@@ -62,4 +73,14 @@ Runs cluster-side stages: Build EPP image (in-cluster BuildKit) → Suite A/B/C 
 --skip-build-epp   Skip EPP build (image already pushed this run)
 --pr               Create PR after benchmarks pass [default: skip — review results first]
 --force-rerun      Re-run already-completed benchmark phases without prompting
+```
+
+### analyze.py
+
+Generates latency comparison charts and a summary table from a completed run's artifacts. Run after `deploy.py` finishes. Outputs per-workload bar charts and a summary heatmap (% change, green = improvement) to `workspace/runs/<run>/results_charts/`, and prints a comparison table to stdout.
+
+Requires `matplotlib` and `numpy` (installed via `requirements.txt`).
+
+```
+--run NAME   Run name to analyze [default: from workspace/setup_config.json]
 ```

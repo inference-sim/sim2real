@@ -152,10 +152,10 @@ def check_prerequisites() -> None:
 def load_setup_config() -> dict:
     cfg_path = REPO_ROOT / "workspace/setup_config.json"
     cfg = json.loads(cfg_path.read_text())
-    run_name = cfg["current_run"]
-    run_dir = REPO_ROOT / "workspace/runs" / run_name
+    current_run = cfg["current_run"]
+    run_dir = REPO_ROOT / "workspace/runs" / current_run
     run_dir.mkdir(parents=True, exist_ok=True)
-    ok(f"Run: {run_name}  ({run_dir})")
+    ok(f"Run: {current_run}  ({run_dir})")
     return cfg
 
 
@@ -1450,7 +1450,7 @@ def main() -> int:
     print_intro(args.reviews, dev=args.dev)
     check_prerequisites()
     cfg = load_setup_config()
-    run_dir = REPO_ROOT / "workspace/runs" / cfg["run_name"]
+    run_dir = REPO_ROOT / "workspace/runs" / cfg["current_run"]
 
     update_run_metadata(
         run_dir, "prepare",

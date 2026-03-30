@@ -49,7 +49,7 @@ stack:
       build:
         hub: quay.io/jgchen
         name: blis-inference-scheduler
-        tag: sim2real-test3
+        tag: sim2real-test5
         platform: linux/amd64
         pullPolicy: Always
     shared:
