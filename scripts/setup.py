@@ -275,8 +275,20 @@ def detect_storage_class(args: argparse.Namespace, is_openshift: bool) -> str:
         info("Using cluster default storageClassName")
     return sc
 
+def secret_exists(name: str, namespace: str) -> bool:
+    """Return True if the named Kubernetes secret exists in the namespace."""
+    return run(["kubectl", "get", "secret", name, f"-n={namespace}"],
+               check=False, capture=True).returncode == 0
+
 def create_hf_secret(args: argparse.Namespace, namespace: str) -> str:
     step(5, "Creating HuggingFace secret")
+
+    if not args.no_cluster and not args.hf_token and secret_exists("hf-secret", namespace):
+        ok("hf-secret already exists in namespace")
+        answer = prompt("override_hf", "Override existing hf-secret? [y/N]", default="N")
+        if answer.strip().lower() not in ("y", "yes"):
+            return "<existing>"
+
     hf_token = args.hf_token or prompt_secret("Enter HuggingFace token", env_var="HF_TOKEN")
     if not hf_token:
         err("HF_TOKEN is required"); sys.exit(1)
@@ -355,6 +367,16 @@ def create_registry_secret(args: argparse.Namespace, namespace: str,
     print("  2. Account Settings → Robot Accounts → Create Robot Account")
     print("  3. Grant robot 'Write' on your repository")
     print()
+
+    if not args.no_cluster and not args.registry and secret_exists("registry-secret", namespace):
+        ok("registry-secret already exists in namespace")
+        answer = prompt("override_reg", "Override existing registry-secret? [y/N]", default="N")
+        if answer.strip().lower() not in ("y", "yes"):
+            # Still need to return registry/repo_name for downstream steps; read from args/env
+            registry = args.registry or os.environ.get("REGISTRY", "")
+            if not registry:
+                warn("Existing registry-secret kept — update config/env_defaults.yaml manually if registry changed.")
+            return registry, args.repo_name
 
     registry = args.registry or prompt(
         "registry", "Container registry host (e.g. quay.io/username, or blank to skip)", default="")

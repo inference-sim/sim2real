@@ -137,3 +137,100 @@ def test_merge_noise_cv_at_top_level():
     val = deploy._merge_benchmark_into_validation(_make_val(), _make_bench(noise_cv=0.12))
     assert val["noise_cv"] == 0.12
     assert "noise_cv" not in val["benchmark"]
+
+
+# ── _clear_phase_state ──────────────────────────────────────────────
+
+def test_clear_phase_state_removes_status_and_results_path(tmp_path):
+    f = tmp_path / "benchmark_state.json"
+    f.write_text(json.dumps({
+        "phases": {
+            "baseline": {"status": "done", "results_path": "/some/path", "started_at": "t"},
+            "treatment": {"status": "done"},
+        }
+    }))
+    deploy._clear_phase_state("baseline", f)
+    state = json.loads(f.read_text())
+    assert "status" not in state["phases"]["baseline"]
+    assert "results_path" not in state["phases"]["baseline"]
+    # Other keys preserved
+    assert state["phases"]["baseline"]["started_at"] == "t"
+    # Sibling phase untouched
+    assert state["phases"]["treatment"]["status"] == "done"
+
+
+def test_clear_phase_state_missing_phase_is_noop(tmp_path):
+    f = tmp_path / "benchmark_state.json"
+    original = {"phases": {"treatment": {"status": "done"}}}
+    f.write_text(json.dumps(original))
+    deploy._clear_phase_state("baseline", f)  # baseline not present
+    assert json.loads(f.read_text()) == original
+
+
+def test_clear_phase_state_missing_file_is_noop(tmp_path):
+    f = tmp_path / "benchmark_state.json"
+    # File does not exist — should not raise
+    deploy._clear_phase_state("baseline", f)
+    assert not f.exists()
+
+
+# ── _should_skip_phase ───────────────────────────────────────────────
+
+def test_should_skip_phase_force_rerun_returns_false(tmp_path):
+    """force_rerun=True means never skip — always re-run."""
+    f = tmp_path / "benchmark_state.json"
+    f.write_text(json.dumps({"phases": {"baseline": {"status": "done"}}}))
+    skip, reason = deploy._should_skip_phase("baseline", f, force_rerun=True, interactive=False)
+    assert skip is False
+    assert "force-rerun" in reason
+
+
+def test_should_skip_phase_non_interactive_skips(tmp_path):
+    """Non-interactive + no flag → skip."""
+    f = tmp_path / "benchmark_state.json"
+    f.write_text(json.dumps({"phases": {"baseline": {"status": "done"}}}))
+    skip, reason = deploy._should_skip_phase("baseline", f, force_rerun=False, interactive=False)
+    assert skip is True
+    assert "non-interactive" in reason
+
+
+def test_should_skip_phase_not_done_returns_false(tmp_path):
+    """Phase not done → never skip regardless of flags."""
+    f = tmp_path / "benchmark_state.json"
+    f.write_text(json.dumps({"phases": {"baseline": {"status": "pending"}}}))
+    skip, _ = deploy._should_skip_phase("baseline", f, force_rerun=False, interactive=False)
+    assert skip is False
+
+
+def test_should_skip_phase_missing_state_returns_false(tmp_path):
+    """No state file → phase has never run, don't skip."""
+    f = tmp_path / "benchmark_state.json"
+    skip, _ = deploy._should_skip_phase("baseline", f, force_rerun=False, interactive=False)
+    assert skip is False
+
+
+def test_should_skip_phase_interactive_user_says_no(tmp_path, monkeypatch):
+    """Interactive + user enters 'n' → skip."""
+    f = tmp_path / "benchmark_state.json"
+    f.write_text(json.dumps({"phases": {"baseline": {"status": "done"}}}))
+    monkeypatch.setattr("builtins.input", lambda _: "n")
+    skip, reason = deploy._should_skip_phase("baseline", f, force_rerun=False, interactive=True)
+    assert skip is True
+
+
+def test_should_skip_phase_interactive_user_says_yes(tmp_path, monkeypatch):
+    """Interactive + user enters 'y' → re-run."""
+    f = tmp_path / "benchmark_state.json"
+    f.write_text(json.dumps({"phases": {"baseline": {"status": "done"}}}))
+    monkeypatch.setattr("builtins.input", lambda _: "y")
+    skip, _ = deploy._should_skip_phase("baseline", f, force_rerun=False, interactive=True)
+    assert skip is False
+
+
+def test_should_skip_phase_interactive_empty_enter_skips(tmp_path, monkeypatch):
+    """Interactive + user hits Enter (empty) → default skip."""
+    f = tmp_path / "benchmark_state.json"
+    f.write_text(json.dumps({"phases": {"baseline": {"status": "done"}}}))
+    monkeypatch.setattr("builtins.input", lambda _: "")
+    skip, _ = deploy._should_skip_phase("baseline", f, force_rerun=False, interactive=True)
+    assert skip is True

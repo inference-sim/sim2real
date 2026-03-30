@@ -61,6 +61,7 @@ Examples:
   python scripts/deploy.py --pr                 # EPP build + benchmarks + PR creation
   python scripts/deploy.py --skip-build-epp     # resume benchmarks (EPP already built)
   python scripts/deploy.py --skip-build-epp --pr  # resume and create PR
+  python scripts/deploy.py --skip-build-epp --force-rerun  # re-run all done phases
 
 Environment variables:
   NAMESPACE   Override namespace from workspace/setup_config.json
@@ -70,6 +71,8 @@ Environment variables:
                    help="Skip EPP image build (use if already built this run)")
     p.add_argument("--pr", action="store_true",
                    help="Create PR after benchmarks pass (default: skip, review results first)")
+    p.add_argument("--force-rerun", action="store_true",
+                   help="Re-run already-done benchmark phases without prompting")
     return p
 
 
@@ -130,6 +133,41 @@ def _merge_benchmark_into_validation(val: dict, bench: dict) -> dict:
     else:
         val["overall_verdict"] = "FAIL"
     return val
+
+
+def _clear_phase_state(phase: str, bench_state_file: Path) -> None:
+    """Remove status and results_path for a phase so it will re-run.
+
+    Preserves other keys in the phase entry. No-op if file or phase absent.
+    """
+    if not bench_state_file.exists():
+        return
+    state = json.loads(bench_state_file.read_text())
+    phase_dict = state.get("phases", {}).get(phase, {})
+    phase_dict.pop("status", None)
+    phase_dict.pop("results_path", None)
+    bench_state_file.write_text(json.dumps(state, indent=2))
+
+
+def _should_skip_phase(phase: str, bench_state_file: Path,
+                       force_rerun: bool, interactive: bool) -> tuple[bool, str]:
+    """Return (should_skip, reason_message) for a benchmark phase.
+
+    Returns (False, "") when the phase is not marked done.
+    """
+    if not bench_state_file.exists():
+        return False, ""
+    state = json.loads(bench_state_file.read_text())
+    if state.get("phases", {}).get(phase, {}).get("status") != "done":
+        return False, ""
+    if force_rerun:
+        return False, f"Phase {phase} already done — re-running (--force-rerun)"
+    if interactive:
+        answer = input(f"  Phase {phase} already done — re-run? [y/N]: ").strip().lower()
+        if answer == "y":
+            return False, ""
+        return True, f"Skipping {phase}"
+    return True, f"Phase {phase} already done — skipping (non-interactive)"
 
 
 # ── Run metadata ──────────────────────────────────────────────────────────────
@@ -286,7 +324,7 @@ def stage_build_epp(run_dir: Path, run_name: str, namespace: str) -> str:
     ok(f"EPP image: {full_image}")
 
     # Inject image reference into algorithm_values.yaml
-    step("1b", "Injecting image reference into algorithm_values.yaml")
+    step("1a", "Injecting image reference into algorithm_values.yaml")
     import yaml
     alg_values_path = run_dir / "prepare_tekton" / "algorithm_values.yaml"
     alg_values = yaml.safe_load(alg_values_path.read_text())
@@ -304,7 +342,7 @@ def stage_build_epp(run_dir: Path, run_name: str, namespace: str) -> str:
     ok("algorithm_values.yaml updated")
 
     # Re-merge values
-    step("1c", "Re-merging values")
+    step("1b", "Re-merging values")
     values_out = run_dir / "prepare_tekton" / "values.yaml"
     run([VENV_PYTHON, CLI, "merge-values",
          "--env", str(REPO_ROOT / "config" / "env_defaults.yaml"),
@@ -314,7 +352,7 @@ def stage_build_epp(run_dir: Path, run_name: str, namespace: str) -> str:
     ok("values.yaml re-merged")
 
     # Compile and apply Tekton pipeline YAMLs
-    step("1d", "Compiling and applying Tekton pipelines")
+    step("1c", "Compiling and applying Tekton pipelines")
     pipelines_dir = run_dir / "prepare_tekton" / "pipelines"
     pipelines_dir.mkdir(parents=True, exist_ok=True)
     for phase in ["noise", "baseline", "treatment"]:
@@ -559,7 +597,7 @@ def _run_noise_phase(run_dir: Path, namespace: str, workspace_dir: Path) -> None
 
 # ── Stage 2: Cluster benchmarks ───────────────────────────────────────────────
 
-def stage_benchmarks(run_dir: Path, namespace: str, fast_iter: bool) -> str:
+def stage_benchmarks(run_dir: Path, namespace: str, fast_iter: bool, force_rerun: bool = False) -> str:
     """Run cluster benchmarks. Returns overall_verdict string."""
     step(2, f"Cluster Benchmarks (fast_iteration={fast_iter})")
 
@@ -595,12 +633,18 @@ def stage_benchmarks(run_dir: Path, namespace: str, fast_iter: bool) -> str:
     bench_state_file = workspace_dir / "benchmark_state.json"
 
     for phase in phases_to_run:
-        # Skip if already done (resume support)
-        if bench_state_file.exists():
-            state = json.loads(bench_state_file.read_text())
-            if state.get("phases", {}).get(phase, {}).get("status") == "done":
-                info(f"Phase {phase} already done — skipping")
-                continue
+        # Skip or re-run if already done
+        skip, msg = _should_skip_phase(
+            phase, bench_state_file,
+            force_rerun=force_rerun,
+            interactive=sys.stdin.isatty(),
+        )
+        if skip:
+            info(msg)
+            continue
+        if msg:
+            info(msg)
+        _clear_phase_state(phase, bench_state_file)  # no-op if file absent
 
         if phase == "noise":
             _run_noise_phase(run_dir, namespace, workspace_dir)
@@ -623,7 +667,7 @@ def stage_benchmarks(run_dir: Path, namespace: str, fast_iter: bool) -> str:
 
     # ── Mechanism check (full mode only) ─────────────────────────────────────
     if not fast_iter:
-        step("2b", "Mechanism check")
+        step("2a", "Mechanism check")
         bench_out = run_dir / "deploy_benchmark_output.json"
         result = run(
             [VENV_PYTHON, CLI, "benchmark",
@@ -661,7 +705,7 @@ def stage_benchmarks(run_dir: Path, namespace: str, fast_iter: bool) -> str:
         ok(f"Mechanism check: {mech_verdict}")
 
     # ── Comparison table ──────────────────────────────────────────────────────
-    step("2c", "Comparison table")
+    step("2b", "Comparison table")
     table_path = run_dir / "deploy_comparison_table.txt"
     result = run(
         [VENV_PYTHON, CLI, "compare",
@@ -862,7 +906,7 @@ def main() -> int:
             sys.exit(1)
         info(f"Skipping EPP build. Using image: {full_image}")
 
-    verdict = stage_benchmarks(run_dir, namespace, fast_iter)
+    verdict = stage_benchmarks(run_dir, namespace, fast_iter, args.force_rerun)
 
     pr_url = None
     if args.pr:
