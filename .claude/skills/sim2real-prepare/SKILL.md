@@ -197,14 +197,14 @@ Follow the logic from `prompts/generate.md`. Key steps:
            readinessProbe:
              httpGet:
                path: /health
-               port: 8000
+               port: 8200
              initialDelaySeconds: 10
              periodSeconds: 5
              failureThreshold: 3
            startupProbe:
              httpGet:
                path: /health
-               port: 8000
+               port: 8200
              initialDelaySeconds: 30
              periodSeconds: 10
              failureThreshold: 60

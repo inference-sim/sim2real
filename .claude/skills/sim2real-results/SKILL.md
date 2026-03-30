@@ -102,12 +102,12 @@ For each phase in `noise`, `baseline`, `treatment`:
    ```
 3. Copy data:
    ```bash
-   kubectl cp ${NAMESPACE}/sim2real-extract-${phase}:/data/${phase}/ ${RUN_DIR}/${phase}_raw/ --retries=3
+   kubectl cp ${NAMESPACE}/sim2real-extract-${phase}:/data/${phase}/ ${RUN_DIR}/${phase}_log/ --retries=3
    ```
 4. Convert TraceV2:
    ```bash
    .venv/bin/python tools/transfer_cli.py convert-trace \
-     --input-dir ${RUN_DIR}/${phase}_raw/ \
+     --input-dir ${RUN_DIR}/${phase}_log/ \
      --output ${RUN_DIR}/deploy_${phase}_results.json
    ```
 5. Clean up:

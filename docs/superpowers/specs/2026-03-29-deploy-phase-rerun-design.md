@@ -61,20 +61,32 @@ if state.get("phases", {}).get(phase, {}).get("status") == "done":
 
 ### `_clear_phase_state` Helper
 
-Reads `benchmark_state.json`, removes `status` and `results_path` from the named phase entry, writes it back. Handles missing file gracefully (no-op).
+Reads `benchmark_state.json`, removes `status` and `results_path` from the named phase entry (preserving other keys), writes it back. Handles missing file gracefully (no-op).
 
 ```python
 def _clear_phase_state(phase: str, bench_state_file: Path) -> None:
     if not bench_state_file.exists():
         return
     state = json.loads(bench_state_file.read_text())
-    state.get("phases", {}).pop(phase, None)
+    phase_dict = state.get("phases", {}).get(phase, {})
+    phase_dict.pop("status", None)
+    phase_dict.pop("results_path", None)
     bench_state_file.write_text(json.dumps(state, indent=2))
 ```
 
+Only `status` and `results_path` are cleared — any other keys in the phase entry (e.g. timestamps) are preserved. The phase entry itself is not removed, so downstream readers won't see a missing key where they expect a dict.
+
+State is cleared before the phase runs. If the phase fails mid-execution, the cleared state is intentional: the phase will simply re-run on the next `deploy.py` invocation, which is the correct resume behavior.
+
+The noise phase is treated as a single unit — the prompt or `--force-rerun` flag applies to the entire noise phase (all noise runs), not to individual noise iterations inside `_run_noise_phase`.
+
 ### Signature Change
 
-`stage_benchmarks` gains a `force_rerun: bool` parameter. `main()` passes `args.force_rerun`.
+```python
+def stage_benchmarks(run_dir: Path, namespace: str, fast_iter: bool, force_rerun: bool) -> str:
+```
+
+`main()` passes `args.force_rerun`. `--force-rerun` only applies to phases whose `status == "done"`; phases that never ran or previously failed are unaffected and run unconditionally.
 
 ## Scope
 

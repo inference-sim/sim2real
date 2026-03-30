@@ -744,13 +744,13 @@ def _generate_algorithm_values(algo_summary: dict, signal_coverage: dict,
                                 "mountModelVolume": True,
                                 "image": vllm_image,
                                 "readinessProbe": {
-                                    "httpGet": {"path": "/health", "port": 8000},
+                                    "httpGet": {"path": "/health", "port": 8200},
                                     "initialDelaySeconds": 10,
                                     "periodSeconds": 5,
                                     "failureThreshold": 3,
                                 },
                                 "startupProbe": {
-                                    "httpGet": {"path": "/health", "port": 8000},
+                                    "httpGet": {"path": "/health", "port": 8200},
                                     "initialDelaySeconds": 30,
                                     "periodSeconds": 10,
                                     "failureThreshold": 60,
@@ -1397,10 +1397,38 @@ def stage_final_review(run_dir: Path, stage3_path: Path,
     return passed
 
 
+# ── Scorer snapshot ───────────────────────────────────────────────────────────
+
+def persist_scorer_snapshot(run_dir: Path, stage3_path: Path) -> tuple[Path, Path | None]:
+    """Copy generated scorer + test files into run_dir as durable run artifacts.
+
+    Called only after all gates pass. Returns (scorer_dest, test_dest).
+    test_dest is None when no test file was generated.
+    """
+    stage3 = json.loads(stage3_path.read_text())
+
+    scorer_src = REPO_ROOT / stage3["scorer_file"]
+    test_src_str = stage3.get("test_file", "")
+    test_src = (REPO_ROOT / test_src_str) if test_src_str else None
+
+    scorer_dest = run_dir / "prepare_scorer.go"
+    shutil.copy(scorer_src, scorer_dest)
+    ok(f"Scorer snapshot → {scorer_dest.relative_to(REPO_ROOT)}")
+
+    test_dest: Path | None = None
+    if test_src and test_src.exists():
+        test_dest = run_dir / "prepare_scorer_test.go"
+        shutil.copy(test_src, test_dest)
+        ok(f"Test snapshot   → {test_dest.relative_to(REPO_ROOT)}")
+
+    return scorer_dest, test_dest
+
+
 # ── Completion ────────────────────────────────────────────────────────────────
 
 def write_outputs(run_dir: Path, cfg: dict, stage3_path: Path) -> None:
     stage3 = json.loads(stage3_path.read_text())
+    persist_scorer_snapshot(run_dir, stage3_path)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     update_run_metadata(
         run_dir, "prepare",
@@ -1412,6 +1440,8 @@ def write_outputs(run_dir: Path, cfg: dict, stage3_path: Path) -> None:
             "prepare_signal_coverage.json",
             "prepare_stage3_output.json",
             "prepare_translation_reviews.json",
+            "prepare_scorer.go",
+            "prepare_scorer_test.go",
         ],
     )
 
@@ -1429,6 +1459,8 @@ def write_outputs(run_dir: Path, cfg: dict, stage3_path: Path) -> None:
         "prepare_reviewer_output.json",
         "prepare_equivalence_results.json",
         "prepare_translation_reviews.json",
+        "prepare_scorer.go",
+        "prepare_scorer_test.go",
     ]:
         p = run_dir / name
         exists = "✓" if p.exists() else "-"

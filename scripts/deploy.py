@@ -522,7 +522,7 @@ def _extract_phase_results(phase: str, namespace: str, run_dir: Path) -> Path:
         err(f"Extractor pod {pod_name} not ready")
         sys.exit(1)
 
-    raw_dir = run_dir / f"deploy_{phase}_raw"
+    raw_dir = run_dir / f"deploy_{phase}_log"
     raw_dir.mkdir(parents=True, exist_ok=True)
     result = run(
         ["kubectl", "cp", f"{namespace}/{pod_name}:/data/{phase}/", str(raw_dir), "--retries=3"],
@@ -534,6 +534,22 @@ def _extract_phase_results(phase: str, namespace: str, run_dir: Path) -> Path:
     if result.returncode != 0:
         err(f"kubectl cp failed for {phase}")
         sys.exit(1)
+
+    # Collect vLLM decode pod logs
+    log_result = run(
+        ["kubectl", "get", "pods", "-n", namespace,
+         "--no-headers", "-o", "custom-columns=NAME:.metadata.name"],
+        check=False, capture=True,
+    )
+    if log_result.returncode == 0:
+        decode_pods = [p for p in log_result.stdout.splitlines() if "decode" in p.lower()]
+        for n, pod in enumerate(decode_pods):
+            pod_log = run(
+                ["kubectl", "logs", pod, "-n", namespace],
+                check=False, capture=True,
+            )
+            if pod_log.returncode == 0 and pod_log.stdout:
+                (raw_dir / f"{pod}_decode_{n}.log").write_text(pod_log.stdout)
 
     results_path = run_dir / f"deploy_{phase}_results.json"
     result = run(

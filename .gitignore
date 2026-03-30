@@ -46,3 +46,4 @@ bin/
 
 # Transfer pipeline workspace (inter-stage artifacts)
 workspace/
+workspace */
