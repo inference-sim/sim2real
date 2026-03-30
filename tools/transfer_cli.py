@@ -764,6 +764,15 @@ def cmd_validate_schema(args: argparse.Namespace) -> int:
             f"Schema path '{schema_path}' resolves outside schemas directory '{SCHEMAS_DIR}'."],
                         output_type="schema_validation", violations=[])
     if not schema_path.exists():
+        # Try stripping known stage prefixes (e.g. "deploy_baseline_results" → "baseline_results")
+        for prefix in ("deploy_", "prepare_"):
+            if stem.startswith(prefix):
+                candidate = stem[len(prefix):]
+                candidate_path = (SCHEMAS_DIR / f"{candidate}.schema.json").resolve()
+                if candidate_path.is_relative_to(SCHEMAS_DIR) and candidate_path.exists():
+                    schema_path = candidate_path
+                    break
+    if not schema_path.exists():
         return _output("error", 2, errors=[f"Schema not found: {schema_path}"],
                         output_type="schema_validation", violations=[])
 
