@@ -1,38 +1,24 @@
-# config/env_defaults.yaml — infrastructure defaults for sim2real benchmarking
-# Edit this file to configure your environment. Algorithm-specific values are
-# generated separately (workspace/tekton/algorithm_values.yaml) by Stage 3 Step 8.
-#
-# Input model:
-#   - This file is the default source of truth for infrastructure choices.
-#   - When running Stage 3 (generate.md), you can override any value at prompt
-#     time (e.g., "use kgateway instead of istio"). The agent will update this
-#     file before merging, so the override persists for future runs.
-
 stack:
   gateway:
     helmValues:
       gateway:
-        provider: istio          # User choice: istio or kgateway; must also update gaie.shared.helmValues.provider.name
-        gatewayClassName: istio  # Must match provider; must also update gaie.shared.helmValues.provider.name
+        provider: istio
+        gatewayClassName: istio
         gatewayParameters:
           resources:
             limits:
-              cpu: "16"
+              cpu: '16'
               memory: 16Gi
             requests:
-              cpu: "4"
+              cpu: '4'
               memory: 4Gi
           istio:
             accessLogging: false
-
   model:
-    # vllm_image overrides the vLLM serving image from blis_router/llm_config.yaml.
-    # When set, merge-values replaces decode.containers[0].image with this value.
-    # Comment out or remove to use the original simulation image.
-    vllm_image: "ghcr.io/llm-d/llm-d-cuda:v0.5.1"
+    vllm_image: ghcr.io/llm-d/llm-d-cuda:v0.5.1
     helmValues:
       modelArtifacts:
-        authSecretName: "hf-secret"
+        authSecretName: hf-secret
       routing:
         servicePort: 8000
       prefill:
@@ -40,49 +26,40 @@ stack:
       decode:
         create: true
         acceleratorTypes:
-          labelKey: "nvidia.com/gpu.product"
+          labelKey: nvidia.com/gpu.product
         affinity:
           nodeAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
               nodeSelectorTerms:
-                - matchExpressions:
-                    - key: kubernetes.io/hostname
-                      operator: NotIn
-                      values:
-                        - pokprod-b93r39s0
+              - matchExpressions:
+                - key: kubernetes.io/hostname
+                  operator: NotIn
+                  values:
+                  - pokprod-b93r39s0
         containers:
-          - modelCommand: vllmServe  # Only supported value
-            mountModelVolume: true   # Must be set explicitly — lost when algorithm_values.yaml overrides the containers list (Helm replaces lists, not merges)
-
+        - modelCommand: vllmServe
+          mountModelVolume: true
   gaie:
-    # epp_image defines the EPP container images used per phase.
-    # Baseline/noise use the upstream llm-d image (contains load-aware-scorer).
-    # Treatment uses a developer-built image (contains the generated scorer plugin).
-    # merge-values injects these into gaie.{baseline,treatment}.helmValues and removes epp_image.
     epp_image:
       upstream:
         hub: ghcr.io/llm-d
         name: llm-d-inference-scheduler
-        tag: latest               # pin to a specific upstream release if needed
-        pullPolicy: IfNotPresent  # stable upstream images; IfNotPresent avoids unnecessary pulls
+        tag: latest
+        pullPolicy: IfNotPresent
       build:
-        hub: quay.io/jgchen     # set to developer's registry
+        hub: quay.io/jgchen
         name: blis-inference-scheduler
-        tag: sim2real-test3       # built by BuildKit in-cluster
-        platform: linux/amd64     # target cluster architecture; cross-compiled on arm64 Mac
-        pullPolicy: Always        # dev images may be rebuilt and pushed with the same tag
-
-    # gaie.shared is merged into both baseline and treatment by merge-values.
-    # The final values.yaml has no gaie.shared key — it is flattened away.
+        tag: sim2real-test3
+        platform: linux/amd64
+        pullPolicy: Always
     shared:
       helmValues:
         inferenceExtension:
-          pluginsConfigFile: "custom-plugins.yaml"
+          pluginsConfigFile: custom-plugins.yaml
           flags:
-            - name: v
-              value: 1
+            v: 1
         provider:
-          name: istio           # Must match stack.gateway.helmValues.gateway.provider
+          name: istio
         istio:
           destinationRule:
             trafficPolicy:
@@ -91,41 +68,24 @@ stack:
                   http1MaxPendingRequests: 256000
                   maxRequestsPerConnection: 256000
                   http2MaxRequests: 256000
-                  idleTimeout: "900s"
+                  idleTimeout: 900s
                 tcp:
                   maxConnections: 256000
-                  maxConnectionDuration: "1800s"
-                  connectTimeout: "900s"
-
+                  maxConnectionDuration: 1800s
+                  connectTimeout: 900s
     baseline:
       helmValues:
         inferenceExtension:
           pluginsCustomConfig:
-            custom-plugins.yaml: |
-              apiVersion: inference.networking.x-k8s.io/v1alpha1
-              kind: EndpointPickerConfig
-              plugins:
-              - type: load-aware-scorer
-              - type: decode-filter
-              - type: max-score-picker
-              - type: single-profile-handler
-              schedulingProfiles:
-              - name: default
-                plugins:
-                - pluginRef: decode-filter
-                - pluginRef: max-score-picker
-                - pluginRef: load-aware-scorer
-                  weight: 1
-
+            custom-plugins.yaml: "apiVersion: inference.networking.x-k8s.io/v1alpha1\n\
+              kind: EndpointPickerConfig\nplugins:\n- type: load-aware-scorer\n- type:\
+              \ decode-filter\n- type: max-score-picker\n- type: single-profile-handler\n\
+              schedulingProfiles:\n- name: default\n  plugins:\n  - pluginRef: decode-filter\n\
+              \  - pluginRef: max-score-picker\n  - pluginRef: load-aware-scorer\n\
+              \    weight: 1\n"
 observe:
   noise_runs: 5
-  request_multiplier: 10   # Scale workload num_requests for real-cluster benchmarks
-                            # (sim calibrates for ~1500; cluster needs ~10x).
-                            # Set to 1 or remove to disable scaling.
-
+  request_multiplier: 10
 pipeline:
-  fast_iteration: true   # When true: Suites A/B/C + baseline/treatment cluster pipelines run,
-                         # but noise gate and mechanism check are skipped, and PR creation (Stage 6)
-                         # is skipped. Set to false when algorithm is ready for full validation.
-  sleepDuration: "30s"   # Post-model-deploy pause. deploy-model already waits for Ready;
-                         # this is a safety buffer only. Reduced from default 5m.
+  fast_iteration: true
+  sleepDuration: 30s

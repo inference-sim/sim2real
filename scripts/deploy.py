@@ -291,10 +291,11 @@ def stage_build_epp(run_dir: Path, run_name: str, namespace: str) -> str:
     alg_values_path = run_dir / "prepare_tekton" / "algorithm_values.yaml"
     alg_values = yaml.safe_load(alg_values_path.read_text())
 
-    # Read hub+name from env_defaults build config (already validated above).
+    # Read hub+name from env_defaults build config (already validated in prerequisites).
     # Only the tag comes from the newly built image reference.
-    build_cfg = (cfg.get("stack", {}).get("gaie", {})
-                    .get("epp_image", {}).get("build", {}))
+    env_cfg = yaml.safe_load((REPO_ROOT / "config" / "env_defaults.yaml").read_text())
+    build_cfg = (env_cfg.get("stack", {}).get("gaie", {})
+                        .get("epp_image", {}).get("build", {}))
     epp_hub  = build_cfg.get("hub", "")
     epp_name = build_cfg.get("name", "")
     epp_tag  = full_image.rsplit(":", 1)[1] if ":" in full_image else run_name
@@ -351,7 +352,7 @@ def _run_pipeline_phase(phase: str, pipelinerun_name: str, namespace: str,
         sys.exit(1)
 
     # Write PipelineRun YAML directly (avoids dependency on pre-existing template files)
-    pipelinerun_yaml = f"/tmp/pipelinerun-{phase}-{run_index}.yaml"
+    pipelinerun_yaml = str(run_dir / f"pipelinerun-{phase}-{run_index}.yaml")
     pipeline_ref_name = f"sim2real-{phase}"
     pipelinerun_manifest = f"""apiVersion: tekton.dev/v1
 kind: PipelineRun
@@ -650,7 +651,8 @@ def stage_benchmarks(run_dir: Path, namespace: str, fast_iter: bool) -> str:
             warn("  2) Inspect per-workload improvements in deploy_benchmark_output.json")
             warn("  3) Accept as soft-pass: set operator_notes in deploy_validation_results.json,")
             warn("     then re-run with --skip-build-epp --pr")
-            sys.exit(1)
+            # Exit 3 = INCONCLUSIVE pause (distinct from error=1 and infra=2)
+            sys.exit(3)
 
         # Merge benchmark into validation_results
         val = json.loads(val_path.read_text())
@@ -757,8 +759,17 @@ def stage_pr(run_dir: Path) -> str | None:
         branch = f"{branch}-{timestamp}"
         warn(f"Branch already exists — using timestamped branch: {branch}")
 
-    run(["git", "checkout", "-b", branch], check=False, cwd=scheduler_dir)
-    result = run(["git", "push", "origin", branch], check=False, capture=True, cwd=scheduler_dir)
+    run(["git", "checkout", "-b", branch], cwd=scheduler_dir)
+    run(["git", "add", "-A"], cwd=scheduler_dir)
+    result = run(["git", "diff", "--cached", "--quiet"], check=False, cwd=scheduler_dir)
+    if result.returncode != 0:
+        # There are staged changes to commit
+        run(["git", "commit", "-m",
+             f"feat: add {alg_name} scorer plugin (sim2real transfer)"],
+            cwd=scheduler_dir)
+    else:
+        warn("No changes to commit in llm-d-inference-scheduler — pushing branch as-is")
+    result = run(["git", "push", "-u", "origin", branch], check=False, capture=True, cwd=scheduler_dir)
     if result.returncode != 0:
         err(f"git push failed for branch {branch}")
         sys.exit(1)

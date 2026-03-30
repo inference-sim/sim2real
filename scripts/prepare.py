@@ -370,7 +370,7 @@ def _load_evolve_block(algo_summary: dict) -> str:
 
 def build_generate_prompt(algo_summary: dict, signal_coverage: dict,
                            mapping_doc: str, scorer_template: str,
-                           existing_scorer: str,
+                           example_scorer: str, example_scorer_test: str,
                            build_error: str = "") -> list[dict]:
     system = (
         "You are an expert Go engineer implementing a production scorer plugin. "
@@ -410,19 +410,30 @@ def build_generate_prompt(algo_summary: dict, signal_coverage: dict,
 ## Mapping Document (reference for composite signal expansion)
 {mapping_doc[:4000]}
 
-## Example Existing Scorer (follow these patterns)
-{existing_scorer[:2000]}
+## Example Scorer Implementation (follow these patterns exactly)
+```go
+{example_scorer}
+```
+
+## Example Scorer Test File (copy this structure exactly for your test file)
+```go
+{example_scorer_test}
+```
 
 ## Critical Requirements
 1. Register the scorer in llm-d-inference-scheduler/pkg/plugins/register.go
 2. EffectiveLoad expands to WaitingQueueSize + 2*RunningRequestsSize (both BatchSize and InFlightRequests map to RunningRequestsSize)
 3. The scorer type constant must match the kebab-case scorer name with -scorer suffix
-4. Test math must be verified: for every test case that claims a score will be negative/positive,
+4. Test file MUST use `package scorer_test` (external test package, not `package scorer`)
+5. Test file MUST import `github.com/llm-d/llm-d-inference-scheduler/test/utils` and use `utils.NewTestContext(t)` to create contexts
+6. Test endpoints MUST be constructed with `scheduling.NewEndpoint(&fwkdl.EndpointMetadata{...}, &fwkdl.Metrics{...}, nil)`
+7. Use `cmpopts.EquateApprox(0, 1e-9)` for float comparisons (import `github.com/google/go-cmp/cmp/cmpopts`)
+8. Test math must be verified: for every test case that claims a score will be negative/positive,
    compute it manually step by step before writing the assertion. A claim like "both scores negative"
    must be validated with actual numbers — if the penalty (e.g. 0.4) is less than the base score
    (e.g. 0.407), the result is positive, not negative. Choose parameter values that guarantee
    the claimed scenario (e.g. increase effectiveLoad until base score < penalty).
-5. Exported symbol names (type constant, factory function, constructor) must be consistent
+9. Exported symbol names (type constant, factory function, constructor) must be consistent
    throughout scorer and test files. Use the same casing everywhere.
 """
     return [{"role": "system", "content": system},
@@ -432,7 +443,7 @@ def build_generate_prompt(algo_summary: dict, signal_coverage: dict,
 def build_revision_prompt(prev_code: str, issues: list[str],
                            algo_summary: dict, signal_coverage: dict,
                            mapping_doc: str, scorer_template: str,
-                           existing_scorer: str,
+                           example_scorer_test: str,
                            build_error: str = "") -> list[dict]:
     system = (
         "You are an expert Go engineer fixing a production scorer plugin based on "
@@ -477,10 +488,19 @@ def build_revision_prompt(prev_code: str, issues: list[str],
 ## Scorer Template
 {scorer_template}
 
+## Example Test File (your test must follow this structure exactly)
+```go
+{example_scorer_test}
+```
+
 ## Critical Requirements
 1. Register the scorer in llm-d-inference-scheduler/pkg/plugins/register.go
 2. EffectiveLoad expands to WaitingQueueSize + 2*RunningRequestsSize
 3. The scorer type constant must match the kebab-case scorer name with -scorer suffix
+4. Test file MUST use `package scorer_test` (external test package, not `package scorer`)
+5. Test file MUST import `github.com/llm-d/llm-d-inference-scheduler/test/utils` and use `utils.NewTestContext(t)`
+6. Test endpoints MUST be constructed with `scheduling.NewEndpoint(&fwkdl.EndpointMetadata{...}, &fwkdl.Metrics{...}, nil)`
+7. Use `cmpopts.EquateApprox(0, 1e-9)` for float comparisons
 """
     return [{"role": "system", "content": system},
             {"role": "user", "content": user}]
@@ -654,10 +674,10 @@ def _generate_algorithm_values(algo_summary: dict, signal_coverage: dict,
     # ── vLLM args (from llm_config.yaml vllm_config section) ───────────────
     vc = llm_cfg.get("vllm_config", {})
     vllm_args = [
-        f"--model={model_hf_repo}",
-        f"--tensor-parallel-size={tensor_parallelism}",
         "--dtype=bfloat16",
     ]
+    if tensor_parallelism > 1:
+        vllm_args.append(f"--tensor-parallel-size={tensor_parallelism}")
     if vc.get("gpu_memory_utilization"):
         vllm_args.append(f"--gpu-memory-utilization={vc['gpu_memory_utilization']}")
     if vc.get("max_num_running_reqs"):
@@ -900,8 +920,7 @@ def _reconstruct_stage3_output(run_dir: Path, stage3_out: Path) -> Path:
 
 def stage_generate(run_dir: Path, algo_summary_path: Path,
                    signal_coverage_path: Path, reviews: int,
-                   force: bool = False, skip_generate: bool = False,
-                   build_error: str = "") -> Path:
+                   force: bool = False, skip_generate: bool = False) -> Path:
     stage3_out = run_dir / "prepare_stage3_output.json"
 
     if skip_generate:
@@ -936,16 +955,17 @@ def stage_generate(run_dir: Path, algo_summary_path: Path,
     signal_coverage = json.loads(signal_coverage_path.read_text())
     mapping_doc = (REPO_ROOT / "docs/transfer/blis_to_llmd_mapping.md").read_text()
     scorer_template = (REPO_ROOT / "docs/transfer/scorer_template.go.md").read_text()
-    load_aware = REPO_ROOT / "llm-d-inference-scheduler/pkg/plugins/scorer/load_aware.go"
-    existing_scorer = load_aware.read_text() if load_aware.exists() else ""
+    scorer_dir = REPO_ROOT / "llm-d-inference-scheduler/pkg/plugins/scorer"
+    example_scorer = (scorer_dir / "blis_weighted_scoring.go").read_text()
+    example_scorer_test = (scorer_dir / "blis_weighted_scoring_test.go").read_text()
     evolve_block = _load_evolve_block(algo_summary)
 
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
     from lib.llm import call_model, call_models_parallel, LLMError
 
     writer_messages = build_generate_prompt(
-        algo_summary, signal_coverage, mapping_doc, scorer_template, existing_scorer,
-        build_error=build_error,
+        algo_summary, signal_coverage, mapping_doc, scorer_template,
+        example_scorer, example_scorer_test,
     )
 
     round_num = 0
@@ -953,6 +973,9 @@ def stage_generate(run_dir: Path, algo_summary_path: Path,
     last_writer_response: str = ""
     review_responses: dict = {}
     all_rounds: list[dict] = []
+    build_attempts = 0
+    scorer_path: Path | None = None
+    test_path: Path | None = None
 
     while True:
         round_num += 1
@@ -971,7 +994,29 @@ def stage_generate(run_dir: Path, algo_summary_path: Path,
             err("Writer returned no code block — HALT")
             sys.exit(1)
 
-        # ── Reviewers check faithfulness ───────────────────────────────────────
+        # ── Build / test before reviewers ─────────────────────────────────────
+        scorer_path, test_path = _write_scorer_files(last_writer_response, algo_summary)
+        _tmp_scorer_name = scorer_path.stem
+        _tmp_scorer_type = _scorer_type_from_name(_tmp_scorer_name)
+        _ensure_scorer_registered(_tmp_scorer_name, _tmp_scorer_type)
+
+        build_attempts += 1
+        build_passed, build_error_out = _run_build_test()
+        print(f"\n━━━ Generate Round {round_num} ━━━")
+        print(f"  Writer  →  {len(writer_code.splitlines())} lines")
+        if not build_passed:
+            print(f"  Build/test  →  FAILED (attempt {build_attempts})")
+            info(f"  Passing build errors back to writer...")
+            writer_messages = build_revision_prompt(
+                writer_code, [build_error_out], algo_summary, signal_coverage,
+                mapping_doc, scorer_template, example_scorer_test,
+                build_error=build_error_out,
+            )
+            continue
+
+        print(f"  Build/test  →  PASSED (attempt {build_attempts})")
+
+        # ── Reviewers check faithfulness (only after build passes) ────────────
         info("  Reviewers checking faithfulness...")
         review_messages = build_review_prompt(
             writer_code, algo_summary, signal_coverage, evolve_block,
@@ -998,14 +1043,13 @@ def stage_generate(run_dir: Path, algo_summary_path: Path,
         all_rounds.append({
             "round": round_num,
             "writer_lines": len(writer_code.splitlines()),
+            "build_attempts_so_far": build_attempts,
             "consensus": consensus,
             "reviewers": reviewer_data,
             "issues_passed_to_writer": issues_for_writer if not consensus else [],
         })
 
-        # ── Print round summary ────────────────────────────────────────────────
-        print(f"\n━━━ Generate Round {round_num} ━━━")
-        print(f"  Writer  →  {len(writer_code.splitlines())} lines")
+        # ── Print reviewer summary ─────────────────────────────────────────────
         print()
         for model, data in reviewer_data.items():
             if "error" in data:
@@ -1030,11 +1074,8 @@ def stage_generate(run_dir: Path, algo_summary_path: Path,
             info(f"  Passing {len(issues_for_writer)} issue(s) back to writer...")
             writer_messages = build_revision_prompt(
                 writer_code, issues_for_writer, algo_summary, signal_coverage,
-                mapping_doc, scorer_template, existing_scorer,
-                build_error=build_error,
+                mapping_doc, scorer_template, example_scorer_test,
             )
-            # Build error is included in the first revision only; clear after first pass
-            build_error = ""
             continue
 
         # Max rounds reached — pause for user
@@ -1044,7 +1085,7 @@ def stage_generate(run_dir: Path, algo_summary_path: Path,
         remaining = extra
         writer_messages = build_revision_prompt(
             writer_code, issues_for_writer, algo_summary, signal_coverage,
-            mapping_doc, scorer_template, existing_scorer,
+            mapping_doc, scorer_template, example_scorer_test,
         )
 
     # ── Save all reviewer rounds ───────────────────────────────────────────────
@@ -1056,9 +1097,7 @@ def stage_generate(run_dir: Path, algo_summary_path: Path,
         "rounds": all_rounds,
     }, indent=2))
     ok(f"Reviewer output → {reviewer_out.relative_to(REPO_ROOT)}")
-
-    scorer_path, test_path = _write_scorer_files(last_writer_response, algo_summary)
-    _validate_build(REPO_ROOT / "llm-d-inference-scheduler")
+    ok(f"Build/test passed after {build_attempts} attempt(s)")
 
     algo_values_path = _generate_algorithm_values(algo_summary, signal_coverage, out_dir)
     values_path = _run_merge_values(algo_values_path, out_dir)
@@ -1092,16 +1131,10 @@ def stage_generate(run_dir: Path, algo_summary_path: Path,
 
 # ── Stage 4: Build / Test / Equivalence Gate ──────────────────────────────────
 
-def stage_build_test(stage3_path: Path, force: bool = False) -> tuple[bool, str]:
-    """Build and test the generated scorer. Returns (passed, error_output)."""
-    # Silently skip if equivalence results exist — the user is asked once in stage_equivalence_gate
-    equiv_out = stage3_path.parent / "prepare_equivalence_results.json"
-    if not force and equiv_out.exists():
-        return True, ""
-    step(4, "Build & Test")
+def _run_build_test() -> tuple[bool, str]:
+    """Run go build/vet/test on the scorer. Returns (passed, error_output)."""
     sched = REPO_ROOT / "llm-d-inference-scheduler"
     env = {**os.environ, "GOWORK": "off"}
-
     for label, cmd in [
         ("go build", ["go", "build", "./..."]),
         ("go vet",   ["go", "vet", "./..."]),
@@ -1115,6 +1148,16 @@ def stage_build_test(stage3_path: Path, force: bool = False) -> tuple[bool, str]
             return False, output
         ok(f"{label} passed")
     return True, ""
+
+
+def stage_build_test(stage3_path: Path, force: bool = False) -> tuple[bool, str]:
+    """Build and test the generated scorer. Returns (passed, error_output)."""
+    # Silently skip if equivalence results exist — the user is asked once in stage_equivalence_gate
+    equiv_out = stage3_path.parent / "prepare_equivalence_results.json"
+    if not force and equiv_out.exists():
+        return True, ""
+    step(4, "Build & Test")
+    return _run_build_test()
 
 
 def stage_equivalence_gate(run_dir: Path, force: bool = False) -> Path:
@@ -1251,7 +1294,7 @@ def check_review_consensus(responses: dict) -> bool:
             verdicts.append(data.get("verdict", "unknown"))
         except json.JSONDecodeError:
             pass
-    return all(v == "consistent" for v in verdicts) and len(verdicts) >= 2
+    return all(v == "consistent" for v in verdicts) and len(verdicts) >= min(2, len(responses))
 
 
 def _make_review_summarizer(run_dir: Path):
@@ -1423,35 +1466,20 @@ def main() -> int:
         signal_coverage_path = stage_translate(run_dir, algo_summary_path, force=force)
 
         MAX_OUTER = 3  # final-review retries
-        MAX_INNER = 3  # build/test retries per outer attempt
         stage3_path: Path | None = None
         for outer in range(1, MAX_OUTER + 1):
             if outer > 1:
                 warn(f"Final review found issues — restarting Generate "
                      f"(outer {outer}/{MAX_OUTER})...")
 
-            last_build_error = ""
-            for inner in range(1, MAX_INNER + 1):
-                if inner > 1:
-                    warn(f"Build/test failed — restarting Generate "
-                         f"(inner {inner}/{MAX_INNER})...")
-                # Force regeneration on any retry (outer or inner)
-                force_gen = force or outer > 1 or inner > 1
-                # --skip-generate only applies on the very first attempt
-                stage3_path = stage_generate(
-                    run_dir, algo_summary_path, signal_coverage_path, args.reviews,
-                    force=force_gen,
-                    skip_generate=skip_generate and outer == 1 and inner == 1,
-                    build_error=last_build_error,
-                )
-                build_passed, last_build_error = stage_build_test(stage3_path, force=force_gen)
-                if build_passed:
-                    break
-                if inner == MAX_INNER:
-                    err("Build/test still failing after max retries — HALT")
-                    sys.exit(1)
-
+            # Force regeneration on any retry; --skip-generate only on first attempt
             force_gen = force or outer > 1
+            stage3_path = stage_generate(
+                run_dir, algo_summary_path, signal_coverage_path, args.reviews,
+                force=force_gen,
+                skip_generate=skip_generate and outer == 1,
+            )
+            stage_build_test(stage3_path, force=force_gen)
             stage_equivalence_gate(run_dir, force=force_gen)
             passed = stage_final_review(
                 run_dir, stage3_path, algo_summary_path, signal_coverage_path, args.reviews,
