@@ -576,7 +576,7 @@ def write_outputs(namespace: str, registry: str, repo_name: str,
         "storage_class": storage_class,
         "is_openshift": is_openshift, "tektonc_dir": str(TEKTONC_DIR),
         "sim2real_root": str(REPO_ROOT), "container_runtime": container_rt,
-        "setup_timestamp": now_iso, "run_name": run_name, "run_dir": str(run_dir),
+        "setup_timestamp": now_iso, "current_run": run_name,
     }
     setup_path = workspace / "setup_config.json"
     setup_path.write_text(json.dumps(setup_config, indent=2))

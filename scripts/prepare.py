@@ -152,7 +152,7 @@ def check_prerequisites() -> None:
 def load_setup_config() -> dict:
     cfg_path = REPO_ROOT / "workspace/setup_config.json"
     cfg = json.loads(cfg_path.read_text())
-    run_name = cfg["run_name"]
+    run_name = cfg["current_run"]
     run_dir = REPO_ROOT / "workspace/runs" / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     ok(f"Run: {run_name}  ({run_dir})")
@@ -1418,7 +1418,7 @@ def write_outputs(run_dir: Path, cfg: dict, stage3_path: Path) -> None:
     print()
     print(_c("32", "━━━ sim2real-prepare complete ━━━"))
     print()
-    print(f"Run:      {cfg['run_name']}")
+    print(f"Run:      {cfg['current_run']}")
     print(f"Run dir:  {run_dir}")
     print()
     print("Artifacts produced:")

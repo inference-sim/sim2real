@@ -176,6 +176,31 @@ def test_clear_phase_state_missing_file_is_noop(tmp_path):
 
 # ── _should_skip_phase ───────────────────────────────────────────────
 
+def test_should_skip_phase_results_file_fallback(tmp_path):
+    """Results file exists but no benchmark_state.json → treat as done."""
+    state_file = tmp_path / "benchmark_state.json"
+    results_file = tmp_path / "deploy_baseline_results.json"
+    results_file.write_text("{}")
+    # state_file does not exist
+    skip, reason = deploy._should_skip_phase(
+        "baseline", state_file, force_rerun=False, interactive=False,
+        results_path=results_file,
+    )
+    assert skip is True
+    assert "non-interactive" in reason
+
+
+def test_should_skip_phase_no_results_and_no_state_runs(tmp_path):
+    """Neither state file nor results file → don't skip."""
+    state_file = tmp_path / "benchmark_state.json"
+    results_file = tmp_path / "deploy_baseline_results.json"
+    skip, _ = deploy._should_skip_phase(
+        "baseline", state_file, force_rerun=False, interactive=False,
+        results_path=results_file,
+    )
+    assert skip is False
+
+
 def test_should_skip_phase_force_rerun_returns_false(tmp_path):
     """force_rerun=True means never skip — always re-run."""
     f = tmp_path / "benchmark_state.json"

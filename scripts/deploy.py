@@ -150,15 +150,22 @@ def _clear_phase_state(phase: str, bench_state_file: Path) -> None:
 
 
 def _should_skip_phase(phase: str, bench_state_file: Path,
-                       force_rerun: bool, interactive: bool) -> tuple[bool, str]:
+                       force_rerun: bool, interactive: bool,
+                       results_path: Path | None = None) -> tuple[bool, str]:
     """Return (should_skip, reason_message) for a benchmark phase.
 
     Returns (False, "") when the phase is not marked done.
+    A phase is considered done if benchmark_state.json marks it "done" OR
+    if results_path already exists on disk (fallback for runs without state file).
     """
-    if not bench_state_file.exists():
-        return False, ""
-    state = json.loads(bench_state_file.read_text())
-    if state.get("phases", {}).get(phase, {}).get("status") != "done":
+    is_done = False
+    if bench_state_file.exists():
+        state = json.loads(bench_state_file.read_text())
+        if state.get("phases", {}).get(phase, {}).get("status") == "done":
+            is_done = True
+    if not is_done and results_path is not None and results_path.exists():
+        is_done = True
+    if not is_done:
         return False, ""
     if force_rerun:
         return False, f"Phase {phase} already done — re-running (--force-rerun)"
@@ -190,7 +197,7 @@ def load_setup_config() -> tuple[dict, str, Path]:
         err("workspace/setup_config.json not found — run python scripts/setup.py first")
         sys.exit(1)
     cfg = json.loads(cfg_path.read_text())
-    run_name = cfg["run_name"]
+    run_name = cfg["current_run"]
     run_dir = REPO_ROOT / "workspace" / "runs" / run_name
     ok(f"Run: {run_name}  ({run_dir})")
     return cfg, run_name, run_dir
@@ -638,6 +645,7 @@ def stage_benchmarks(run_dir: Path, namespace: str, fast_iter: bool, force_rerun
             phase, bench_state_file,
             force_rerun=force_rerun,
             interactive=sys.stdin.isatty(),
+            results_path=run_dir / f"deploy_{phase}_results.json",
         )
         if skip:
             info(msg)
