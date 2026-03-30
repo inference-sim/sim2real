@@ -111,9 +111,10 @@ def print_intro(reviews: int, dev: bool = False) -> None:
     reviewer_note = "1 model (dev)" if dev else "all 3 models"
     print("LLM interactions (3 total):")
     print("  1. Translate     single call   1 model maps signals to production equivalents")
-    print(f"  2. Generate      writer loop   claude-opus-4-6 writes; {reviewer_note} review;")
+    print(f"  2. Generate      writer loop   claude -p writes (with codebase access);")
+    print(f"                                 {reviewer_note} review via claude -p + review script;")
     print("                                 issues fed back to writer until consistent")
-    print("  3. Final Review  review loop   all 3 models do a final check after build/test;")
+    print("  3. Final Review  review loop   claude -p invokes all 3 models for final check;")
     print("                                 if issues found, returns to Generate")
     print(f"\n--reviews {reviews}: each loop runs up to {reviews} round(s), then pauses for your input.")
     print("At each pause: [c]ontinue / [+N] N more rounds / [a]ccept / [q]uit")
@@ -343,6 +344,368 @@ def stage_translate(run_dir: Path, algo_summary_path: Path, force: bool = False)
 
     ok(f"Translate complete → {out.relative_to(REPO_ROOT)}")
     return out
+
+
+# ── Helpers: claude -p subprocess ────────────────────────────────────────────
+
+REVIEW_SCRIPT = (REPO_ROOT / ".claude/skills/sim2real-prepare/scripts/review_translation.py")
+
+
+def _run_claude(prompt: str, *, label: str = "",
+                max_turns: int = 15, timeout: int = 600,
+                model: str = "") -> subprocess.CompletedProcess:
+    """Run claude -p with stream-json output, relaying tool events to terminal.
+
+    Args:
+        max_turns: Maximum conversation turns before claude stops (default 15).
+        timeout: Wall-clock timeout in seconds (default 600 = 10 min).
+        model: Model override (e.g. "haiku"). Empty string uses default.
+    """
+    if label:
+        info(f"{label}...")
+    cmd = [
+        "claude", "-p", prompt,
+        "--output-format", "stream-json",
+        "--verbose",
+        "--max-turns", str(max_turns),
+        "--dangerously-skip-permissions",
+        "--add-dir", str(REPO_ROOT),
+    ]
+    if model:
+        cmd.extend(["--model", model])
+    proc = subprocess.Popen(
+        cmd,
+        cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True,
+    )
+    import time as _time
+    start = _time.monotonic()
+    turn_count = 0
+    while True:
+        line = proc.stdout.readline()
+        if not line:
+            break
+        # Timeout check
+        elapsed = _time.monotonic() - start
+        if elapsed > timeout:
+            err(f"  claude -p timed out after {timeout}s — killing subprocess")
+            proc.kill()
+            proc.wait()
+            return subprocess.CompletedProcess(proc.args, 1)
+
+        line = line.rstrip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            print(f"  [claude] {line}")
+            continue
+        ev_type = ev.get("type", "")
+        if ev_type == "assistant":
+            turn_count += 1
+            for block in ev.get("message", {}).get("content", []):
+                btype = block.get("type", "")
+                if btype == "tool_use":
+                    name = block.get("name", "")
+                    inp = block.get("input", {})
+                    detail = inp.get("path") or inp.get("command") or inp.get("file_path") or ""
+                    if detail:
+                        info(f"  [{turn_count}] {name}: {detail}")
+                    else:
+                        info(f"  [{turn_count}] {name}")
+                elif btype == "text":
+                    text = block.get("text", "").strip()
+                    if text and len(text) > 20:
+                        # Only show substantive text, skip filler like "I'll do X now"
+                        preview = text[:120] + ("..." if len(text) > 120 else "")
+                        print(f"  [claude] {preview}")
+        elif ev_type == "tool_result":
+            for block in ev.get("content", []):
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "")
+                    low = text.lower()
+                    if "permission" in low or "denied" in low:
+                        err(f"  PERMISSION ISSUE: {text[:300]}")
+                    elif "error" in low:
+                        err(f"  tool error: {text[:200]}")
+        elif ev_type == "result":
+            if ev.get("is_error"):
+                err(f"  claude -p error: {ev.get('error', ev)}")
+            else:
+                # Show final result snippet
+                result_text = ev.get("result", "")
+                if result_text:
+                    preview = result_text[:200] + ("..." if len(result_text) > 200 else "")
+                    info(f"  [done] {preview}")
+    proc.wait()
+    if proc.returncode != 0:
+        err(f"  claude -p exited with code {proc.returncode} after {turn_count} turns")
+    return subprocess.CompletedProcess(proc.args, proc.returncode)
+
+
+# ── Preamble: context gathering (once per Stage 3 run) ────────────────────────
+
+def _preamble_prompt(run_dir: Path) -> str:
+    from datetime import datetime, timezone
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return f"""\
+You are building context documents for the sim2real scorer generation pipeline.
+Read the following files and produce two output documents.
+All paths below are absolute.
+
+STRICT CONSTRAINTS:
+- Read ONLY the files listed below — nothing else. No ls, no glob, no grep, no exploration.
+- Do NOT follow imports or search for additional context.
+- If a file does not exist, skip it.
+- Use ONE Read tool call per file. Read all files, then write both outputs. No other actions.
+
+## Files to read (use Read tool only — 8 calls total)
+1. {REPO_ROOT}/llm-d-inference-scheduler/pkg/plugins/scoring.go
+2. {REPO_ROOT}/llm-d-inference-scheduler/pkg/plugins/scorer/load_aware.go
+3. {REPO_ROOT}/llm-d-inference-scheduler/pkg/plugins/scorer/load_aware_test.go
+4. {REPO_ROOT}/llm-d-inference-scheduler/test/utils/context.go
+5. {REPO_ROOT}/llm-d-inference-scheduler/test/utils/network.go
+6. {REPO_ROOT}/llm-d-inference-scheduler/pkg/plugins/register.go
+7. {REPO_ROOT}/docs/transfer/scorer_template.go.md
+8. {REPO_ROOT}/docs/transfer/blis_to_llmd_mapping.md
+9. {REPO_ROOT}/blis_router/best/best_program.go
+
+## Output 1: {run_dir}/prepare_codebase_context.md
+For the scorer writer. Begin with exactly: "Generated: {ts}"
+Include:
+- ScorerPlugin interface signature (exact source from scoring.go)
+- EndpointMetadata and Metrics field names used in scoring (exact field names)
+- Registration pattern from register.go (exact lines)
+- Test package conventions: NewTestContext, NewEndpoint usage copied from test/utils
+- Full scorer template (from scorer_template.go.md)
+- Full blis_to_llmd_mapping.md content (complete, untruncated)
+- Example scorer (load_aware.go) annotated with where interface is satisfied and how each signal is accessed
+
+## Output 2: {run_dir}/prepare_reviewer_context.md
+For external model reviewers (GPT-4o, Gemini). Begin with exactly: "Generated: {ts}"
+Include everything from Output 1, plus:
+- What BLIS simulates: discrete-event LLM inference simulator; signals represent queue depth, cache state, and load at each decode pod
+- Known intentional design decisions reviewers MUST NOT flag as errors:
+  * F-10 double-counting fix: BatchSize is zeroed in production; EffectiveLoad = WaitingQueueSize + RunningRequestsSize only
+  * Any other design decisions documented in blis_to_llmd_mapping.md
+- Definition of translation fidelity: the scorer must implement the same mathematical formula as the EVOLVE-BLOCK, using the mapped production signals
+
+Write both files now. Do not output anything else.
+"""
+
+
+def stage_build_context(run_dir: Path, force: bool = False) -> tuple[Path, Path]:
+    """Build codebase and reviewer context documents (once per Stage 3 run)."""
+    ctx_path = run_dir / "prepare_codebase_context.md"
+    rev_path = run_dir / "prepare_reviewer_context.md"
+
+    # Skip if both exist and user confirms
+    if not force and ctx_path.exists() and rev_path.exists():
+        rel = ctx_path.relative_to(REPO_ROOT)
+        print(f"\n  Existing context: {rel}")
+        while True:
+            choice = input("  Reuse context for Generate? [Y]es / [n]o rebuild: ").strip().lower()
+            if choice in ("", "y", "yes"):
+                info("[skip] Context — reusing existing files")
+                return ctx_path, rev_path
+            if choice in ("n", "no"):
+                break
+            print("  Enter 'y' to reuse or 'n' to rebuild.")
+
+    step("3a", "Build codebase context (reads llm-d pkg/, test/utils/, mapping doc)")
+    ctx_path.unlink(missing_ok=True)
+    rev_path.unlink(missing_ok=True)
+
+    result = _run_claude(_preamble_prompt(run_dir), label="Building context via claude -p",
+                         max_turns=6, model="haiku")
+    if result.returncode != 0 or not ctx_path.exists() or not rev_path.exists():
+        missing = [str(p) for p in (ctx_path, rev_path) if not p.exists()]
+        err(f"Context preamble failed (exit {result.returncode}). Missing: {missing}")
+        sys.exit(1)
+
+    ok(f"Codebase context  → {ctx_path.relative_to(REPO_ROOT)}")
+    ok(f"Reviewer context  → {rev_path.relative_to(REPO_ROOT)}")
+    return ctx_path, rev_path
+
+
+# ── Helpers: evolve block file ────────────────────────────────────────────────
+
+def _write_evolve_block(algo_summary: dict, run_dir: Path) -> Path:
+    """Extract EVOLVE-BLOCK and write to run_dir/prepare_evolve_block.go."""
+    out = run_dir / "prepare_evolve_block.go"
+    content = _load_evolve_block(algo_summary)
+    out.write_text(content)
+    return out
+
+
+# ── Helpers: generate iteration ───────────────────────────────────────────────
+
+def _generate_prompt(round_num: int, round_dir: Path, run_dir: Path,
+                     algo_summary_path: Path, signal_coverage_path: Path) -> str:
+    ctx_path = run_dir / "prepare_codebase_context.md"
+
+    # Determine prior issues file and scorer snapshot (build failure takes priority over review issues)
+    prior_context = ""
+    if round_num > 1:
+        prev_dir = run_dir / "rounds" / str(round_num - 1)
+        build_issues = prev_dir / "build_issues.json"
+        review_issues = prev_dir / "review_issues.json"
+        scorer_snapshot = prev_dir / "scorer_snapshot.go"
+        prior_scorer_line = (
+            f"Read {scorer_snapshot} — this is the exact scorer you wrote in round {round_num - 1}.\n"
+            if scorer_snapshot.exists() else ""
+        )
+        if build_issues.exists():
+            prior_context = f"""\
+## Round {round_num - 1} scorer + build failure
+{prior_scorer_line}Read {build_issues} and fix all reported errors.
+"""
+        elif review_issues.exists():
+            prior_context = f"""\
+## Round {round_num - 1} scorer + reviewer issues
+{prior_scorer_line}Read {review_issues} and fix every issue listed.
+"""
+        elif prior_scorer_line:
+            prior_context = f"""\
+## Round {round_num - 1} scorer (no output recorded)
+{prior_scorer_line}"""
+
+    scorer_dir = REPO_ROOT / "llm-d-inference-scheduler/pkg/plugins/scorer"
+    return f"""\
+You are generating a scorer plugin for llm-d-inference-scheduler.
+
+Read {ctx_path} for full system context (interfaces, examples, conventions).
+Read {algo_summary_path} for the algorithm to implement.
+Read {signal_coverage_path} for production signal access paths.
+{prior_context}
+Generate the scorer plugin. Write files in THIS ORDER (use Write tool, not Edit):
+
+1. Scorer: {scorer_dir}/<name>.go
+2. IMMEDIATELY write {round_dir}/generate_output.json:
+   {{"scorer_name": "<stem>", "scorer_file": "<relative-path-from-repo-root>", \
+"test_file": "<relative-path-from-repo-root>", "lines": <int>}}
+3. Test: {scorer_dir}/<name>_test.go (if time permits — not required)
+
+Do NOT modify register.go — registration is handled automatically after generation.
+Do NOT read other scorer files in {scorer_dir}/ — only read your own snapshot above if provided.
+Use relative paths from the repo root ({REPO_ROOT}) in generate_output.json.
+Do not output anything else after writing the files.
+"""
+
+
+def _clean_stale_scorers() -> None:
+    """Remove scorer files not tracked by git so claude writes fresh instead of editing."""
+    sched = REPO_ROOT / "llm-d-inference-scheduler"
+    scorer_dir = sched / "pkg/plugins/scorer"
+    result = run(["git", "ls-tree", "-r", "--name-only", "HEAD", "pkg/plugins/scorer/"],
+                 capture=True, check=False, cwd=sched)
+    tracked = {Path(p).name for p in result.stdout.strip().splitlines() if p}
+    for f in scorer_dir.glob("*.go"):
+        if f.name not in tracked:
+            f.unlink()
+            info(f"  Removed stale: {f.name}")
+
+
+def stage_generate_iteration(round_num: int, round_dir: Path, run_dir: Path,
+                              algo_summary_path: Path,
+                              signal_coverage_path: Path) -> tuple[Path, Path]:
+    """Run one generate iteration via claude -p. Returns (scorer_path, test_path)."""
+    if round_num == 1:
+        _clean_stale_scorers()
+
+    prompt = _generate_prompt(round_num, round_dir, run_dir,
+                               algo_summary_path, signal_coverage_path)
+    prompt_file = round_dir / "generate_prompt.md"
+    prompt_file.write_text(prompt)
+
+    label = f"Writer (claude -p) — round {round_num}"
+    if round_num > 1:
+        label += " (revision)"
+    result = _run_claude(prompt, label=label, max_turns=15, model="claude-opus-4-6",
+                         timeout=900)
+
+    out_path = round_dir / "generate_output.json"
+    if not out_path.exists():
+        err(f"Generate round {round_num} failed (exit {result.returncode}) — "
+            f"generate_output.json not written; will retry next round")
+        return None, None
+
+    try:
+        out = json.loads(out_path.read_text())
+        scorer_path = REPO_ROOT / out["scorer_file"]
+        test_file_str = out.get("test_file", "")
+        test_path = (REPO_ROOT / test_file_str) if test_file_str else None
+    except (json.JSONDecodeError, KeyError) as e:
+        err(f"Could not parse generate_output.json: {e}; will retry next round")
+        return None, None
+
+    if not scorer_path.exists():
+        err(f"Scorer file not found after generate: {scorer_path}; will retry next round")
+        return None, None
+
+    lines = out.get("lines", len(scorer_path.read_text().splitlines()))
+    ok(f"Wrote scorer: {scorer_path.relative_to(REPO_ROOT)} ({lines} lines)")
+    return scorer_path, test_path
+
+
+# ── Helpers: review iteration ─────────────────────────────────────────────────
+
+def _review_prompt(round_dir: Path, run_dir: Path, scorer_path: Path,
+                   algo_summary_path: Path, signal_coverage_path: Path,
+                   evolve_block_path: Path) -> str:
+    rev_ctx = run_dir / "prepare_reviewer_context.md"
+    cmd = (
+        f"python3 {REVIEW_SCRIPT} "
+        f"--scorer {scorer_path} "
+        f"--algorithm {algo_summary_path} "
+        f"--signals {signal_coverage_path} "
+        f"--evolve-block {evolve_block_path} "
+        f"--extra-context {rev_ctx} "
+        f"--rounds 1 "
+        f"--out {round_dir}/review_output.json"
+    )
+    return f"""\
+Read {rev_ctx} for reviewer system context.
+
+First, write the exact command you are about to run to {round_dir}/review_prompt.txt.
+
+Then run:
+  {cmd}
+
+After the script exits (exit 0 = consensus, exit 1 = no consensus), read \
+{round_dir}/review_output.json and write {round_dir}/review_issues.json:
+  {{"round": <N>, "issues": ["[model] issue text", ...]}}
+Use an empty list for "issues" if all models returned verdict "consistent".
+
+Do not output anything else.
+"""
+
+
+def stage_review_iteration(round_dir: Path, run_dir: Path, scorer_path: Path,
+                            algo_summary_path: Path, signal_coverage_path: Path,
+                            evolve_block_path: Path) -> bool:
+    """Run one review iteration via claude -p. Returns True if consensus reached."""
+    prompt = _review_prompt(round_dir, run_dir, scorer_path,
+                             algo_summary_path, signal_coverage_path,
+                             evolve_block_path)
+    info("Reviewers (Azure/gpt-4o, GCP/gemini-2.5-flash, aws/claude-opus-4-6)...")
+    result = _run_claude(prompt, max_turns=10, model="haiku")
+
+    issues_path = round_dir / "review_issues.json"
+    if not issues_path.exists():
+        err(f"Review failed (exit {result.returncode}) — review_issues.json not written")
+        sys.exit(1)
+
+    try:
+        data = json.loads(issues_path.read_text())
+        issues = data.get("issues", [])
+    except (json.JSONDecodeError, KeyError) as e:
+        err(f"Could not parse review_issues.json: {e}")
+        sys.exit(1)
+
+    consensus = len(issues) == 0
+    return consensus
 
 
 # ── Stage 3: Generate (writer + reviewer loop) ────────────────────────────────
@@ -927,7 +1290,6 @@ def stage_generate(run_dir: Path, algo_summary_path: Path,
         if not stage3_out.exists():
             stage3_out = _reconstruct_stage3_output(run_dir, stage3_out)
         info(f"[skip] Generate — --skip-generate passed, using {stage3_out.relative_to(REPO_ROOT)}")
-        # Still re-run registration so register.go reflects the correct symbol names.
         s3 = json.loads(stage3_out.read_text())
         scorer_name = Path(s3["scorer_file"]).stem
         scorer_type = s3.get("scorer_type", _scorer_type_from_name(scorer_name))
@@ -939,166 +1301,142 @@ def stage_generate(run_dir: Path, algo_summary_path: Path,
             _s3 = json.loads(stage3_out.read_text())
             if (REPO_ROOT / _s3.get("scorer_file", "")).exists():
                 if _should_skip(stage3_out, "Generate", force):
-                    _rout = run_dir / "prepare_reviewer_output.json"
-                    if _rout.exists():
-                        info(f"  Reviewer output: {_rout.relative_to(REPO_ROOT)}")
                     return stage3_out
         except (json.JSONDecodeError, KeyError):
             pass
 
-    step(3, "Generate  (writer: claude-opus-4-6  |  reviewers: all 3 models)")
+    step(3, "Generate  (writer: claude -p  |  reviewers: all 3 models)")
     out_dir = run_dir / "prepare_tekton"
     out_dir.mkdir(parents=True, exist_ok=True)
     stage3_out.unlink(missing_ok=True)
 
     algo_summary = json.loads(algo_summary_path.read_text())
     signal_coverage = json.loads(signal_coverage_path.read_text())
-    mapping_doc = (REPO_ROOT / "docs/transfer/blis_to_llmd_mapping.md").read_text()
-    scorer_template = (REPO_ROOT / "docs/transfer/scorer_template.go.md").read_text()
-    scorer_dir = REPO_ROOT / "llm-d-inference-scheduler/pkg/plugins/scorer"
-    example_scorer = (scorer_dir / "blis_weighted_scoring.go").read_text()
-    example_scorer_test = (scorer_dir / "blis_weighted_scoring_test.go").read_text()
-    evolve_block = _load_evolve_block(algo_summary)
 
-    sys.path.insert(0, str(REPO_ROOT / "scripts"))
-    from lib.llm import call_model, call_models_parallel, LLMError
+    # Preamble: build context documents once (skippable on rerun)
+    stage_build_context(run_dir, force=force)
 
-    writer_messages = build_generate_prompt(
-        algo_summary, signal_coverage, mapping_doc, scorer_template,
-        example_scorer, example_scorer_test,
-    )
+    # Write evolve block to stable file for review script
+    evolve_block_path = _write_evolve_block(algo_summary, run_dir)
 
+    # Round loop — resume from last incomplete round if rerunning
     round_num = 0
     remaining = reviews
-    last_writer_response: str = ""
-    review_responses: dict = {}
-    all_rounds: list[dict] = []
-    build_attempts = 0
     scorer_path: Path | None = None
     test_path: Path | None = None
+    consensus = False
 
-    while True:
+    rounds_root = run_dir / "rounds"
+    if not force and rounds_root.exists():
+        existing = sorted(
+            (int(d.name) for d in rounds_root.iterdir()
+             if d.is_dir() and d.name.isdigit()),
+        )
+        for n in existing:
+            rd = rounds_root / str(n)
+            complete = (rd / "build_issues.json").exists() or (rd / "review_issues.json").exists()
+            if complete:
+                round_num = n
+                remaining -= 1
+                # Check if this round reached consensus
+                ri = rd / "review_issues.json"
+                if ri.exists():
+                    try:
+                        issues = json.loads(ri.read_text()).get("issues", [])
+                        if len(issues) == 0:
+                            consensus = True
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+            else:
+                break  # incomplete round — will redo it
+        if round_num > 0 and not consensus:
+            info(f"  Resuming from round {round_num + 1} ({round_num} completed rounds found)")
+
+    if consensus:
+        # Previous run already reached consensus — recover scorer path from generate_output.json
+        last_dir = rounds_root / str(round_num)
+        gen_out = last_dir / "generate_output.json"
+        if gen_out.exists():
+            gdata = json.loads(gen_out.read_text())
+            scorer_path = REPO_ROOT / gdata["scorer_file"]
+            test_file_str = gdata.get("test_file", "")
+            test_path = (REPO_ROOT / test_file_str) if test_file_str else None
+            ok(f"  Consensus already reached in round {round_num} (previous run)")
+        else:
+            # Can't recover — redo this round
+            consensus = False
+            round_num -= 1
+            info(f"  Round {round_num + 1} had consensus but missing generate_output.json — redoing")
+
+    while not consensus:
         round_num += 1
-        remaining -= 1
+        round_dir = run_dir / "rounds" / str(round_num)
+        round_dir.mkdir(parents=True, exist_ok=True)
 
-        # ── Writer generates / revises ─────────────────────────────────────────
-        info(f"  Writer (aws/claude-opus-4-6) — round {round_num}...")
-        try:
-            last_writer_response = call_model("aws/claude-opus-4-6", writer_messages)
-        except LLMError as e:
-            err(f"Writer failed: {e}")
-            sys.exit(1)
+        revision = " (revision)" if round_num > 1 else ""
+        print(f"\n  ── Round {round_num}{revision} " + "─" * max(0, 48 - len(revision)))
 
-        writer_code = _extract_code_block(last_writer_response)
-        if not writer_code:
-            err("Writer returned no code block — HALT")
-            sys.exit(1)
+        scorer_path, test_path = stage_generate_iteration(
+            round_num, round_dir, run_dir, algo_summary_path, signal_coverage_path,
+        )
 
-        # ── Build / test before reviewers ─────────────────────────────────────
-        scorer_path, test_path = _write_scorer_files(last_writer_response, algo_summary)
-        _tmp_scorer_name = scorer_path.stem
-        _tmp_scorer_type = _scorer_type_from_name(_tmp_scorer_name)
-        _ensure_scorer_registered(_tmp_scorer_name, _tmp_scorer_type)
-
-        build_attempts += 1
-        build_passed, build_error_out = _run_build_test()
-        print(f"\n━━━ Generate Round {round_num} ━━━")
-        print(f"  Writer  →  {len(writer_code.splitlines())} lines")
-        if not build_passed:
-            print(f"  Build/test  →  FAILED (attempt {build_attempts})")
-            info(f"  Passing build errors back to writer...")
-            writer_messages = build_revision_prompt(
-                writer_code, [build_error_out], algo_summary, signal_coverage,
-                mapping_doc, scorer_template, example_scorer_test,
-                build_error=build_error_out,
-            )
+        if scorer_path is None:
+            info("  Generate did not produce output — retrying next round...")
+            remaining -= 1
+            if remaining > 0:
+                continue
+            extra = _prompt_user_continue(False, label=f"Generate round {round_num}")
+            if extra == 0:
+                sys.exit(1)
+            remaining = extra
             continue
 
-        print(f"  Build/test  →  PASSED (attempt {build_attempts})")
+        # Snapshots written before build — records exactly what was compiled
+        shutil.copy(scorer_path, round_dir / "scorer_snapshot.go")
+        if test_path and test_path.exists():
+            shutil.copy(test_path, round_dir / "scorer_test_snapshot.go")
 
-        # ── Reviewers check faithfulness (only after build passes) ────────────
-        info("  Reviewers checking faithfulness...")
-        review_messages = build_review_prompt(
-            writer_code, algo_summary, signal_coverage, evolve_block,
+        scorer_name = scorer_path.stem
+        scorer_type = _scorer_type_from_name(scorer_name)
+        _ensure_scorer_registered(scorer_name, scorer_type)
+
+        build_passed, build_error = _run_build_test()
+        (round_dir / "build_output.txt").write_text(build_error or "PASS")
+
+        if not build_passed:
+            (round_dir / "build_issues.json").write_text(json.dumps({
+                "round": round_num,
+                "issues": [build_error],
+            }, indent=2))
+            info("  Build failed — passing errors to next generate round...")
+            continue  # skip review; build error feeds next round
+
+        consensus = stage_review_iteration(
+            round_dir, run_dir, scorer_path,
+            algo_summary_path, signal_coverage_path, evolve_block_path,
         )
-        review_responses = call_models_parallel(MODELS, review_messages)
-        consensus = check_review_consensus(review_responses)
 
-        # ── Parse reviewer responses and build round record ────────────────────
-        reviewer_data: dict = {}
-        verdicts: list[str] = []
-        for model, resp in review_responses.items():
-            if isinstance(resp, LLMError):
-                reviewer_data[model] = {"error": str(resp)}
-                continue
-            clean = re.sub(r"^```(?:\w+)?\s*\n?", "", resp.strip())
-            clean = re.sub(r"\n?```$", "", clean)
-            try:
-                reviewer_data[model] = json.loads(clean)
-                verdicts.append(reviewer_data[model].get("verdict", "unknown"))
-            except json.JSONDecodeError:
-                reviewer_data[model] = {"raw": resp}
-
-        issues_for_writer = _collect_review_feedback(review_responses)
-        all_rounds.append({
-            "round": round_num,
-            "writer_lines": len(writer_code.splitlines()),
-            "build_attempts_so_far": build_attempts,
-            "consensus": consensus,
-            "reviewers": reviewer_data,
-            "issues_passed_to_writer": issues_for_writer if not consensus else [],
-        })
-
-        # ── Print reviewer summary ─────────────────────────────────────────────
-        print()
-        for model, data in reviewer_data.items():
-            if "error" in data:
-                print(f"    {model:<32} ✗  error: {data['error'][:60]}")
-            elif "raw" in data:
-                print(f"    {model:<32} ?  could not parse response")
-            else:
-                verdict = data.get("verdict", "unknown")
-                issues = data.get("issues", [])
-                icon = "✓" if verdict == "consistent" else "✗"
-                issue_note = f"  ({len(issues)} issue(s))" if issues else ""
-                print(f"    {model:<32} {icon}  {verdict}{issue_note}")
-        consistent_count = verdicts.count("consistent")
-        verdict_str = "All consistent ✓" if consensus else "not all consistent"
-        print(f"\n  {consistent_count}/{len(review_responses)} reviewers consistent  →  {verdict_str}")
-        print(f"  Full output: {run_dir}/")
+        issues = json.loads(
+            (round_dir / "review_issues.json").read_text()
+        ).get("issues", [])
+        print(f"  Round logs: {round_dir.relative_to(REPO_ROOT)}/")
 
         if consensus:
+            ok(f"  Consensus reached in round {round_num}")
             break
 
+        remaining -= 1
         if remaining > 0:
-            info(f"  Passing {len(issues_for_writer)} issue(s) back to writer...")
-            writer_messages = build_revision_prompt(
-                writer_code, issues_for_writer, algo_summary, signal_coverage,
-                mapping_doc, scorer_template, example_scorer_test,
-            )
+            info(f"  Passing {len(issues)} issue(s) to next round...")
             continue
 
         # Max rounds reached — pause for user
-        extra = _prompt_user_continue(consensus, label="Generate")
+        extra = _prompt_user_continue(consensus, label=f"Generate round {round_num}")
         if extra == 0:
             break
         remaining = extra
-        writer_messages = build_revision_prompt(
-            writer_code, issues_for_writer, algo_summary, signal_coverage,
-            mapping_doc, scorer_template, example_scorer_test,
-        )
 
-    # ── Save all reviewer rounds ───────────────────────────────────────────────
-    reviewer_out = run_dir / "prepare_reviewer_output.json"
-    reviewer_out.write_text(json.dumps({
-        "stage": "generate",
-        "total_rounds": round_num,
-        "final_consensus": consensus,
-        "rounds": all_rounds,
-    }, indent=2))
-    ok(f"Reviewer output → {reviewer_out.relative_to(REPO_ROOT)}")
-    ok(f"Build/test passed after {build_attempts} attempt(s)")
-
+    # Generate Tekton artifacts (logic unchanged from original)
     algo_values_path = _generate_algorithm_values(algo_summary, signal_coverage, out_dir)
     values_path = _run_merge_values(algo_values_path, out_dir)
 
@@ -1108,7 +1446,7 @@ def stage_generate(run_dir: Path, algo_summary_path: Path,
 
     payload = json.dumps({
         "scorer_file": str(scorer_path.relative_to(REPO_ROOT)),
-        "test_file": str(test_path.relative_to(REPO_ROOT)),
+        "test_file": str(test_path.relative_to(REPO_ROOT)) if test_path and test_path.exists() else "",
         "register_file": str(register_path.relative_to(REPO_ROOT)),
         "scorer_type": scorer_type,
         "tekton_artifacts": {
@@ -1119,13 +1457,13 @@ def stage_generate(run_dir: Path, algo_summary_path: Path,
     venv_python = str(REPO_ROOT / ".venv/bin/python")
     cli = str(REPO_ROOT / "tools/transfer_cli.py")
 
-    # Validate against canonical name, then copy to run_dir
     ws_out = REPO_ROOT / "workspace/stage3_output.json"
     ws_out.write_text(payload)
     run([venv_python, cli, "validate-schema", str(ws_out)], cwd=REPO_ROOT)
     shutil.copy(ws_out, stage3_out)
 
     ok(f"Generate complete → {stage3_out.relative_to(REPO_ROOT)}")
+    ok(f"Round logs: {(run_dir / 'rounds').relative_to(REPO_ROOT)}/")
     return stage3_out
 
 
@@ -1335,65 +1673,47 @@ def _make_review_summarizer(run_dir: Path):
 def stage_final_review(run_dir: Path, stage3_path: Path,
                         algo_summary_path: Path, signal_coverage_path: Path,
                         reviews: int, force: bool = False) -> bool:
-    """Run final 3-model review. Returns True if passed (consensus or user-accepted)."""
+    """Run final 3-model review via claude -p. Returns True if consensus reached."""
     out = run_dir / "prepare_translation_reviews.json"
-    # Only offer reuse if the previous review actually passed
-    _review_skip_ok = False
     if not force and out.exists():
         try:
             if json.loads(out.read_text()).get("passed"):
-                _review_skip_ok = True
+                if _should_skip(out, "Final Review", force):
+                    return True
         except (json.JSONDecodeError, KeyError):
             pass
-    if _review_skip_ok and _should_skip(out, "Final Review", force):
-        return True
     step(5, "Final Review (3 models)")
 
     stage3 = json.loads(stage3_path.read_text())
-    scorer_file = REPO_ROOT / stage3["scorer_file"]
-    scorer_code = scorer_file.read_text()
+    scorer_path = REPO_ROOT / stage3["scorer_file"]
 
     algo_summary = json.loads(algo_summary_path.read_text())
-    signal_coverage = json.loads(signal_coverage_path.read_text())
-    evolve_block = _load_evolve_block(algo_summary)
+    evolve_block_path = _write_evolve_block(algo_summary, run_dir)
 
-    sys.path.insert(0, str(REPO_ROOT / "scripts"))
-    from lib.llm import call_models_parallel, LLMError
-    from lib.consensus import run_consensus_loop
+    final_dir = run_dir / "final-review"
+    final_dir.mkdir(parents=True, exist_ok=True)
 
-    messages = build_review_prompt(scorer_code, algo_summary, signal_coverage, evolve_block)
-
-    result = run_consensus_loop(
-        messages=messages,
-        call_fn=lambda msgs: call_models_parallel(MODELS, msgs),
-        check_fn=check_review_consensus,
-        summarize_fn=_make_review_summarizer(run_dir),
-        max_rounds=reviews,
+    consensus = stage_review_iteration(
+        final_dir, run_dir, scorer_path,
+        algo_summary_path, signal_coverage_path, evolve_block_path,
     )
 
-    reviews_data: dict = {}
-    for model, resp in result.responses.items():
-        if isinstance(resp, LLMError):
-            reviews_data[model] = {"error": str(resp)}
-        else:
-            clean = re.sub(r"^```(?:\w+)?\s*\n?", "", resp.strip())
-            clean = re.sub(r"\n?```$", "", clean)
-            try:
-                reviews_data[model] = json.loads(clean)
-            except json.JSONDecodeError:
-                reviews_data[model] = {"raw": resp}
+    issues = json.loads(
+        (final_dir / "review_issues.json").read_text()
+    ).get("issues", [])
+    passed = consensus
 
-    passed = result.consensus or result.accepted_by_user
-    out = run_dir / "prepare_translation_reviews.json"
     out.write_text(json.dumps({
-        "rounds": result.rounds_run,
-        "consensus": result.consensus,
-        "accepted_by_user": result.accepted_by_user,
+        "rounds": 1,
+        "consensus": consensus,
+        "accepted_by_user": False,
         "passed": passed,
-        "reviews": reviews_data,
+        "issues": issues,
+        "logs": str(final_dir.relative_to(REPO_ROOT)),
     }, indent=2))
     status = "passed ✓" if passed else "failed — issues found"
     ok(f"Final review {status} → {out.relative_to(REPO_ROOT)}")
+    ok(f"Final review logs: {final_dir.relative_to(REPO_ROOT)}/")
     return passed
 
 

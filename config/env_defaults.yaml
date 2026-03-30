@@ -47,9 +47,9 @@ stack:
         tag: latest
         pullPolicy: IfNotPresent
       build:
-        hub: quay.io/jgchen
-        name: blis-inference-scheduler
-        tag: sim2real-test5
+        hub: ghcr.io/kalantar
+        name: llm-d-inference-scheduler
+        tag: sim2real-test6
         platform: linux/amd64
         pullPolicy: Always
     shared:

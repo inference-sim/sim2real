@@ -34,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Environment variables (alternatives to --flags):
-  NAMESPACE, HF_TOKEN, QUAY_ROBOT_USERNAME, QUAY_ROBOT_TOKEN
+  NAMESPACE, HF_TOKEN, QUAY_ROBOT_USERNAME, QUAY_ROBOT_TOKEN, GITHUB_TOKEN
 
 Examples:
   python scripts/setup.py                         # fully interactive
@@ -45,7 +45,7 @@ Examples:
     )
     p.add_argument("--namespace",      metavar="NS",    help="Kubernetes namespace")
     p.add_argument("--hf-token",       metavar="TOKEN", help="HuggingFace API token")
-    p.add_argument("--registry",       metavar="REG",   help="Container registry host (e.g. quay.io/username)")
+    p.add_argument("--registry",       metavar="REG",   help="Container registry host (e.g. quay.io/username or ghcr.io/username)")
     p.add_argument("--repo-name",      metavar="NAME",  default="llm-d-inference-scheduler",
                                                         help="Registry repository name [%(default)s]")
     p.add_argument("--registry-user",  metavar="USER",  help="Registry robot username")
@@ -333,10 +333,10 @@ def test_registry_push(registry: str, repo_name: str, container_rt: str,
         login = run(
             [container_rt, "login", docker_server,
              "--username", reg_user, "--password-stdin"],
-            input=reg_token, check=False, capture=True,
+            input=reg_token, check=False, capture=False,
         )
         if login.returncode != 0:
-            warn(f"Login failed before test push: {login.stderr.strip()}")
+            warn(f"Login step returned non-zero before test push")
 
     info(f"Pushing {full_image}...")
     push = run([container_rt, "push", full_image], check=False)
@@ -348,8 +348,8 @@ def test_registry_push(registry: str, repo_name: str, container_rt: str,
         ok(f"Test push succeeded → {full_image}")
         info("Registry credentials confirmed.")
     else:
-        err("Test push FAILED — check credentials and repository permissions.")
-        warn("Re-run setup with corrected --registry-user / --registry-token to retry.")
+        warn("Test push failed — credentials will be verified when EPP build runs in-cluster.")
+        warn("If the in-cluster build also fails, re-run setup with correct --registry-user / --registry-token.")
 
 
 def create_registry_secret(args: argparse.Namespace, namespace: str,
@@ -362,10 +362,9 @@ def create_registry_secret(args: argparse.Namespace, namespace: str,
     info("The built image is pushed to your registry and pulled back by the cluster")
     info("for benchmarking. You need push access to a registry the cluster can also pull from.")
     print()
-    info("If using Quay.io, you need a robot account with Write access:")
-    print("  1. https://quay.io/repository/ — create a repository")
-    print("  2. Account Settings → Robot Accounts → Create Robot Account")
-    print("  3. Grant robot 'Write' on your repository")
+    info("If using Quay.io: create a robot account with Write access and set")
+    info("  QUAY_ROBOT_USERNAME / QUAY_ROBOT_TOKEN (or pass --registry-user/--registry-token).")
+    info("If using ghcr.io: set GITHUB_TOKEN (a PAT with write:packages scope).")
     print()
 
     if not args.no_cluster and not args.registry and secret_exists("registry-secret", namespace):
@@ -379,26 +378,31 @@ def create_registry_secret(args: argparse.Namespace, namespace: str,
             return registry, args.repo_name
 
     registry = args.registry or prompt(
-        "registry", "Container registry host (e.g. quay.io/username, or blank to skip)", default="")
+        "registry", "Container registry host (e.g. quay.io/username or ghcr.io/username, or blank to skip)", default="")
     repo_name = args.repo_name
 
     if not registry:
         warn("No registry — skipping. Update config/env_defaults.yaml manually.")
         return "", repo_name
 
-    if args.registry:
-        repo_name = args.repo_name
-    else:
-        repo_name = prompt("repo_name", "Repository name", default=repo_name)
+    repo_name = prompt("repo_name", "Repository name", default=repo_name)
     docker_server = registry.split("/")[0]
 
+    # Credential resolution: explicit args > QUAY env vars > GITHUB_TOKEN (for ghcr.io)
     reg_user  = args.registry_user  or os.environ.get("QUAY_ROBOT_USERNAME", "")
     reg_token = args.registry_token or os.environ.get("QUAY_ROBOT_TOKEN", "")
+    if not reg_user and not reg_token and docker_server == "ghcr.io":
+        github_token = os.environ.get("GITHUB_TOKEN", "")
+        if github_token:
+            # ghcr.io accepts any non-empty string as username with a PAT
+            reg_user  = registry.split("/")[1] if "/" in registry else "github"
+            reg_token = github_token
+            info("Using GITHUB_TOKEN for ghcr.io authentication.")
     if not reg_user and not args.registry:
         reg_user = prompt("registry_user",
-            "Registry robot username (or press Enter to use container login)", default="")
+            "Registry username (or press Enter to use container login)", default="")
     if reg_user and not reg_token and not args.registry:
-        reg_token = prompt_secret("Registry robot token", env_var="QUAY_ROBOT_TOKEN")
+        reg_token = prompt_secret("Registry token", env_var="QUAY_ROBOT_TOKEN")
 
     if not args.no_cluster:
         if reg_user and reg_token:
