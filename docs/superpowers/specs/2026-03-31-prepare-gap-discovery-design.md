@@ -31,7 +31,7 @@ Add a new section to the extraction prompt:
 
 > **Section 5: Report Unused Source Attributes**
 >
-> Scan the full source file (the file containing the EVOLVE-BLOCK) for class attributes, state variables, configuration parameters, and fields on key types (e.g., Request, RouterState, Instance) that exist in the source file but are NOT referenced within the EVOLVE-BLOCK. Report these as potential gaps — they represent algorithm inputs that could affect routing/scoring but are ignored by this algorithm.
+> Scan the full source file (the file containing the EVOLVE-BLOCK) for class attributes, state variables, configuration parameters, and fields on key types that exist in the source file but are NOT referenced within the EVOLVE-BLOCK. Report these as potential gaps — they represent inputs available to the algorithm that it does not use.
 >
 > **Scope:** Only scan the file that contains the EVOLVE-BLOCK. Do not scan other files in the repository.
 >
@@ -73,7 +73,7 @@ When displayed, show before the gate menu:
     - SessionID (string) — Session affinity identifier
     - SLOClass (string) — SLO tier classification
 
-  These source-file attributes exist but are NOT captured by the EVOLVE-BLOCK.
+  These source-file attributes exist but are NOT referenced by the EVOLVE-BLOCK.
   If any are important to the algorithm's behavior, the extraction may be incomplete.
 
   [e] Edit    [c] Chat    [d] Done (accept gaps)    [q] Quit (halt)
