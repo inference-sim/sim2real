@@ -52,6 +52,10 @@
           "fidelity_provisional": {
             "type": "boolean",
             "description": "Copied from algorithm_summary.json signals[].fidelity_provisional when true. When true, PR5 empirical validation is required before the fidelity rating can be considered stable."
+          },
+          "context_notes": {
+            "type": "string",
+            "description": "Optional. How this signal is used in the algorithm (weight, threshold, formula)."
           }
         }
       }
@@ -69,6 +73,52 @@
     "coverage_complete": {
       "type": "boolean",
       "description": "True if all signals are mapped (unmapped_signals is empty)"
+    },
+    "type_mappings": {
+      "type": "array",
+      "description": "Optional. How simulation types map to production types.",
+      "items": {
+        "type": "object",
+        "required": ["sim_type", "prod_type", "notes"],
+        "additionalProperties": false,
+        "properties": {
+          "sim_type": {"type": "string"},
+          "prod_type": {"type": "string"},
+          "notes": {"type": "string"}
+        }
+      }
+    },
+    "helper_translations": {
+      "type": "array",
+      "description": "Optional. How simulation helper functions map to production patterns.",
+      "items": {
+        "type": "object",
+        "required": ["sim_function", "prod_pattern", "notes"],
+        "additionalProperties": false,
+        "properties": {
+          "sim_function": {"type": "string"},
+          "prod_pattern": {"type": "string"},
+          "notes": {"type": "string"}
+        }
+      }
+    },
+    "production_gaps": {
+      "type": "array",
+      "description": "Optional. Production capabilities not mapped by this algorithm.",
+      "items": {
+        "type": "object",
+        "required": ["name", "category", "production_location", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "description": "Capability name" },
+          "category": {
+            "type": "string",
+            "enum": ["header", "metric", "crd_field", "plugin_type", "config_option"]
+          },
+          "production_location": { "type": "string", "description": "File path within llm-d-inference-scheduler" },
+          "description": { "type": "string" }
+        }
+      }
     }
   }
 }

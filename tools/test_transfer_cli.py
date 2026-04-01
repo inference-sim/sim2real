@@ -1912,8 +1912,27 @@ class TestPreflight:
         data["stack"]["scorer"]["treatment"]["configContent"] = ""
         vf.write_text(yaml.dump(data))
         from tools.transfer_cli import _preflight_check_values
-        errors = _preflight_check_values(vf, "test-ns", "treatment")
+        errors = _preflight_check_values(vf, "test-ns", "treatment",
+                                          helm_path="stack.scorer.treatment.configContent")
         assert any("treatment" in e.lower() for e in errors)
+
+    def test_treatment_check_passes_with_valid_helm_path(self, tmp_path):
+        from tools.transfer_cli import _preflight_check_values
+        vf = self._values(tmp_path)
+        errors = _preflight_check_values(vf, "test-ns", "treatment",
+                                          helm_path="stack.scorer.treatment.configContent")
+        assert not any("treatment" in e.lower() for e in errors)
+
+    def test_treatment_check_skipped_without_helm_path(self, tmp_path):
+        """When no helm_path is provided, treatment config check is skipped."""
+        import yaml
+        from tools.transfer_cli import _preflight_check_values
+        vf = self._values(tmp_path)
+        data = yaml.safe_load(vf.read_text())
+        data["stack"]["scorer"]["treatment"]["configContent"] = ""
+        vf.write_text(yaml.dump(data))
+        errors = _preflight_check_values(vf, "test-ns", "treatment")
+        assert not any("treatment" in e.lower() for e in errors)
 
     def test_noise_phase_skips_treatment_check(self, tmp_path):
         import yaml
@@ -1922,7 +1941,8 @@ class TestPreflight:
         data["stack"]["scorer"]["treatment"]["configContent"] = ""
         vf.write_text(yaml.dump(data))
         from tools.transfer_cli import _preflight_check_values
-        errors = _preflight_check_values(vf, "test-ns", "noise")
+        errors = _preflight_check_values(vf, "test-ns", "noise",
+                                          helm_path="stack.scorer.treatment.configContent")
         # treatment check not run for noise phase
         assert not any("treatment" in e.lower() for e in errors)
 
@@ -1965,7 +1985,8 @@ class TestPreflight:
              mock.patch("subprocess.run", side_effect=fake_run):
             from tools.transfer_cli import cmd_preflight
             args = argparse.Namespace(phase="treatment", values=str(vf),
-                                      namespace="test-ns")
+                                      namespace="test-ns",
+                                      helm_path=None, build_command=None)
             rc = cmd_preflight(args)
         # preflight must still return (not hang), and some check must have failed
         assert rc == 1, (
@@ -2744,8 +2765,8 @@ class TestMergeValues:
             "to guard against alg_data containing it"
         )
 
-    def test_list_replacement(self, tmp_path):
-        """List in overlay replaces list in base entirely (not appended)."""
+    def test_keyless_dict_list_positional_merge(self, tmp_path):
+        """Keyless dict lists are positionally merged — base fields survive unless overridden."""
         env_file = tmp_path / "env.yaml"
         alg_file = tmp_path / "alg.yaml"
         out_file = tmp_path / "out.yaml"
@@ -2763,7 +2784,7 @@ class TestMergeValues:
         self._write_yaml(env_file, env)
 
         alg = self._minimal_algorithm_values()
-        # Override containers with a new list (no modelCommand)
+        # Overlay: new image only — modelCommand not present
         alg["stack"]["model"]["helmValues"]["decode"]["containers"] = [{"image": "new"}]
         self._write_yaml(alg_file, alg)
 
@@ -2776,12 +2797,175 @@ class TestMergeValues:
         assert rc == 0, f"exit {rc}: {err}"
         result = self._load_yaml(out_file)
         containers = result["stack"]["model"]["helmValues"]["decode"]["containers"]
-        assert containers == [{"image": "new"}], (
-            f"Expected list replacement with [{{image: new}}], got: {containers}"
+        assert containers == [{"image": "new", "modelCommand": "vllmServe"}], (
+            f"Expected positional merge preserving modelCommand, got: {containers}"
         )
-        # modelCommand should be gone — list was replaced, not merged
-        assert "modelCommand" not in containers[0], (
-            "modelCommand should be absent after list replacement"
+        assert containers[0]["modelCommand"] == "vllmServe", (
+            "modelCommand must survive positional merge from env_defaults"
+        )
+
+    def test_scalar_list_still_replaced(self, tmp_path):
+        """Scalar lists (non-dict items) continue to be replaced entirely."""
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        env = self._minimal_env_defaults()
+        env["observe"] = {
+            "image": "ghcr.io/x:v1",
+            "tags": ["v1", "v2"],
+            "workloads": [],
+        }
+        self._write_yaml(env_file, env)
+
+        alg = self._minimal_algorithm_values()
+        alg["observe"]["tags"] = ["v3"]
+        self._write_yaml(alg_file, alg)
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        assert result["observe"]["tags"] == ["v3"], (
+            "Scalar lists must still be replaced entirely"
+        )
+
+    def test_named_key_list_merge_via_containers_with_name(self, tmp_path):
+        """When containers have a 'name' field, named-key (Tier 2) merge applies."""
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        env = self._minimal_env_defaults()
+        env["stack"]["model"] = {
+            "helmValues": {
+                "decode": {
+                    "replicas": 1,
+                    "containers": [{"name": "vllm", "modelCommand": "vllmServe"}],
+                },
+                "modelArtifacts": {"name": "x", "uri": "pvc://x/y"},
+            }
+        }
+        self._write_yaml(env_file, env)
+
+        alg = self._minimal_algorithm_values()
+        alg["stack"]["model"]["helmValues"]["decode"]["containers"] = [
+            {"name": "vllm", "image": "vllm/vllm-openai:v0.11.0"}
+        ]
+        self._write_yaml(alg_file, alg)
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        containers = result["stack"]["model"]["helmValues"]["decode"]["containers"]
+        assert len(containers) == 1
+        assert containers[0]["name"] == "vllm"
+        assert containers[0]["image"] == "vllm/vllm-openai:v0.11.0"
+        assert containers[0]["modelCommand"] == "vllmServe", (
+            "Named-key merge: base fields not in overlay must be preserved"
+        )
+
+    def test_positional_merge_surplus_base_items_preserved(self, tmp_path):
+        """Positional merge: surplus items beyond overlay length are kept from base."""
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        env = self._minimal_env_defaults()
+        env["stack"]["model"] = {
+            "helmValues": {
+                "decode": {
+                    "replicas": 1,
+                    "containers": [
+                        {"modelCommand": "vllmServe"},
+                        {"sidecar": "proxy"},
+                    ],
+                },
+                "modelArtifacts": {"name": "x", "uri": "pvc://x/y"},
+            }
+        }
+        self._write_yaml(env_file, env)
+
+        alg = self._minimal_algorithm_values()
+        # Overlay has only 1 container — base has 2
+        alg["stack"]["model"]["helmValues"]["decode"]["containers"] = [{"image": "new"}]
+        self._write_yaml(alg_file, alg)
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        containers = result["stack"]["model"]["helmValues"]["decode"]["containers"]
+        assert len(containers) == 2, "Surplus base item must be preserved"
+        assert containers[0] == {"image": "new", "modelCommand": "vllmServe"}
+        assert containers[1] == {"sidecar": "proxy"}
+
+    def test_epp_pullpolicy_survives_when_image_preinjected(self, tmp_path):
+        """pullPolicy from epp_image is applied even when treatment already has inferenceExtension.image.
+
+        Regression test for the setdefault short-circuit bug in _flatten_gaie_shared.
+        """
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        env = self._minimal_env_defaults()
+        env["stack"]["gaie"] = {
+            "epp_image": {
+                "upstream": {
+                    "hub": "ghcr.io", "name": "epp", "tag": "v1",
+                    "pullPolicy": "IfNotPresent",
+                },
+                "build": {
+                    "hub": "registry.io", "name": "epp", "tag": "sha-abc123",
+                    "pullPolicy": "Always",
+                },
+            },
+            "baseline": {"helmValues": {}},
+            "treatment": {"helmValues": {}},
+        }
+        self._write_yaml(env_file, env)
+
+        alg = self._minimal_algorithm_values()
+        # Simulate build-push-epp pre-injecting image — no pullPolicy set
+        alg["stack"]["gaie"]["treatment"]["helmValues"]["inferenceExtension"] = {
+            "image": {"hub": "registry.io", "name": "epp", "tag": "sha-abc123"},
+            "pluginsCustomConfig": {
+                "custom-plugins.yaml": "treatment config"
+            }
+        }
+        self._write_yaml(alg_file, alg)
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        treatment_ie = result["stack"]["gaie"]["treatment"]["helmValues"]["inferenceExtension"]
+        assert treatment_ie["image"]["tag"] == "sha-abc123", (
+            "Pre-injected tag must survive"
+        )
+        assert treatment_ie["image"]["hub"] == "registry.io", (
+            "Pre-injected hub must survive"
+        )
+        assert treatment_ie["image"]["pullPolicy"] == "Always", (
+            "pullPolicy from epp_image.build must be applied when absent from pre-injected image"
         )
 
     def test_gaie_shared_flattening(self, tmp_path):
@@ -4573,3 +4757,93 @@ kvUtil := m.KVCacheUsagePercent
             f"Real scorer should pass all mechanical checks, got exit {code}.\n"
             f"Errors: {output.get('errors', [])}"
         )
+
+class TestListMergeHelpers:
+    """Unit tests for _detect_list_key and _merge_lists helpers."""
+
+    def test_detect_list_key_returns_name(self):
+        from tools.transfer_cli import _detect_list_key
+        base = [{"name": "v", "value": 1}]
+        overlay = [{"name": "debug", "value": 0}]
+        assert _detect_list_key(base, overlay) == "name"
+
+    def test_detect_list_key_returns_mountpath_when_no_name(self):
+        from tools.transfer_cli import _detect_list_key
+        base = [{"mountPath": "/data"}]
+        overlay = [{"mountPath": "/logs"}]
+        assert _detect_list_key(base, overlay) == "mountPath"
+
+    def test_detect_list_key_returns_none_no_common_key(self):
+        from tools.transfer_cli import _detect_list_key
+        base = [{"image": "old", "modelCommand": "vllmServe"}]
+        overlay = [{"image": "new", "extraConfig": {}}]
+        assert _detect_list_key(base, overlay) is None
+
+    def test_detect_list_key_empty_lists(self):
+        from tools.transfer_cli import _detect_list_key
+        assert _detect_list_key([], []) is None
+
+    def test_detect_list_key_priority_name_before_mountpath(self):
+        from tools.transfer_cli import _detect_list_key
+        base = [{"name": "v", "mountPath": "/a"}]
+        overlay = [{"name": "debug", "mountPath": "/b"}]
+        # Both candidates present — name has higher priority
+        assert _detect_list_key(base, overlay) == "name"
+
+    def test_detect_list_key_partial_key_returns_none(self):
+        from tools.transfer_cli import _detect_list_key
+        # overlay item is missing 'name' → candidate rejected
+        base = [{"name": "v"}]
+        overlay = [{"value": 1}]
+        assert _detect_list_key(base, overlay) is None
+
+    # --- _merge_lists tests ---
+
+    def test_merge_lists_tier1_scalar_replaced(self):
+        from tools.transfer_cli import _merge_lists
+        assert _merge_lists(["a", "b"], ["c"]) == ["c"]
+
+    def test_merge_lists_tier1_mixed_dict_and_scalar_replaced(self):
+        from tools.transfer_cli import _merge_lists
+        # Mixed list (some non-dict items) → overlay replaces
+        assert _merge_lists([{"a": 1}, "scalar"], [{"b": 2}]) == [{"b": 2}]
+
+    def test_merge_lists_tier2_named_key_merge(self):
+        from tools.transfer_cli import _merge_lists
+        base = [{"name": "v", "value": 1}, {"name": "debug", "value": 0}]
+        overlay = [{"name": "v", "value": 3}, {"name": "timeout", "value": 30}]
+        result = _merge_lists(base, overlay)
+        assert result == [
+            {"name": "v", "value": 3},        # matched: overlay wins
+            {"name": "debug", "value": 0},     # unmatched base: preserved
+            {"name": "timeout", "value": 30},  # new overlay item: appended
+        ]
+
+    def test_merge_lists_tier3_positional_merge(self):
+        from tools.transfer_cli import _merge_lists
+        base = [{"modelCommand": "vllmServe"}]
+        overlay = [{"image": "vllm/vllm-openai:v0.11.0"}]
+        result = _merge_lists(base, overlay)
+        assert result == [{"modelCommand": "vllmServe", "image": "vllm/vllm-openai:v0.11.0"}]
+
+    def test_merge_lists_tier3_surplus_from_base_preserved(self):
+        from tools.transfer_cli import _merge_lists
+        base = [{"a": 1}, {"b": 2}]
+        overlay = [{"a": 10}]
+        result = _merge_lists(base, overlay)
+        assert result == [{"a": 10}, {"b": 2}]
+
+    def test_merge_lists_tier3_surplus_from_overlay_appended(self):
+        from tools.transfer_cli import _merge_lists
+        base = [{"a": 1}]
+        overlay = [{"a": 10}, {"c": 3}]
+        result = _merge_lists(base, overlay)
+        assert result == [{"a": 10}, {"c": 3}]
+
+    def test_merge_lists_empty_overlay_clears(self):
+        from tools.transfer_cli import _merge_lists
+        assert _merge_lists([{"a": 1}], []) == []
+
+    def test_merge_lists_empty_base_returns_overlay(self):
+        from tools.transfer_cli import _merge_lists
+        assert _merge_lists([], [{"a": 1}]) == [{"a": 1}]

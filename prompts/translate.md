@@ -155,6 +155,25 @@ Write `workspace/signal_coverage.json` with all required fields:
 
 **HALT if validation fails.**
 
+## Step 9: Report Production Gaps
+
+As you navigated the production codebase (`llm-d-inference-scheduler/`) to map signals,
+note any metrics fields, request headers, CRD spec fields, or plugin types you encountered
+that are NOT needed by this algorithm.
+
+**Scope:** Only report capabilities you encountered while navigating the production
+codebase to complete the signal mapping. This is not an exhaustive audit — report what
+you naturally discovered during your mapping work. Focus on the scorer plugin interface,
+endpoint metrics, request metadata, and CRD spec fields.
+
+For each, report in the `production_gaps` array:
+- `name`: capability name
+- `category`: one of `"header"`, `"metric"`, `"crd_field"`, `"plugin_type"`, `"config_option"`
+- `production_location`: file path within `llm-d-inference-scheduler/`
+- `description`: brief description of the capability
+
+If no production gaps are found, omit the field or set it to an empty array.
+
 ## Halt Conditions
 
 | Condition | halt_reason | Action |

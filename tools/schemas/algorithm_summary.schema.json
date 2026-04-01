@@ -85,6 +85,75 @@
     "fidelity_checked": {
       "type": "boolean",
       "description": "Whether fidelity checks were performed AND PASSED during extraction for ALL signals. True means the mapping artifact existed, all signal fidelity ratings were acceptable (no low-fidelity signals), AND no signals have type 'unknown'. False if: (a) the mapping artifact was absent (bootstrap phase — no checks were possible), or (b) any signal has type 'unknown' (fidelity cannot be checked for unknown signals). This guarantee holds because the CLI exits with error before writing this artifact if any fidelity check fails — therefore any produced artifact with fidelity_checked=true implies checks passed for every signal. CI with --strict always produces fidelity_checked=true."
+    },
+    "type_refs": {
+      "type": "array",
+      "description": "Optional. Struct types referenced by the algorithm, extracted from the full program.",
+      "items": {
+        "type": "object",
+        "required": ["name", "file_path", "fields"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {"type": "string"},
+          "file_path": {"type": "string"},
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "type"],
+              "additionalProperties": false,
+              "properties": {
+                "name": {"type": "string"},
+                "type": {"type": "string"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "helper_refs": {
+      "type": "array",
+      "description": "Optional. Helper functions called by the algorithm.",
+      "items": {
+        "type": "object",
+        "required": ["name", "file_path", "signature", "returns"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {"type": "string"},
+          "file_path": {"type": "string"},
+          "signature": {"type": "string"},
+          "returns": {"type": "string"}
+        }
+      }
+    },
+    "cross_file_deps": {
+      "type": "array",
+      "description": "Optional. Symbols referenced from other files.",
+      "items": {
+        "type": "object",
+        "required": ["symbol", "file_path", "usage_note"],
+        "additionalProperties": false,
+        "properties": {
+          "symbol": {"type": "string"},
+          "file_path": {"type": "string"},
+          "usage_note": {"type": "string"}
+        }
+      }
+    },
+    "unused_source_attributes": {
+      "type": "array",
+      "description": "Optional. Source-file attributes not referenced by the EVOLVE-BLOCK.",
+      "items": {
+        "type": "object",
+        "required": ["name", "type", "location", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "type": { "type": "string", "description": "Go type if determinable, otherwise 'unknown'" },
+          "location": { "type": "string", "description": "file:line location in source" },
+          "description": { "type": "string" }
+        }
+      }
     }
   }
 }

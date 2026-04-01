@@ -40,6 +40,15 @@ stack:
         - modelCommand: vllmServe
           mountModelVolume: true
   gaie:
+    inferenceObjectives:
+      - name: critical
+        priority: 100
+      - name: standard
+        priority: 0
+      - name: sheddable
+        priority: -10
+      - name: batch
+        priority: -50
     epp_image:
       upstream:
         hub: ghcr.io/llm-d

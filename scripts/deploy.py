@@ -2,10 +2,12 @@
 """sim2real deploy — Build EPP, Cluster Benchmarks, PR."""
 
 import argparse
+import concurrent.futures
 import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import tempfile
 from datetime import datetime, timezone
@@ -17,6 +19,32 @@ VENV_PYTHON = str(REPO_ROOT / ".venv/bin/python")
 CLI = str(REPO_ROOT / "tools/transfer_cli.py")
 
 PIPELINE_TIMEOUT_SECS = 14400  # 4 hours
+
+# Lock for concurrent benchmark-state JSON updates
+_bench_state_lock = threading.Lock()
+
+
+class PhaseError(RuntimeError):
+    """Raised when a pipeline phase fails (replaces sys.exit in threaded context)."""
+
+
+def _preflight_cmd(phase: str, values_path: str, namespace: str,
+                   manifest: dict | None = None) -> list[str]:
+    """Build the preflight CLI command, adding manifest-derived flags when available."""
+    cmd = [VENV_PYTHON, CLI, "preflight",
+           "--phase", phase,
+           "--values", values_path,
+           "--namespace", namespace]
+    if manifest:
+        helm_path = manifest.get("config", {}).get("helm_path")
+        if helm_path:
+            cmd += ["--helm-path", helm_path]
+        # Use first test command as build check (e.g. ["go", "build", "./..."])
+        test_cmds = manifest.get("target", {}).get("test_commands", [])
+        if test_cmds:
+            import shlex
+            cmd += ["--build-command", shlex.join(test_cmds[0])]
+    return cmd
 
 # ── Color helpers ─────────────────────────────────────────────────────────────
 _tty = sys.stdout.isatty()
@@ -67,12 +95,16 @@ Environment variables:
   NAMESPACE   Override namespace from workspace/setup_config.json
 """,
     )
+    p.add_argument("--manifest", type=Path, default=REPO_ROOT / "config/transfer.yaml",
+                   help="Path to transfer.yaml manifest")
     p.add_argument("--skip-build-epp", action="store_true",
                    help="Skip EPP image build (use if already built this run)")
     p.add_argument("--pr", action="store_true",
                    help="Create PR after benchmarks pass (default: skip, review results first)")
     p.add_argument("--force-rerun", action="store_true",
                    help="Re-run already-done benchmark phases without prompting")
+    p.add_argument("--parallel", type=int, default=1, metavar="N",
+                   help="Max pipeline phases to run concurrently (default: 1)")
     return p
 
 
@@ -99,16 +131,15 @@ def _construct_validation_results(equiv: dict, fast_iter: bool) -> dict:
 
     In fast mode, adds overall_verdict. In full mode, leaves overall_verdict
     absent (set later by _merge_benchmark_into_validation).
+
+    The equivalence gate stores results under dynamic command names (not
+    hardcoded suite_a/b/c), so we copy all entries into val["equivalence"].
     """
-    val = {
-        "suite_a": equiv["suite_a"],
-        "suite_b": equiv["suite_b"],
-        "suite_c": equiv["suite_c"],
-    }
+    val = {"equivalence": {k: v for k, v in equiv.items() if k != "skipped"}}
     if fast_iter:
-        passed = (
-            val.get("suite_a", {}).get("passed")
-            and val.get("suite_c", {}).get("passed")
+        passed = all(
+            entry.get("passed") for entry in val["equivalence"].values()
+            if entry.get("fatal", True)
         )
         val["overall_verdict"] = "PASS" if passed else "FAIL"
     return val
@@ -124,9 +155,11 @@ def _merge_benchmark_into_validation(val: dict, bench: dict) -> dict:
     val["noise_cv"] = bench["noise_cv"]
 
     mech = bench.get("mechanism_check_verdict", "ERROR")
-    if (mech == "PASS"
-            and val.get("suite_a", {}).get("passed")
-            and val.get("suite_c", {}).get("passed")):
+    equiv_passed = all(
+        entry.get("passed") for entry in val.get("equivalence", {}).values()
+        if entry.get("fatal", True)
+    )
+    if mech == "PASS" and equiv_passed:
         val["overall_verdict"] = "PASS"
     elif mech == "INCONCLUSIVE":
         val["overall_verdict"] = "INCONCLUSIVE"
@@ -205,10 +238,10 @@ def load_setup_config() -> tuple[dict, str, Path]:
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
 
-def check_prerequisites(run_dir: Path) -> tuple[str, bool]:
+def check_prerequisites(run_dir: Path, manifest: dict) -> tuple[str, bool]:
     """Verify Phase 1 artifacts and cluster readiness.
 
-    Returns (scorer_file_path, fast_iter).
+    Returns (plugin_file_path, fast_iter).
     Exits 1 on any failure.
     """
     step(0, "Checking prerequisites")
@@ -246,57 +279,58 @@ def check_prerequisites(run_dir: Path) -> tuple[str, bool]:
         err("AI review did not pass — re-run prepare or investigate reviews")
         sys.exit(1)
 
-    # Equivalence gate check (Suite A + C required)
-    equiv = json.loads((run_dir / "prepare_equivalence_results.json").read_text())
-    if not equiv.get("suite_a", {}).get("passed"):
-        err("Suite A did not pass — re-run prepare equivalence gate")
-        sys.exit(1)
-    if not equiv.get("suite_c", {}).get("passed"):
-        err("Suite C did not pass — re-run prepare equivalence gate")
-        sys.exit(1)
+    # Equivalence gate check (generic — reads prepare_equivalence_results and checks for fatal failures)
+    equiv_path = run_dir / "prepare_equivalence_results.json"
+    if equiv_path.exists():
+        equiv = json.loads(equiv_path.read_text())
+        if not equiv.get("skipped"):
+            for name, result in equiv.items():
+                if isinstance(result, dict) and result.get("fatal", True) and not result.get("passed", False):
+                    err(f"Equivalence test '{name}' did not pass — re-run prepare")
+                    sys.exit(1)
 
-    # Scorer file exists and builds
+    # Plugin file exists and builds
     stage3 = json.loads((run_dir / "prepare_stage3_output.json").read_text())
-    scorer_file = stage3["scorer_file"]
-    if not Path(scorer_file).exists():
-        err(f"Scorer file missing: {scorer_file}")
+    plugin_file = stage3["plugin_file"]
+    if not Path(plugin_file).exists():
+        err(f"Plugin file missing: {plugin_file}")
         sys.exit(1)
     result = run(
         ["go", "build", "./..."],
         check=False, capture=True,
-        cwd=REPO_ROOT / "llm-d-inference-scheduler",
+        cwd=REPO_ROOT / manifest["target"]["repo"],
         env={**os.environ, "GOWORK": "off"},
     )
     if result.returncode != 0:
-        err("Scorer build failed:")
+        err("Plugin build failed:")
         print(result.stderr)
         sys.exit(1)
 
     # Registry configuration check
     try:
         import yaml
-        cfg = yaml.safe_load((REPO_ROOT / "config" / "env_defaults.yaml").read_text())
+        cfg = yaml.safe_load((REPO_ROOT / manifest["config"]["env_defaults"]).read_text())
         hub = (cfg.get("stack", {})
                   .get("gaie", {})
                   .get("epp_image", {})
                   .get("build", {})
                   .get("hub", ""))
         if not hub or "REPLACE_ME" in hub:
-            err("Set epp_image.build.hub in config/env_defaults.yaml before deploying")
+            err(f"Set epp_image.build.hub in {manifest['config']['env_defaults']} before deploying")
             sys.exit(1)
         fast_iter = bool(cfg.get("pipeline", {}).get("fast_iteration", True))
     except Exception as e:
-        err(f"Cannot read config/env_defaults.yaml: {e}")
+        err(f"Cannot read {manifest['config']['env_defaults']}: {e}")
         sys.exit(1)
 
     ok("All prerequisites satisfied")
     info(f"Fast iteration mode: {fast_iter}")
-    return scorer_file, fast_iter
+    return plugin_file, fast_iter
 
 
 # ── Stage 1: Build EPP ────────────────────────────────────────────────────────
 
-def stage_build_epp(run_dir: Path, current_run: str, namespace: str) -> str:
+def stage_build_epp(run_dir: Path, current_run: str, namespace: str, manifest: dict) -> str:
     """Build EPP image on-cluster, update algorithm_values, re-merge, compile+apply pipelines.
 
     Returns the full image reference (e.g. quay.io/me/llm-d:run-name).
@@ -338,7 +372,7 @@ def stage_build_epp(run_dir: Path, current_run: str, namespace: str) -> str:
 
     # Read hub+name from env_defaults build config (already validated in prerequisites).
     # Only the tag comes from the newly built image reference.
-    env_cfg = yaml.safe_load((REPO_ROOT / "config" / "env_defaults.yaml").read_text())
+    env_cfg = yaml.safe_load((REPO_ROOT / manifest["config"]["env_defaults"]).read_text())
     build_cfg = (env_cfg.get("stack", {}).get("gaie", {})
                         .get("epp_image", {}).get("build", {}))
     epp_hub  = build_cfg.get("hub", "")
@@ -351,10 +385,12 @@ def stage_build_epp(run_dir: Path, current_run: str, namespace: str) -> str:
     # Re-merge values
     step("1b", "Re-merging values")
     values_out = run_dir / "prepare_tekton" / "values.yaml"
+    helm_path = manifest["config"]["helm_path"]
     run([VENV_PYTHON, CLI, "merge-values",
-         "--env", str(REPO_ROOT / "config" / "env_defaults.yaml"),
+         "--env", str(REPO_ROOT / manifest["config"]["env_defaults"]),
          "--algorithm", str(alg_values_path),
-         "--out", str(values_out)],
+         "--out", str(values_out),
+         "--helm-path", f"stack.{helm_path}"],
         cwd=REPO_ROOT)
     ok("values.yaml re-merged")
 
@@ -384,7 +420,7 @@ def _run_pipeline_phase(phase: str, pipelinecurrent_run: str, namespace: str,
     """Submit a Tekton PipelineRun and wait for it to complete.
 
     Prints a monitoring hint so the user can tail logs in a second terminal.
-    Updates benchmark-state on success/failure. Exits 1 on failure or timeout.
+    Updates benchmark-state on success/failure. Raises PhaseError on failure.
     """
     pipelines_dir = run_dir / "prepare_tekton" / "pipelines"
     pipeline_yaml = pipelines_dir / f"{phase}-pipeline.yaml"
@@ -393,8 +429,7 @@ def _run_pipeline_phase(phase: str, pipelinecurrent_run: str, namespace: str,
     result = run(["kubectl", "apply", "-f", str(pipeline_yaml), f"-n={namespace}"],
                  check=False, capture=True)
     if result.returncode != 0:
-        err(f"kubectl apply failed for {phase} pipeline: {result.stderr}")
-        sys.exit(1)
+        raise PhaseError(f"kubectl apply failed for {phase} pipeline: {result.stderr}")
 
     # Write PipelineRun YAML directly (avoids dependency on pre-existing template files)
     pipelinerun_yaml = str(run_dir / f"pipelinerun-{phase}-{run_index}.yaml")
@@ -436,10 +471,10 @@ spec:
     result = run(["kubectl", "apply", "-f", pipelinerun_yaml, f"-n={namespace}"],
                  check=False, capture=True)
     if result.returncode != 0:
-        err(f"kubectl apply pipelinerun failed for {phase}: {result.stderr}")
-        sys.exit(1)
+        raise PhaseError(f"kubectl apply pipelinerun failed for {phase}: {result.stderr}")
 
-    run([VENV_PYTHON, CLI, "benchmark-state",
+    with _bench_state_lock:
+        run([VENV_PYTHON, CLI, "benchmark-state",
          "--workspace", str(run_dir.parent.parent),
          "--set-phase", phase, "--status", "running",
          "--pipelinerun", pipelinecurrent_run],
@@ -462,13 +497,13 @@ spec:
         time.sleep(30)
         elapsed += 30
         if elapsed >= PIPELINE_TIMEOUT_SECS:
-            run([VENV_PYTHON, CLI, "benchmark-state",
-                 "--workspace", str(run_dir.parent.parent),
-                 "--set-phase", phase, "--status", "failed",
-                 "--failure-reason", f"Polling timeout after {PIPELINE_TIMEOUT_SECS}s on run {run_index}"],
-                check=False, cwd=REPO_ROOT)
-            err(f"{phase} run {run_index} timed out after {PIPELINE_TIMEOUT_SECS}s")
-            sys.exit(1)
+            with _bench_state_lock:
+                run([VENV_PYTHON, CLI, "benchmark-state",
+                     "--workspace", str(run_dir.parent.parent),
+                     "--set-phase", phase, "--status", "failed",
+                     "--failure-reason", f"Polling timeout after {PIPELINE_TIMEOUT_SECS}s on run {run_index}"],
+                    check=False, cwd=REPO_ROOT)
+            raise PhaseError(f"{phase} run {run_index} timed out after {PIPELINE_TIMEOUT_SECS}s")
 
     if "Succeeded" not in reason:
         fail_result = run(
@@ -478,13 +513,13 @@ spec:
             check=False, capture=True,
         )
         fail_reason = fail_result.stdout.strip() or "PipelineRun failed"
-        run([VENV_PYTHON, CLI, "benchmark-state",
-             "--workspace", str(run_dir.parent.parent),
-             "--set-phase", phase, "--status", "failed",
-             "--failure-reason", fail_reason],
-            check=False, cwd=REPO_ROOT)
-        err(f"{phase} run {run_index} failed: {fail_reason}")
-        sys.exit(1)
+        with _bench_state_lock:
+            run([VENV_PYTHON, CLI, "benchmark-state",
+                 "--workspace", str(run_dir.parent.parent),
+                 "--set-phase", phase, "--status", "failed",
+                 "--failure-reason", fail_reason],
+                check=False, cwd=REPO_ROOT)
+        raise PhaseError(f"{phase} run {run_index} failed: {fail_reason}")
 
     ok(f"{phase} PipelineRun succeeded: {pipelinecurrent_run}")
 
@@ -519,8 +554,7 @@ def _extract_phase_results(phase: str, namespace: str, run_dir: Path) -> Path:
         check=False, capture=True,
     )
     if result.returncode != 0:
-        err(f"Extractor pod {pod_name} not ready")
-        sys.exit(1)
+        raise PhaseError(f"Extractor pod {pod_name} not ready")
 
     raw_dir = run_dir / f"deploy_{phase}_log"
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -532,8 +566,7 @@ def _extract_phase_results(phase: str, namespace: str, run_dir: Path) -> Path:
          "--ignore-not-found", "--force", "--grace-period=0"],
         check=False, capture=True)
     if result.returncode != 0:
-        err(f"kubectl cp failed for {phase}")
-        sys.exit(1)
+        raise PhaseError(f"kubectl cp failed for {phase}")
 
     # Collect vLLM decode pod logs
     log_result = run(
@@ -559,20 +592,19 @@ def _extract_phase_results(phase: str, namespace: str, run_dir: Path) -> Path:
         check=False, capture=True, cwd=REPO_ROOT,
     )
     if result.returncode != 0:
-        err(f"convert-trace failed for {phase}")
-        sys.exit(1)
+        raise PhaseError(f"convert-trace failed for {phase}")
 
     result = run([VENV_PYTHON, CLI, "validate-schema", str(results_path)],
                  check=False, capture=True, cwd=REPO_ROOT)
     if result.returncode != 0:
-        err(f"Schema validation failed for {phase}_results.json — do not mark phase done")
-        sys.exit(1)
+        raise PhaseError(f"Schema validation failed for {phase}_results.json — do not mark phase done")
 
-    run([VENV_PYTHON, CLI, "benchmark-state",
-         "--workspace", str(run_dir.parent.parent),
-         "--set-phase", phase, "--status", "done",
-         "--results", str(results_path)],
-        check=False, cwd=REPO_ROOT)
+    with _bench_state_lock:
+        run([VENV_PYTHON, CLI, "benchmark-state",
+             "--workspace", str(run_dir.parent.parent),
+             "--set-phase", phase, "--status", "done",
+             "--results", str(results_path)],
+            check=False, cwd=REPO_ROOT)
 
     ok(f"{phase} results extracted: {results_path}")
     return results_path
@@ -608,8 +640,7 @@ def _run_noise_phase(run_dir: Path, namespace: str, workspace_dir: Path) -> None
                 warn("Preflight failed, retrying in 30s...")
                 time.sleep(30)
             else:
-                err("Preflight failed for noise phase")
-                sys.exit(1)
+                raise PhaseError("Preflight failed for noise phase")
 
         _run_pipeline_phase("noise", pipelinecurrent_run, namespace, run_dir, run_index=i)
 
@@ -620,7 +651,77 @@ def _run_noise_phase(run_dir: Path, namespace: str, workspace_dir: Path) -> None
 
 # ── Stage 2: Cluster benchmarks ───────────────────────────────────────────────
 
-def stage_benchmarks(run_dir: Path, namespace: str, fast_iter: bool, force_rerun: bool = False) -> str:
+def _gpu_warning(parallel: int, values_path: Path) -> None:
+    """Warn about total GPU demand when running phases in parallel."""
+    if parallel <= 1:
+        return
+    import yaml
+    try:
+        values = yaml.safe_load(values_path.read_text())
+        decode = values.get("stack", {}).get("model", {}).get("helmValues", {}).get("decode", {})
+        replicas = decode.get("replicas", 1)
+        gpu_per_pod = int(
+            decode.get("resources", {}).get("limits", {}).get("nvidia.com/gpu", "1")
+        )
+        gpus_per_phase = replicas * gpu_per_pod
+        total = gpus_per_phase * parallel
+        warn(
+            f"Parallel={parallel} requires {total} GPUs "
+            f"({gpus_per_phase} per phase × {parallel} concurrent)."
+        )
+        warn(
+            "If fewer GPUs are available, Kubernetes will queue pending pods — "
+            "phases will complete but wall-clock savings will be reduced."
+        )
+    except Exception:
+        warn(f"Parallel={parallel}: could not compute GPU demand from values.yaml.")
+
+
+def _run_single_phase(phase: str, run_dir: Path, namespace: str,
+                      workspace_dir: Path, bench_state_file: Path,
+                      force_rerun: bool,
+                      manifest: dict | None = None) -> tuple[str, str]:
+    """Run one benchmark phase end-to-end. Designed for ThreadPoolExecutor.
+
+    Returns (phase, status) where status is "done" or "skipped".
+    Raises PhaseError on failure.
+    """
+    # Skip check (non-interactive when parallel — can't prompt from threads)
+    skip, msg = _should_skip_phase(
+        phase, bench_state_file,
+        force_rerun=force_rerun,
+        interactive=False,
+        results_path=run_dir / f"deploy_{phase}_results.json",
+    )
+    if skip:
+        info(f"[{phase}] {msg}")
+        return phase, "skipped"
+    if msg:
+        info(f"[{phase}] {msg}")
+    _clear_phase_state(phase, bench_state_file)
+
+    if phase == "noise":
+        _run_noise_phase(run_dir, namespace, workspace_dir)
+    else:
+        values_path = str(run_dir / "prepare_tekton" / "values.yaml")
+        result = run(
+            _preflight_cmd(phase, values_path, namespace, manifest),
+            check=False, capture=True, cwd=REPO_ROOT,
+        )
+        if result.returncode != 0:
+            raise PhaseError(f"Preflight failed for {phase}")
+
+        pipelinecurrent_run = f"sim2real-{phase}-{int(time.time())}"
+        info(f"[{phase}] Submitting PipelineRun: {pipelinecurrent_run}")
+        _run_pipeline_phase(phase, pipelinecurrent_run, namespace, run_dir)
+        _extract_phase_results(phase, namespace, run_dir)
+
+    ok(f"[{phase}] Phase complete")
+    return phase, "done"
+
+
+def stage_benchmarks(run_dir: Path, namespace: str, fast_iter: bool, manifest: dict,
+                     force_rerun: bool = False, parallel: int = 1) -> str:
     """Run cluster benchmarks. Returns overall_verdict string."""
     step(2, f"Cluster Benchmarks (fast_iteration={fast_iter})")
 
@@ -655,51 +756,74 @@ def stage_benchmarks(run_dir: Path, namespace: str, fast_iter: bool, force_rerun
     phases_to_run = ([] if fast_iter else ["noise"]) + ["baseline", "treatment"]
     bench_state_file = workspace_dir / "benchmark_state.json"
 
-    for phase in phases_to_run:
-        # Skip or re-run if already done
-        skip, msg = _should_skip_phase(
-            phase, bench_state_file,
-            force_rerun=force_rerun,
-            interactive=sys.stdin.isatty(),
-            results_path=run_dir / f"deploy_{phase}_results.json",
-        )
-        if skip:
-            info(msg)
-            continue
-        if msg:
-            info(msg)
-        _clear_phase_state(phase, bench_state_file)  # no-op if file absent
+    _gpu_warning(parallel, run_dir / "prepare_tekton" / "values.yaml")
+    info(f"Running {len(phases_to_run)} phase(s) with --parallel {parallel}: {phases_to_run}")
 
-        if phase == "noise":
-            _run_noise_phase(run_dir, namespace, workspace_dir)
-        else:
-            # Pre-flight
-            result = run(
-                [VENV_PYTHON, CLI, "preflight",
-                 "--phase", phase,
-                 "--values", str(run_dir / "prepare_tekton" / "values.yaml"),
-                 "--namespace", namespace],
-                check=False, capture=True, cwd=REPO_ROOT,
+    if parallel <= 1:
+        # Sequential mode: preserves interactive skip prompts
+        for phase in phases_to_run:
+            skip, msg = _should_skip_phase(
+                phase, bench_state_file,
+                force_rerun=force_rerun,
+                interactive=sys.stdin.isatty(),
+                results_path=run_dir / f"deploy_{phase}_results.json",
             )
-            if result.returncode != 0:
-                err(f"Preflight failed for {phase}")
-                sys.exit(1)
+            if skip:
+                info(msg)
+                continue
+            if msg:
+                info(msg)
+            _clear_phase_state(phase, bench_state_file)
 
-            pipelinecurrent_run = f"sim2real-{phase}-{int(time.time())}"
-            _run_pipeline_phase(phase, pipelinecurrent_run, namespace, run_dir)
-            _extract_phase_results(phase, namespace, run_dir)
+            if phase == "noise":
+                _run_noise_phase(run_dir, namespace, workspace_dir)
+            else:
+                result = run(
+                    _preflight_cmd(phase, str(run_dir / "prepare_tekton" / "values.yaml"),
+                                   namespace, manifest),
+                    check=False, capture=True, cwd=REPO_ROOT,
+                )
+                if result.returncode != 0:
+                    err(f"Preflight failed for {phase}")
+                    sys.exit(1)
+                pipelinecurrent_run = f"sim2real-{phase}-{int(time.time())}"
+                _run_pipeline_phase(phase, pipelinecurrent_run, namespace, run_dir)
+                _extract_phase_results(phase, namespace, run_dir)
+    else:
+        # Parallel mode: ThreadPoolExecutor dispatches up to N phases concurrently
+        with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as pool:
+            futures = {
+                pool.submit(
+                    _run_single_phase, phase, run_dir, namespace,
+                    workspace_dir, bench_state_file, force_rerun,
+                    manifest,
+                ): phase
+                for phase in phases_to_run
+            }
+            for future in concurrent.futures.as_completed(futures):
+                phase = futures[future]
+                try:
+                    _, status = future.result()
+                    info(f"[{phase}] finished: {status}")
+                except PhaseError as exc:
+                    err(f"[{phase}] {exc}")
+                    # Cancel remaining futures and exit
+                    for f in futures:
+                        f.cancel()
+                    sys.exit(1)
 
     # ── Mechanism check (full mode only) ─────────────────────────────────────
     if not fast_iter:
         step("2a", "Mechanism check")
         bench_out = run_dir / "deploy_benchmark_output.json"
+        workloads_dir = REPO_ROOT / manifest["algorithm"]["experiment_dir"] / manifest["algorithm"]["workloads"]
         result = run(
             [VENV_PYTHON, CLI, "benchmark",
              "--noise", str(run_dir / "deploy_noise_results.json"),
              "--baseline", str(run_dir / "deploy_baseline_results.json"),
              "--treatment", str(run_dir / "deploy_treatment_results.json"),
              "--signal-coverage", str(run_dir / "prepare_signal_coverage.json"),
-             "--workloads-dir", str(REPO_ROOT / "blis_router/workloads/"),
+             "--workloads-dir", str(workloads_dir),
              "--out", str(bench_out)],
             check=False, capture=True, cwd=REPO_ROOT,
         )
@@ -753,17 +877,17 @@ def stage_benchmarks(run_dir: Path, namespace: str, fast_iter: bool, force_rerun
 
 # ── Stage 3: PR creation ──────────────────────────────────────────────────────
 
-def stage_pr(run_dir: Path) -> str | None:
-    """Create PR in llm-d-inference-scheduler. Returns PR URL, or None if skipped."""
+def stage_pr(run_dir: Path, manifest: dict) -> str | None:
+    """Create PR in target repository. Returns PR URL, or None if skipped."""
     step(3, "PR Creation")
 
     # Fast-iteration guard (pipeline.fast_iteration=true means no PR)
     try:
         import yaml
-        cfg = yaml.safe_load((REPO_ROOT / "config" / "env_defaults.yaml").read_text())
+        cfg = yaml.safe_load((REPO_ROOT / manifest["config"]["env_defaults"]).read_text())
         fast_iter = bool(cfg.get("pipeline", {}).get("fast_iteration", True))
     except Exception as e:
-        err(f"Cannot read config/env_defaults.yaml: {e}")
+        err(f"Cannot read {manifest['config']['env_defaults']}: {e}")
         sys.exit(1)
 
     if fast_iter:
@@ -813,31 +937,31 @@ def stage_pr(run_dir: Path) -> str | None:
         err("gh auth check failed — run 'gh auth login' and retry")
         sys.exit(1)
 
-    # Push branch to llm-d-inference-scheduler
+    # Push branch to target repository
     alg_name = json.loads((run_dir / "prepare_algorithm_summary.json").read_text())["algorithm_name"]
     branch = f"transfer/{alg_name}"
-    scheduler_dir = REPO_ROOT / "llm-d-inference-scheduler"
+    target_dir = REPO_ROOT / manifest["target"]["repo"]
 
     result = run(
         ["git", "ls-remote", "--exit-code", "--heads", "origin", branch],
-        check=False, capture=True, cwd=scheduler_dir,
+        check=False, capture=True, cwd=target_dir,
     )
     if result.returncode == 0:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         branch = f"{branch}-{timestamp}"
         warn(f"Branch already exists — using timestamped branch: {branch}")
 
-    run(["git", "checkout", "-b", branch], cwd=scheduler_dir)
-    run(["git", "add", "-A"], cwd=scheduler_dir)
-    result = run(["git", "diff", "--cached", "--quiet"], check=False, cwd=scheduler_dir)
+    run(["git", "checkout", "-b", branch], cwd=target_dir)
+    run(["git", "add", "-A"], cwd=target_dir)
+    result = run(["git", "diff", "--cached", "--quiet"], check=False, cwd=target_dir)
     if result.returncode != 0:
         # There are staged changes to commit
         run(["git", "commit", "-m",
-             f"feat: add {alg_name} scorer plugin (sim2real transfer)"],
-            cwd=scheduler_dir)
+             f"feat: add {alg_name} {manifest['target']['package']} plugin (sim2real transfer)"],
+            cwd=target_dir)
     else:
-        warn("No changes to commit in llm-d-inference-scheduler — pushing branch as-is")
-    result = run(["git", "push", "-u", "origin", branch], check=False, capture=True, cwd=scheduler_dir)
+        warn(f"No changes to commit in {manifest['target']['repo']} — pushing branch as-is")
+    result = run(["git", "push", "-u", "origin", branch], check=False, capture=True, cwd=target_dir)
     if result.returncode != 0:
         err(f"git push failed for branch {branch}")
         sys.exit(1)
@@ -856,8 +980,12 @@ def stage_pr(run_dir: Path) -> str | None:
     ok("Calibration log appended")
 
     # Create PR
-    suite_a_tau = val.get("suite_a", {}).get("kendall_tau", "N/A")
-    suite_c_pass = str(val.get("suite_c", {}).get("passed", False)).lower()
+    equiv_entries = val.get("equivalence", {})
+    equiv_lines = []
+    for ename, edata in equiv_entries.items():
+        status = "pass" if edata.get("passed") else "fail"
+        equiv_lines.append(f"- {ename}: `{status}`")
+    equiv_summary = "\n".join(equiv_lines) if equiv_lines else "- (none)"
     mech = val.get("benchmark", {}).get("mechanism_check_verdict", "N/A")
     evidence = evidence_path.read_text()
 
@@ -866,8 +994,7 @@ def stage_pr(run_dir: Path) -> str | None:
 Sim-to-production transfer: `{alg_name}`
 
 **Validation:**
-- Suite A Kendall-tau: `{suite_a_tau}` (threshold: 0.8)
-- Suite C concurrent safety: `{suite_c_pass}`
+{equiv_summary}
 - Mechanism check: `{mech}`
 - Overall verdict: `{verdict}`
 
@@ -877,7 +1004,7 @@ Sim-to-production transfer: `{alg_name}`
 
 ## Rollback
 
-To disable: in EndpointPickerConfig, set `parameters.enabled: false` on the blis-weighted-scorer plugin entry.
+To disable: Disable the {alg_name} plugin in the treatment config.
 """
 
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
@@ -887,11 +1014,11 @@ To disable: in EndpointPickerConfig, set `parameters.enabled: false` on the blis
     try:
         result = run(
             ["gh", "pr", "create",
-             "--title", f"feat(scorer): add {alg_name} sim-to-production scorer plugin",
+             "--title", f"feat({manifest['target']['package']}): add {alg_name} sim-to-production plugin",
              "--base", "main",
              "--head", branch,
              "--body-file", body_file],
-            check=False, capture=True, cwd=scheduler_dir,
+            check=False, capture=True, cwd=target_dir,
         )
         if result.returncode != 0:
             err(f"gh pr create failed. Branch '{branch}' is already pushed — create PR manually.")
@@ -900,7 +1027,7 @@ To disable: in EndpointPickerConfig, set `parameters.enabled: false` on the blis
         Path(body_file).unlink(missing_ok=True)
 
     pr_url_result = run(["gh", "pr", "view", "--json", "url", "-q", ".url"],
-                        check=False, capture=True, cwd=scheduler_dir)
+                        check=False, capture=True, cwd=target_dir)
     pr_url = pr_url_result.stdout.strip()
     ok(f"PR created: {pr_url}")
     return pr_url
@@ -912,16 +1039,24 @@ def main() -> int:
     args = build_parser().parse_args()
     print(_c("36", "\n━━━ sim2real-deploy ━━━\n"))
 
+    # Load manifest
+    from lib.manifest import load_manifest, ManifestError
+    try:
+        manifest = load_manifest(args.manifest)
+    except ManifestError as e:
+        err(f"Manifest error: {e}")
+        sys.exit(1)
+
     cfg, current_run, run_dir = load_setup_config()
     namespace = os.environ.get("NAMESPACE", cfg["namespace"])
 
     update_run_metadata(run_dir, status="in_progress",
                         started_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
-    scorer_file, fast_iter = check_prerequisites(run_dir)
+    plugin_file, fast_iter = check_prerequisites(run_dir, manifest)
 
     if not args.skip_build_epp:
-        full_image = stage_build_epp(run_dir, current_run, namespace)
+        full_image = stage_build_epp(run_dir, current_run, namespace, manifest)
     else:
         meta = json.loads((run_dir / "run_metadata.json").read_text())
         full_image = meta.get("epp_image", "")
@@ -930,11 +1065,12 @@ def main() -> int:
             sys.exit(1)
         info(f"Skipping EPP build. Using image: {full_image}")
 
-    verdict = stage_benchmarks(run_dir, namespace, fast_iter, args.force_rerun)
+    verdict = stage_benchmarks(run_dir, namespace, fast_iter, manifest, args.force_rerun,
+                               parallel=args.parallel)
 
     pr_url = None
     if args.pr:
-        pr_url = stage_pr(run_dir)
+        pr_url = stage_pr(run_dir, manifest)
 
     update_run_metadata(run_dir,
                         status="completed",

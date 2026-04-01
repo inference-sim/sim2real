@@ -5,18 +5,19 @@ import json
 import sys
 
 
-def build_request(model: str, scorer_code: str, algorithm_summary: str,
-                  signal_coverage: str, evolve_block: str, round_num: int) -> str:
+def build_request(model: str, plugin_code: str, algorithm_summary: str,
+                  signal_coverage: str, evolve_block: str, round_num: int,
+                  extra_context: str = "") -> str:
     """Return JSON string for a /v1/chat/completions request."""
     system_prompt = (
-        "You are a technical reviewer verifying that a generated Go scorer plugin "
+        "You are a technical reviewer verifying that a generated Go plugin "
         "faithfully implements an evolved routing algorithm. You will receive:\n"
-        "1. The generated scorer Go code\n"
+        "1. The generated plugin Go code\n"
         "2. The algorithm summary (extracted metadata)\n"
         "3. The signal coverage mapping (sim signals → production equivalents)\n"
         "4. The original EVOLVE-BLOCK source (the ground truth)\n\n"
         "For EACH signal in the signal coverage, verify:\n"
-        "- The scorer reads the correct production field\n"
+        "- The plugin reads the correct production field\n"
         "- Normalization matches the algorithm summary\n"
         "- The weight/coefficient matches the EVOLVE-BLOCK\n"
         "- The scoring logic (comparison, threshold, combination) is faithful\n\n"
@@ -34,11 +35,13 @@ def build_request(model: str, scorer_code: str, algorithm_summary: str,
 
     user_content = (
         f"## Round {round_num}\n\n"
-        f"## Generated Scorer Code\n```go\n{scorer_code}\n```\n\n"
+        f"## Generated Plugin Code\n```go\n{plugin_code}\n```\n\n"
         f"## Algorithm Summary\n```json\n{algorithm_summary}\n```\n\n"
         f"## Signal Coverage\n```json\n{signal_coverage}\n```\n\n"
         f"## EVOLVE-BLOCK Source\n```go\n{evolve_block}\n```\n"
     )
+    if extra_context:
+        user_content += f"\n## System Context (for reviewer)\n{extra_context}\n"
 
     request = {
         "model": model,
@@ -54,23 +57,42 @@ def build_request(model: str, scorer_code: str, algorithm_summary: str,
 
 def main():
     if len(sys.argv) < 6:
-        print("Usage: build_review_request.py MODEL SCORER_FILE ALGO_FILE SIGNAL_FILE EVOLVE_FILE [ROUND]",
+        print("Usage: build_review_request.py MODEL PLUGIN_FILE ALGO_FILE SIGNAL_FILE EVOLVE_FILE [ROUND]",
               file=sys.stderr)
         sys.exit(1)
 
-    model = sys.argv[1]
-    with open(sys.argv[2]) as f:
-        scorer_code = f.read()
-    with open(sys.argv[3]) as f:
-        algorithm_summary = f.read()
-    with open(sys.argv[4]) as f:
-        signal_coverage = f.read()
-    with open(sys.argv[5]) as f:
-        evolve_block = f.read()
-    round_num = int(sys.argv[6]) if len(sys.argv) > 6 else 1
+    import argparse as _ap
+    parser = _ap.ArgumentParser()
+    parser.add_argument("model")
+    parser.add_argument("plugin_file")
+    parser.add_argument("algo_file")
+    parser.add_argument("signal_file")
+    parser.add_argument("evolve_file")
+    parser.add_argument("round_num", nargs="?", type=int, default=1)
+    parser.add_argument("--extra-context", default="", metavar="FILE",
+                        help="Path to extra context file to append to reviewer prompt")
+    args = parser.parse_args()
 
-    print(build_request(model, scorer_code, algorithm_summary,
-                        signal_coverage, evolve_block, round_num))
+    with open(args.plugin_file) as f:
+        plugin_code = f.read()
+    with open(args.algo_file) as f:
+        algorithm_summary = f.read()
+    with open(args.signal_file) as f:
+        signal_coverage = f.read()
+    with open(args.evolve_file) as f:
+        evolve_block = f.read()
+
+    extra_context = ""
+    if args.extra_context:
+        try:
+            with open(args.extra_context) as f:
+                extra_context = f.read()
+        except OSError:
+            pass
+
+    print(build_request(args.model, plugin_code, algorithm_summary,
+                        signal_coverage, evolve_block, args.round_num,
+                        extra_context=extra_context))
 
 
 if __name__ == "__main__":

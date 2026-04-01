@@ -89,8 +89,12 @@ kubectl run source-copy --image=busybox --restart=Never \
 info "Waiting for source-copy pod..."
 kubectl wait pod/source-copy --for=condition=Ready -n "${NAMESPACE}" --timeout=120s
 
+info "Cleaning stale source on PVC..."
+kubectl exec source-copy -n "${NAMESPACE}" -- sh -c "rm -rf /workspace/source/${RUN_NAME}"
+
 info "Uploading source (this may take a minute)..."
-kubectl cp "${SCHEDULER_DIR}/" "${NAMESPACE}/source-copy:/workspace/source/"
+kubectl exec source-copy -n "${NAMESPACE}" -- mkdir -p "/workspace/source/${RUN_NAME}"
+kubectl cp "${SCHEDULER_DIR}/" "${NAMESPACE}/source-copy:/workspace/source/${RUN_NAME}/llm-d-inference-scheduler"
 ok "Source uploaded"
 
 kubectl delete pod source-copy --namespace "${NAMESPACE}" --force --grace-period=0 2>/dev/null || true
@@ -119,9 +123,9 @@ spec:
         - build
         - --frontend=dockerfile.v0
         - --local
-        - context=/workspace/source/llm-d-inference-scheduler
+        - context=/workspace/source/${RUN_NAME}/llm-d-inference-scheduler
         - --local
-        - dockerfile=/workspace/source/llm-d-inference-scheduler
+        - dockerfile=/workspace/source/${RUN_NAME}/llm-d-inference-scheduler
         - --opt
         - filename=Dockerfile.epp
         - --opt

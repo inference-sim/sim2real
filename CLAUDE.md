@@ -155,7 +155,7 @@ python tools/transfer_cli.py merge-values \
   --algorithm workspace/tekton/algorithm_values.yaml \
   --out workspace/tekton/values.yaml
 ```
-Deep-merges algorithm values over env defaults. `gaie.shared.helmValues` (connection pool, provider, flags) is flattened into both `gaie.baseline` and `gaie.treatment` phases; `gaie.shared` is removed from the output. Lists are replaced (not appended). The merged `workspace/tekton/values.yaml` is what `compile-pipeline` consumes — same shape as before the split.
+Deep-merges algorithm values over env defaults. `gaie.shared.helmValues` (connection pool, provider, flags) is flattened into both `gaie.baseline` and `gaie.treatment` phases; `gaie.shared` is removed from the output. Lists of scalars are replaced entirely. Lists of dicts are merged using a three-tier strategy: named-key merge (by `name`, `mountPath`, or `containerPort`) when all items share a key field; positional deep-merge otherwise. An explicit `[]` in the overlay clears the base list. The merged `workspace/tekton/values.yaml` is what `compile-pipeline` consumes — same shape as before the split.
 
 **Override flow:** If the user specifies a non-default infrastructure option at Stage 3 prompt time (e.g., "use kgateway"), apply the override by editing `config/env_defaults.yaml` before running merge-values. The override persists for future runs.
 

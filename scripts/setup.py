@@ -354,10 +354,10 @@ def test_registry_push(registry: str, repo_name: str, container_rt: str,
 
 def create_registry_secret(args: argparse.Namespace, namespace: str,
                             container_rt: str) -> tuple[str, str]:
-    step(10, "Configuring container registry for treatment EPP image")
+    step(10, "Configuring container registry for custom EPP image")
     print()
-    info("The pipeline compiles your scorer plugin into a treatment EPP image using")
-    info("BuildKit running inside the cluster (faster than a local build, and avoids")
+    info("The pipeline builds a custom EPP image (with your plugin) using BuildKit")
+    info("running inside the cluster (faster than a local build, and avoids")
     info("cross-architecture issues on arm64 laptops targeting amd64 clusters).")
     info("The built image is pushed to your registry and pulled back by the cluster")
     info("for benchmarking. You need push access to a registry the cluster can also pull from.")

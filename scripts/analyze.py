@@ -255,11 +255,29 @@ def main_with_args(argv: "list[str] | None" = None) -> int:
     )
     p.add_argument("--run", metavar="NAME",
                    help="Run name (default: from workspace/setup_config.json)")
+    p.add_argument("--manifest", type=Path, default=REPO_ROOT / "config/transfer.yaml",
+                   help="Path to transfer.yaml manifest")
     args = p.parse_args(argv)
+
+    # Load manifest
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    from lib.manifest import load_manifest, ManifestError
+    try:
+        manifest = load_manifest(args.manifest)
+    except ManifestError as e:
+        print(f"Manifest error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     workspace_dir = REPO_ROOT / "workspace"
     current_run, run_dir = resolve_run(args, workspace_dir)
     baseline, treatment, validation = load_artifacts(run_dir)
+
+    # Handle custom_evaluator mode — skip chart generation
+    if manifest["validation"]["mode"] == "custom_evaluator":
+        print("Custom evaluator mode — chart generation skipped")
+        print_comparison_table(run_dir)
+        print_summary(current_run, validation)
+        return 0
 
     charts_dir = run_dir / "results_charts"
     charts_dir.mkdir(parents=True, exist_ok=True)

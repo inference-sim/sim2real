@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Multi-model translation review orchestrator.
 
-Sends generated scorer code to multiple LLM models for independent
+Sends generated plugin code to multiple LLM models for independent
 consistency review against the original EVOLVE-BLOCK algorithm.
 
 Usage:
-    review_translation.py --scorer FILE --algorithm FILE --signals FILE \
+    review_translation.py --plugin FILE --algorithm FILE --signals FILE \
         --evolve-block FILE --rounds N --out FILE
 
 Environment:
@@ -144,14 +144,14 @@ def extract_json_from_content(content):
     return None
 
 
-def call_model(model, scorer_file, algo_file, signal_file, evolve_file,
-               round_num, api_key, base_url):
+def call_model(model, plugin_file, algo_file, signal_file, evolve_file,
+               round_num, api_key, base_url, extra_context=""):
     """Call a single model and return parsed review JSON."""
-    result = subprocess.run(
-        ["python3", str(BUILD_REQUEST), model, scorer_file, algo_file,
-         signal_file, evolve_file, str(round_num)],
-        capture_output=True, text=True
-    )
+    cmd = ["python3", str(BUILD_REQUEST), model, plugin_file, algo_file,
+           signal_file, evolve_file, str(round_num)]
+    if extra_context:
+        cmd += ["--extra-context", extra_context]
+    result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         print(f"{RED}[ERROR]{NC} Failed to build request for {model}: {result.stderr}",
               file=sys.stderr)
@@ -209,10 +209,12 @@ def run_review_round(round_num, args, api_key, base_url):
     """Run one round of reviews across all models. Return list of reviews."""
     print(f"\n{BLUE}━━━ Review Round {round_num}/{args.rounds} ━━━{NC}")
     reviews = []
+    extra_context = getattr(args, "extra_context", "") or ""
     for model in MODELS:
         print(f"  Reviewing with {model}...", end=" ", flush=True)
-        review = call_model(model, args.scorer, args.algorithm, args.signals,
-                            args.evolve_block, round_num, api_key, base_url)
+        review = call_model(model, args.plugin, args.algorithm, args.signals,
+                            args.evolve_block, round_num, api_key, base_url,
+                            extra_context=extra_context)
         if review is None:
             print(f"{RED}FAILED{NC}")
             reviews.append({
@@ -227,8 +229,6 @@ def run_review_round(round_num, args, api_key, base_url):
             reviews.append(review)
         else:
             print(f"{YELLOW}INCONSISTENT{NC}")
-            for issue in review.get("issues", []):
-                print(f"    - {issue}")
             reviews.append(review)
     return reviews
 
@@ -240,15 +240,19 @@ def check_consensus(reviews):
 
 def main():
     parser = argparse.ArgumentParser(description="Multi-model translation review")
-    parser.add_argument("--scorer", required=True, help="Path to generated scorer .go file")
+    parser.add_argument("--plugin", "--scorer", dest="plugin", required=True,
+                        help="Path to generated plugin .go file")
     parser.add_argument("--algorithm", required=True, help="Path to algorithm_summary.json")
     parser.add_argument("--signals", required=True, help="Path to signal_coverage.json")
     parser.add_argument("--evolve-block", required=True, help="Path to EVOLVE-BLOCK source")
     parser.add_argument("--rounds", type=int, default=2, help="Number of review rounds (default: 2)")
     parser.add_argument("--out", required=True, help="Output path for translation_reviews.json")
+    parser.add_argument("--extra-context", default="", metavar="FILE",
+                        dest="extra_context",
+                        help="Path to extra context file to append to each reviewer prompt")
     args = parser.parse_args()
 
-    for path_attr in ("scorer", "algorithm", "signals", "evolve_block"):
+    for path_attr in ("plugin", "algorithm", "signals", "evolve_block"):
         path = getattr(args, path_attr)
         if not os.path.isfile(path):
             print(f"{RED}[ERROR]{NC} File not found: {path}", file=sys.stderr)
@@ -284,7 +288,7 @@ def main():
             print(f"\n{YELLOW}Issues to fix before round {round_num + 1}:{NC}")
             for issue in all_issues:
                 print(f"  - {issue}")
-            print(f"\n{YELLOW}FIX_NEEDED: Apply fixes to the scorer, then re-run this script.{NC}")
+            print(f"\n{YELLOW}FIX_NEEDED: Apply fixes to the plugin, then re-run this script.{NC}")
             partial = {
                 "rounds": all_rounds,
                 "final_verdict": "pending",
