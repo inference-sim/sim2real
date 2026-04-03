@@ -34,10 +34,10 @@ target:
 
 # ─── LLM Context Documents ──────────────────────────────────────────────────
 # NOTE: These files must be created before running the pipeline.
-#   - docs/transfer/blis_to_llmd_admission_mapping.md
+#   - docs/transfer/blis_to_llmd_mapping.md
 #   - docs/transfer/admission_template.go.md
 context:
-  mapping: docs/transfer/blis_to_llmd_admission_mapping.md
+  mapping: docs/transfer/blis_to_llmd_mapping.md
   template: docs/transfer/admission_template.go.md
   examples: []
   extra:

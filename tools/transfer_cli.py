@@ -1206,6 +1206,8 @@ def _default_benchmark_state(algorithm_name: str, namespace: str, context: str) 
         "status": "pending", "pipelinerun_name": None,
         "submitted_at": None, "completed_at": None,
         "results_local_path": None, "failure_reason": None,
+        "run_name": None,
+        "workloads": {},
     }
     return {
         "schema_version": 1,
@@ -1297,6 +1299,21 @@ def cmd_benchmark_state(args: "argparse.Namespace") -> int:
                     file=sys.stderr,
                 )
                 return 2
+        # Migrate old state files: add workloads map and run_name if missing
+        migrated = False
+        for ph in _PHASE_ORDER:
+            if "workloads" not in state["phases"][ph]:
+                state["phases"][ph]["workloads"] = {}
+                migrated = True
+            if "run_name" not in state["phases"][ph]:
+                state["phases"][ph]["run_name"] = None
+                migrated = True
+        if migrated:
+            try:
+                state_path.write_text(json.dumps(state, indent=2))
+            except OSError as e:
+                print(f"ERROR: cannot write {state_path}: {e}", file=sys.stderr)
+                return 2
 
     # ---- context guard (read-only calls) ----
     if not getattr(args, "set_phase", None):
@@ -1327,8 +1344,11 @@ def cmd_benchmark_state(args: "argparse.Namespace") -> int:
         return 2
     current_status = state["phases"][phase]["status"]
 
-    # status regression guard
-    if not getattr(args, "force", False):
+    # Guards below apply only to phase-level status changes (not per-workload updates)
+    _workload_scoped = bool(getattr(args, "workload", None))
+
+    # status regression guard (phase-level only)
+    if not _workload_scoped and not getattr(args, "force", False):
         if current_status == "done" and new_status in ("pending", "running"):
             print(
                 f"ERROR: cannot regress phase '{phase}' from 'done' to '{new_status}'. "
@@ -1336,8 +1356,8 @@ def cmd_benchmark_state(args: "argparse.Namespace") -> int:
             )
             return 2
 
-    # ordering guard
-    if new_status == "running" and not getattr(args, "force", False):
+    # ordering guard (phase-level only)
+    if not _workload_scoped and new_status == "running" and not getattr(args, "force", False):
         idx = _PHASE_ORDER.index(phase)
         if idx > 0:
             prev = _PHASE_ORDER[idx - 1]
@@ -1350,19 +1370,42 @@ def cmd_benchmark_state(args: "argparse.Namespace") -> int:
                 )
                 return 1
 
-    state["phases"][phase]["status"] = new_status
-    if getattr(args, "pipelinerun", None):
-        state["phases"][phase]["pipelinerun_name"] = args.pipelinerun
-        state["phases"][phase]["submitted_at"] = (
-            datetime.now(timezone.utc).isoformat(timespec="seconds")
-        )
-    if getattr(args, "results", None):
-        state["phases"][phase]["results_local_path"] = args.results
-        state["phases"][phase]["completed_at"] = (
-            datetime.now(timezone.utc).isoformat(timespec="seconds")
-        )
-    if getattr(args, "failure_reason", None):
-        state["phases"][phase]["failure_reason"] = args.failure_reason
+    # set run_name at phase level (no --workload required)
+    if getattr(args, "run_name", None):
+        state["phases"][phase]["run_name"] = args.run_name
+
+    # per-workload update (--workload scopes the update)
+    if _workload_scoped:
+        workload = args.workload
+        wl_entry = state["phases"][phase].setdefault("workloads", {}).setdefault(workload, {
+            "status": "pending", "pipelinerun_name": None,
+            "submitted_at": None, "completed_at": None,
+            "results_local_path": None, "failure_reason": None,
+        })
+        wl_entry["status"] = new_status
+        if getattr(args, "pipelinerun", None):
+            wl_entry["pipelinerun_name"] = args.pipelinerun
+            wl_entry["submitted_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        if getattr(args, "results", None):
+            wl_entry["results_local_path"] = args.results
+            wl_entry["completed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        if getattr(args, "failure_reason", None):
+            wl_entry["failure_reason"] = args.failure_reason
+    else:
+        # phase-level update (existing logic)
+        state["phases"][phase]["status"] = new_status
+        if getattr(args, "pipelinerun", None):
+            state["phases"][phase]["pipelinerun_name"] = args.pipelinerun
+            state["phases"][phase]["submitted_at"] = (
+                datetime.now(timezone.utc).isoformat(timespec="seconds")
+            )
+        if getattr(args, "results", None):
+            state["phases"][phase]["results_local_path"] = args.results
+            state["phases"][phase]["completed_at"] = (
+                datetime.now(timezone.utc).isoformat(timespec="seconds")
+            )
+        if getattr(args, "failure_reason", None):
+            state["phases"][phase]["failure_reason"] = args.failure_reason
 
     try:
         state_path.write_text(json.dumps(state, indent=2))
@@ -2946,6 +2989,10 @@ def main():
     p_bstate.add_argument("--results")
     p_bstate.add_argument("--failure-reason", dest="failure_reason")
     p_bstate.add_argument("--force", action="store_true")
+    p_bstate.add_argument("--workload", dest="workload", default=None,
+                          help="Workload name for per-workload status update")
+    p_bstate.add_argument("--run-name", dest="run_name", default=None,
+                          help="Shared run name for this phase invocation (PVC results path)")
     p_bstate.set_defaults(func=cmd_benchmark_state)
 
     p_cp = subparsers.add_parser("compile-pipeline",
