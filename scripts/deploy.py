@@ -38,7 +38,7 @@ def _preflight_cmd(phase: str, values_path: str, namespace: str,
     if manifest:
         helm_path = manifest.get("config", {}).get("helm_path")
         if helm_path:
-            cmd += ["--helm-path", helm_path]
+            cmd += ["--helm-path", f"stack.{helm_path}"]
         # Use first test command as build check (e.g. ["go", "build", "./..."])
         test_cmds = manifest.get("target", {}).get("test_commands", [])
         if test_cmds:
@@ -177,7 +177,7 @@ def _clear_phase_state(phase: str, bench_state_file: Path) -> None:
         return
     state = json.loads(bench_state_file.read_text())
     phase_dict = state.get("phases", {}).get(phase, {})
-    phase_dict.pop("status", None)
+    phase_dict["status"] = "pending"
     phase_dict.pop("results_path", None)
     bench_state_file.write_text(json.dumps(state, indent=2))
 
@@ -524,8 +524,31 @@ spec:
     ok(f"{phase} PipelineRun succeeded: {pipelinecurrent_run}")
 
 
-def _extract_phase_results(phase: str, namespace: str, run_dir: Path) -> Path:
+def _reorganize_noise_results(staging: Path, dest: Path, n_runs: int) -> None:
+    """Convert staging/run-{i}/{wl_name}/ → dest/{wl_name}/run-{i}/ for convert-trace."""
+    import shutil
+    for i in range(n_runs):
+        run_stage = staging / f"run-{i}"
+        if not run_stage.is_dir():
+            continue
+        for wl_dir in sorted(run_stage.iterdir()):
+            if not wl_dir.is_dir():
+                continue
+            run_dest = dest / wl_dir.name / f"run-{i}"
+            run_dest.mkdir(parents=True, exist_ok=True)
+            for f in wl_dir.iterdir():
+                shutil.copy2(f, run_dest / f.name)
+
+
+def _extract_phase_results(phase: str, namespace: str, run_dir: Path,
+                            experiment_ids: list[str] | None = None) -> Path:
     """Extract results from cluster data-pvc via extractor pod.
+
+    experiment_ids: list of PipelineRun experiment IDs written to the PVC.
+      - Baseline/treatment: single-element list → copies {phase}/{id}/ directly.
+      - Noise: multi-element list → copies each {phase}/{id}/ into a staging area,
+        then reorganizes into {wl_name}/run-{i}/ shape for convert-trace.
+      - None: legacy fallback, copies the entire {phase}/ directory.
 
     Returns path to validated results JSON.
     """
@@ -558,15 +581,51 @@ def _extract_phase_results(phase: str, namespace: str, run_dir: Path) -> Path:
 
     raw_dir = run_dir / f"deploy_{phase}_log"
     raw_dir.mkdir(parents=True, exist_ok=True)
-    result = run(
-        ["kubectl", "cp", f"{namespace}/{pod_name}:/data/{phase}/", str(raw_dir), "--retries=3"],
-        check=False, capture=True,
-    )
+
+    if experiment_ids and len(experiment_ids) > 1:
+        # Noise: copy each run into a staging subdir, then reorganize for convert-trace
+        staging = raw_dir / "_stage"
+        staging.mkdir(exist_ok=True)
+        for i, exp_id in enumerate(experiment_ids):
+            run_stage = staging / f"run-{i}"
+            run_stage.mkdir(exist_ok=True)
+            result = run(
+                ["kubectl", "cp",
+                 f"{namespace}/{pod_name}:/data/{phase}/{exp_id}/",
+                 str(run_stage), "--retries=3"],
+                check=False, capture=True,
+            )
+            if result.returncode != 0:
+                run(["kubectl", "delete", "pod", pod_name, "-n", namespace,
+                     "--ignore-not-found", "--force", "--grace-period=0"],
+                    check=False, capture=True)
+                raise PhaseError(f"kubectl cp failed for {phase} run {i} ({exp_id})")
+    elif experiment_ids:
+        # Baseline/treatment: single run-specific subdirectory
+        result = run(
+            ["kubectl", "cp",
+             f"{namespace}/{pod_name}:/data/{phase}/{experiment_ids[0]}/",
+             str(raw_dir), "--retries=3"],
+            check=False, capture=True,
+        )
+    else:
+        # Legacy fallback: copy entire phase directory
+        result = run(
+            ["kubectl", "cp", f"{namespace}/{pod_name}:/data/{phase}/", str(raw_dir), "--retries=3"],
+            check=False, capture=True,
+        )
+
     run(["kubectl", "delete", "pod", pod_name, "-n", namespace,
          "--ignore-not-found", "--force", "--grace-period=0"],
         check=False, capture=True)
-    if result.returncode != 0:
+
+    # For single-ID and legacy paths, check result here (multi-ID checked inside the loop)
+    if not (experiment_ids and len(experiment_ids) > 1) and result.returncode != 0:
         raise PhaseError(f"kubectl cp failed for {phase}")
+
+    if experiment_ids and len(experiment_ids) > 1:
+        # Reorganize noise staging into wl_name/run-{i}/ structure for convert-trace
+        _reorganize_noise_results(staging, raw_dir, len(experiment_ids))
 
     # Collect vLLM decode pod logs
     log_result = run(
@@ -621,6 +680,7 @@ def _run_noise_phase(run_dir: Path, namespace: str, workspace_dir: Path) -> None
     noise_runs = values.get("observe", {}).get("noise_runs", 3)
     info(f"Running {noise_runs} noise characterization run(s)...")
 
+    noise_experiment_ids: list[str] = []
     for i in range(noise_runs):
         pipelinecurrent_run = f"sim2real-noise-run{i}-{int(time.time())}"
         info(f"Noise run {i} of {noise_runs - 1}: {pipelinecurrent_run}")
@@ -643,9 +703,10 @@ def _run_noise_phase(run_dir: Path, namespace: str, workspace_dir: Path) -> None
                 raise PhaseError("Preflight failed for noise phase")
 
         _run_pipeline_phase("noise", pipelinecurrent_run, namespace, run_dir, run_index=i)
+        noise_experiment_ids.append(pipelinecurrent_run)
 
-    # Extract all noise runs at once via a single extractor pod
-    _extract_phase_results("noise", namespace, run_dir)
+    # Extract all noise runs at once via a single extractor pod, reorganized for convert-trace
+    _extract_phase_results("noise", namespace, run_dir, experiment_ids=noise_experiment_ids)
     ok(f"Noise characterization complete: {run_dir / 'deploy_noise_results.json'}")
 
 
@@ -714,7 +775,7 @@ def _run_single_phase(phase: str, run_dir: Path, namespace: str,
         pipelinecurrent_run = f"sim2real-{phase}-{int(time.time())}"
         info(f"[{phase}] Submitting PipelineRun: {pipelinecurrent_run}")
         _run_pipeline_phase(phase, pipelinecurrent_run, namespace, run_dir)
-        _extract_phase_results(phase, namespace, run_dir)
+        _extract_phase_results(phase, namespace, run_dir, experiment_ids=[pipelinecurrent_run])
 
     ok(f"[{phase}] Phase complete")
     return phase, "done"
@@ -739,18 +800,19 @@ def stage_benchmarks(run_dir: Path, namespace: str, fast_iter: bool, manifest: d
         val = _construct_validation_results(equiv, fast_iter=False)
         val_path.write_text(json.dumps(val, indent=2))
 
-        # Initialize benchmark state
-        result = run(
-            [VENV_PYTHON, CLI, "benchmark-state",
-             "--workspace", str(workspace_dir), "--namespace", namespace],
-            check=False, capture=True, cwd=REPO_ROOT,
-        )
-        if result.returncode == 2:
-            err("benchmark-state failed — missing workspace/algorithm_summary.json")
-            sys.exit(1)
-        elif result.returncode != 0:
-            err(f"benchmark-state failed (exit {result.returncode})")
-            sys.exit(1)
+    # Initialize benchmark state (both fast and full mode need this so that
+    # _run_pipeline_phase can update phase status without --namespace)
+    result = run(
+        [VENV_PYTHON, CLI, "benchmark-state",
+         "--workspace", str(workspace_dir), "--namespace", namespace],
+        check=False, capture=True, cwd=REPO_ROOT,
+    )
+    if result.returncode == 2:
+        err("benchmark-state failed — missing workspace/algorithm_summary.json")
+        sys.exit(1)
+    elif result.returncode != 0:
+        err(f"benchmark-state failed (exit {result.returncode})")
+        sys.exit(1)
 
     # ── Run phases ────────────────────────────────────────────────────────────
     phases_to_run = ([] if fast_iter else ["noise"]) + ["baseline", "treatment"]
@@ -788,7 +850,7 @@ def stage_benchmarks(run_dir: Path, namespace: str, fast_iter: bool, manifest: d
                     sys.exit(1)
                 pipelinecurrent_run = f"sim2real-{phase}-{int(time.time())}"
                 _run_pipeline_phase(phase, pipelinecurrent_run, namespace, run_dir)
-                _extract_phase_results(phase, namespace, run_dir)
+                _extract_phase_results(phase, namespace, run_dir, experiment_ids=[pipelinecurrent_run])
     else:
         # Parallel mode: ThreadPoolExecutor dispatches up to N phases concurrently
         with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as pool:
