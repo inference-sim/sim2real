@@ -1342,7 +1342,7 @@ def cmd_benchmark_state(args: "argparse.Namespace") -> int:
     if new_status is None:
         print("ERROR: --status is required when --set-phase is used.", file=sys.stderr)
         return 2
-    current_status = state["phases"][phase]["status"]
+    current_status = state["phases"][phase].get("status")
 
     # Guards below apply only to phase-level status changes (not per-workload updates)
     _workload_scoped = bool(getattr(args, "workload", None))

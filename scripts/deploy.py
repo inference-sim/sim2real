@@ -38,7 +38,7 @@ def _preflight_cmd(phase: str, values_path: str, namespace: str,
     if manifest:
         helm_path = manifest.get("config", {}).get("helm_path")
         if helm_path:
-            cmd += ["--helm-path", helm_path]
+            cmd += ["--helm-path", f"stack.{helm_path}"]
         # Use first test command as build check (e.g. ["go", "build", "./..."])
         test_cmds = manifest.get("target", {}).get("test_commands", [])
         if test_cmds:
@@ -718,7 +718,8 @@ def _restructure_for_convert_trace(raw_dir: Path, phase: str) -> Path:
                 shutil.copytree(str(wl_dir), str(dest), dirs_exist_ok=True)
             else:
                 dest = structured / wl_dir.name
-                shutil.copytree(str(wl_dir), str(dest))
+                dest.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(str(wl_dir), str(dest), dirs_exist_ok=True)
 
     return structured
 
@@ -795,7 +796,9 @@ def _extract_phase_results(phase: str, namespace: str, run_dir: Path) -> Path:
         check=False, capture=True, cwd=REPO_ROOT,
     )
     if result.returncode != 0:
-        raise PhaseError(f"convert-trace failed for {phase}")
+        raise PhaseError(
+            f"convert-trace failed for {phase}:\n{result.stderr or result.stdout}"
+        )
 
     result = run([VENV_PYTHON, CLI, "validate-schema", str(results_path)],
                  check=False, capture=True, cwd=REPO_ROOT)
@@ -930,6 +933,20 @@ def _run_single_phase(phase: str, run_dir: Path, namespace: str,
         )
         _extract_phase_results(phase, namespace, run_dir)
 
+        # ── Post-collection trace audit (non-blocking) ────────────────────────
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from lib.validate_checks import run_post_collection_checks
+            col_report = run_post_collection_checks(phase, run_dir)
+            col_json = json.dumps(col_report.to_dict(), indent=2)
+            (run_dir / f"validate_post_collection_{phase}.json").write_text(col_json)
+            if col_report.failed:
+                warn(f"[{phase}] Post-collection validation FAILED — see validate_post_collection_{phase}.json")
+            else:
+                ok(f"[{phase}] Post-collection validation passed (overall={col_report.overall})")
+        except Exception as e:
+            warn(f"[{phase}] Post-collection validation error (non-blocking): {e}")
+
     ok(f"[{phase}] Phase complete")
     return phase, "done"
 
@@ -966,6 +983,22 @@ def stage_benchmarks(run_dir: Path, namespace: str, fast_iter: bool, manifest: d
         elif result.returncode != 0:
             err(f"benchmark-state failed (exit {result.returncode})")
             sys.exit(1)
+
+    # ── Pre-deploy validation ─────────────────────────────────────────────────
+    info("Pre-deploy validation")
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from lib.validate_checks import run_pre_deploy_checks
+    try:
+        pre_report = run_pre_deploy_checks(run_dir)
+        val_json = json.dumps(pre_report.to_dict(), indent=2)
+        (run_dir / "validate_pre_deploy.json").write_text(val_json)
+        if pre_report.failed:
+            err("Pre-deploy validation FAILED — see validate_pre_deploy.json")
+            sys.exit(1)
+        ok("Pre-deploy validation passed")
+    except FileNotFoundError as e:
+        err(f"Pre-deploy validation error (missing artifact): {e}")
+        sys.exit(2)
 
     # ── Run phases ────────────────────────────────────────────────────────────
     phases_to_run = ([] if fast_iter else ["noise"]) + ["baseline", "treatment"]

@@ -1234,6 +1234,21 @@ def _plugin_type_from_name(name: str, manifest: dict) -> str:
     return t
 
 
+def _plugin_type_from_source(plugin_path: Path) -> str | None:
+    """Read the PluginType constant from a Go source file.
+
+    More reliable than _plugin_type_from_name because it reflects what the
+    plugin actually registers, regardless of file naming conventions.
+    """
+    import re
+    try:
+        text = plugin_path.read_text()
+    except OSError:
+        return None
+    m = re.search(r'PluginType\s*=\s*"([^"]+)"', text)
+    return m.group(1) if m else None
+
+
 def _write_plugin_files(response: str, algo_summary: dict, manifest: dict) -> tuple[Path, Path]:
     """Parse code blocks from response and write plugin + test files."""
     plugin_dir = REPO_ROOT / manifest["target"]["repo"] / manifest["target"]["plugin_dir"]
@@ -1427,6 +1442,37 @@ def _generate_algorithm_values(algo_summary: dict, signal_coverage: dict,
     # Apply treatment config to nested path via manifest
     helm_path = manifest["config"]["helm_path"]
     set_nested_path(values["stack"], helm_path, config_yaml)
+
+    # ── Treatment EndpointPickerConfig (pluginsCustomConfig) ────────────────
+    # Read the actual PluginType from the generated Go source — more reliable
+    # than the naming-formula because the LLM may choose a different constant.
+    plugin_dir = REPO_ROOT / manifest["target"]["repo"] / manifest["target"]["plugin_dir"]
+    plugin_file = plugin_dir / f"{_plugin_name_from_summary(algo_summary)}.go"
+    actual_plugin_type = _plugin_type_from_source(plugin_file) or plugin_type
+    epc_content = (
+        "apiVersion: inference.networking.x-k8s.io/v1alpha1\n"
+        "kind: EndpointPickerConfig\n"
+        "plugins:\n"
+        f"- type: {actual_plugin_type}\n"
+        "- type: load-aware-scorer\n"
+        "- type: decode-filter\n"
+        "- type: max-score-picker\n"
+        "- type: single-profile-handler\n"
+        "schedulingProfiles:\n"
+        "- name: default\n"
+        "  plugins:\n"
+        f"  - pluginRef: {actual_plugin_type}\n"
+        "  - pluginRef: decode-filter\n"
+        "  - pluginRef: max-score-picker\n"
+        "  - pluginRef: load-aware-scorer\n"
+        "    weight: 1\n"
+    )
+    (values["stack"]
+     .setdefault("gaie", {})
+     .setdefault("treatment", {})
+     .setdefault("helmValues", {})
+     .setdefault("inferenceExtension", {})
+     ["pluginsCustomConfig"]) = {"custom-plugins.yaml": epc_content}
 
     out_path = out_dir / "algorithm_values.yaml"
     out_path.write_text(yaml.dump(values, default_flow_style=False,
