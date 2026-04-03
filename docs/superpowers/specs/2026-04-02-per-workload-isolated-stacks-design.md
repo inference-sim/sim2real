@@ -6,50 +6,52 @@
 ## Problem
 
 The current Tekton pipeline deploys one shared llm-d stack (gateway + GAIE + model) per phase
-and runs all workloads sequentially against it. This means workloads within a phase share the
-same infrastructure — residual state from one workload (in-flight requests, KV cache, scheduler
-state) can contaminate the next.
+and runs all workloads sequentially against it. Residual state from one workload (in-flight
+requests, KV cache, scheduler state) can contaminate the next.
 
 The goal is to give each workload its own independent, clean llm-d stack: full deploy → run →
 teardown per workload, with no shared infrastructure between workloads. Applies to all three
 benchmark phases: noise, baseline, and treatment.
 
-## Approach: Lift Workload to Tekton Pipeline Parameter (Approach A)
+## Approach: Lift Workload to Tekton Pipeline Parameter
 
 `pipeline.yaml.j2` becomes a single-workload template. `workloadName` and `workloadSpec` are
 promoted from Jinja compile-time variables to Tekton pipeline-level runtime parameters.
-`compile-pipeline` is called once per phase (unchanged) and produces one pipeline definition.
-`deploy.py` submits N PipelineRuns per phase — one per workload — each with its own
-independent stack.
+`compile-pipeline` CLI flags are unchanged — still called once per phase, produces one pipeline
+definition per phase. `deploy.py` submits N PipelineRuns per phase — one per workload — each
+with its own independent stack.
 
 ## Pipeline Template Changes (`pipeline.yaml.j2`)
 
-### New Tekton pipeline params
+### Two-Param Separation
+
+**`experimentId`** (unique per PipelineRun): used exclusively for Kubernetes resource names —
+gateway, GAIE deployment, model label, HTTPRoute, teardown tasks. Ensures no k8s resource
+conflicts between concurrent workload stacks. Format: `sim2real-{phase}-{wl_slug}-{timestamp+i}`.
+
+**`runName`** (shared across all workload PipelineRuns within a phase invocation): used
+exclusively for the PVC results path. Keeps results directory layout identical to today.
+Format: `sim2real-{phase}-{timestamp}`.
+
+### New Tekton Pipeline Params
 
 ```yaml
 params:
-  - name: experimentId    # unique per PipelineRun — k8s resource naming
+  - name: experimentId    # unique per PipelineRun — k8s resource naming only
   - name: namespace
   - name: sleepDuration
-  - name: runName         # NEW: shared across workloads in a phase — PVC results path
-  - name: workloadName    # NEW: name of this workload
-  - name: workloadSpec    # NEW: JSON string of the workload spec
+    default: "30s"
+  - name: runName         # shared per phase — PVC results path only
+  - name: workloadName    # name of this workload (e.g. overload_mixed_slo)
+  - name: workloadSpec    # JSON string of the workload spec dict
 ```
 
-### Two-param separation
-
-**`experimentId`** is unique per PipelineRun (e.g. `sim2real-baseline-wl-overload-1743600001`).
-Used for all Kubernetes resource names: gateway, GAIE, model label, HTTPRoute, delete tasks.
-Ensures no k8s resource conflicts between concurrent workload stacks.
-
-**`runName`** is shared across all workload PipelineRuns within a phase invocation
-(e.g. `sim2real-baseline-1743600000`). Used exclusively for the PVC results path. Keeps the
-results directory layout identical to today.
-
-### Template changes
+### Template Body Changes
 
 Remove the `{% for wl in observe.workloads %}` Jinja loop. Replace with a single
-`run-workload-blis-observe` task:
+`run-workload-blis-observe` task. `$(params.workloadName)` and `$(params.workloadSpec)` are
+Tekton runtime variable expansions (not Jinja). `{{ phase }}` and `{{ observe.image }}` remain
+Jinja compile-time expansions.
 
 ```yaml
 - name: run-workload
@@ -62,141 +64,261 @@ Remove the `{% for wl in observe.workloads %}` Jinja loop. Replace with a single
     - name: model
       value: "{{ stack.model.modelName }}"
     - name: workloadSpec
-      value: "$(params.workloadSpec)"
+      value: "$(params.workloadSpec)"        # Tekton param — runtime
     - name: blisImage
       value: "{{ observe.image }}"
     - name: resultsDir
-      value: "{{ phase }}/$(params.runName)/$(params.workloadName)"
+      value: "{{ phase }}/$(params.runName)/$(params.workloadName)"  # runName = shared
 ```
 
 `collect-results` runs after this single task. The `finally` teardown block is unchanged —
-it already uses `$(params.experimentId)` so each PipelineRun tears down its own stack.
+it already scopes all k8s resource names on `$(params.experimentId)`.
 
-### What stays Jinja (compile-time)
+### `compile-pipeline` Interface
 
-`gaie_config`, `stack.*`, `observe.image`, `inference_objectives`, `phase` — all phase-level,
-resolved at compile time. The workload list in `values.yaml` is no longer consumed by the
-template (used by `deploy.py` at submission time).
+CLI flags unchanged. The template no longer iterates `observe.workloads` — that key remains
+in `values.yaml` (it is read by `deploy.py` at submission time) but is now a no-op during
+template compilation. Old templates in other sample directories (`blis/`, `blis-inference-perf/`)
+are unaffected — they remain in their own subdirectories.
 
-### `compile-pipeline` interface
+### Workload Spec Extraction
 
-Unchanged — still called once per phase, still produces `{phase}-pipeline.yaml`. The workload
-list in `values.yaml` is ignored by the template but remains in the file for `deploy.py` to
-read.
+`deploy.py` reads `observe.workloads` from `values.yaml`. Each entry already contains an
+embedded `spec` dict (placed there by `merge-values`). At submission time, `deploy.py`
+serializes `wl['spec']` to a compact JSON string and passes it as the `workloadSpec` param:
+
+```python
+workload_spec_json = json.dumps(wl["spec"], separators=(",", ":"))
+```
+
+No file path resolution needed — the spec is already materialized in `values.yaml`.
 
 ## `deploy.py` Changes
 
-### New CLI argument
+### New CLI Argument
 
 ```
 --parallel-workloads N   Max workload stacks to run concurrently within a phase (default: 1)
 ```
 
-### GPU warning
+### GPU Warning
 
-Updated to account for both parallelism dimensions:
+Updated to account for both parallelism dimensions. Warning fires when either
+`--parallel > 1` or `--parallel-workloads > 1`:
 
 ```
-parallel={P}, parallel_workloads={W} → {P × W × gpus_per_stack} GPUs total
-({gpus_per_stack} per stack × {P} concurrent phases × {W} concurrent workloads per phase)
+parallel={P}, parallel_workloads={W}
+→ {P × W × gpus_per_stack} GPUs required simultaneously
+  ({gpus_per_stack} per stack × {P} concurrent phases × {W} concurrent workloads per phase)
 ```
 
-Where `gpus_per_stack = replicas × gpu_per_pod`. Shown whenever either `parallel > 1` or
-`parallel_workloads > 1`.
+Where `gpus_per_stack = replicas × gpu_per_pod` (same formula as before, renamed from
+`gpus_per_phase`). Total reflects worst-case simultaneous demand across all running phases.
 
-### Phase execution model (baseline and treatment)
+### `_run_pipeline_phase` Signature
+
+New signature (breaking change to internal function):
+
+```python
+def _run_pipeline_phase(
+    phase: str,
+    experiment_id: str,    # unique per PipelineRun — k8s resource naming
+    namespace: str,
+    run_dir: Path,
+    run_name: str,         # NEW: shared per phase — PVC results path
+    workload_name: str,    # NEW
+    workload_spec: str,    # NEW: JSON string
+    run_index: int = 0,
+) -> None:
+```
+
+All three call sites must be updated:
+- Sequential baseline/treatment path in `stage_benchmarks`
+- Noise pass loop in `_run_noise_phase`
+- `_run_single_phase` (used by parallel phase `ThreadPoolExecutor`)
+
+### PipelineRun YAML (emitted by `_run_pipeline_phase`)
+
+```yaml
+params:
+  - name: experimentId
+    value: {experiment_id}
+  - name: namespace
+    value: {namespace}
+  - name: runName           # NEW
+    value: {run_name}
+  - name: workloadName      # NEW
+    value: {workload_name}
+  - name: workloadSpec      # NEW
+    value: '{workload_spec_json}'
+  - name: sleepDuration
+    value: "30s"
+```
+
+### Phase Execution Model (Baseline and Treatment)
 
 For each phase invocation:
 
-1. Read workload list from `values.yaml`
+1. Read `observe.workloads` from `values.yaml` to get workload list
 2. Generate `runName` once: `sim2real-{phase}-{timestamp}` (shared across workloads)
-3. For each workload, generate unique `experimentId`: `sim2real-{phase}-{wl_slug}-{timestamp+i}`
-4. Submit up to `--parallel-workloads N` PipelineRuns concurrently via `ThreadPoolExecutor`
-5. Each thread: preflight → submit PipelineRun (passing `runName`, `experimentId`,
-   `workloadName`, `workloadSpec`) → poll until complete
-6. All workload PipelineRuns must complete before the phase is marked done
-7. Extract results once — reads `{phase}/{runName}/` as today
+3. For each workload, generate unique `experimentId`:
+   `sim2real-{phase}-{wl_slug}-{timestamp+i}` (where `i` is the workload index)
+4. Create one `ThreadPoolExecutor(max_workers=parallel_workloads)` per phase invocation
+5. Submit all workloads to the pool; each thread runs:
+   - preflight (phase-level, validates cluster readiness for this phase — unchanged interface)
+   - submit PipelineRun via `kubectl apply` (passing all params above)
+   - poll `tkn pr describe` until terminal state
+6. Collect thread results; if **any workload fails**, the phase is marked failed (see error
+   handling below)
+7. After all threads complete, call `_extract_phase_results(phase, namespace, run_dir,
+   experiment_ids=[run_name])` — single-element list, same as today
 
-### Noise phase
+The `ThreadPoolExecutor` is created and destroyed per phase invocation. Phases themselves are
+still orchestrated by the outer `--parallel` mechanism (unchanged).
 
-Passes remain sequential. Within each pass, workloads run with `--parallel-workloads`
-concurrency. Each pass generates its own per-pass run name
-(e.g. `sim2real-noise-run0-1743600000`) used as `runName` for all workload PipelineRuns in
-that pass. This preserves the existing noise results directory structure and keeps
-`_reorganize_noise_results` and `_extract_phase_results` unchanged.
+### Noise Phase
 
-Pass-i submits M PipelineRuns (throttled to `--parallel-workloads` concurrent), waits for all
-M to complete, then pass-(i+1) begins.
+Passes remain sequential. Each pass:
 
-### Skip/resume
+1. Generate per-pass `run_name`: `sim2real-noise-run{i}-{timestamp}` (same format as today's
+   per-pass `pipelinecurrent_run`, but now used as `runName` param, not `experimentId`)
+2. For each workload in that pass, generate unique `experimentId`:
+   `sim2real-noise-run{i}-{wl_slug}-{timestamp+j}`
+3. Submit up to `--parallel-workloads N` workload PipelineRuns concurrently within the pass
+4. Wait for all workloads in the pass to complete before starting pass i+1
+5. Append `run_name` to `noise_experiment_ids` (not individual workload experimentIds)
 
-`benchmark_state.json` tracking is extended to per-workload granularity. If a workload's
-results already exist under `{runName}/{wl_name}/` on the PVC, it is skipped individually.
-`--force-rerun` clears all workload state for the phase.
+After all passes, `_extract_phase_results("noise", ..., experiment_ids=noise_experiment_ids)`
+is called with the list of per-pass `runName` values — same as today's list of per-pass
+experimentIds. `_reorganize_noise_results` and `_extract_phase_results` are unchanged.
+
+### Error Handling for Partial Workload Failures
+
+Within a `ThreadPoolExecutor`, each workload thread raises `PhaseError` on failure. The
+calling code collects all futures before surfacing errors (uses `as_completed` + exception
+check). If **any workload fails**:
+
+- All other workloads in the phase that have completed are left in `benchmark_state.json`
+  with status `done` (their results are preserved on the PVC)
+- The phase is marked `failed` in `benchmark_state.json`
+- The script exits with an error message listing which workloads failed
+
+On resume (without `--force-rerun`): workloads already marked `done` in `benchmark_state.json`
+are skipped. Only failed or pending workloads are re-run.
+
+`--force-rerun`: clears all per-workload state for the phase, re-runs everything.
+
+### Skip/Resume: `benchmark_state.json` Schema
+
+The per-phase entry is extended with a `workloads` map and `runName`:
+
+```json
+{
+  "phases": {
+    "baseline": {
+      "status": "running|done|failed",
+      "runName": "sim2real-baseline-1743600000",
+      "workloads": {
+        "overload_mixed_slo": {
+          "status": "done|running|pending|failed",
+          "experimentId": "sim2real-baseline-wl-overload-1743600001"
+        },
+        "bursty_adversary": {
+          "status": "pending",
+          "experimentId": null
+        }
+      }
+    }
+  }
+}
+```
+
+The `benchmark-state` CLI subcommand gains a `--workload` flag to set individual workload
+status. Existing phase-level flags (`--set-phase`, `--status`) continue to work for
+backward-compatible tooling.
+
+Skip logic for a workload: status is `done` in `benchmark_state.json`. Fallback: results
+directory `{phase}/{runName}/{wl_name}/` exists on the PVC (checked via the extractor).
+
+### Preflight
+
+Preflight is called once per workload PipelineRun, before submission. It remains phase-level
+(validates that the cluster is ready to run this phase — e.g., the model image is available,
+RBAC is configured). No per-workload validation is added. The preflight interface is unchanged.
 
 ## Result Extraction
 
-### Baseline and treatment
+### Baseline and Treatment
 
-PVC layout is **identical to today**: `{phase}/{runName}/{wl_name}/`. `_extract_phase_results`
-is called once per phase with `experiment_ids=[runName]` — unchanged.
+PVC layout is **identical to today**: `{phase}/{runName}/{wl_name}/`. All workloads in a phase
+write under the same `runName` directory, so the extractor finds all workload subdirectories
+in one pass.
+
+`_extract_phase_results` is called once per phase with `experiment_ids=[run_name]` —
+single-element list, unchanged behavior.
 
 ### Noise
 
 `_extract_phase_results` is called with `experiment_ids=[passRunName_0, passRunName_1, ...]`
-(N per-pass run names) — same as today's list of per-pass experimentIds. `_reorganize_noise_results`
-reads `noise/{passRunName}/{wl_name}/` for each pass — unchanged.
+(N per-pass `runName` values). Each pass's `runName` directory contains all workload
+subdirectories for that pass. `_reorganize_noise_results` reads
+`noise/{passRunName}/{wl_name}/` for each pass and reorganizes into `wl_name/run-{i}/` —
+unchanged logic.
 
-### Change surface summary
+## Change Surface Summary
 
-| Component | Changes? |
-|---|---|
-| `pipeline.yaml.j2` | Yes — single workload, `runName` + `experimentId` params |
-| `compile-pipeline` | No |
-| `_run_pipeline_phase` | Yes — accepts workload name/spec/runName, passes all three params |
-| `_extract_phase_results` | No |
-| `_reorganize_noise_results` | No |
-| `benchmark_state.json` tracking | Yes — per-workload granularity |
-| `_gpu_warning` | Yes — accounts for both `--parallel` and `--parallel-workloads` |
-| `stage_benchmarks` | Yes — loops over workloads, manages ThreadPoolExecutor per phase |
+| Component | Changes? | Notes |
+|---|---|---|
+| `pipeline.yaml.j2` | Yes | Remove workload loop; add `runName`, `workloadName`, `workloadSpec` params |
+| `compile-pipeline` CLI | No | Flags unchanged; `observe.workloads` ignored by template |
+| `_run_pipeline_phase` | Yes | New signature: `run_name`, `workload_name`, `workload_spec` args; all 3 call sites updated |
+| `stage_benchmarks` | Yes | Loops over workloads; manages per-phase `ThreadPoolExecutor` |
+| `_run_noise_phase` | Yes | Inner loop over workloads per pass; per-pass `run_name` generation |
+| `_run_single_phase` | Yes | Updated to pass workload params through to `_run_pipeline_phase` |
+| `_gpu_warning` | Yes | Accounts for `--parallel` × `--parallel-workloads`; new formula |
+| `_extract_phase_results` | No | Receives `[run_name]` as before |
+| `_reorganize_noise_results` | No | Reads same directory structure |
+| `benchmark_state.json` schema | Yes | Per-workload `workloads` map + `runName` field per phase |
+| `benchmark-state` CLI | Yes | Gains `--workload` flag for per-workload status updates |
+| `build_parser` | Yes | New `--parallel-workloads` argument |
 
 ## PVC Layout Example
 
 ```
 data-pvc/
   baseline/
-    sim2real-baseline-1743600000/       ← runName (shared)
-      overload_mixed_slo/               ← workload A results
-      bursty_adversary/                 ← workload B results
+    sim2real-baseline-1743600000/         ← runName (shared across workloads)
+      overload_mixed_slo/                 ← workload A results
+      bursty_adversary/                   ← workload B results
   treatment/
-    sim2real-treatment-1743600100/
+    sim2real-treatment-1743600100/        ← runName
       overload_mixed_slo/
       bursty_adversary/
   noise/
-    sim2real-noise-run0-1743600200/     ← pass 0 runName
+    sim2real-noise-run0-1743600200/       ← pass 0 runName
       overload_mixed_slo/
       bursty_adversary/
-    sim2real-noise-run1-1743600400/     ← pass 1 runName
+    sim2real-noise-run1-1743600300/       ← pass 1 runName
       overload_mixed_slo/
       bursty_adversary/
 ```
 
 ## Concurrent Stack Example
 
-With `--parallel 1 --parallel-workloads 2` and 2 workloads:
+With `--parallel 1 --parallel-workloads 2` and 2 workloads (requires 2 × gpus_per_stack):
 
 ```
 baseline phase:
-  t=0   PipelineRun A (wl=overload_mixed_slo)   → deploys stack A
-  t=0   PipelineRun B (wl=bursty_adversary)     → deploys stack B
-  t=N   Both complete, stacks torn down
-  t=N   extract baseline results
+  t=0   PipelineRun: sim2real-baseline-wl-overload-T0  → own stack A
+  t=0   PipelineRun: sim2real-baseline-wl-bursty-T1   → own stack B
+  t=N   Both complete, both stacks torn down
+  t=N   Extract baseline results from baseline/sim2real-baseline-T/
 ```
 
-With `--parallel 2 --parallel-workloads 2` and 2 workloads (fast mode, 4 stacks total):
+With `--parallel 2 --parallel-workloads 2` (fast mode, 4 concurrent stacks,
+requires 4 × gpus_per_stack):
 
 ```
-  t=0   baseline/wl-overload   baseline/wl-bursty
-  t=0   treatment/wl-overload  treatment/wl-bursty
-  (requires 4 × gpus_per_stack GPUs)
+  baseline/wl-overload   baseline/wl-bursty
+  treatment/wl-overload  treatment/wl-bursty
 ```
