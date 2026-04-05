@@ -149,7 +149,7 @@ def check_prerequisites(manifest: dict) -> None:
     required_files = [
         exp / manifest["algorithm"]["source"],
         exp / manifest["algorithm"]["info"],
-        REPO_ROOT / manifest["context"]["mapping"],
+        # mapping doc intentionally excluded — gate handles creation
         REPO_ROOT / manifest["context"]["template"],
         REPO_ROOT / "workspace/setup_config.json",
     ]
@@ -414,8 +414,8 @@ def _write_full_context(
     ok(f"Full context written → {full_context_path.relative_to(REPO_ROOT)}")
 
 
-def _extract_mapping_hash(manifest: dict) -> str:
-    text = (REPO_ROOT / manifest["context"]["mapping"]).read_text()
+def _extract_mapping_hash(mapping_path: Path) -> str:
+    text = mapping_path.read_text()
     m = re.search(r"\*{0,2}Pinned commit hash:\*{0,2}\s*([0-9a-f]{7,40})", text)
     if not m:
         err("Could not extract pinned commit hash from mapping artifact")
@@ -458,7 +458,9 @@ Do NOT wrap the object in a "signal_coverage" key.
             {"role": "user", "content": user}]
 
 
-def stage_translate(run_dir: Path, algo_summary_path: Path, manifest: dict, force: bool = False, no_gate: bool = False) -> Path:
+def stage_translate(run_dir: Path, algo_summary_path: Path, manifest: dict,
+                    mapping_path: Path,
+                    force: bool = False, no_gate: bool = False) -> Path:
     out = run_dir / "prepare_signal_coverage.json"
     if _should_skip(out, "Translate", force):
         return out
@@ -470,7 +472,7 @@ def stage_translate(run_dir: Path, algo_summary_path: Path, manifest: dict, forc
         ["git", "-C", str(REPO_ROOT / manifest["target"]["repo"]), "rev-parse", "HEAD"],
         capture=True,
     ).stdout.strip()
-    mapping_hash = _extract_mapping_hash(manifest)
+    mapping_hash = _extract_mapping_hash(mapping_path)
     if not submodule_head.startswith(mapping_hash):
         err(f"Stale submodule: mapping pinned at {mapping_hash}, "
             f"submodule at {submodule_head[:7]}")
@@ -478,7 +480,7 @@ def stage_translate(run_dir: Path, algo_summary_path: Path, manifest: dict, forc
     ok(f"Submodule commit matches mapping artifact ({mapping_hash})")
 
     algo_summary = json.loads(algo_summary_path.read_text())
-    mapping_doc = (REPO_ROOT / manifest["context"]["mapping"]).read_text()
+    mapping_doc = mapping_path.read_text()
 
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
     from lib.llm import call_model, LLMError
@@ -557,7 +559,7 @@ def stage_translate(run_dir: Path, algo_summary_path: Path, manifest: dict, forc
         f"Read the signal_coverage.json at {out}.\n"
         f"Read the algorithm_summary.json at {algo_summary_path}.\n"
         f"Read the algorithm source file at {source_file}.\n"
-        f"Read the mapping document at {REPO_ROOT / manifest['context']['mapping']}.\n\n"
+        f"Read the mapping document at {mapping_path}.\n\n"
         "Enhance signal_coverage.json with:\n"
         "1. context_notes for each signal (how it's used in the algorithm — weight, threshold, formula)\n"
         "2. type_mappings: how simulation types map to production types\n"
@@ -2085,7 +2087,12 @@ def main() -> int:
 
     try:
         algo_summary_path = stage_extract(run_dir, manifest, force=force, no_gate=no_gate)
-        signal_coverage_path = stage_translate(run_dir, algo_summary_path, manifest, force=force, no_gate=no_gate)
+        canonical_mapping = REPO_ROOT / manifest["context"]["mapping"]
+        signal_coverage_path = stage_translate(
+            run_dir, algo_summary_path, manifest,
+            mapping_path=canonical_mapping,    # Task 3 will replace this with resolved path
+            force=force, no_gate=no_gate,
+        )
 
         MAX_OUTER = 3  # final-review retries
         stage3_path: Path | None = None
