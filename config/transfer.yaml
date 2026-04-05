@@ -39,6 +39,10 @@ target:
 context:
   mapping: docs/transfer/blis_to_llmd_mapping.md
   template: docs/transfer/admission_template.go.md
+  mapping_notes: |
+    # Optional: provide domain context to steer mapping generation.
+    # Example: "This is an admission control algorithm. The a.* fields
+    # are internal plugin state and do not need production signal mappings."
   examples: []
   extra:
     - admission_by60/baselines/baseline_always_admit.go

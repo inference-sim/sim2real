@@ -163,3 +163,18 @@ def test_invalid_kind_raises(tmp_path):
 
     with pytest.raises(ManifestError, match='kind'):
         load_manifest(manifest_path)
+
+
+def test_mapping_notes_defaults_to_empty(tmp_path):
+    """mapping_notes is optional; absent means empty string."""
+    manifest_path = _write_manifest(tmp_path)
+    m = load_manifest(manifest_path)
+    assert m["context"].get("mapping_notes", "") == ""
+
+
+def test_mapping_notes_preserved_when_set(tmp_path):
+    """mapping_notes value is preserved when explicitly set."""
+    manifest_path = _write_manifest(tmp_path,
+                                     overrides={"context.mapping_notes": "focus on aggregate signals"})
+    m = load_manifest(manifest_path)
+    assert m["context"]["mapping_notes"] == "focus on aggregate signals"

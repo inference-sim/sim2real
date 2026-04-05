@@ -75,6 +75,7 @@ def load_manifest(path: Path) -> dict:
         'target.equivalence_commands': [],
         'context.examples': [],
         'context.extra': [],
+        'context.mapping_notes': '',
         'config.baseline_config_template': '',
         'validation.evaluator': '',
         'validation.metrics': [],
