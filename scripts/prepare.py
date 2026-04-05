@@ -125,6 +125,9 @@ def print_intro(reviews: int, dev: bool = False, no_gate: bool = False) -> None:
     print(f"                   AI review     {reviewer_note} check completeness")
     if not no_gate:
         print("                   human gate    [e]dit / [c]hat / [d]one / [q]uit")
+    print("  1b. Map review   mapping gate  generate or review signal mapping doc")
+    if not no_gate:
+        print("                   human gate    [e]dit / [c]hat / [d]one (+ [x] drop override)")
     print("  2. Translate     single call   1 model maps signals to production equivalents")
     print("                   claude -p     enhanced translation (types, helpers)")
     print(f"                   AI review     {reviewer_note} check coverage")

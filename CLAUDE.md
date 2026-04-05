@@ -49,6 +49,15 @@ python tools/transfer_cli.py extract --strict blis_router/best/
 # CI workflow performs the real hash comparison
 python tools/transfer_cli.py validate-mapping
 
+# Validate an override mapping file (--path flag)
+python tools/transfer_cli.py validate-mapping --path workspace/runs/<run>/mapping_override.md
+
+# Copy a mapping override from one run to another
+cp workspace/runs/<src-run>/mapping_override.md workspace/runs/<dst-run>/mapping_override.md
+
+# Promote a run override to the canonical mapping document
+cp workspace/runs/<run>/mapping_override.md docs/transfer/blis_to_llmd_mapping.md
+
 # Validate workspace artifact against JSON Schema
 python tools/transfer_cli.py validate-schema workspace/algorithm_summary.json
 
