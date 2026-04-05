@@ -60,3 +60,80 @@ def test_resolve_mapping_path_none_when_neither_exists(tmp_path):
 
     resolved = _prepare._resolve_mapping_path(run_dir, canonical)
     assert resolved is None
+
+
+from unittest.mock import patch
+
+
+def test_state_a_done_returns_canonical(tmp_path):
+    """State A: canonical exists, user presses 'd' — returns canonical path."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    canonical = tmp_path / "mapping.md"
+    canonical.write_text("**Pinned commit hash:** abc1234\n")
+
+    manifest = {"context": {"mapping": str(canonical.relative_to(tmp_path)),
+                             "mapping_notes": ""},
+                 "target": {"repo": "llm-d-inference-scheduler"}}
+
+    with patch.object(_prepare, "REPO_ROOT", tmp_path), \
+         patch("builtins.input", return_value="d"), \
+         patch.object(_prepare, "update_run_metadata"):
+        result = _prepare.stage_mapping_review(run_dir, manifest, tmp_path / "summary.json",
+                                                no_gate=False)
+    assert result == canonical
+
+
+def test_state_b_drop_override_reverts_to_canonical(tmp_path):
+    """State B: override exists, user presses 'x' then 'd' — override deleted, canonical returned."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    canonical = tmp_path / "mapping.md"
+    canonical.write_text("**Pinned commit hash:** abc1234\n")
+    override = run_dir / "mapping_override.md"
+    override.write_text("override content")
+
+    manifest = {"context": {"mapping": str(canonical.relative_to(tmp_path)),
+                             "mapping_notes": ""},
+                 "target": {"repo": "llm-d-inference-scheduler"}}
+
+    with patch.object(_prepare, "REPO_ROOT", tmp_path), \
+         patch("builtins.input", side_effect=["x", "d"]), \
+         patch.object(_prepare, "update_run_metadata"):
+        result = _prepare.stage_mapping_review(run_dir, manifest, tmp_path / "summary.json",
+                                                no_gate=False)
+
+    assert result == canonical
+    assert not override.exists()
+
+
+def test_no_gate_skips_prompts(tmp_path):
+    """--no-gate: skips all interactive prompts, returns canonical path."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    canonical = tmp_path / "mapping.md"
+    canonical.write_text("**Pinned commit hash:** abc1234\n")
+
+    manifest = {"context": {"mapping": str(canonical.relative_to(tmp_path)),
+                             "mapping_notes": ""},
+                 "target": {"repo": "llm-d-inference-scheduler"}}
+
+    with patch.object(_prepare, "REPO_ROOT", tmp_path), \
+         patch.object(_prepare, "update_run_metadata"):
+        result = _prepare.stage_mapping_review(run_dir, manifest, tmp_path / "summary.json",
+                                                no_gate=True)
+    assert result == canonical
+
+
+def test_state_c_no_gate_exits(tmp_path):
+    """State C with --no-gate: mapping missing → sys.exit(1)."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    manifest = {"context": {"mapping": "nonexistent.md", "mapping_notes": ""},
+                 "target": {"repo": "llm-d-inference-scheduler"}}
+
+    with patch.object(_prepare, "REPO_ROOT", tmp_path), \
+         pytest.raises(SystemExit):
+        _prepare.stage_mapping_review(run_dir, manifest, tmp_path / "summary.json",
+                                       no_gate=True)
