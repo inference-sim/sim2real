@@ -458,6 +458,279 @@ Do NOT wrap the object in a "signal_coverage" key.
             {"role": "user", "content": user}]
 
 
+def _resolve_mapping_path(run_dir: Path, canonical: Path) -> Path | None:
+    """Return the active mapping path: override > canonical > None.
+
+    Args:
+        run_dir: Current run directory (workspace/runs/<run>/).
+        canonical: The canonical path from manifest["context"]["mapping"].
+
+    Returns:
+        Path to the active mapping document, or None if neither exists.
+    """
+    override = run_dir / "mapping_override.md"
+    if override.exists():
+        return override
+    if canonical.exists():
+        return canonical
+    return None
+
+
+def _get_submodule_head(manifest: dict) -> str:
+    """Return the short HEAD commit hash of the target submodule."""
+    result = run(
+        ["git", "-C", str(REPO_ROOT / manifest["target"]["repo"]), "rev-parse", "--short", "HEAD"],
+        check=False, capture=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else "unknown"
+
+
+def _generate_mapping_doc(
+    canonical_path: Path,
+    algo_summary_path: Path,
+    manifest: dict,
+    user_context: str,
+) -> None:
+    """Generate a first-draft mapping document via LLM and write to canonical_path."""
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    from lib.llm import call_model, LLMError
+
+    algo_summary = json.loads(algo_summary_path.read_text())
+    mapping_notes = manifest.get("context", {}).get("mapping_notes", "").strip()
+
+    target_repo = REPO_ROOT / manifest["target"]["repo"]
+    prod_context = ""
+    for candidate in [
+        target_repo / "pkg/plugins/scoring.go",
+        target_repo / "pkg/framework/interface.go",
+    ]:
+        if candidate.exists():
+            prod_context += f"\n## {candidate.name}\n```go\n{candidate.read_text()[:4000]}\n```\n"
+
+    system = (
+        "You are a technical architect mapping simulation signals to production equivalents. "
+        "Generate a complete signal mapping document in the established markdown format. "
+        "The document must include a Signal Mapping Table, Fidelity Rating Scale, and "
+        "Scorer Interface Reference. Include 'Pinned commit hash: <hash>' in the header. "
+        "Be precise about production access paths and fidelity ratings."
+    )
+    user = f"""Generate a signal mapping document for this algorithm.
+
+## Algorithm Summary
+```json
+{json.dumps(algo_summary, indent=2)}
+```
+{f"## Domain Context (from transfer.yaml){chr(10)}{mapping_notes}{chr(10)}" if mapping_notes else ""}
+{f"## Additional User Context{chr(10)}{user_context}{chr(10)}" if user_context.strip() else ""}
+{f"## Production Interface Reference{chr(10)}{prod_context}" if prod_context else ""}
+
+## Instructions
+1. For each signal in algorithm_summary.signals[], determine its production equivalent.
+2. Distinguish between:
+   - External observables: signals read from cluster/request state → map to production paths
+   - Internal plugin state: signals the algorithm maintains itself (a.* fields) → note as
+     "internal state — maintain as plugin-local variable, no production mapping needed"
+3. Use the established mapping table format with columns:
+   Sim Signal | Go Type | Sim Access Path | Production Equivalent | Prod Access Path | Fidelity | Staleness Window (ms) | Rationale
+4. Set Pinned commit hash to: {_get_submodule_head(manifest)}
+5. Include the Fidelity Rating Scale section (high/medium/low definitions).
+6. Include the Scorer Interface Reference section.
+
+Respond with ONLY the markdown document — no prose wrapper.
+"""
+    info("Calling LLM to generate mapping document draft...")
+    try:
+        response = call_model("Azure/gpt-4o", [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ])
+    except LLMError as e:
+        err(f"LLM call failed during mapping generation: {e}")
+        sys.exit(1)
+
+    canonical_path.parent.mkdir(parents=True, exist_ok=True)
+    canonical_path.write_text(response)
+    ok(f"Mapping document draft written → {canonical_path.relative_to(REPO_ROOT)}")
+
+
+def _mapping_chat_loop(
+    doc_path: Path,
+    override_path: Path,
+    manifest: dict,
+) -> Path:
+    """Multi-turn LLM chat to edit the mapping document.
+
+    Each turn: user message + current doc → LLM returns updated full doc.
+    Writes result to override_path and returns it.
+    """
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    from lib.llm import call_model, LLMError
+
+    mapping_notes = manifest.get("context", {}).get("mapping_notes", "").strip()
+    current_doc = doc_path.read_text()
+
+    system_parts = [
+        "You are a technical architect editing a signal mapping document. "
+        "When the user asks you to make a change, return the COMPLETE updated document. "
+        "Preserve all sections (Signal Mapping Table, Fidelity Rating Scale, "
+        "Scorer Interface Reference). Make only the changes the user requests."
+    ]
+    if mapping_notes:
+        system_parts.append(f"\nDomain context:\n{mapping_notes}")
+    system = "\n".join(system_parts)
+
+    info("Chatting with gpt-4o about the mapping document.")
+    info("Type your request, or 'done' (or empty line) to finish.")
+    print()
+
+    modified = False
+    while True:
+        try:
+            user_input = input("  > ").strip()
+        except EOFError:
+            break
+        if not user_input or user_input.lower() in ("done", "exit", "quit"):
+            break
+
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": (
+                f"Here is the current mapping document:\n\n{current_doc}\n\n"
+                f"User request: {user_input}\n\n"
+                "Return ONLY the complete updated markdown document."
+            )},
+        ]
+        info("Updating mapping document...")
+        try:
+            response = call_model("Azure/gpt-4o", messages)
+        except LLMError as e:
+            warn(f"LLM call failed: {e} — skipping this turn")
+            continue
+
+        current_doc = response
+        override_path.write_text(current_doc)
+        modified = True
+        ok(f"Updated → {override_path.relative_to(REPO_ROOT)}")
+
+    if modified:
+        ok(f"Changes saved → {override_path.relative_to(REPO_ROOT)}")
+    else:
+        info("No changes made.")
+    return override_path
+
+
+def _record_mapping_source(run_dir: Path, resolved: Path, override: Path) -> None:
+    """Write mapping_source to run_metadata.json."""
+    source = "override" if resolved == override else "canonical"
+    update_run_metadata(run_dir, "prepare", mapping_source=source)
+
+
+def stage_mapping_review(
+    run_dir: Path,
+    manifest: dict,
+    algo_summary_path: Path,
+    no_gate: bool = False,
+) -> Path:
+    """Interactive mapping document review gate.
+
+    Resolves the active mapping path (override → canonical → generate),
+    presents an [e]dit / [c]hat / [d]one loop, and returns the resolved path.
+
+    State A — canonical exists, no override: show path, offer e/c/d.
+    State B — override exists: show both, offer e/c/d/x (drop override).
+    State C — neither exists: run generation session, then fall into State A loop.
+
+    Args:
+        run_dir: Current run directory.
+        manifest: Transfer manifest.
+        algo_summary_path: Path to algorithm summary for generation context.
+        no_gate: If True, skip interactive prompts (CI mode).
+
+    Returns:
+        Path to the resolved (and possibly overridden) mapping document.
+    """
+    step("1b", "Mapping document review")
+
+    canonical = REPO_ROOT / manifest["context"]["mapping"]
+    override = run_dir / "mapping_override.md"
+
+    resolved = _resolve_mapping_path(run_dir, canonical)
+
+    # State C: neither exists — run generation session first
+    if resolved is None:
+        warn(f"No mapping document found at {canonical.relative_to(REPO_ROOT)}")
+        if no_gate:
+            err("--no-gate: mapping document missing and cannot generate interactively — HALT")
+            sys.exit(1)
+        print(f"\n[INFO]  Let's create one. Provide context about this algorithm's domain")
+        print(f"        (or press Enter to generate from algorithm summary alone):")
+        try:
+            user_context = input("  > ").strip()
+        except EOFError:
+            user_context = ""
+        _generate_mapping_doc(canonical, algo_summary_path, manifest, user_context)
+        resolved = canonical
+
+    # Display state
+    print()
+    info(f"Mapping document: {canonical.relative_to(REPO_ROOT)}")
+    if resolved == override:
+        warn(f"Run override active: {override.relative_to(REPO_ROOT)}")
+        info("The override will be used for translation.")
+    else:
+        info("This document guides signal translation. Review it before continuing.")
+
+    if no_gate:
+        info("--no-gate: skipping mapping review")
+        _record_mapping_source(run_dir, resolved, override)
+        return resolved
+
+    # Interactive loop
+    while True:
+        if resolved == override:
+            prompt = "  [e] Edit override  [c] Chat with model  [d] Done  [x] Drop override\n  > "
+        else:
+            prompt = "  [e] Edit file directly  [c] Chat with model  [d] Done\n  > "
+
+        try:
+            choice = input(prompt).strip().lower()
+        except EOFError:
+            choice = "d"
+
+        if choice == "d":
+            break
+        elif choice == "q":
+            print("Aborted.")
+            sys.exit(0)
+        elif choice == "x" and resolved == override:
+            override.unlink()
+            resolved = canonical
+            ok(f"Override dropped — using canonical: {canonical.relative_to(REPO_ROOT)}")
+            info(f"Mapping document: {canonical.relative_to(REPO_ROOT)}")
+        elif choice == "e":
+            if resolved == canonical:
+                shutil.copy(canonical, override)
+                resolved = override
+                info(f"Copied to override for editing: {override.relative_to(REPO_ROOT)}")
+            editor = os.environ.get("EDITOR", "")
+            if editor:
+                subprocess.run([editor, str(resolved)], check=False)
+            else:
+                print(f"\n  Edit: {resolved}")
+                input("  Press Enter when done editing > ")
+        elif choice == "c":
+            if resolved == canonical:
+                shutil.copy(canonical, override)
+                resolved = override
+            resolved = _mapping_chat_loop(resolved, override, manifest)
+        else:
+            print(f"  Invalid choice '{choice}'.")
+
+    _record_mapping_source(run_dir, resolved, override)
+    ok(f"Using mapping: {resolved.relative_to(REPO_ROOT)}")
+    return resolved
+
+
 def stage_translate(run_dir: Path, algo_summary_path: Path, manifest: dict,
                     mapping_path: Path,
                     force: bool = False, no_gate: bool = False) -> Path:
@@ -2087,10 +2360,12 @@ def main() -> int:
 
     try:
         algo_summary_path = stage_extract(run_dir, manifest, force=force, no_gate=no_gate)
-        canonical_mapping = REPO_ROOT / manifest["context"]["mapping"]
+        mapping_path = stage_mapping_review(
+            run_dir, manifest, algo_summary_path, no_gate=no_gate
+        )
         signal_coverage_path = stage_translate(
             run_dir, algo_summary_path, manifest,
-            mapping_path=canonical_mapping,    # Task 3 will replace this with resolved path
+            mapping_path=mapping_path,
             force=force, no_gate=no_gate,
         )
 
