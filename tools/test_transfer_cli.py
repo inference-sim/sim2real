@@ -4847,3 +4847,28 @@ class TestListMergeHelpers:
     def test_merge_lists_empty_base_returns_overlay(self):
         from tools.transfer_cli import _merge_lists
         assert _merge_lists([], [{"a": 1}]) == [{"a": 1}]
+
+
+def test_validate_mapping_custom_path(tmp_path):
+    """--path flag routes to the specified file, not MAPPING_PATH."""
+    fake_mapping = tmp_path / "custom_mapping.md"
+    fake_mapping.write_text("no pinned hash here")
+    result = subprocess.run(
+        [sys.executable, str(CLI), "validate-mapping", "--path", str(fake_mapping)],
+        capture_output=True, text=True, cwd=str(REPO_ROOT),
+    )
+    # Should fail (no pinned hash), not error with "file not found"
+    assert result.returncode != 2, "Should not return infrastructure error 2"
+    output = json.loads(result.stdout)
+    assert output["status"] == "error"
+
+
+def test_validate_mapping_default_path_unchanged():
+    """No --path flag: uses the canonical MAPPING_PATH (existing behavior)."""
+    result = subprocess.run(
+        [sys.executable, str(CLI), "validate-mapping"],
+        capture_output=True, text=True, cwd=str(REPO_ROOT),
+    )
+    # Either 0 (valid canonical mapping) or non-zero — just must not crash
+    assert result.returncode in (0, 1, 2)
+    json.loads(result.stdout)  # must be valid JSON

@@ -538,8 +538,9 @@ def cmd_extract(args: argparse.Namespace) -> int:
 
 def cmd_validate_mapping(args: argparse.Namespace) -> int:
     """Validate mapping artifact completeness against algorithm summary."""
-    if not MAPPING_PATH.exists():
-        return _output("error", 2, errors=[f"Mapping artifact not found: {MAPPING_PATH}"],
+    mapping_path = Path(args.path) if getattr(args, "path", None) else MAPPING_PATH
+    if not mapping_path.exists():
+        return _output("error", 2, errors=[f"Mapping artifact not found: {mapping_path}"],
                         output_type="mapping_validation",
                         mapping_complete=False, missing_signals=[], extra_signals=[],
                         duplicate_signals=[], double_counting_risks=[], stale_commit=False)
@@ -549,7 +550,7 @@ def cmd_validate_mapping(args: argparse.Namespace) -> int:
     # tests that write a malformed mapping see exit 1 regardless of summary state.
     MAX_MAPPING_SIZE = 10 * 1024 * 1024
     try:
-        _mapping_size = MAPPING_PATH.stat().st_size
+        _mapping_size = mapping_path.stat().st_size
     except OSError as e:
         return _output("error", 2,
                         errors=[f"Failed to stat mapping artifact: {e}"],
@@ -564,7 +565,7 @@ def cmd_validate_mapping(args: argparse.Namespace) -> int:
                         duplicate_signals=[], double_counting_risks=[], stale_commit=False)
 
     try:
-        content = MAPPING_PATH.read_text()
+        content = mapping_path.read_text()
     except OSError as e:
         return _output("error", 2,
                         errors=[f"Failed to read mapping artifact: {e}"],
@@ -2933,6 +2934,10 @@ def main():
              "verifies presence of a hex string, not currency against submodule HEAD; "
              "CI workflow performs the real hash comparison)")
     p_mapping.add_argument("--summary", help="Path to algorithm_summary.json (default: workspace/)")
+    p_mapping.add_argument(
+        "--path", metavar="FILE",
+        help="Path to mapping document to validate (default: docs/transfer/blis_to_llmd_mapping.md)",
+    )
     p_mapping.set_defaults(func=cmd_validate_mapping)
 
     # validate-schema
