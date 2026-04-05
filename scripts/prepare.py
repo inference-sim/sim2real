@@ -421,7 +421,10 @@ def _extract_mapping_hash(mapping_path: Path) -> str:
     text = mapping_path.read_text()
     m = re.search(r"\*{0,2}Pinned commit hash:\*{0,2}\s*([0-9a-f]{7,40})", text)
     if not m:
-        err("Could not extract pinned commit hash from mapping artifact")
+        err(f"Could not extract pinned commit hash from: {mapping_path}")
+        err("  Expected a line like: **Pinned commit hash:** <7-40 hex chars>")
+        err("  If using a run override, drop it with [x] at the mapping review gate, or delete:")
+        err(f"  rm {mapping_path}")
         sys.exit(1)
     return m.group(1)[:7]
 
@@ -673,6 +676,22 @@ def stage_mapping_review(
             user_context = ""
         _generate_mapping_doc(canonical, algo_summary_path, manifest, user_context)
         resolved = canonical
+
+    # Validate that the resolved document has a real pinned commit hash
+    _hash_re = re.compile(r"\*{0,2}Pinned commit hash:\*{0,2}\s*([0-9a-f]{7,40})")
+    if not _hash_re.search(resolved.read_text()):
+        warn(f"Mapping document lacks a valid pinned commit hash: {resolved.relative_to(REPO_ROOT)}")
+        warn("  Expected a line like: **Pinned commit hash:** <7-40 hex chars>")
+        if resolved == override and not no_gate:
+            warn("  Dropping invalid override — falling back to canonical.")
+            override.unlink()
+            resolved = canonical
+            if not canonical.exists():
+                err("Canonical mapping also missing — cannot continue.")
+                sys.exit(1)
+        elif no_gate:
+            err("--no-gate: mapping document has no valid pinned commit hash — HALT")
+            sys.exit(1)
 
     # Display state
     print()
