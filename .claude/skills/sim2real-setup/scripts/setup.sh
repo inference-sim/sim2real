@@ -10,12 +10,14 @@ err()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 step()  { echo -e "\n${BLUE}━━━ Step $1: $2 ━━━${NC}"; }
 
 # ── Parse args ──────────────────────────────────────────────────────
+REDEPLOY_TASKS=false
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --namespace) NAMESPACE="$2"; shift 2 ;;
-    --hf-token)  HF_TOKEN="$2"; shift 2 ;;
-    --registry)  REGISTRY="$2"; shift 2 ;;
-    --run)       RUN_NAME="$2"; shift 2 ;;
+    --namespace)      NAMESPACE="$2"; shift 2 ;;
+    --hf-token)       HF_TOKEN="$2"; shift 2 ;;
+    --registry)       REGISTRY="$2"; shift 2 ;;
+    --run)            RUN_NAME="$2"; shift 2 ;;
+    --redeploy-tasks) REDEPLOY_TASKS=true; shift ;;
     *) err "Unknown arg: $1"; exit 1 ;;
   esac
 done
@@ -24,6 +26,23 @@ done
 # Script lives at sim2real/.claude/skills/sim2real-setup/scripts/setup.sh
 SIM2REAL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 TEKTONC_DIR="${SIM2REAL_ROOT}/tektonc-data-collection"
+
+# ── --redeploy-tasks shortcut ──────────────────────────────────────
+if [ "${REDEPLOY_TASKS}" = true ]; then
+  if [ -z "${NAMESPACE:-}" ]; then
+    err "--namespace is required with --redeploy-tasks"; exit 1
+  fi
+  step 9 "Redeploying Tekton steps and tasks (--redeploy-tasks)"
+  cd "${TEKTONC_DIR}"
+  for f in tekton/steps/*.yaml; do
+    [ -f "$f" ] && kubectl apply -f "$f" -n "${NAMESPACE}"
+  done
+  for f in tekton/tasks/*.yaml; do
+    [ -f "$f" ] && kubectl apply -f "$f" -n "${NAMESPACE}"
+  done
+  ok "Tekton steps and tasks redeployed"
+  exit 0
+fi
 
 # ── Step 1: Prerequisites ──────────────────────────────────────────
 step 1 "Checking prerequisites"

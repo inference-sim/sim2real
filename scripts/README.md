@@ -14,6 +14,14 @@ git submodule update --init inference-sim llm-d-inference-scheduler tektonc-data
 
 > `setup.py` also runs the submodule init step automatically, so this is just a safety net for cases where you need the submodules before running setup.
 
+**Pinned submodule versions:**
+
+| Submodule | Commit | Notes |
+|-----------|--------|-------|
+| `inference-sim` | `50bc797` | |
+| `llm-d-inference-scheduler` | `6f5cb93` | v0.7.0 |
+| `tektonc-data-collection` | `fc4a883` | |
+
 **Then run in order, once per algorithm transfer:**
 
 ```bash

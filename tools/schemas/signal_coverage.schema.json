@@ -11,7 +11,8 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["sim_name", "prod_name", "prod_access_path", "fidelity_rating", "staleness_window_ms", "mapped"],
+        "required": ["sim_name", "fidelity_rating", "staleness_window_ms", "mapped"],
+        "x-required-when": {"field": "mapped", "value": true, "fields": ["prod_name", "prod_access_path"]},
         "additionalProperties": false,
         "properties": {
           "sim_name": {

@@ -95,6 +95,8 @@ Environment variables:
   NAMESPACE   Override namespace from workspace/setup_config.json
 """,
     )
+    p.add_argument("--run", metavar="NAME",
+                   help="Run name to operate on (overrides current_run in setup_config.json)")
     p.add_argument("--manifest", type=Path, default=REPO_ROOT / "config/transfer.yaml",
                    help="Path to transfer.yaml manifest")
     p.add_argument("--skip-build-epp", action="store_true",
@@ -103,6 +105,9 @@ Environment variables:
                    help="Create PR after benchmarks pass (default: skip, review results first)")
     p.add_argument("--force-rerun", action="store_true",
                    help="Re-run already-done benchmark phases without prompting")
+    p.add_argument("--phases", nargs="+", metavar="PHASE",
+                   choices=["noise", "baseline", "treatment"],
+                   help="Run only these benchmark phases (e.g. --phases baseline)")
     p.add_argument("--parallel", type=int, default=1, metavar="N",
                    help="Max pipeline phases to run concurrently (default: 1)")
     p.add_argument("--parallel-workloads", type=int, default=1, metavar="N",
@@ -404,22 +409,28 @@ def update_run_metadata(run_dir: Path, stage: str = "deploy", **fields) -> None:
 
 # ── Setup config ──────────────────────────────────────────────────────────────
 
-def load_setup_config() -> tuple[dict, str, Path]:
+def load_setup_config(run_override: str | None = None) -> tuple[dict, str, Path]:
     """Load workspace/setup_config.json. Returns (cfg, current_run, run_dir)."""
     cfg_path = REPO_ROOT / "workspace" / "setup_config.json"
     if not cfg_path.exists():
         err("workspace/setup_config.json not found — run python scripts/setup.py first")
         sys.exit(1)
     cfg = json.loads(cfg_path.read_text())
-    current_run = cfg["current_run"]
+    current_run = run_override or cfg["current_run"]
     run_dir = REPO_ROOT / "workspace" / "runs" / current_run
+    if not run_dir.exists():
+        err(f"Run directory not found: {run_dir}")
+        sys.exit(1)
+    if run_override:
+        info(f"Run override: {current_run}")
     ok(f"Run: {current_run}  ({run_dir})")
     return cfg, current_run, run_dir
 
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
 
-def check_prerequisites(run_dir: Path, manifest: dict) -> tuple[str, bool]:
+def check_prerequisites(run_dir: Path, manifest: dict,
+                        skip_plugin_check: bool = False) -> tuple[str, bool]:
     """Verify Phase 1 artifacts and cluster readiness.
 
     Returns (plugin_file_path, fast_iter).
@@ -473,19 +484,22 @@ def check_prerequisites(run_dir: Path, manifest: dict) -> tuple[str, bool]:
     # Plugin file exists and builds
     stage3 = json.loads((run_dir / "prepare_stage3_output.json").read_text())
     plugin_file = stage3["plugin_file"]
-    if not Path(plugin_file).exists():
-        err(f"Plugin file missing: {plugin_file}")
-        sys.exit(1)
-    result = run(
-        ["go", "build", "./..."],
-        check=False, capture=True,
-        cwd=REPO_ROOT / manifest["target"]["repo"],
-        env={**os.environ, "GOWORK": "off"},
-    )
-    if result.returncode != 0:
-        err("Plugin build failed:")
-        print(result.stderr)
-        sys.exit(1)
+    if skip_plugin_check:
+        info("Skipping plugin file check (--skip-build-epp)")
+    else:
+        if not Path(plugin_file).exists():
+            err(f"Plugin file missing: {plugin_file}")
+            sys.exit(1)
+        result = run(
+            ["go", "build", "./..."],
+            check=False, capture=True,
+            cwd=REPO_ROOT / manifest["target"]["repo"],
+            env={**os.environ, "GOWORK": "off"},
+        )
+        if result.returncode != 0:
+            err("Plugin build failed:")
+            print(result.stderr)
+            sys.exit(1)
 
     # Registry configuration check
     try:
@@ -953,7 +967,8 @@ def _run_single_phase(phase: str, run_dir: Path, namespace: str,
 
 def stage_benchmarks(run_dir: Path, namespace: str, fast_iter: bool, manifest: dict,
                      force_rerun: bool = False, parallel: int = 1,
-                     parallel_workloads: int = 1) -> str:
+                     parallel_workloads: int = 1,
+                     phases_filter: list[str] | None = None) -> str:
     """Run cluster benchmarks. Returns overall_verdict string."""
     step(2, f"Cluster Benchmarks (fast_iteration={fast_iter})")
 
@@ -1002,6 +1017,8 @@ def stage_benchmarks(run_dir: Path, namespace: str, fast_iter: bool, manifest: d
 
     # ── Run phases ────────────────────────────────────────────────────────────
     phases_to_run = ([] if fast_iter else ["noise"]) + ["baseline", "treatment"]
+    if phases_filter:
+        phases_to_run = [p for p in phases_to_run if p in phases_filter]
     bench_state_file = workspace_dir / "benchmark_state.json"
 
     _gpu_warning(parallel, parallel_workloads, run_dir / "prepare_tekton" / "values.yaml")
@@ -1286,13 +1303,14 @@ def main() -> int:
         err(f"Manifest error: {e}")
         sys.exit(1)
 
-    cfg, current_run, run_dir = load_setup_config()
+    cfg, current_run, run_dir = load_setup_config(run_override=args.run)
     namespace = os.environ.get("NAMESPACE", cfg["namespace"])
 
     update_run_metadata(run_dir, status="in_progress",
                         started_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
-    plugin_file, fast_iter = check_prerequisites(run_dir, manifest)
+    plugin_file, fast_iter = check_prerequisites(run_dir, manifest,
+                                                  skip_plugin_check=args.skip_build_epp)
 
     if not args.skip_build_epp:
         full_image = stage_build_epp(run_dir, current_run, namespace, manifest)
@@ -1307,7 +1325,8 @@ def main() -> int:
     verdict = stage_benchmarks(run_dir, namespace, fast_iter, manifest,
                                force_rerun=args.force_rerun,
                                parallel=args.parallel,
-                               parallel_workloads=args.parallel_workloads)
+                               parallel_workloads=args.parallel_workloads,
+                               phases_filter=args.phases)
 
     pr_url = None
     if args.pr:

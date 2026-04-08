@@ -26,6 +26,8 @@ _UNSUPPORTED_KEYWORDS = {
     "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
 }
 
+_EXTENSION_KEYWORDS = {"x-required-when"}
+
 
 def validate_artifact(data: dict, schema: dict) -> list[str]:
     """Validate data against a restricted JSON Schema. Returns list of error strings.
@@ -118,6 +120,20 @@ def _validate_node(data, schema: dict, path: str, errors: list[str]) -> None:
             maximum = schema.get("maximum")
             if maximum is not None and data > maximum:
                 errors.append(f"{path or '/'}: value {data} is greater than maximum {maximum}")
+
+    # Object: x-required-when conditional required fields
+    # Extension: {"x-required-when": {"field": "f", "value": v, "fields": [...]}}
+    # When data[field] == value, all listed fields must be present.
+    if expected_type == "object" and isinstance(data, dict):
+        cond = schema.get("x-required-when")
+        if cond:
+            trigger_field = cond.get("field")
+            trigger_value = cond.get("value")
+            cond_fields = cond.get("fields", [])
+            if data.get(trigger_field) == trigger_value:
+                for f in cond_fields:
+                    if f not in data:
+                        errors.append(f"{path}/{f}: required field missing (when {trigger_field}={trigger_value!r})")
 
     # Array: check minItems, maxItems, and item schemas
     if expected_type == "array" and isinstance(data, list):

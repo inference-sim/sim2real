@@ -52,8 +52,10 @@ Examples:
     p.add_argument("--registry-token", metavar="TOKEN", help="Registry robot token")
     p.add_argument("--storage-class",  metavar="SC",    help="PVC storageClassName (auto-detected for OpenShift)")
     p.add_argument("--run",            metavar="NAME",  help="Run name [sim2real-YYYY-MM-DD]")
-    p.add_argument("--no-cluster",     action="store_true",
+    p.add_argument("--no-cluster",      action="store_true",
                                        help="Skip all kubectl/tkn steps (config collection + JSON outputs only)")
+    p.add_argument("--redeploy-tasks", action="store_true",
+                                       help="Re-apply Tekton step/task YAMLs only, then exit (requires --namespace)")
     p.add_argument("--test-push-tag",  metavar="TAG",   default="_test-image-push",
                                        help="Image tag for optional registry credential test push [%(default)s]")
     return p
@@ -605,6 +607,12 @@ def write_outputs(namespace: str, registry: str, repo_name: str,
 
 def main() -> int:
     args = build_parser().parse_args()
+
+    if args.redeploy_tasks:
+        if not args.namespace:
+            err("--namespace is required with --redeploy-tasks"); return 1
+        deploy_tekton_tasks(args.namespace, no_cluster=False)
+        return 0
 
     container_rt  = check_prerequisites(args.no_cluster)
     init_submodules()
