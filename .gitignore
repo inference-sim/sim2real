@@ -6,6 +6,7 @@ docs/plans/scratch/
 tmp/
 actions-runner/
 # temporary
+.claude/worktrees/
 .claude/convergence-state/
 .claude/skills/convergence-review/
 *-review.md
@@ -47,3 +48,9 @@ bin/
 # Transfer pipeline workspace (inter-stage artifacts)
 workspace/
 workspace */
+
+.specify/
+specs
+sim2real_golden/
+sim2real_golden_correct/
+.superpowers
