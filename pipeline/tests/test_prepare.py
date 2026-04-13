@@ -21,7 +21,6 @@ MINIMAL_MANIFEST = {
         "real": {"config": None, "notes": ""},
     },
     "workloads": ["sim2real_golden/workloads/wl1.yaml"],
-    "llm_config": "sim2real_golden/llm_config.yaml",
 }
 
 MINIMAL_ENV_DEFAULTS = {
@@ -71,8 +70,6 @@ def repo(tmp_path):
     _write_text(tmp_path / "sim2real_golden" / "routers" / "policy_baseline_211.yaml", "policy: baseline")
     _write_text(tmp_path / "sim2real_golden" / "workloads" / "wl1.yaml",
                 yaml.dump({"name": "wl1", "num_requests": 100}))
-    _write_text(tmp_path / "sim2real_golden" / "llm_config.yaml",
-                yaml.dump({"model_name": "test-model", "model_uri": "s3://test"}))
 
     # Target repo
     (tmp_path / "llm-d-inference-scheduler" / "pkg" / "plugins" / "scorer").mkdir(parents=True)
@@ -606,7 +603,6 @@ class TestPhaseTranslate:
                 },
             },
             "workloads": ["sim2real_golden/workloads/wl1.yaml"],
-            "llm_config": "sim2real_golden/llm_config.yaml",
         }
         _write_yaml(repo / "config" / "transfer.yaml", v3_data)
         # Create the real config file so manifest validation passes
@@ -667,7 +663,8 @@ class TestValidateAssembly:
         (pkg_dir / "treatment-pipeline.yaml").write_text("- type: test-scorer\n")
 
         # Create treatment_config with correct kind
-        _write_yaml(run_dir / "treatment_config.yaml", {"kind": "EndpointPickerConfig"})
+        (run_dir / "generated").mkdir(parents=True, exist_ok=True)
+        _write_yaml(run_dir / "generated" / "treatment_config.yaml", {"kind": "EndpointPickerConfig"})
 
         # Create the files_created file
         scorer_path = repo / "llm-d-inference-scheduler" / "pkg" / "plugins" / "scorer" / "test_scorer.go"
@@ -759,7 +756,8 @@ class TestValidateAssembly:
         (pkg_dir / "treatment-pipeline.yaml").write_text("- type: test-scorer\n")
 
         # treatment_config has wrong kind
-        _write_yaml(run_dir / "treatment_config.yaml", {"kind": "WrongKind"})
+        (run_dir / "generated").mkdir(parents=True, exist_ok=True)
+        _write_yaml(run_dir / "generated" / "treatment_config.yaml", {"kind": "WrongKind"})
 
         with pytest.raises(SystemExit):
             mod._validate_assembly(run_dir, resolved)
@@ -811,7 +809,8 @@ class TestValidateAssembly:
         pkg_dir = run_dir / "cluster" / "treatment"
         pkg_dir.mkdir(parents=True)
         (pkg_dir / "treatment-pipeline.yaml").write_text("type: test-scorer\n")
-        _write_yaml(run_dir / "treatment_config.yaml", {"kind": "EndpointPickerConfig"})
+        (run_dir / "generated").mkdir(parents=True, exist_ok=True)
+        _write_yaml(run_dir / "generated" / "treatment_config.yaml", {"kind": "EndpointPickerConfig"})
 
         # register.go does NOT contain plugin_type — but should be ignored
         register = repo / "llm-d-inference-scheduler" / "pkg" / "plugins" / "register.go"
@@ -841,7 +840,8 @@ class TestValidateAssembly:
         pkg_dir = run_dir / "cluster" / "treatment"
         pkg_dir.mkdir(parents=True)
         (pkg_dir / "treatment-pipeline.yaml").write_text("type: test-scorer\n")
-        _write_yaml(run_dir / "treatment_config.yaml", {"kind": "EndpointPickerConfig"})
+        (run_dir / "generated").mkdir(parents=True, exist_ok=True)
+        _write_yaml(run_dir / "generated" / "treatment_config.yaml", {"kind": "EndpointPickerConfig"})
 
         mod._validate_assembly(run_dir, resolved)  # should not raise
 
@@ -913,7 +913,8 @@ class TestGenerateAlgorithmValues:
             "treatment_config_generated": True,
         }))
         tc_yaml = "kind: EndpointPickerConfig\npluginType: test-scorer\n"
-        (run_dir / "treatment_config.yaml").write_text(tc_yaml)
+        (run_dir / "generated").mkdir(parents=True, exist_ok=True)
+        (run_dir / "generated" / "treatment_config.yaml").write_text(tc_yaml)
 
         manifest = dict(MINIMAL_MANIFEST)
         resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]
@@ -973,7 +974,7 @@ class TestGenerateAlgorithmValues:
         resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]
         out_path = run_dir / "algorithm_values.yaml"
 
-        with pytest.raises(RuntimeError, match="treatment_config.yaml"):
+        with pytest.raises(RuntimeError, match="generated/treatment_config.yaml"):
             mod._generate_algorithm_values(manifest, resolved, out_path)
 
     def test_warns_when_no_baseline_and_not_generated(self, repo):

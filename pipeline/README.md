@@ -141,8 +141,6 @@ baseline:
 workloads:
   - <path>                  # one or more workload YAMLs
 
-llm_config: <path>          # model, vLLM args, serving params
-
 hints:
   files: [<path>, ...]      # hint files passed to translation skill
   text: |                   # freeform hint text

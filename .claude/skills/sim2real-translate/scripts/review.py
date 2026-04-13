@@ -87,7 +87,7 @@ def build_system_prompt() -> str:
 def build_user_message(
     plugin_code: str,
     algorithm_source: str,
-    algorithm_config: str,
+    algorithm_config: "str | None",
     context_doc: str,
     treatment_config: str,
     round_num: int,
@@ -97,7 +97,10 @@ def build_user_message(
         f"## Review Round {round_num}\n\n"
         f"## Generated Plugin Code\n```go\n{plugin_code}\n```\n\n"
         f"## Algorithm Source (Ground Truth)\n```go\n{algorithm_source}\n```\n\n"
-        f"## Algorithm Config\n```yaml\n{algorithm_config}\n```\n\n"
+    )
+    if algorithm_config is not None:
+        base += f"## Algorithm Config\n```yaml\n{algorithm_config}\n```\n\n"
+    base += (
         f"## Translation Context\n{context_doc}\n\n"
         f"## Treatment Config\n```yaml\n{treatment_config}\n```\n"
     )
@@ -291,7 +294,7 @@ def run_review_round(
     round_num: int,
     plugin_files: list,
     algorithm: str,
-    algorithm_config: str,
+    algorithm_config: "str | None",
     context: str,
     treatment_config: str,
     models: list,
@@ -311,7 +314,7 @@ def run_review_round(
         {"role": "user", "content": build_user_message(
             plugin_code,
             Path(algorithm).read_text(),
-            Path(algorithm_config).read_text(),
+            Path(algorithm_config).read_text() if algorithm_config else None,
             Path(context).read_text(),
             Path(treatment_config).read_text(),
             round_num,
@@ -357,7 +360,8 @@ def main():
     )
     parser.add_argument("--algorithm", required=True, help="Path to algorithm source file")
     parser.add_argument(
-        "--algorithm-config", required=True, help="Path to algorithm config YAML"
+        "--algorithm-config", required=False, default=None,
+        help="Path to algorithm config YAML (optional; omit when scenario uses default config)"
     )
     parser.add_argument("--context", required=True, help="Path to context.md document")
     parser.add_argument(
@@ -381,7 +385,6 @@ def main():
             sys.exit(1)
     for attr, label in [
         ("algorithm", "algorithm source"),
-        ("algorithm_config", "algorithm config"),
         ("context", "context document"),
         ("treatment_config", "treatment config"),
     ]:
@@ -389,6 +392,9 @@ def main():
         if not Path(path).is_file():
             print(f"{RED}[ERROR]{NC} {label} not found: {path}", file=sys.stderr)
             sys.exit(1)
+    if args.algorithm_config and not Path(args.algorithm_config).is_file():
+        print(f"{RED}[ERROR]{NC} algorithm config not found: {args.algorithm_config}", file=sys.stderr)
+        sys.exit(1)
 
     api_key, base_url = resolve_api_credentials()
     models = DEV_MODELS if args.dev else ALL_MODELS

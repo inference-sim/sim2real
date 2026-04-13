@@ -3,8 +3,9 @@ name: sim2real-translate
 description: |
   Translates a simulation-discovered algorithm into a production plugin for
   llm-d-inference-scheduler. Reads skill_input.json (written by prepare.py),
-  spawns a two-agent team (writer + reviewer) that owns the translate loop,
-  build/test gate, and review rounds, then copies artifacts to generated/.
+  spawns a three-agent team (expert + writer + reviewer) where the expert does
+  deep repo exploration in parallel with writer/reviewer initialization, then
+  the writer owns the translate loop, build/test gate, and review rounds.
   Use after prepare.py reaches the translation checkpoint.
 argument-hint: "[--rounds N] [--rebuild-context]"
 user-invocable: true
@@ -97,7 +98,7 @@ python3 -c "
 import json, sys
 si = json.load(open('$RUN_DIR/skill_input.json'))
 required = ['run_name', 'run_dir', 'scenario', 'context_path', 'manifest_path',
-            'algorithm_source', 'algorithm_config', 'baseline_sim_config',
+            'algorithm_source', 'baseline_sim_config',
             'target', 'build_commands', 'config_kind', 'hints']
 missing = [f for f in required if f not in si]
 if missing:
@@ -118,7 +119,7 @@ SCENARIO=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.j
 CONTEXT_PATH=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['context_path'])")
 MANIFEST_PATH=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['manifest_path'])")
 ALGO_SOURCE=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['algorithm_source'])")
-ALGO_CONFIG=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['algorithm_config'])")
+ALGO_CONFIG=$(python3 -c "import json; v=json.load(open('$RUN_DIR/skill_input.json')).get('algorithm_config'); print(v or '')")
 TARGET_REPO=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['target']['repo'])")
 CONFIG_KIND=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['config_kind'])")
 HINTS_TEXT=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json')).get('hints', {}).get('text', ''))")
@@ -139,7 +140,7 @@ Verify source files exist:
 
 ```bash
 test -f "$ALGO_SOURCE" || { echo "HALT: algorithm source not found: $ALGO_SOURCE"; exit 1; }
-test -f "$ALGO_CONFIG" || { echo "HALT: algorithm config not found: $ALGO_CONFIG"; exit 1; }
+[ -z "$ALGO_CONFIG" ] || test -f "$ALGO_CONFIG" || { echo "HALT: algorithm config not found: $ALGO_CONFIG"; exit 1; }
 test -d "$TARGET_REPO" || { echo "HALT: target repo not found: $TARGET_REPO"; exit 1; }
 ```
 
@@ -291,33 +292,6 @@ print('State updated: context_file_populated=true')
 
 TaskUpdate Step 1 → completed
 
-## Step 1.5: Spawn Expert Agent
-
-Use TaskCreate: `"Step 1.5: Spawn Expert"` → TaskUpdate in_progress
-
-Read `prompts/prepare/agent-expert.md`, substitute all `{PLACEHOLDER}` values:
-- `{REPO_ROOT}` → `$REPO_ROOT`
-- `{TARGET_REPO}` → `$TARGET_REPO`
-- `{ALGO_SOURCE}` → `$ALGO_SOURCE`
-- `{ALGO_CONFIG}` → `$ALGO_CONFIG`
-- `{BASELINE_SIM_CONFIG}` → `$BASELINE_SIM_CONFIG`
-- `{BASELINE_REAL_CONFIG}` → `$BASELINE_REAL_CONFIG`
-
-Spawn the Expert agent in the background:
-```
-Agent(
-  subagent_type: general-purpose,
-  name: "expert",
-  run_in_background: true,
-  prompt: <substituted agent-expert.md content>
-)
-```
-
-The Expert initializes in the background. The Writer and Reviewer will use it during
-translation. Do not wait for Expert initialization to complete before proceeding.
-
-TaskUpdate Step 1.5 → completed
-
 ## Step 2: Team Translation
 
 Use TaskCreate: `"Step 2: Team Translation"` → TaskUpdate in_progress
@@ -332,7 +306,7 @@ print(json.dumps(si.get('build_commands', [])))
 ")
 ```
 
-Read the two prompt templates and construct agent prompts by substituting
+Read the three prompt templates and construct agent prompts by substituting
 all `{PLACEHOLDER}` values with the corresponding shell variables
 (`{REPO_ROOT}` → `$REPO_ROOT`, `{RUN_DIR}` → `$RUN_DIR`, `{CONTEXT_PATH}` →
 `$CONTEXT_PATH`, `{ALGO_SOURCE}` → `$ALGO_SOURCE`, `{ALGO_CONFIG}` →
@@ -348,19 +322,27 @@ all `{PLACEHOLDER}` values with the corresponding shell variables
 
 Use TeamCreate to create the team:
 ```
-TeamCreate(team_name="translate-$RUN_NAME", description="sim2real writer+reviewer for $RUN_NAME")
+TeamCreate(team_name="translate-$RUN_NAME", description="sim2real expert+writer+reviewer for $RUN_NAME")
 ```
 
-Use Agent tool to spawn the Reviewer (stays idle, name="reviewer"):
-- Read `prompts/prepare/agent-reviewer.md`, substitute all `{PLACEHOLDER}` values, pass as prompt
-- subagent_type: general-purpose
-- name: "reviewer"
-- run_in_background: true
+**Spawn all three agents in a single tool-call message** so they start in parallel.
+Issue three Agent tool calls at once — do not wait between them:
 
-Use Agent tool to spawn the Writer (starts immediately, name="writer"):
-- Read `prompts/prepare/agent-writer.md`, substitute all `{PLACEHOLDER}` values, pass as prompt
-- subagent_type: general-purpose
-- name: "writer"
+1. Agent(name="expert", team_name="translate-$RUN_NAME", run_in_background=true,
+         subagent_type=general-purpose,
+         prompt=<substituted agent-expert.md>)
+
+2. Agent(name="reviewer", team_name="translate-$RUN_NAME", run_in_background=true,
+         subagent_type=general-purpose,
+         prompt=<substituted agent-reviewer.md>)
+
+3. Agent(name="writer", team_name="translate-$RUN_NAME",
+         subagent_type=general-purpose,
+         prompt=<substituted agent-writer.md>)
+
+All three start simultaneously. Expert and Reviewer initialize in the background while
+Writer begins Phase 2. By the time Writer reaches Phase 4 (translation), Expert will
+have completed its repo exploration and be ready to answer queries.
 
 Wait for the Writer to send a message to the main session. Handle each case:
 

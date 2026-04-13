@@ -205,11 +205,11 @@ def main() -> None:
 
     baseline_wl = {
         d.name for d in baseline_log.iterdir()
-        if d.is_dir() and d.name.startswith("workload_")
+        if d.is_dir() and (d / "trace_data.csv").exists()
     }
     treatment_wl = {
         d.name for d in treatment_log.iterdir()
-        if d.is_dir() and d.name.startswith("workload_")
+        if d.is_dir() and (d / "trace_data.csv").exists()
     }
 
     for wl in sorted(baseline_wl - treatment_wl):

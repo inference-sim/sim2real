@@ -8,8 +8,8 @@ class ManifestError(Exception):
     """Manifest validation error."""
 
 
-_REQUIRED_TOP = ["kind", "version", "scenario", "algorithm", "baseline", "workloads", "llm_config"]
-_REQUIRED_ALGORITHM = ["source", "config"]
+_REQUIRED_TOP = ["kind", "version", "scenario", "algorithm", "baseline"]
+_REQUIRED_ALGORITHM = ["source"]
 
 
 def load_manifest(path: "Path | str") -> dict:
@@ -63,10 +63,15 @@ def load_manifest(path: "Path | str") -> dict:
             "real": {"config": None, "notes": ""},
         }
     else:
-        # v3: baseline.sim.config required; baseline.real.* optional with defaults
+        # v3: baseline.sim.config optional (None when scenario has no sim baseline);
+        # baseline.real.* optional with defaults
         sim_section = bl.get("sim")
-        if not isinstance(sim_section, dict) or "config" not in sim_section:
-            raise ManifestError("Missing required field: baseline.sim.config")
+        if sim_section is None:
+            data["baseline"]["sim"] = {"config": None}
+        elif not isinstance(sim_section, dict):
+            raise ManifestError("baseline.sim must be a mapping")
+        else:
+            sim_section.setdefault("config", None)
         real_section = bl.get("real")
         if real_section is None:
             data["baseline"]["real"] = {"config": None, "notes": ""}
@@ -76,10 +81,12 @@ def load_manifest(path: "Path | str") -> dict:
             data["baseline"]["real"].setdefault("config", None)
             data["baseline"]["real"].setdefault("notes", "")
 
-    if not isinstance(data["workloads"], list):
+    # Normalize workloads: absent/null → [] (standby mode — stack up, no benchmarks)
+    wl = data.get("workloads")
+    if wl is None:
+        data["workloads"] = []
+    elif not isinstance(wl, list):
         raise ManifestError("workloads must be a list")
-    if len(data["workloads"]) == 0:
-        raise ManifestError("workloads must contain at least one path")
 
     # Hints section (optional)
     hints_raw = data.get("hints", {}) or {}

@@ -26,6 +26,9 @@ common:
             istio:
               accessLogging: false
     model:
+      modelName: Qwen/Qwen3-32B
+      modelArtifacts:
+        uri: hf://Qwen/Qwen3-32B
       vllm_image: ghcr.io/llm-d/llm-d-cuda:v0.6.0
       helmValues:
         modelArtifacts:
@@ -36,6 +39,7 @@ common:
           create: false
         decode:
           create: true
+          replicas: 4
           extraConfig:
             affinity:
               nodeAffinity:
@@ -51,22 +55,35 @@ common:
                       values:
                       - pokprod-b93r39s0
                       - pokprod-b93r43s2
+                      - pokprod-b93r38s0
           containers:
           - modelCommand: vllmServe
             mountModelVolume: true
-            env:
-            - name: GAIE_RELEASE_NAME_POSTFIX  # index 0 matters because of set in helmfile
-            - name: NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace  # assumed to be the same as the EPP's
-            - name: POD_IP
-              valueFrom:
-                fieldRef:
-                  apiVersion: v1
-                  fieldPath: status.podIP
-            - name: TRITON_CACHE_DIR
-              value: /tmp/.triton-cache
+            resources:
+              limits:
+                nvidia.com/gpu: 1
+              requests:
+                nvidia.com/gpu: 1
+            args:
+            - --block-size=64
+            - --max-num-seqs=256
+            - --max-num-batched-tokens=2048
+            # - --max-model-len=36000
+            - --gpu-memory-utilization=0.95
+            # - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://$(GAIE_RELEASE_NAME_POSTFIX)-gaie-epp.$(NAMESPACE).svc.cluster.local:5557","topic":"kv@$(POD_IP):8000@Qwen/Qwen3-32B"}
+            # env:
+            # - name: GAIE_RELEASE_NAME_POSTFIX
+            # - name: NAMESPACE
+            #   valueFrom:
+            #     fieldRef:
+            #       fieldPath: metadata.namespace
+            # - name: POD_IP
+            #   valueFrom:
+            #     fieldRef:
+            #       apiVersion: v1
+            #       fieldPath: status.podIP
+            # - name: TRITON_CACHE_DIR
+            #   value: /tmp/.triton-cache
             extraConfig:
               startupProbe:
                 httpGet:
@@ -86,12 +103,12 @@ common:
         upstream:
           hub: ghcr.io/llm-d
           name: llm-d-inference-scheduler
-          tag: latest
-          pullPolicy: IfNotPresent
+          tag: v0.7.1
+          pullPolicy: Always
         build:
           hub: ghcr.io/kalantar
           name: llm-d-inference-scheduler
-          tag: adaptive6
+          tag: adminctrl1
           platform: linux/amd64
           pullPolicy: Always
 scenarios:
@@ -140,10 +157,38 @@ scenarios:
     target:
       repo: llm-d-inference-scheduler
     config:
-      kind: AdmissionPolicyConfig
-      helm_path: gaie.treatment.admissionPolicy
+      kind: EndpointPickerConfig
+      helm_path: gaie.treatment.helmValues.inferenceExtension.pluginsCustomConfig.custom-plugins.yaml
     stack:
+      model:
+        modelName: Qwen/Qwen3-14B
+        modelArtifacts:
+          uri: hf://Qwen/Qwen3-14B
       gaie:
+        shared:
+          helmValues:
+            inferenceExtension:
+              flags:
+                v: 5
+            provider:
+              name: istio
+            istio:
+              destinationRule:
+                trafficPolicy:
+                  connectionPool:
+                    http:
+                      http1MaxPendingRequests: 256000
+                      maxRequestsPerConnection: 256000
+                      http2MaxRequests: 256000
+                      idleTimeout: 900s
+                    tcp:
+                      maxConnections: 256000
+                      maxConnectionDuration: 1800s
+                      connectTimeout: 900s
+        treatment:
+          helmValues:
+            inferenceExtension:
+              pluginsConfigFile: custom-plugins.yaml
         inferenceObjectives:
         - name: critical
           priority: 100
@@ -153,8 +198,6 @@ scenarios:
           priority: -10
         - name: batch
           priority: -50
-        baseline:
-          helmValues: {}
   adaptive-routing:
     target:
       repo: llm-d-inference-scheduler
@@ -178,20 +221,20 @@ scenarios:
                 interval: 5s
               extProcPort: 9002
               extraContainerPorts:
-                - name: zmq
-                  containerPort: 5557
-                  protocol: TCP
+              - name: zmq
+                containerPort: 5557
+                protocol: TCP
               extraServicePorts:
-                - name: zmq
-                  port: 5557
-                  targetPort: 5557
-                  protocol: TCP
+              - name: zmq
+                port: 5557
+                targetPort: 5557
+                protocol: TCP
               env:
-                - name: HF_TOKEN
-                  valueFrom:
-                    secretKeyRef:
-                      name: hf-secret
-                      key: HF_TOKEN
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: HF_TOKEN
               sidecar:
                 enabled: true
                 image: ghcr.io/llm-d/llm-d-uds-tokenizer:v0.7.1
@@ -200,25 +243,25 @@ scenarios:
                 configMap:
                   name: tokenizer-uds-config
                   data:
-                    placeholder: ""
+                    placeholder: ''
                 env:
-                  - name: TOKENIZERS_DIR
-                    value: /tokenizers
-                  - name: HF_HOME
-                    value: /tokenizers
+                - name: TOKENIZERS_DIR
+                  value: /tokenizers
+                - name: HF_HOME
+                  value: /tokenizers
                 volumeMounts:
-                  - mountPath: /tokenizers
-                    name: tokenizers
-                  - mountPath: /tmp/tokenizer
-                    name: tokenizer-uds
-              volumes:
-                - name: tokenizers
-                  emptyDir: {}
-                - name: tokenizer-uds
-                  emptyDir: {}
-              volumeMounts:
+                - mountPath: /tokenizers
+                  name: tokenizers
                 - mountPath: /tmp/tokenizer
                   name: tokenizer-uds
+              volumes:
+              - name: tokenizers
+                emptyDir: {}
+              - name: tokenizer-uds
+                emptyDir: {}
+              volumeMounts:
+              - mountPath: /tmp/tokenizer
+                name: tokenizer-uds
             provider:
               name: istio
             istio:

@@ -3,6 +3,7 @@
 Extracted from tools/transfer_cli.py compile-pipeline subcommand.
 """
 import copy
+import json
 import subprocess
 import sys
 import tempfile
@@ -11,6 +12,14 @@ from pathlib import Path
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+# Tasks in the per-phase pipeline that are workload-specific and should be
+# omitted from the standby pipeline (no-workload mode).
+_WORKLOAD_TASK_NAMES = frozenset({"run-workload", "collect-results", "stream-epp-logs"})
+_WORKLOAD_PARAM_NAMES = frozenset({"workloadName", "workloadSpec"})
+# Duration passed to the "sleep" task in standby pipelines.  The pipeline never
+# completes naturally; spec.finally (teardown) only runs on cancel/stop.
+_STANDBY_SLEEP_DURATION = "infinity"
 
 
 def compile_pipeline(
@@ -59,7 +68,10 @@ def compile_pipeline(
 
     values["phase"] = phase
     gaie_key = "treatment" if phase == "treatment" else "baseline"
-    values["gaie_config"] = (
+    # Pre-serialize to JSON string so the template's `| tojson` produces a
+    # properly-quoted YAML scalar.  Without this, an empty dict renders as `{}`
+    # (a YAML mapping), which Tekton rejects for `type: string` params.
+    values["gaie_config"] = json.dumps(
         values.get("stack", {}).get("gaie", {}).get(gaie_key, {}).get("helmValues", {})
     )
     values["inference_objectives"] = (
@@ -248,13 +260,16 @@ def make_experiment_pipeline(
     for phase, wload_name, wload_data in phase_workloads:
         safe_wl = wload_name.replace("_", "-")
 
-        # Truncate safe_wl so that prefix + longest_task_name <= 63 (Tekton/k8s limit).
+        # Truncate safe_wl so that pr_name + "-" + prefix + longest_task_name <= 63.
+        # Tekton derives TaskRun names as "<pipelinerun-name>-<task-name>" and hashes
+        # any result over 63 chars, making pod names unidentifiable.
         # Compute max original task name length from the compiled phase pipeline.
         phase_all_tasks = (compiled_pipelines[phase].get("spec", {}).get("tasks", [])
                            + compiled_pipelines[phase].get("spec", {}).get("finally", []))
         max_orig = max((len(t["name"]) for t in phase_all_tasks), default=0)
-        # prefix = "{phase}-{safe_wl}-"  → budget for safe_wl = 63 - len(phase) - 2 - max_orig
-        budget = max(1, 63 - len(phase) - 2 - max_orig)
+        # prefix = "{phase}-{safe_wl}-"  → budget for safe_wl:
+        # 63 - len(pr_name) - 1 (separator) - len(phase) - 2 (dashes) - max_orig
+        budget = max(1, 63 - len(pr_name) - len(phase) - 3 - max_orig)
         safe_wl = safe_wl[:budget].rstrip("-")
 
         prefix = f"{phase}-{safe_wl}-"
@@ -339,6 +354,111 @@ def make_experiment_pipeline(
 
     pr_workspaces = _apply_workspace_bindings(
         [ws["name"] for ws in all_workspaces], workspace_bindings or {}
+    )
+
+    pipelinerun = {
+        "apiVersion": "tekton.dev/v1",
+        "kind": "PipelineRun",
+        "metadata": {"name": pr_name, "namespace": namespace},
+        "spec": {
+            "pipelineRef": {"name": pipeline_name},
+            "params": pr_params,
+            "workspaces": pr_workspaces,
+        },
+    }
+
+    return pipeline, pipelinerun
+
+
+def make_standby_pipeline(
+    phase: str,
+    compiled_pipeline: dict,
+    run_name: str,
+    namespace: str,
+    workspace_bindings: dict | None = None,
+) -> tuple:
+    """Generate a standby Pipeline + PipelineRun for no-workload deployments.
+
+    All deploy tasks run normally.  A ``standby`` sleep task runs last and
+    blocks indefinitely (``sleep infinity``), so the pipeline never completes
+    on its own.  ``spec.finally`` (teardown) only fires on cancel/stop — never
+    on normal completion.
+
+    Args:
+        phase: Pipeline phase name ("baseline" or "treatment")
+        compiled_pipeline: Compiled Pipeline YAML dict from tektonc
+        run_name: Experiment run name
+        namespace: Kubernetes namespace
+        workspace_bindings: Optional workspace → PVC/secret bindings
+
+    Returns:
+        (pipeline_dict, pipelinerun_dict)
+    """
+    safe_run = run_name.replace("_", "-")
+    pipeline_name = f"sim2real-{phase}-standby-{safe_run}"
+    pr_name = f"{phase}-standby-{safe_run}"
+
+    spec = compiled_pipeline.get("spec", {})
+    all_tasks = spec.get("tasks", [])
+    finally_tasks = spec.get("finally", [])
+    workspaces = spec.get("workspaces", [])
+
+    # Remove workload-specific tasks; clean up dangling runAfter refs.
+    removed = {t["name"] for t in all_tasks if t["name"] in _WORKLOAD_TASK_NAMES}
+    deploy_tasks = []
+    for task in all_tasks:
+        if task["name"] in removed:
+            continue
+        t = copy.deepcopy(task)
+        if t.get("runAfter"):
+            t["runAfter"] = [r for r in t["runAfter"] if r not in removed]
+            if not t["runAfter"]:
+                t.pop("runAfter")
+        deploy_tasks.append(t)
+
+    # Leaf tasks: no other deploy task depends on them — standby waits for all.
+    has_successor: set = set()
+    for t in deploy_tasks:
+        for r in t.get("runAfter", []):
+            has_successor.add(r)
+    leaf_names = [t["name"] for t in deploy_tasks if t["name"] not in has_successor]
+
+    standby_task: dict = {
+        "name": "standby",
+        "taskRef": {"name": "sleep"},
+        "params": [{"name": "duration", "value": _STANDBY_SLEEP_DURATION}],
+    }
+    if leaf_names:
+        standby_task["runAfter"] = leaf_names
+
+    # Strip workload-only params (no workload spec is passed in standby mode).
+    pipeline_params = [
+        p for p in spec.get("params", [])
+        if p.get("name") not in _WORKLOAD_PARAM_NAMES
+    ]
+
+    pipeline_spec: dict = {
+        "params": pipeline_params,
+        "workspaces": workspaces,
+        "tasks": deploy_tasks + [standby_task],
+    }
+    if finally_tasks:
+        pipeline_spec["finally"] = finally_tasks
+
+    pipeline = {
+        "apiVersion": "tekton.dev/v1",
+        "kind": "Pipeline",
+        "metadata": {"name": pipeline_name},
+        "spec": pipeline_spec,
+    }
+
+    pr_params = [
+        {"name": "namespace", "value": namespace},
+        {"name": "experimentId", "value": run_name},
+        {"name": "runName", "value": run_name},
+    ]
+    pr_workspaces = _apply_workspace_bindings(
+        [ws["name"] for ws in workspaces], workspace_bindings or {}
     )
 
     pipelinerun = {

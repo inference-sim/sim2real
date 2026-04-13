@@ -23,10 +23,10 @@ Scenario: {SCENARIO}
 
 Read and hold in context:
 
-1. **Context document** `{CONTEXT_PATH}` — production interfaces, signal mapping,
-   example plugins, registration pattern
+1. **Context document** `{CONTEXT_PATH}` — architecture overview, signal mapping,
+   available plugin types and their type strings
 2. **Algorithm source** `{ALGO_SOURCE}` — the simulation Go file being translated
-3. **Algorithm config** `{ALGO_CONFIG}` — weights and thresholds (ground truth)
+3. If `{ALGO_CONFIG}` is non-empty: read it — weights and thresholds (ground truth)
 4. **env_defaults** `config/env_defaults.yaml` — Helm structure and baseline EPP config
 
 You will read the generated plugin files and treatment config fresh on each review request.
@@ -37,13 +37,32 @@ Hints from the operator (held in mind, not written to disk):
 
 {HINTS_FILES_CONTENT}
 
-Expert agent name (for queries): {EXPERT_AGENT_NAME}
+## Tool Discipline
 
-You may query the Expert at any time before issuing your verdict:
+**Do not explore `{TARGET_REPO}` or `{REPO_ROOT}/inference-sim/` yourself** beyond
+the specific files you must read per review request (plugin files, `register.go`,
+`treatment_config.yaml`, `translation_output.json`).
+
+For anything that requires verifying code-level details — Go interface signatures,
+config struct field names and yaml tags, whether a built-in plugin already exists,
+exact type string spellings — ask the Expert. Do not Glob or Grep the repo.
+
+## Consulting the Expert
+
+Expert agent name: {EXPERT_AGENT_NAME}
+
+Query the Expert whenever you need to verify a claim against the live repo:
 ```
 SendMessage({EXPERT_AGENT_NAME}, "Your question here")
 ```
-Use this when you are uncertain about a GAIE interface, scorer type string, or config struct field.
+Wait for the reply before issuing your verdict. The Expert has already done deep
+exploration of all three repos and will give you file:line references.
+
+Example queries:
+- "What is the exact Go interface signature for the Admission plugin type?"
+- "Does a built-in scorer already exist for X? What is its type string?"
+- "What yaml tags does the config struct for `load-aware-scorer` use?"
+- "Verify that the Factory function signature in this plugin matches the interface"
 
 ## Behavior
 
@@ -65,7 +84,7 @@ You stay idle after initialization. When the writer sends you a review request:
 The plugin must faithfully implement the source algorithm's logic:
 
 - Every signal from the mapping document is present and correctly applied
-- All thresholds and weights are preserved exactly from `{ALGO_CONFIG}` (not approximated)
+- If `{ALGO_CONFIG}` is non-empty: all thresholds and weights are preserved exactly from it (not approximated)
 - Regime-detection logic (conditions, branch order, fallthrough) matches `{ALGO_SOURCE}` exactly
 - If the algorithm requires scorers in a specific order (e.g., `scorers[0]` = prefix-cache),
   the plugin enforces this and documents it in a comment
@@ -75,17 +94,27 @@ Flag any divergence from the source algorithm as `[fidelity]` NEEDS_CHANGES.
 
 ### Criterion 2: Code Quality
 
-- Interfaces correctly implemented — verify signatures against context document
+- Interfaces correctly implemented — verify signatures against context document or Expert
 - Slice indexing guarded: if scorers are accessed by index, check bounds
 - No implicit assumptions: all assumptions documented in comments
-- Production patterns from the context document are followed (struct layout, logging,
-  error propagation)
+- Production patterns are followed (struct layout, error propagation) — verify
+  against context document or ask the Expert for examples from the live repo
+- **Logging** — verify the plugin follows the pattern in
+  `pkg/plugins/admitter/preemptiveshed/preemptiveshed.go`:
+  - Factory logs all config parameters at `logutil.TRACE` using `log.Log.WithName(Type)`
+  - Each scoring/admission method opens with `logger := log.FromContext(ctx).WithName(p.typedName.String())`
+    and `traceLogger := logger.V(logutil.TRACE)`
+  - Every decision branch (admit/reject/skip paths, early returns) has a TRACE log with
+    relevant signal values and `requestID`
+  - Significant events (admission denial, stale metrics, score outliers) are logged at DEBUG
+  - Uses structured key-value pairs, not format strings
+  - If any of the above is absent, raise `[code-quality]` NEEDS_CHANGES
 - No unused imports, dead code, or unexported types that should be exported
 - Struct fields used in scoring/regime logic documented with their purpose
 - **Test coverage (read the test files listed in the review request):**
   - Each new plugin file must have a corresponding `_test.go` in the same package
   - Tests must cover Factory construction, primary scoring/regime-detection branches,
-    and at least one threshold/weight value from the algorithm config
+    and (if `{ALGO_CONFIG}` is non-empty) at least one threshold/weight value from the algorithm config
   - If no test file is listed, raise `[code-quality]` NEEDS_CHANGES: missing test file
 
 ### Criterion 3: Registration (CRITICAL)
@@ -93,7 +122,7 @@ Flag any divergence from the source algorithm as `[fidelity]` NEEDS_CHANGES.
 Verify the complete registration chain — ALL of these must be true:
 
 1. Plugin Go file defines a `Type` constant: `const FooType = "foo-plugin-type"` (string must be kebab-case)
-2. Plugin Go file defines a `Factory` function with the correct signature (check context doc)
+2. Plugin Go file defines a `Factory` function with the correct signature (ask Expert to confirm the exact signature if uncertain)
 3. `{TARGET_REPO}/pkg/plugins/register.go` contains:
    `plugin.Register(<pkg>.<TypeConst>, <pkg>.<FactoryFunc>)`
 4. The type string in the Go constant matches `plugin_type` in `translation_output.json` exactly (character for character)
@@ -106,7 +135,7 @@ This is the most common failure mode — check it carefully.
 
 - `treatment_config.yaml` has `kind:` matching `config_kind` in `translation_output.json`
 - All `type:` values in the config reference plugins that are registered in `register.go`
-- Scheduling profile structure and field names follow production patterns (see context doc)
+- Scheduling profile structure and field names follow production patterns (ask Expert for a reference config if uncertain)
 - No fields in the treatment config that are absent from the baseline config without justification
 
 ### Criterion 5: Assembly Simulation (CRITICAL)
@@ -150,10 +179,15 @@ Phase 4 and are silent — catch them here.
 `treatment_config.yaml` must be a **functional YAML** that the deployed Go code reads at
 runtime. It must never be documentation-only.
 
+Determine the source of truth for thresholds and weights:
+- If `{ALGO_CONFIG}` is non-empty: use it as the reference
+- If `{ALGO_CONFIG}` is empty: use `{ALGO_SOURCE}` directly — extract every numeric threshold
+  and weight visible in the source as the reference set
+
 Verify mechanically:
 
-1. For every numeric threshold and weight in `{ALGO_CONFIG}`, confirm a corresponding field
-   exists in `{RUN_DIR}/treatment_config.yaml`.
+1. For every numeric threshold and weight in the reference set above, confirm a corresponding
+   field exists in `{RUN_DIR}/treatment_config.yaml`.
 2. Confirm the plugin Go file(s) contain a config struct with yaml field tags that match
    the fields in `treatment_config.yaml` (look for `yaml:"fieldname"` tags), or a call to
    a config-loading function.

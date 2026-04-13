@@ -30,7 +30,7 @@ from pipeline.lib.manifest import load_manifest, ManifestError
 from pipeline.lib.state_machine import StateMachine
 from pipeline.lib.context_builder import build_context
 from pipeline.lib.values import _deep_merge, merge_values
-from pipeline.lib.tekton import compile_pipeline, make_experiment_pipeline, make_phase_pipeline
+from pipeline.lib.tekton import compile_pipeline, make_experiment_pipeline, make_phase_pipeline, make_standby_pipeline
 
 # ── Repo layout ──────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -118,14 +118,19 @@ def _phase_init(args, manifest: dict, run_dir: Path) -> StateMachine:
     resolved = _load_resolved_config(manifest)
 
     # Validate prerequisites
-    for label, path_str in [
-        ("algorithm.source", manifest["algorithm"]["source"]),
-        ("algorithm.config", manifest["algorithm"]["config"]),
-        ("baseline.sim.config", manifest["baseline"]["sim"]["config"]),
-    ]:
-        if not (REPO_ROOT / path_str).exists():
-            err(f"{label} not found: {path_str}")
-            sys.exit(1)
+    if not (REPO_ROOT / manifest["algorithm"]["source"]).exists():
+        err(f"algorithm.source not found: {manifest['algorithm']['source']}")
+        sys.exit(1)
+
+    baseline_sim_config = manifest["baseline"]["sim"]["config"]
+    if baseline_sim_config and not (REPO_ROOT / baseline_sim_config).exists():
+        err(f"baseline.sim.config not found: {baseline_sim_config}")
+        sys.exit(1)
+
+    algo_config = manifest["algorithm"].get("config")
+    if algo_config and not (REPO_ROOT / algo_config).exists():
+        err(f"algorithm.config not found: {algo_config}")
+        sys.exit(1)
 
     # Validate baseline.real.config if present
     baseline_real_config = manifest["baseline"]["real"].get("config")
@@ -138,10 +143,6 @@ def _phase_init(args, manifest: dict, run_dir: Path) -> StateMachine:
         if not (REPO_ROOT / wl).exists():
             err(f"Workload not found: {wl}")
             sys.exit(1)
-
-    if not (REPO_ROOT / manifest["llm_config"]).exists():
-        err(f"llm_config not found: {manifest['llm_config']}")
-        sys.exit(1)
 
     # Validate target repo exists
     target = resolved.get("target", {})
@@ -221,8 +222,8 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
                            else context_path),
         "manifest_path": str(getattr(args, "manifest", None) or "config/transfer.yaml"),
         "algorithm_source": manifest["algorithm"]["source"],
-        "algorithm_config": manifest["algorithm"]["config"],
-        "baseline_sim_config": manifest["baseline"]["sim"]["config"],
+        "algorithm_config": manifest["algorithm"].get("config"),
+        "baseline_sim_config": manifest["baseline"]["sim"].get("config"),
         "baseline_real_config": manifest["baseline"]["real"].get("config"),
         "baseline_real_notes": manifest["baseline"]["real"].get("notes", ""),
         "target": {"repo": target.get("repo", "")},
@@ -284,7 +285,7 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
         return
 
     # 4a: Validate treatment config
-    tc_path = run_dir / "treatment_config.yaml"
+    tc_path = run_dir / "generated" / "treatment_config.yaml"
     if tc_path.exists():
         tc = yaml.safe_load(tc_path.read_text())
         expected_kind = resolved.get("config", {}).get("kind")
@@ -293,7 +294,7 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
             sys.exit(1)
         ok("Treatment config validated")
 
-    # 4b: Baseline config — from baseline_config.yaml in run dir (if Phase 2 ran),
+    # 4b: Baseline config — from generated/baseline_config.yaml (if skill ran),
     # otherwise falls back to env_defaults (scenarios.<scenario>.gaie.baseline)
 
     # 4c: Generate algorithm_values.yaml
@@ -353,19 +354,6 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
 
 def _generate_algorithm_values(manifest: dict, resolved: dict, out_path: Path):
     """Generate algorithm_values.yaml from manifest + resolved config."""
-    llm_config_path = REPO_ROOT / manifest["llm_config"]
-    llm_config = yaml.safe_load(llm_config_path.read_text())
-
-    # Support both flat format (model_name/model_uri) and nested format (model.hf_repo/model.id)
-    _model_block = llm_config.get("model", {})
-    if "model_name" not in llm_config:
-        llm_config["model_name"] = _model_block.get("hf_repo") or _model_block.get("id", "")
-    if "model_uri" not in llm_config:
-        hf_repo = _model_block.get("hf_repo") or _model_block.get("id", "")
-        llm_config["model_uri"] = f"hf://{hf_repo}" if hf_repo else ""
-    if "vllm_args" not in llm_config:
-        llm_config["vllm_args"] = llm_config.get("vllm_config", {})
-
     # Parse workloads
     workloads = []
     multiplier = resolved.get("observe", {}).get("request_multiplier", 1)
@@ -387,58 +375,25 @@ def _generate_algorithm_values(manifest: dict, resolved: dict, out_path: Path):
     blis_tag = blis_tag_result.stdout.strip() if blis_tag_result.returncode == 0 else ""
 
     # Build algorithm values
-    vllm_image = resolved.get("stack", {}).get("model", {}).get("vllm_image", "")
     observe = {"workloads": workloads}
     if blis_tag:
         observe["image"] = f"ghcr.io/inference-sim/blis:{blis_tag}"
+    # Set GAIE_RELEASE_NAME_POSTFIX so the kv-events-config endpoint resolves correctly.
+    # The EPP service is named sim2real-{run_name}-gaie-epp by the Tekton deploy-gaie task.
+    run_name = out_path.parent.name
     alg_values = {
         "stack": {
             "model": {
-                "modelName": llm_config.get("model_name", ""),
-                "modelArtifacts": {"uri": llm_config.get("model_uri", "")},
+                "helmValues": {
+                    "decode": {
+                        "containers": [{"env": [{"name": "GAIE_RELEASE_NAME_POSTFIX",
+                                                 "value": f"sim2real-{run_name}"}]}],
+                    },
+                },
             },
         },
         "observe": observe,
     }
-    if vllm_image:
-        alg_values["stack"]["model"]["vllmImage"] = vllm_image
-
-    # Translate BLIS vllm_config params to vLLM CLI flags for the helm chart.
-    # The chart expects containers[].args as a list of "--flag=value" strings.
-    # Mapping per blis_router/CLUSTER.md and the deployment comment in llm_config.yaml.
-    # total_kv_blocks is a calibration reference only — not a vLLM CLI flag.
-    # max_model_len: 0 means "unlimited (model native)" in BLIS — omit the flag.
-    _BLIS_TO_VLLM_FLAG = {
-        "gpu_memory_utilization":   "--gpu-memory-utilization",
-        "block_size_in_tokens":     "--block-size",
-        "max_num_running_reqs":     "--max-num-seqs",
-        "max_num_scheduled_tokens": "--max-num-batched-tokens",
-        "max_model_len":            "--max-model-len",
-        "kv_events_config":         "--kv-events-config",
-    }
-    vllm_config_raw = llm_config.get("vllm_args", {})
-    tp = llm_config.get("serving", {}).get("tensor_parallelism", 1)
-    replicas = llm_config.get("cluster", {}).get("num_instances", 1)
-    vllm_args_list: list[str] = []
-    if tp is not None and int(tp) > 1:
-        vllm_args_list.append(f"--tensor-parallel-size={int(tp)}")
-    for blis_key, cli_flag in _BLIS_TO_VLLM_FLAG.items():
-        val = vllm_config_raw.get(blis_key)
-        if val is None:
-            continue
-        if blis_key == "max_model_len" and val == 0:
-            continue
-        vllm_args_list.append(f"{cli_flag}={val}")
-    decode_block: dict = {"replicas": replicas}
-    # Set GAIE_RELEASE_NAME_POSTFIX so the kv-events-config endpoint resolves correctly.
-    # The EPP service is named sim2real-{run_name}-gaie-epp by the Tekton deploy-gaie task.
-    run_name = out_path.parent.name
-    container_entry: dict = {"env": [{"name": "GAIE_RELEASE_NAME_POSTFIX",
-                                      "value": f"sim2real-{run_name}"}]}
-    if vllm_args_list:
-        container_entry["args"] = vllm_args_list
-    decode_block["containers"] = [container_entry]
-    alg_values["stack"]["model"]["helmValues"] = {"decode": decode_block}
 
     # Embed treatment EPP config based on treatment_config_generated flag
     output_path = out_path.parent / "translation_output.json"
@@ -449,10 +404,10 @@ def _generate_algorithm_values(manifest: dict, resolved: dict, out_path: Path):
         treatment_config_generated = False
 
     if treatment_config_generated:
-        tc_path = out_path.parent / "treatment_config.yaml"
+        tc_path = out_path.parent / "generated" / "treatment_config.yaml"
         if not tc_path.exists():
             raise RuntimeError(
-                f"treatment_config_generated=true but treatment_config.yaml "
+                f"treatment_config_generated=true but generated/treatment_config.yaml "
                 f"not found at {tc_path}")
         tc_content = tc_path.read_text()
         (alg_values["stack"]
@@ -486,8 +441,9 @@ def _generate_algorithm_values(manifest: dict, resolved: dict, out_path: Path):
             )
 
     # Embed baseline EPP config if derived in Phase 2 (overrides env_defaults static value)
-    baseline_cfg_path = out_path.parent / "baseline_config.yaml"
-    if baseline_cfg_path.exists():
+    # Skip if file is empty — empty baseline means "use EPP defaults, no custom config"
+    baseline_cfg_path = out_path.parent / "generated" / "baseline_config.yaml"
+    if baseline_cfg_path.exists() and baseline_cfg_path.read_text().strip():
         bc_content = baseline_cfg_path.read_text()
         (alg_values["stack"]
          .setdefault("gaie", {})
@@ -556,19 +512,34 @@ def _compile_cluster_packages(run_dir: Path, resolved: dict, values_path: Path,
         for stale in pkg_dir.glob("pipelinerun-workload-*.yaml"):
             stale.unlink()
 
-        # Generate a single sequential Pipeline + PipelineRun for standalone package execution
+        # Generate a Pipeline + PipelineRun for standalone package execution.
+        # When no workloads are defined, emit a standby pipeline: stack deploys
+        # normally, then a sleep-infinity task runs indefinitely.  spec.finally
+        # (teardown) only fires on cancel/stop, never on normal completion.
         if package in compiled_pipelines:
-            phase_pipeline, phase_pr = make_phase_pipeline(
-                package, workloads, compiled_pipelines[package],
-                run_name, namespace,
-                workspace_bindings=setup_config.get("workspaces"),
-            )
+            if workloads:
+                phase_pipeline, phase_pr = make_phase_pipeline(
+                    package, workloads, compiled_pipelines[package],
+                    run_name, namespace,
+                    workspace_bindings=setup_config.get("workspaces"),
+                )
+            else:
+                phase_pipeline, phase_pr = make_standby_pipeline(
+                    package, compiled_pipelines[package],
+                    run_name, namespace,
+                    workspace_bindings=setup_config.get("workspaces"),
+                )
             (pkg_dir / f"sim2real-{package}-pipeline.yaml").write_text(
                 yaml.dump(phase_pipeline, default_flow_style=False, allow_unicode=True)
             )
             (pkg_dir / f"pipelinerun-{package}.yaml").write_text(
                 yaml.dump(phase_pr, default_flow_style=False, allow_unicode=True)
             )
+
+    # No workloads → standby pipelines only; no combined experiment pipeline.
+    if not workloads:
+        ok(f"Standby pipelines generated (no workloads): {cluster_dir.relative_to(REPO_ROOT)}")
+        return
 
     # Generate the single sequential experiment pipeline (all baselines then all
     # treatments, one after another). This replaces the per-workload PipelineRuns.
@@ -652,7 +623,7 @@ def _validate_assembly(run_dir: Path, resolved: dict):
 
     # Check 3: treatment_config kind matches scenario (only if custom config generated)
     if treatment_config_generated and config_cfg.get("kind"):
-        tc_path = run_dir / "treatment_config.yaml"
+        tc_path = run_dir / "generated" / "treatment_config.yaml"
         if tc_path.exists():
             tc = yaml.safe_load(tc_path.read_text())
             if isinstance(tc, dict) and tc.get("kind") != config_cfg["kind"]:
@@ -710,12 +681,12 @@ def _phase_summary(state: StateMachine, manifest: dict, run_dir: Path, resolved:
     cluster_dir = run_dir / "cluster"
     exp_pr = cluster_dir / "experiment" / "pipelinerun-experiment.yaml"
     if exp_pr.exists():
-        lines.append("- `experiment/` — pipelinerun-experiment.yaml (sequential)")
+        lines.append(f"- `{exp_pr}` (sequential)")
     elif cluster_dir.exists():
         for pkg_dir in sorted(cluster_dir.iterdir()):
             if pkg_dir.is_dir() and any(pkg_dir.glob("pipelinerun-*.yaml")):
-                pr_names = ", ".join(p.name for p in sorted(pkg_dir.glob("pipelinerun-*.yaml")))
-                lines.append(f"- `{pkg_dir.name}/` — {pr_names}")
+                for p in sorted(pkg_dir.glob("pipelinerun-*.yaml")):
+                    lines.append(f"- `{p}`")
 
     # Workloads
     lines.extend(["", "**Workloads**", ""])

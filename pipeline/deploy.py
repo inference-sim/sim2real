@@ -79,9 +79,9 @@ def _build_epp_image(run_dir: Path, run_name: str, namespace: str) -> str:
     step(1, "Build EPP Image")
 
     # Locate build-epp.sh
-    build_script = REPO_ROOT / ".claude" / "skills" / "sim2real-deploy" / "scripts" / "build-epp.sh"
+    build_script = REPO_ROOT / "pipeline" / "scripts" / "build-epp.sh"
     if not build_script.exists():
-        err(f"build-epp.sh not found at {build_script.relative_to(REPO_ROOT)}")
+        err(f"build-epp.sh not found at {build_script.relative_to(REPO_ROOT)} — ensure pipeline/scripts/build-epp.sh is present in the repo")
         sys.exit(1)
 
     result = run(

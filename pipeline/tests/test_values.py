@@ -154,6 +154,21 @@ class TestFlattenGaieShared:
         assert t_img["tag"] == "abc123"
         assert b_img["hub"] == "upstream.io"
 
+    def test_shared_helmvalues_promoted_to_missing_phase(self):
+        # admission_control pattern: shared flags set but no gaie.baseline defined
+        data = {
+            "stack": {
+                "gaie": {
+                    "shared": {"helmValues": {"inferenceExtension": {"flags": {"v": 5}}}},
+                    "treatment": {"helmValues": {"inferenceExtension": {"pluginsConfigFile": "custom.yaml"}}},
+                }
+            }
+        }
+        result = _flatten_gaie_shared(data)
+        gaie = result["stack"]["gaie"]
+        assert gaie["baseline"]["helmValues"]["inferenceExtension"]["flags"] == {"v": 5}
+        assert gaie["treatment"]["helmValues"]["inferenceExtension"]["flags"] == {"v": 5}
+
     def test_noop_when_no_gaie(self):
         data = {"stack": {"model": {"name": "llama"}}}
         result = _flatten_gaie_shared(data)

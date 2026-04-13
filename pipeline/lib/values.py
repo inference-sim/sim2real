@@ -117,7 +117,9 @@ def _flatten_gaie_shared(merged: dict) -> dict:
 
     for phase in ["baseline", "treatment"]:
         if phase not in gaie:
-            continue
+            if not shared_helm and not upstream_img:
+                continue
+            gaie[phase] = {}
         phase_helm = gaie[phase].get("helmValues", {})
         gaie[phase]["helmValues"] = _deep_merge(shared_helm, phase_helm)
 

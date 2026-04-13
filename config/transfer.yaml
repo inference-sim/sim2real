@@ -1,77 +1,63 @@
 kind: sim2real-transfer
 version: 3
 
-scenario: adaptive-routing
+scenario: admission_control
 
 algorithm:
-  source: sim2real_golden_correct/routers/router_adaptive.go
-  config: sim2real_golden_correct/routers/policy_adaptive.yaml
+  source: sim2real_bundle_14b/algorithm/admission.go
 
 baseline:
-  sim:
-    config: sim2real_golden_correct/routers/policy_baseline_322.yaml
+  # sim:
+  #   config: sim2real_golden_correct/routers/policy_baseline_322.yaml
   real:
-    config: sim2real_golden_correct/routers/baseline_epp_template.yaml
     notes: |
-      # The precise prefix well-lit path features the following config and can be found here: https://github.com/llm-d/llm-d/blob/main/guides/precise-prefix-cache-aware/gaie-kv-events/values.yaml#L116
+      use the default llm-d-inference-scheduler / GAIE plugin. Use the same EPP config for both baseline and treatment, but just include the configuration for adding admission control if it needs to be activated. The inference objective configuration will look like the following:
 
-      pluginsConfigFile: "precise-prefix-cache-config.yaml"
-      pluginsCustomConfig:
-        precise-prefix-cache-config.yaml: |
-          apiVersion: inference.networking.x-k8s.io/v1alpha1
-          kind: EndpointPickerConfig
-          plugins:
-            - type: single-profile-handler
-            - type: tokenizer
-              parameters:
-                modelName: Qwen/Qwen3-32B
-                udsTokenizerConfig:
-                  socketFile: /tmp/tokenizer/tokenizer-uds.socket
-            - type: precise-prefix-cache-scorer
-              parameters:
-                tokenProcessorConfig:
-                  blockSize: 64
-                indexerConfig:
-                  speculativeIndexing: true
-                  tokenizersPoolConfig:
-                    modelName: Qwen/Qwen3-32B
-                    local: null
-                    hf: null
-                    uds:
-                      socketFile: /tmp/tokenizer/tokenizer-uds.socket
-                kvEventsConfig:
-                  topicFilter: "kv@"
-                  concurrency: 4
-                  discoverPods: false
-                  zmqEndpoint: "tcp://*:5557"
-            - type: kv-cache-utilization-scorer
-            - type: queue-scorer
-            - type: max-score-picker
-          schedulingProfiles:
-            - name: default
-              plugins:
-                - pluginRef: precise-prefix-cache-scorer
-                  weight: 3.0
-                - pluginRef: kv-cache-utilization-scorer
-                  weight: 2.0
-                - pluginRef: queue-scorer
-                  weight: 2.0
-                - pluginRef: max-score-picker
+      ```yaml
+      inferenceObjectives:
+        - name: critical
+          priority: 100
+        - name: standard
+          priority: 0
+        - name: sheddable
+          priority: -10
+        - name: batch
+          priority: -50
+      ````
 
+      The default plugin for baseline is
+
+      ```yaml
+      apiVersion: inference.networking.x-k8s.io/v1alpha1
+      kind: EndpointPickerConfig
+      plugins:
+      - type: queue-scorer
+      - type: kv-cache-utilization-scorer
+      - type: prefix-cache-scorer
+      schedulingProfiles:
+      - name: default
+        plugins:
+        - pluginRef: queue-scorer
+        - pluginRef: kv-cache-utilization-scorer
+        - pluginRef: prefix-cache-scorer
+      ```
+
+      So use the same plugin configuration with adaptive admission control for the treatment.
 
 workloads:
-  # - sim2real_golden_correct/workloads/workload_fm3_burst.yaml
-  - sim2real_golden_correct/workloads/workload_fm5_short_output.yaml
-  # - sim2real_golden_correct/workloads/workload_fm8_short_output_highrate.yaml
-
-llm_config: admission_by60/llm_config.yaml
+# - sim2real_bundle_14b/workloads/w1_14b.yaml
+- sim2real_bundle_14b/workloads/w2_14b_burst.yaml
+# - sim2real_bundle_14b/workloads/w2_14b_burst.yaml
+# - sim2real_bundle_14b/workloads/w3_14b_high_sheddable.yaml
 
 hints:
   files:
-  - sim2real_golden_correct/README.md
-  - sim2real_golden_correct/transfer_hint.md
-  - sim2real_golden_correct/feedback.md
-  notes: Please check upstream GAIE for scorers that already exist and reuse instead of implementing new ones.
+  - sim2real_bundle_14b/README.md
+  # files:
+  # - sim2real_golden_correct/README.md
+  # - sim2real_golden_correct/transfer_hint.md
+  # - sim2real_golden_correct/feedback.md
+  # notes: Please check upstream GAIE for scorers that already exist and reuse instead of implementing new ones.
 
 context:
   files:

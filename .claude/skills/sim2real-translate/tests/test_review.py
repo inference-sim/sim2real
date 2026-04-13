@@ -153,6 +153,17 @@ def test_build_user_message_includes_all_sections():
     assert "Treatment Config" in msg
 
 
+def test_build_user_message_no_config_skips_section():
+    """When algorithm_config is None, the Algorithm Config section is omitted."""
+    msg = rv.build_user_message("package p", "func algo(){}", None,
+                                 "# Context", "kind: Scorer", 1)
+    assert "Generated Plugin Code" in msg
+    assert "Algorithm Source" in msg
+    assert "Algorithm Config" not in msg
+    assert "Translation Context" in msg
+    assert "Treatment Config" in msg
+
+
 # ── collect_issues ─────────────────────────────────────────────────────────────
 
 def test_collect_issues_from_needs_changes():

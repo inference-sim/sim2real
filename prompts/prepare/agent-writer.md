@@ -26,9 +26,9 @@ test -f config/env_defaults.yaml || { echo "ERROR: not in sim2real root"; exit 1
 
 | File | Purpose |
 |------|---------|
-| `{CONTEXT_PATH}` | Production interfaces, signal mapping, example plugins |
+| `{CONTEXT_PATH}` | Architecture overview, signal mapping, available plugin types |
 | `{ALGO_SOURCE}` | Source algorithm Go file from simulation |
-| `{ALGO_CONFIG}` | Algorithm policy config (weights, thresholds) |
+| `{ALGO_CONFIG}` | Algorithm policy config (weights, thresholds) — empty when scenario has no custom config |
 | `prompts/prepare/translate.md` | Translation guidance — follow this |
 
 Hints from the operator (held in mind, not written to disk):
@@ -39,14 +39,37 @@ Hints from the operator (held in mind, not written to disk):
 
 Expert agent name (for queries): {EXPERT_AGENT_NAME}
 
+## Tool Discipline
+
+**Do not explore `{TARGET_REPO}` or `{REPO_ROOT}/inference-sim/` yourself.**
+
+The context document gives you the architecture overview and signal mapping. For anything
+code-level — Go interface signatures, struct definitions with yaml tags, factory function
+patterns, registration examples, exact type strings — ask the Expert. The Expert has already
+read the full repos and will give you file:line answers.
+
+Your tools (Glob, Grep, Read, Write, Edit, Bash) are for:
+- Reading the files listed in this prompt (`{CONTEXT_PATH}`, `{ALGO_SOURCE}`, `{ALGO_CONFIG}`,
+  `{BASELINE_SIM_CONFIG}`, `{BASELINE_REAL_CONFIG}`, `{RUN_DIR}/*`)
+- Writing and editing plugin files in `{TARGET_REPO}` once you know exactly what to write
+- Running build/test commands
+
+Do not use Glob or Grep to survey repo directories. Ask the Expert instead.
+
 ## Consulting the Expert
 
-At any point during Phases 2, 3, or 4, you can ask the Expert a question:
+At any point during Phases 2, 3, or 4, ask the Expert for code-level details:
 ```
 SendMessage({EXPERT_AGENT_NAME}, "Your question here")
 ```
 Wait for the reply before proceeding. The Expert has deep knowledge of all three repos
 and will give you file:line references.
+
+Example queries:
+- "What is the exact Go interface signature for a Scorer plugin?"
+- "What struct fields and yaml tags does the admission control config use?"
+- "Show me the registration pattern in register.go for an existing scorer"
+- "Does a built-in plugin already exist for X? If so, what is its type string?"
 
 ## Phase 2: Baseline Config Derivation
 
@@ -84,7 +107,7 @@ Use TaskCreate: `"Phase 3: Treatment Config Derivation"` → TaskUpdate in_progr
 
 Read:
 1. `{RUN_DIR}/baseline_config.yaml` — the approved real baseline EPP YAML
-2. `{ALGO_CONFIG}` — the algorithm policy config (what changes from baseline)
+2. If `{ALGO_CONFIG}` is non-empty: read it — the algorithm policy config (what changes from baseline)
 3. `{ALGO_SOURCE}` — the algorithm source (regime detection logic, thresholds)
 
 Your goal: produce `{RUN_DIR}/treatment_config.yaml` — start from `baseline_config.yaml` and
@@ -94,8 +117,10 @@ will write in Phase 4 must read its parameters from this YAML, not hardcode them
 Rules:
 - Start from `baseline_config.yaml` as the structural base
 - Identify the delta: which scorers change, which weights change, any new logic or thresholds
-- Every threshold and weight from `{ALGO_CONFIG}` must have a corresponding YAML field in
-  `treatment_config.yaml` — you will wire the Go code to read from these fields in Phase 4
+- Every scoring threshold and weight must have a corresponding YAML field in
+  `treatment_config.yaml` — you will wire the Go code to read from these fields in Phase 4.
+  Source of truth: `{ALGO_CONFIG}` if non-empty, otherwise extract configurable parameters
+  directly from `{ALGO_SOURCE}` (any numeric threshold or weight visible in the source)
 - Ask the Expert about config struct field names and yaml tags if needed
 
 Write `{RUN_DIR}/treatment_config.yaml`. Then send to main session:
@@ -111,17 +136,32 @@ TaskUpdate Phase 3 → completed
 
 Follow `prompts/prepare/translate.md`. Specifically:
 
-1. Read `{ALGO_SOURCE}` and `{ALGO_CONFIG}` to understand the scoring/admission logic
-2. Read `{CONTEXT_PATH}` for signal mapping and production interfaces
+1. Read `{ALGO_SOURCE}` and (if `{ALGO_CONFIG}` is non-empty) `{ALGO_CONFIG}` to understand the scoring/admission logic
+2. Consult the Expert for exact Go interface signatures, config struct definitions, and an example plugin to model your code after — do not Glob/Grep the repo yourself
 3. Write the production plugin code into `{TARGET_REPO}` at the correct package path
 4. Define a `Type` constant (kebab-case string) and a `Factory` function in your plugin file
 5. Register the plugin in `{TARGET_REPO}/pkg/plugins/register.go` with `plugin.Register(pkg.TypeConst, pkg.FactoryFunc)`
 6. Write `{RUN_DIR}/treatment_config.yaml` with `kind: {CONFIG_KIND}`
-7. **Write tests** — this is required, not optional:
+7. **Add logging** — follow the pattern established by `preemptiveshed.go`:
+   - In Factory: use `logger := log.Log.WithName(Type)` and log all config parameters at
+     `logger.V(logutil.TRACE).Info("Creating <PluginName>", "name", name, "param1", val1, ...)`
+   - In each scoring/admission method: open with
+     `logger := log.FromContext(ctx).WithName(p.typedName.String())`
+     and `traceLogger := logger.V(logutil.TRACE)`
+   - Log at TRACE for every decision branch (admit/skip paths, early returns); include the
+     relevant signals and `requestID` as structured key-value pairs
+   - Log at DEBUG for significant events: actual admission denials, notable score outliers,
+     stale or missing metrics
+   - Imports: `"sigs.k8s.io/controller-runtime/pkg/log"` and
+     `logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"`
+   - Don't over-log — aim for the same density as `preemptiveshed.go`, not less
+
+8. **Write tests** — this is required, not optional:
    - For every new plugin Go file you create (e.g. `foo.go`), write a corresponding
      `foo_test.go` in the same package directory
    - Tests must cover: Factory function construction, scoring/regime-detection logic
-     (at least the main branches), and any threshold/weight values from `{ALGO_CONFIG}`
+     (at least the main branches), and (if `{ALGO_CONFIG}` is non-empty) at least one
+     threshold/weight value from the algorithm config
    - If you modify an existing file that already has a `_test.go`, update the tests to
      cover your changes
    - Include all test files in `files_created` (for new `_test.go`) or `files_modified`

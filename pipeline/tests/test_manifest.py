@@ -15,7 +15,6 @@ MINIMAL_V2 = {
     },
     "baseline": {"config": "sim2real_golden/routers/policy_baseline_211.yaml"},
     "workloads": ["sim2real_golden/workloads/wl1.yaml"],
-    "llm_config": "sim2real_golden/llm_config.yaml",
 }
 
 
@@ -47,7 +46,7 @@ def test_missing_version_raises(tmp_path):
 
 
 def test_missing_required_field(tmp_path):
-    for field in ["scenario", "algorithm", "baseline", "workloads", "llm_config"]:
+    for field in ["scenario", "algorithm", "baseline"]:
         data = {k: v for k, v in MINIMAL_V2.items() if k != field}
         path = _write_manifest(tmp_path, data)
         with pytest.raises(ManifestError, match=field):
@@ -61,11 +60,12 @@ def test_missing_algorithm_source(tmp_path):
         load_manifest(path)
 
 
-def test_missing_algorithm_config(tmp_path):
+def test_missing_algorithm_config_is_valid(tmp_path):
+    """algorithm.config is optional — manifests without it load cleanly."""
     data = {**MINIMAL_V2, "algorithm": {"source": "x.go"}}
     path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="algorithm.config"):
-        load_manifest(path)
+    m = load_manifest(path)
+    assert "config" not in m["algorithm"]
 
 
 def test_missing_baseline_config(tmp_path):
@@ -93,11 +93,28 @@ def test_workloads_must_be_list(tmp_path):
         load_manifest(path)
 
 
-def test_workloads_must_be_nonempty(tmp_path):
+def test_empty_workloads_valid_standby_mode(tmp_path):
+    """Empty workloads list is valid — standby mode: stack up, no benchmarks."""
     data = {**MINIMAL_V2, "workloads": []}
     path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="workloads.*at least"):
-        load_manifest(path)
+    m = load_manifest(path)
+    assert m["workloads"] == []
+
+
+def test_absent_workloads_defaults_to_empty(tmp_path):
+    """Missing workloads key is valid; defaults to []."""
+    data = {k: v for k, v in MINIMAL_V2.items() if k != "workloads"}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["workloads"] == []
+
+
+def test_null_workloads_defaults_to_empty(tmp_path):
+    """workloads: null (YAML null) is valid; defaults to []."""
+    data = {**MINIMAL_V2, "workloads": None}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["workloads"] == []
 
 
 def test_wrong_kind(tmp_path):
@@ -184,7 +201,6 @@ MINIMAL_V3 = {
         "sim": {"config": "sim2real_golden/routers/policy_baseline_211.yaml"},
     },
     "workloads": ["sim2real_golden/workloads/wl1.yaml"],
-    "llm_config": "sim2real_golden/llm_config.yaml",
 }
 
 
@@ -215,20 +231,20 @@ def test_v3_with_real_config_and_notes(tmp_path):
     assert "EndpointPickerConfig" in m["baseline"]["real"]["notes"]
 
 
-def test_v3_missing_sim_config_raises(tmp_path):
-    """v3 without baseline.sim.config raises ManifestError."""
+def test_v3_missing_sim_config_defaults_to_none(tmp_path):
+    """v3 without baseline.sim.config is valid; sim.config defaults to None."""
     data = {**MINIMAL_V3, "baseline": {"real": {"config": "x.yaml"}}}
     path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="baseline.sim.config"):
-        load_manifest(path)
+    m = load_manifest(path)
+    assert m["baseline"]["sim"]["config"] is None
 
 
-def test_v3_missing_sim_section_raises(tmp_path):
-    """v3 baseline without sim key raises ManifestError."""
+def test_v3_missing_sim_section_defaults_to_none(tmp_path):
+    """v3 baseline without sim key is valid; sim.config defaults to None."""
     data = {**MINIMAL_V3, "baseline": {}}
     path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="baseline.sim.config"):
-        load_manifest(path)
+    m = load_manifest(path)
+    assert m["baseline"]["sim"]["config"] is None
 
 
 def test_v3_real_section_entirely_optional(tmp_path):
