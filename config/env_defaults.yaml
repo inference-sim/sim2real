@@ -70,20 +70,22 @@ common:
             - --max-num-batched-tokens=2048
             # - --max-model-len=36000
             - --gpu-memory-utilization=0.95
-            # - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://$(GAIE_RELEASE_NAME_POSTFIX)-gaie-epp.$(NAMESPACE).svc.cluster.local:5557","topic":"kv@$(POD_IP):8000@Qwen/Qwen3-32B"}
-            # env:
-            # - name: GAIE_RELEASE_NAME_POSTFIX
-            # - name: NAMESPACE
-            #   valueFrom:
-            #     fieldRef:
-            #       fieldPath: metadata.namespace
-            # - name: POD_IP
-            #   valueFrom:
-            #     fieldRef:
-            #       apiVersion: v1
-            #       fieldPath: status.podIP
-            # - name: TRITON_CACHE_DIR
-            #   value: /tmp/.triton-cache
+            - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://$(GAIE_RELEASE_NAME_POSTFIX)-gaie-epp.$(NAMESPACE).svc.cluster.local:5557","topic":"kv@$(POD_IP):8000@Qwen/Qwen3-32B"}
+            env:
+            - name: GAIE_RELEASE_NAME_POSTFIX
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: status.podIP
+            - name: PYTHONHASHSEED    # NEW — must match hashSeed above
+              value: "42"
+            - name: TRITON_CACHE_DIR
+              value: /tmp/.triton-cache
             extraConfig:
               startupProbe:
                 httpGet:
@@ -168,8 +170,59 @@ scenarios:
         shared:
           helmValues:
             inferenceExtension:
+              image:
+                hub: ghcr.io/llm-d
+                name: llm-d-inference-scheduler
+                tag: v0.7.1
+                pullPolicy: Always
+              pluginsConfigFile: custom-plugins.yaml
               flags:
                 v: 5
+              monitoring:
+                interval: 5s
+              extProcPort: 9002
+              extraContainerPorts:
+              - name: zmq
+                containerPort: 5557
+                protocol: TCP
+              extraServicePorts:
+              - name: zmq
+                port: 5557
+                targetPort: 5557
+                protocol: TCP
+              env:
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: HF_TOKEN
+              sidecar:
+                enabled: true
+                image: ghcr.io/llm-d/llm-d-uds-tokenizer:v0.7.1
+                imagePullPolicy: IfNotPresent
+                name: tokenizer-uds
+                configMap:
+                  name: tokenizer-uds-config
+                  data:
+                    placeholder: ''
+                env:
+                - name: TOKENIZERS_DIR
+                  value: /tokenizers
+                - name: HF_HOME
+                  value: /tokenizers
+                volumeMounts:
+                - mountPath: /tokenizers
+                  name: tokenizers
+                - mountPath: /tmp/tokenizer
+                  name: tokenizer-uds
+              volumes:
+              - name: tokenizers
+                emptyDir: {}
+              - name: tokenizer-uds
+                emptyDir: {}
+              volumeMounts:
+              - mountPath: /tmp/tokenizer
+                name: tokenizer-uds
             provider:
               name: istio
             istio:
@@ -185,18 +238,14 @@ scenarios:
                       maxConnections: 256000
                       maxConnectionDuration: 1800s
                       connectTimeout: 900s
-        treatment:
-          helmValues:
-            inferenceExtension:
-              pluginsConfigFile: custom-plugins.yaml
         inferenceObjectives:
         - name: critical
           priority: 100
         - name: standard
           priority: 0
-        - name: sheddable
-          priority: -10
         - name: batch
+          priority: -10
+        - name: sheddable
           priority: -50
   adaptive-routing:
     target:
