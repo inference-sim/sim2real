@@ -65,14 +65,13 @@ common:
               requests:
                 nvidia.com/gpu: 1
             args:
+            - --max-model-len=40960
             - --block-size=64
             - --max-num-seqs=256
             - --max-num-batched-tokens=2048
             - --gpu-memory-utilization=0.95
             - --no-enable-prefix-caching
             - --enable-chunked-prefill
-
-            # - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://$(GAIE_RELEASE_NAME_POSTFIX)-gaie-epp.$(NAMESPACE).svc.cluster.local:5557","topic":"kv@$(POD_IP):8000@Qwen/Qwen3-32B"}
             env:
             - name: GAIE_RELEASE_NAME_POSTFIX
             - name: NAMESPACE
@@ -112,7 +111,7 @@ common:
         build:
           hub: ghcr.io/kalantar
           name: llm-d-inference-scheduler
-          tag: adminctrl2
+          tag: ctrl-admin-jc
           platform: linux/amd64
           pullPolicy: Always
 scenarios:
@@ -129,7 +128,7 @@ scenarios:
             inferenceExtension:
               pluginsConfigFile: custom-plugins.yaml
               flags:
-                v: 5
+                v: 3
               monitoring:
                 interval: 5s
             provider:
@@ -179,7 +178,7 @@ scenarios:
                 pullPolicy: Always
               pluginsConfigFile: custom-plugins.yaml
               flags:
-                v: 5
+                v: 3
               monitoring:
                 interval: 5s
               extProcPort: 9002
@@ -240,7 +239,7 @@ scenarios:
                 pullPolicy: Always
               pluginsConfigFile: custom-plugins.yaml
               flags:
-                v: 5
+                v: 3
               monitoring:
                 interval: 5s
               extProcPort: 9002
