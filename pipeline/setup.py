@@ -28,6 +28,9 @@ class SetupConfig:
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEKTONC_DIR = REPO_ROOT / "tektonc-data-collection"
 
+# Overridden in main() when --experiment-root is specified.
+EXPERIMENT_ROOT = REPO_ROOT
+
 # ── Color helpers ────────────────────────────────────────────────────
 _tty = sys.stdout.isatty()
 def _c(code: str, text: str) -> str:
@@ -68,6 +71,8 @@ Examples:
     p.add_argument("--registry-token", metavar="TOKEN", help="Registry robot token")
     p.add_argument("--storage-class",  metavar="SC",    help="PVC storageClassName (auto-detected for OpenShift)")
     p.add_argument("--run",            metavar="NAME",  help="Run name [sim2real-YYYY-MM-DD]")
+    p.add_argument("--experiment-root", metavar="PATH", dest="experiment_root",
+                   help="Root of the experiment repo (default: framework directory)")
     p.add_argument("--no-cluster",      action="store_true",
                                        help="Skip all kubectl/tkn steps (config + JSON output only)")
     p.add_argument("--redeploy-tasks", action="store_true",
@@ -154,7 +159,7 @@ def _resolve_run_name(args: argparse.Namespace) -> tuple[str, Path]:
     run_name = args.run or prompt("run_name", "Enter a name for this run", default=default)
 
     while True:
-        run_dir = REPO_ROOT / "workspace" / "runs" / run_name
+        run_dir = EXPERIMENT_ROOT / "workspace" / "runs" / run_name
         if run_dir.exists():
             warn(f"Run '{run_name}' already exists at {run_dir}")
             answer = prompt("overwrite", "Overwrite it, or enter a new name? [overwrite/NAME]",
@@ -229,7 +234,7 @@ def collect_config(args: argparse.Namespace) -> tuple[SetupConfig, Path, str]:
     step(1, 8, "Configuration")
 
     # Load prior config for defaults
-    config_path = REPO_ROOT / "workspace" / "setup_config.json"
+    config_path = EXPERIMENT_ROOT / "workspace" / "setup_config.json"
     defaults = json.loads(config_path.read_text()) if config_path.exists() else {}
     if defaults:
         info("Loading defaults from previous setup_config.json")
@@ -580,7 +585,7 @@ def step_config_output(cfg: SetupConfig, run_dir: Path, container_rt: str) -> No
     """Step 8: Write setup_config.json, run_metadata.json, update env_defaults."""
     step(8, 8, "Config")
 
-    workspace = REPO_ROOT / "workspace"
+    workspace = EXPERIMENT_ROOT / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
 
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -642,7 +647,8 @@ def step_config_output(cfg: SetupConfig, run_dir: Path, container_rt: str) -> No
 
 def _update_env_defaults(registry: str, repo_name: str, run_name: str) -> None:
     """Update config/env_defaults.yaml with registry build values."""
-    cfg_path = REPO_ROOT / "config" / "env_defaults.yaml"
+    _env = EXPERIMENT_ROOT / "env_defaults.yaml"
+    cfg_path = _env if _env.exists() else EXPERIMENT_ROOT / "config" / "env_defaults.yaml"
     if not cfg_path.exists():
         warn("config/env_defaults.yaml not found — skipping"); return
     if not registry:
@@ -682,6 +688,9 @@ def _update_env_defaults(registry: str, repo_name: str, run_name: str) -> None:
 def main() -> int:
     args = build_parser().parse_args()
 
+    global EXPERIMENT_ROOT
+    EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if getattr(args, "experiment_root", None) else REPO_ROOT
+
     # --redeploy-tasks shortcut
     if args.redeploy_tasks:
         if not args.namespace:
@@ -712,7 +721,7 @@ def main() -> int:
     print()
     print(_c("32", "━━━ Setup complete ━━━"))
     print()
-    cfg_path = REPO_ROOT / "workspace" / "setup_config.json"
+    cfg_path = EXPERIMENT_ROOT / "workspace" / "setup_config.json"
     print(f"Setup config:  {cfg_path}")
     print(f"Run name:      {cfg.run_name}")
     print(f"Run directory: {run_dir}")
