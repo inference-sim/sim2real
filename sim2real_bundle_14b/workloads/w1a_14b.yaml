@@ -1,14 +1,14 @@
-# W1: Sustained Overload — Qwen3-14B trained-physics on 4x H100 TP=1
+# W1a: Under-capacity sanity check — Qwen3-14B on 4x H100 TP=1
 #
-# Capacity: ~73 req/s. Rate=110 → 1.5x overload.
+# Rate=60 → ~0.87x capacity (no overload). Both baseline and treatment should
+# perform similarly. If treatment hurts here, something is wrong.
 # Tier mix: critical 20%, standard 30%, sheddable 45%, batch 5%
-# After shed: 0.55 * 110 = 60.5 req/s → 0.83x capacity
 
 version: "2"
 seed: 42
 category: language
-aggregate_rate: 110
-num_requests: 19800
+aggregate_rate: 60
+num_requests: 10800
 
 clients:
   - id: "critical"

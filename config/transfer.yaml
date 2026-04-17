@@ -4,7 +4,7 @@ version: 3
 scenario: admission_control
 
 algorithm:
-  source: sim2real_bundle_14b_new/algorithm/admission_control.go
+  source: sim2real_bundle_14b/algorithm/admission.go
 
 baseline:
   real:
@@ -38,13 +38,13 @@ baseline:
       ````
 
 workloads:
-- sim2real_bundle_14b_new/workloads/w1a_14b.yaml
-- sim2real_bundle_14b_new/workloads/w1b_14b.yaml
-- sim2real_bundle_14b_new/workloads/w1c_14b.yaml
+- sim2real_bundle_14b/workloads/w1a_14b.yaml
+- sim2real_bundle_14b/workloads/w1b_14b.yaml
+- sim2real_bundle_14b/workloads/w1c_14b.yaml
 
 hints:
   files:
-  - sim2real_bundle_14b_new/README.md
+  - sim2real_bundle_14b/README.md
   text: You need to override the saturation detection scheme in the legacy admission control in the treatment config generation by disabling it by making it ineffective using saturationDetector the values basically ineffective so the system is never considered saturation, resulting in an always admit policy when it reaches our controller.
 
 context:
