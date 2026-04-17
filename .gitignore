@@ -50,7 +50,7 @@ workspace/
 workspace */
 
 .specify/
-specs
+# specs
 sim2real_golden/
 sim2real_golden_correct/
 .superpowers
