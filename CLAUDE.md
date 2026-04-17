@@ -7,10 +7,11 @@ inference-sim to production llm-d-inference-scheduler scorer plugins.
 
 ## Repository Structure
 
-- `config/` — Version-controlled environment defaults (`env_defaults.yaml`, `transfer.yaml`) — infrastructure choices and algorithm manifest
+- `config/` — Version-controlled environment defaults (`env_defaults.yaml`) — cluster-level infrastructure defaults used as fallback when an experiment has no override. `transfer.yaml` variants here are **legacy** (monorepo era); experiment repos carry their own `transfer.yaml` at their root.
 - `docs/transfer/` — Mapping artifacts, scorer template, calibration log
 - `docs/plans/` — Design docs and implementation plans
 - `pipeline/` — Pipeline entry points and shared library (see [`pipeline/README.md`](pipeline/README.md))
+- `pipeline/templates/` — Default Tekton Pipeline template (`pipeline.yaml.j2`)
 - `workspace/` — Inter-stage artifacts (gitignored, not committed)
 
 ## Submodules
@@ -26,6 +27,16 @@ The pipeline runs in four scripts with a skill invoked between prepare and deplo
 ```
 setup.py → prepare.py → [/sim2real-translate] → deploy.py
 ```
+
+Run all pipeline commands from the `sim2real/` directory, pointing `--experiment-root` at the experiment repo:
+
+```bash
+python pipeline/setup.py  --experiment-root ../admission-control
+python pipeline/prepare.py --experiment-root ../admission-control
+python pipeline/deploy.py  --experiment-root ../admission-control
+```
+
+**Backward compat:** Omitting `--experiment-root` defaults to `REPO_ROOT` (the framework directory), so existing `config/transfer.yaml` layout continues to work.
 
 **`pipeline/setup.py`** — One-time cluster bootstrap (namespace, RBAC, secrets, PVCs, Tekton tasks). Idempotent — safe to re-run.
 
@@ -59,7 +70,7 @@ setup.py → prepare.py → [/sim2real-translate] → deploy.py
 
 ## Workspace Artifacts
 
-All artifacts live under `workspace/` (gitignored). Key files:
+All artifacts live under `<experiment-root>/workspace/` (gitignored). When no `--experiment-root` is given, defaults to `workspace/` in the framework directory (backward compat). Key files:
 
 | File | Written by | Read by |
 |------|-----------|---------|

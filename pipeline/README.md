@@ -10,6 +10,29 @@ setup.py → prepare.py → [/sim2real-translate] → deploy.py
 
 ---
 
+## Running with an Experiment Repo
+
+When algorithm content lives in its own repo (peer directory), pass `--experiment-root`:
+
+```bash
+# From the sim2real/ directory:
+python pipeline/setup.py   --experiment-root ../admission-control
+python pipeline/prepare.py --experiment-root ../admission-control
+python pipeline/deploy.py  --experiment-root ../admission-control
+```
+
+The experiment repo must contain:
+- `transfer.yaml` (or `config/transfer.yaml` for backward compat)
+- `env_defaults.yaml` (or `config/env_defaults.yaml`)
+- `algorithm/` and `workloads/` directories as referenced in `transfer.yaml`
+- `workspace/` in `.gitignore`
+
+`pipeline/templates/pipeline.yaml.j2` is the framework default Tekton template. Override it per-experiment by placing `pipeline.yaml.j2` in the experiment root, or pass `--pipeline-template PATH` to `prepare.py`.
+
+Omitting `--experiment-root` defaults to the framework directory — backward compatible with the existing `config/transfer.yaml` layout.
+
+---
+
 ## setup.py
 
 One-time, idempotent cluster bootstrap. Safe to re-run.
