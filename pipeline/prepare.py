@@ -119,7 +119,9 @@ def _default_run_name() -> str:
 
 
 def _load_setup_config() -> dict:
-    path = REPO_ROOT / "workspace" / "setup_config.json"
+    path = EXPERIMENT_ROOT / "workspace" / "setup_config.json"
+    if not path.exists():
+        path = REPO_ROOT / "workspace" / "setup_config.json"
     if path.exists():
         return json.loads(path.read_text())
     return {}
@@ -127,7 +129,7 @@ def _load_setup_config() -> dict:
 
 def _load_resolved_config(manifest: dict) -> dict:
     """Load env_defaults, merge common + scenario, return resolved config."""
-    env_path = REPO_ROOT / "config" / "env_defaults.yaml"
+    env_path = _resolve_env_defaults(EXPERIMENT_ROOT)
     env_data = yaml.safe_load(env_path.read_text())
     common = env_data.get("common", {})
     scenarios = env_data.get("scenarios", {})
@@ -144,7 +146,12 @@ def _get_submodule_shas() -> dict[str, str]:
     shas = {}
     for name, path in [("inference-sim", "inference-sim"),
                        ("llm-d-inference-scheduler", "llm-d-inference-scheduler")]:
-        sub = REPO_ROOT / path
+        if name == "inference-sim":
+            sub = REPO_ROOT / path
+        else:
+            sub = EXPERIMENT_ROOT / path
+            if not sub.exists():
+                sub = REPO_ROOT / path
         if sub.exists() and (sub / ".git").exists():
             result = run(["git", "rev-parse", "HEAD"], capture=True, cwd=sub)
             shas[name] = result.stdout.strip()
@@ -170,36 +177,36 @@ def _phase_init(args, manifest: dict, run_dir: Path) -> StateMachine:
     resolved = _load_resolved_config(manifest)
 
     # Validate prerequisites
-    if not (REPO_ROOT / manifest["algorithm"]["source"]).exists():
+    if not (EXPERIMENT_ROOT / manifest["algorithm"]["source"]).exists():
         err(f"algorithm.source not found: {manifest['algorithm']['source']}")
         sys.exit(1)
 
     baseline_sim_config = manifest["baseline"]["sim"]["config"]
-    if baseline_sim_config and not (REPO_ROOT / baseline_sim_config).exists():
+    if baseline_sim_config and not (EXPERIMENT_ROOT / baseline_sim_config).exists():
         err(f"baseline.sim.config not found: {baseline_sim_config}")
         sys.exit(1)
 
     algo_config = manifest["algorithm"].get("config")
-    if algo_config and not (REPO_ROOT / algo_config).exists():
+    if algo_config and not (EXPERIMENT_ROOT / algo_config).exists():
         err(f"algorithm.config not found: {algo_config}")
         sys.exit(1)
 
     # Validate baseline.real.config if present
     baseline_real_config = manifest["baseline"]["real"].get("config")
     if baseline_real_config is not None:
-        if not (REPO_ROOT / baseline_real_config).exists():
+        if not (EXPERIMENT_ROOT / baseline_real_config).exists():
             err(f"baseline.real.config not found: {baseline_real_config}")
             sys.exit(1)
 
     for wl in manifest["workloads"]:
-        if not (REPO_ROOT / wl).exists():
+        if not (EXPERIMENT_ROOT / wl).exists():
             err(f"Workload not found: {wl}")
             sys.exit(1)
 
     # Validate target repo exists
     target = resolved.get("target", {})
     target_repo = target.get("repo", "")
-    if target_repo and not (REPO_ROOT / target_repo).exists():
+    if target_repo and not (EXPERIMENT_ROOT / target_repo).exists():
         err(f"Target repo not found: {target_repo}")
         sys.exit(1)
 
@@ -225,7 +232,7 @@ def _phase_context(args, state: StateMachine, manifest: dict, run_dir: Path) -> 
     # Resolve context files from manifest
     context_files = []
     for f in manifest.get("context", {}).get("files", []):
-        full = REPO_ROOT / f
+        full = EXPERIMENT_ROOT / f
         if not full.exists():
             err(f"Context file not found: {f}")
             sys.exit(1)
@@ -237,7 +244,7 @@ def _phase_context(args, state: StateMachine, manifest: dict, run_dir: Path) -> 
         context_files=context_files,
         submodule_shas=shas,
         scenario=manifest["scenario"],
-        cache_dir=REPO_ROOT / "workspace" / "context",
+        cache_dir=EXPERIMENT_ROOT / "workspace" / "context",
     )
 
     state.mark_done("context", hash=path.stem, cached=cached, path=str(path),
@@ -267,11 +274,9 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
     # Write skill_input.json
     skill_input = {
         "run_name": state.run_name,
-        "run_dir": str(run_dir.relative_to(REPO_ROOT)),
+        "run_dir": _display_path(run_dir),
         "scenario": manifest["scenario"],
-        "context_path": str(context_path.relative_to(REPO_ROOT)
-                           if context_path.is_relative_to(REPO_ROOT)
-                           else context_path),
+        "context_path": _display_path(context_path),
         "manifest_path": str(getattr(args, "manifest", None) or "config/transfer.yaml"),
         "algorithm_source": manifest["algorithm"]["source"],
         "algorithm_config": manifest["algorithm"].get("config"),
@@ -316,7 +321,7 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
     print(f"\n{'='*60}")
     print("  TRANSLATION CHECKPOINT")
     print(f"{'='*60}")
-    print(f"\n  skill_input.json written to: {skill_input_path.relative_to(REPO_ROOT)}")
+    print(f"\n  skill_input.json written to: {_display_path(skill_input_path)}")
     print("\n  Next step: run the /sim2real-translate skill in Claude Code,")
     print("  then re-run: python pipeline/prepare.py")
     if hits >= 3:
@@ -352,7 +357,7 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     # 4c: Generate algorithm_values.yaml
     alg_values_path = run_dir / "algorithm_values.yaml"
     _generate_algorithm_values(manifest, resolved, alg_values_path)
-    ok(f"Algorithm values: {alg_values_path.relative_to(REPO_ROOT)}")
+    ok(f"Algorithm values: {_display_path(alg_values_path)}")
 
     # 4c.5: Re-inject EPP image if one was already built for this run
     meta_path = run_dir / "run_metadata.json"
@@ -380,7 +385,7 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     values_path = run_dir / "values.yaml"
     try:
         merge_values(
-            REPO_ROOT / "config" / "env_defaults.yaml",
+            _resolve_env_defaults(EXPERIMENT_ROOT),
             alg_values_path,
             values_path,
             scenario=manifest["scenario"],
@@ -388,11 +393,11 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     except (FileNotFoundError, yaml.YAMLError, ValueError, OSError) as e:
         err(f"merge-values failed: {e}")
         sys.exit(1)
-    ok(f"Values merged: {values_path.relative_to(REPO_ROOT)}")
+    ok(f"Values merged: {_display_path(values_path)}")
 
     # 4e: Compile cluster YAMLs per package
     setup_config = _load_setup_config()
-    _compile_cluster_packages(run_dir, resolved, values_path, setup_config)
+    _compile_cluster_packages(args, run_dir, resolved, values_path, setup_config)
 
     # 4f: Verify generated/ directory (created by translation skill)
     _verify_generated_dir(run_dir)
@@ -410,7 +415,7 @@ def _generate_algorithm_values(manifest: dict, resolved: dict, out_path: Path):
     workloads = []
     multiplier = resolved.get("observe", {}).get("request_multiplier", 1)
     for wl_path_str in manifest["workloads"]:
-        wl_path = REPO_ROOT / wl_path_str
+        wl_path = EXPERIMENT_ROOT / wl_path_str
         wl_data = yaml.safe_load(wl_path.read_text())
         if "name" not in wl_data and "workload_name" not in wl_data:
             wl_data["workload_name"] = Path(wl_path_str).stem
@@ -508,7 +513,7 @@ def _generate_algorithm_values(manifest: dict, resolved: dict, out_path: Path):
     out_path.write_text(yaml.dump(alg_values, default_flow_style=False, sort_keys=False))
 
 
-def _compile_cluster_packages(run_dir: Path, resolved: dict, values_path: Path,
+def _compile_cluster_packages(args, run_dir: Path, resolved: dict, values_path: Path,
                                setup_config: dict):
     """Compile cluster YAMLs organized by package (baseline, treatment)."""
     cluster_dir = run_dir / "cluster"
@@ -534,7 +539,7 @@ def _compile_cluster_packages(run_dir: Path, resolved: dict, values_path: Path,
         except Exception:
             pass
 
-    tektonc_dir = REPO_ROOT / "tektonc-data-collection" / "tektoncsample" / "sim2real"
+    tektonc_dir = _resolve_template_dir(args, EXPERIMENT_ROOT)
     run_name = run_dir.name
     compiled_pipelines: dict = {}
 
@@ -590,7 +595,7 @@ def _compile_cluster_packages(run_dir: Path, resolved: dict, values_path: Path,
 
     # No workloads → standby pipelines only; no combined experiment pipeline.
     if not workloads:
-        ok(f"Standby pipelines generated (no workloads): {cluster_dir.relative_to(REPO_ROOT)}")
+        ok(f"Standby pipelines generated (no workloads): {_display_path(cluster_dir)}")
         return
 
     # Generate the single sequential experiment pipeline (all baselines then all
@@ -612,11 +617,11 @@ def _compile_cluster_packages(run_dir: Path, resolved: dict, values_path: Path,
             yaml.dump(experiment_pipeline, default_flow_style=False, allow_unicode=True))
         (exp_dir / "pipelinerun-experiment.yaml").write_text(
             yaml.dump(experiment_pr, default_flow_style=False, allow_unicode=True))
-        ok(f"Experiment pipeline: {exp_dir.relative_to(REPO_ROOT)}/")
+        ok(f"Experiment pipeline: {_display_path(exp_dir)}/")
     else:
         warn("Could not generate experiment pipeline: missing compiled phase pipelines")
 
-    ok(f"Cluster packages: {cluster_dir.relative_to(REPO_ROOT)}")
+    ok(f"Cluster packages: {_display_path(cluster_dir)}")
 
 
 def _verify_generated_dir(run_dir: Path):
@@ -646,7 +651,7 @@ def _validate_assembly(run_dir: Path, resolved: dict):
     # Check 1: plugin_type in register_file (skip if null — rewrite mode)
     register_file = output.get("register_file")
     if register_file is not None:
-        register_path = REPO_ROOT / target.get("repo", "") / register_file
+        register_path = EXPERIMENT_ROOT / target.get("repo", "") / register_file
         if register_path.exists():
             # Search register_file's directory recursively: Go plugins use constants
             # defined in sibling files (e.g. AdaptiveV2Type = "adaptive-v2-scorer" in
@@ -686,7 +691,7 @@ def _validate_assembly(run_dir: Path, resolved: dict):
     # Check 4: all files_created exist in target repo
     target_repo = target.get("repo", "")
     for f in output.get("files_created", []):
-        if target_repo and not (REPO_ROOT / target_repo / f).exists():
+        if target_repo and not (EXPERIMENT_ROOT / target_repo / f).exists():
             errors.append(f"files_created entry missing on disk: {f}")
 
     if errors:
@@ -759,7 +764,7 @@ def _phase_summary(state: StateMachine, manifest: dict, run_dir: Path, resolved:
     summary_path = run_dir / "run_summary.md"
     summary_path.write_text("\n".join(lines))
     state.mark_done("summary")
-    ok(f"Summary: {summary_path.relative_to(REPO_ROOT)}")
+    ok(f"Summary: {_display_path(summary_path)}")
 
 
 # ── Phase 6: Gate ────────────────────────────────────────────────────────────
@@ -906,7 +911,7 @@ def main():
     global EXPERIMENT_ROOT
     EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if args.experiment_root else REPO_ROOT
 
-    manifest_path = args.manifest or str(REPO_ROOT / "config" / "transfer.yaml")
+    manifest_path = args.manifest or str(_resolve_manifest_default(EXPERIMENT_ROOT))
     try:
         manifest = load_manifest(manifest_path)
     except ManifestError as e:
@@ -915,7 +920,7 @@ def main():
 
     setup_config = _load_setup_config()
     run_name = args.run or setup_config.get("current_run", _default_run_name())
-    run_dir = REPO_ROOT / "workspace" / "runs" / run_name
+    run_dir = EXPERIMENT_ROOT / "workspace" / "runs" / run_name
 
     cmd = args.command
     if cmd == "status":

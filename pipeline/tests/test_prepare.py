@@ -95,6 +95,7 @@ def _import_prepare_with_root(repo_root):
     import pipeline.prepare as mod
     importlib.reload(mod)
     mod.REPO_ROOT = repo_root
+    mod.EXPERIMENT_ROOT = repo_root
     return mod
 
 
@@ -1013,7 +1014,10 @@ class TestCompileClusterPackages:
         }))
         setup_config = {"namespace": "sim2real"}
 
-        mod._compile_cluster_packages(run_dir, {}, values_path, setup_config)
+        class Args:
+            pipeline_template = None
+
+        mod._compile_cluster_packages(Args(), run_dir, {}, values_path, setup_config)
 
         assert not (run_dir / "cluster" / "baseline" / "epp.yaml").exists()
         assert not (run_dir / "cluster" / "treatment" / "epp.yaml").exists()
@@ -1058,8 +1062,11 @@ class TestCompileClusterPackages:
             )
             return True
 
+        class Args:
+            pipeline_template = None
+
         with _patch.object(mod, "compile_pipeline", side_effect=_fake_compile):
-            mod._compile_cluster_packages(run_dir, {}, values_path, setup_config)
+            mod._compile_cluster_packages(Args(), run_dir, {}, values_path, setup_config)
 
         for phase in ["baseline", "treatment"]:
             assert (run_dir / "cluster" / phase / f"pipelinerun-{phase}.yaml").exists()
@@ -1099,8 +1106,11 @@ class TestCompileClusterPackages:
             )
             return True
 
+        class Args:
+            pipeline_template = None
+
         with _patch.object(mod, "compile_pipeline", side_effect=_fake_compile):
-            mod._compile_cluster_packages(run_dir, {}, values_path, setup_config)
+            mod._compile_cluster_packages(Args(), run_dir, {}, values_path, setup_config)
 
         pr_path = run_dir / "cluster" / "baseline" / "pipelinerun-baseline.yaml"
         pr = yaml.safe_load(pr_path.read_text())
