@@ -48,12 +48,12 @@ def _resolve_env_defaults(experiment_root: Path) -> Path:
     return experiment_root / "config" / "env_defaults.yaml"
 
 
-def _resolve_manifest_default(experiment_root: Path) -> str:
+def _resolve_manifest_default(experiment_root: Path) -> Path:
     """Resolve default manifest path: transfer.yaml first, then config/transfer.yaml."""
     direct = experiment_root / "transfer.yaml"
     if direct.exists():
-        return str(direct)
-    return str(experiment_root / "config" / "transfer.yaml")
+        return direct
+    return experiment_root / "config" / "transfer.yaml"
 
 
 def _resolve_template_dir(args, experiment_root: Path) -> Path:
@@ -904,7 +904,7 @@ def main():
     args = parser.parse_args()
 
     global EXPERIMENT_ROOT
-    EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if args.experiment_root else Path.cwd()
+    EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if args.experiment_root else REPO_ROOT
 
     manifest_path = args.manifest or str(REPO_ROOT / "config" / "transfer.yaml")
     try:
