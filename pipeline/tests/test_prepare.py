@@ -1120,3 +1120,152 @@ class TestCompileClusterPackages:
         params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
         assert params["workloadName-baseline-wl1"] == "wl1"
         assert params["namespace"] == "myns"
+
+
+class TestExperimentRootSeparation:
+    """Verify --experiment-root correctly separates experiment paths from framework paths."""
+
+    def _make_framework(self, tmp_path):
+        """Create a minimal framework directory (no experiment files)."""
+        fw = tmp_path / "sim2real"
+        # inference-sim stub
+        (fw / "inference-sim" / ".git").mkdir(parents=True)
+        _write_text(fw / "inference-sim" / ".git" / "config", "[core]\n")
+        # pipeline/templates (framework default template)
+        (fw / "pipeline" / "templates").mkdir(parents=True)
+        _write_text(fw / "pipeline" / "templates" / "pipeline.yaml.j2", "# template\n")
+        return fw
+
+    def _make_experiment(self, tmp_path):
+        """Create a minimal experiment repo (transfer.yaml and env_defaults.yaml at root)."""
+        exp = tmp_path / "admission-control"
+        manifest_data = {
+            "kind": "sim2real-transfer",
+            "version": 3,
+            "scenario": "admission_control",
+            "algorithm": {"source": "algorithm/admission.go"},
+            "baseline": {"sim": {"config": None}, "real": {"config": None, "notes": ""}},
+            "workloads": ["workloads/w1.yaml"],
+        }
+        _write_yaml(exp / "transfer.yaml", manifest_data)
+        env = {
+            "common": {"observe": {"request_multiplier": 1}},
+            "scenarios": {
+                "admission_control": {
+                    "target": {"repo": "llm-d-inference-scheduler"},
+                    "build": {},
+                    "config": {"kind": "AdmissionConfig", "helm_path": "x"},
+                    "gaie": {"baseline": {"helmValues": {}}},
+                },
+            },
+        }
+        _write_yaml(exp / "env_defaults.yaml", env)
+        _write_text(exp / "algorithm" / "admission.go", "package main\n")
+        _write_text(exp / "workloads" / "w1.yaml",
+                    "version: '2'\nnum_requests: 10\naggregate_rate: 10\n")
+        (exp / "llm-d-inference-scheduler" / "pkg").mkdir(parents=True)
+        _write_text(exp / "llm-d-inference-scheduler" / "pkg" / "register.go", "")
+        (exp / "workspace").mkdir(parents=True)
+        return exp
+
+    def _patch(self, mod, fw, exp):
+        """Patch both REPO_ROOT and EXPERIMENT_ROOT to separate framework and experiment."""
+        mod.REPO_ROOT = fw
+        mod.EXPERIMENT_ROOT = exp
+
+    def test_init_resolves_files_from_experiment_root(self, tmp_path):
+        fw = self._make_framework(tmp_path)
+        exp = self._make_experiment(tmp_path)
+
+        import importlib
+        import pipeline.prepare as mod
+        importlib.reload(mod)
+        self._patch(mod, fw, exp)
+
+        from pipeline.lib.manifest import load_manifest
+        manifest = load_manifest(exp / "transfer.yaml")
+        run_dir = exp / "workspace" / "runs" / "test-run"
+
+        class Args:
+            force = False
+            run = "test-run"
+            manifest = str(exp / "transfer.yaml")
+            rebuild_context = False
+            experiment_root = str(exp)
+            pipeline_template = None
+
+        state = mod._phase_init(Args(), manifest, run_dir)
+        assert state.is_done("init")
+        assert state.scenario == "admission_control"
+
+    def test_env_defaults_resolved_from_experiment_root(self, tmp_path):
+        fw = self._make_framework(tmp_path)
+        exp = self._make_experiment(tmp_path)
+
+        import importlib
+        import pipeline.prepare as mod
+        importlib.reload(mod)
+        self._patch(mod, fw, exp)
+
+        from pipeline.lib.manifest import load_manifest
+        manifest = load_manifest(exp / "transfer.yaml")
+        resolved = mod._load_resolved_config(manifest)
+        assert resolved["target"]["repo"] == "llm-d-inference-scheduler"
+
+    def test_template_dir_resolves_framework_default(self, tmp_path):
+        fw = self._make_framework(tmp_path)
+        exp = self._make_experiment(tmp_path)
+
+        import importlib
+        import pipeline.prepare as mod
+        importlib.reload(mod)
+        self._patch(mod, fw, exp)
+
+        class Args:
+            pipeline_template = None
+
+        result = mod._resolve_template_dir(Args(), exp)
+        assert result == fw / "pipeline" / "templates"
+
+    def test_template_dir_resolves_experiment_override(self, tmp_path):
+        fw = self._make_framework(tmp_path)
+        exp = self._make_experiment(tmp_path)
+        _write_text(exp / "pipeline.yaml.j2", "# experiment override\n")
+
+        import importlib
+        import pipeline.prepare as mod
+        importlib.reload(mod)
+        self._patch(mod, fw, exp)
+
+        class Args:
+            pipeline_template = None
+
+        result = mod._resolve_template_dir(Args(), exp)
+        assert result == exp
+
+    def test_workspace_created_in_experiment_root(self, tmp_path):
+        """run_dir should be under EXPERIMENT_ROOT, not REPO_ROOT."""
+        fw = self._make_framework(tmp_path)
+        exp = self._make_experiment(tmp_path)
+
+        import importlib
+        import pipeline.prepare as mod
+        importlib.reload(mod)
+        self._patch(mod, fw, exp)
+
+        from pipeline.lib.manifest import load_manifest
+        manifest = load_manifest(exp / "transfer.yaml")
+        run_dir = exp / "workspace" / "runs" / "test-run"
+
+        class Args:
+            force = False
+            run = "test-run"
+            manifest = str(exp / "transfer.yaml")
+            rebuild_context = False
+            experiment_root = str(exp)
+            pipeline_template = None
+
+        mod._phase_init(Args(), manifest, run_dir)
+        # State file should exist in experiment root, not framework root
+        assert (exp / "workspace" / "runs" / "test-run" / ".state.json").exists()
+        assert not (fw / "workspace").exists()
