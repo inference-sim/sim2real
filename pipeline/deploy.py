@@ -28,6 +28,25 @@ from pipeline.lib.values import merge_values
 # ── Repo layout ──────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Overridden in main() when --experiment-root is specified.
+EXPERIMENT_ROOT = REPO_ROOT
+
+
+def _resolve_env_defaults_d(experiment_root: Path) -> Path:
+    """Resolve env_defaults.yaml: experiment root first, then config/ subdirectory."""
+    direct = experiment_root / "env_defaults.yaml"
+    if direct.exists():
+        return direct
+    return experiment_root / "config" / "env_defaults.yaml"
+
+
+def _resolve_manifest_default_d(experiment_root: Path) -> Path:
+    """Resolve default manifest path: transfer.yaml first, then config/transfer.yaml."""
+    direct = experiment_root / "transfer.yaml"
+    if direct.exists():
+        return direct
+    return experiment_root / "config" / "transfer.yaml"
+
 # ── Color helpers ────────────────────────────────────────────────────────────
 _tty = sys.stdout.isatty()
 
@@ -68,7 +87,9 @@ def _discover_packages(cluster_dir: Path) -> list[str]:
 # ── Setup config ─────────────────────────────────────────────────────────────
 
 def _load_setup_config() -> dict:
-    path = REPO_ROOT / "workspace" / "setup_config.json"
+    path = EXPERIMENT_ROOT / "workspace" / "setup_config.json"
+    if not path.exists():
+        path = REPO_ROOT / "workspace" / "setup_config.json"
     if path.exists():
         return json.loads(path.read_text())
     return {}
@@ -123,7 +144,7 @@ def _inject_image_into_values(run_dir: Path, full_image: str, scenario: str):
     alg_values = yaml.safe_load(alg_values_path.read_text())
 
     # Read hub+name from env_defaults
-    env_path = REPO_ROOT / "config" / "env_defaults.yaml"
+    env_path = _resolve_env_defaults_d(EXPERIMENT_ROOT)
     env_data = yaml.safe_load(env_path.read_text())
     common = env_data.get("common", {})
     build_cfg = common.get("stack", {}).get("gaie", {}).get("epp_image", {}).get("build", {})
@@ -198,9 +219,9 @@ def _print_dry_run(packages: list[str], cluster_dir: Path):
     for pkg in sorted(packages):
         pipeline_yaml = cluster_dir / pkg / f"{pkg}-pipeline.yaml"
         if pipeline_yaml.exists() and not pipeline_yaml.read_text().startswith("#"):
-            print(f"    kubectl apply -f {pipeline_yaml.relative_to(REPO_ROOT)}")
+            print(f"    kubectl apply -f {pipeline_yaml}")
         for pr_path in sorted((cluster_dir / pkg).glob("pipelinerun-*.yaml")):
-            print(f"    kubectl apply -f {pr_path.relative_to(REPO_ROOT)}")
+            print(f"    kubectl apply -f {pr_path}")
     print()
 
 
@@ -556,7 +577,7 @@ def _cmd_collect(args, manifest: dict, run_dir: Path, setup_config: dict):
         print(f"  Failed:    {', '.join(failed)}")
     if collected:
         dirs = "  ".join(f"results/{p}/" for p in collected)
-        print(f"  Results:   {run_dir.relative_to(REPO_ROOT)}/{dirs}")
+        print(f"  Results:   {run_dir}/{dirs}")
         print("\n  Next:      /sim2real-analyze")
     print()
 
@@ -581,6 +602,8 @@ Examples:
                    help="Run name (overrides current_run in setup_config.json)")
     p.add_argument("--manifest", metavar="PATH",
                    help="Path to transfer.yaml (default: config/transfer.yaml)")
+    p.add_argument("--experiment-root", metavar="PATH", dest="experiment_root",
+                   help="Root of the experiment repo (default: framework directory)")
     p.add_argument("--skip-build-epp", action="store_true", dest="skip_build_epp",
                    help="Skip EPP image build")
     p.add_argument("--package", nargs="+", metavar="NAME",
@@ -603,7 +626,10 @@ def main():
     args = parser.parse_args()
     print(_c("36", "\n━━━ sim2real-deploy ━━━\n"))
 
-    manifest_path = args.manifest or str(REPO_ROOT / "config" / "transfer.yaml")
+    global EXPERIMENT_ROOT
+    EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if args.experiment_root else REPO_ROOT
+
+    manifest_path = args.manifest or str(_resolve_manifest_default_d(EXPERIMENT_ROOT))
     try:
         manifest = load_manifest(manifest_path)
     except ManifestError as e:
@@ -615,10 +641,10 @@ def main():
     if not run_name:
         err("No run name. Use --run NAME or set current_run in setup_config.json.")
         sys.exit(1)
-    run_dir = REPO_ROOT / "workspace" / "runs" / run_name
+    run_dir = EXPERIMENT_ROOT / "workspace" / "runs" / run_name
 
     if not run_dir.exists():
-        err(f"Run directory not found: {run_dir.relative_to(REPO_ROOT)}")
+        err(f"Run directory not found: {run_dir}")
         sys.exit(1)
 
     cmd = args.command
