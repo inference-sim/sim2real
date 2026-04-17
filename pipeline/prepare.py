@@ -35,6 +35,58 @@ from pipeline.lib.tekton import compile_pipeline, make_experiment_pipeline, make
 # ── Repo layout ──────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Overridden in main() when --experiment-root is specified.
+# Defaults to REPO_ROOT for backward compatibility with monorepo layout.
+EXPERIMENT_ROOT = REPO_ROOT
+
+
+def _resolve_env_defaults(experiment_root: Path) -> Path:
+    """Resolve env_defaults.yaml: experiment root first, then config/ subdirectory."""
+    direct = experiment_root / "env_defaults.yaml"
+    if direct.exists():
+        return direct
+    return experiment_root / "config" / "env_defaults.yaml"
+
+
+def _resolve_manifest_default(experiment_root: Path) -> str:
+    """Resolve default manifest path: transfer.yaml first, then config/transfer.yaml."""
+    direct = experiment_root / "transfer.yaml"
+    if direct.exists():
+        return str(direct)
+    return str(experiment_root / "config" / "transfer.yaml")
+
+
+def _resolve_template_dir(args, experiment_root: Path) -> Path:
+    """Resolve Tekton pipeline template directory per spec resolution order.
+
+    1. --pipeline-template flag (explicit directory or parent of explicit file)
+    2. <experiment-root>/ if pipeline.yaml.j2 exists there
+    3. <sim2real>/pipeline/templates/ (framework default)
+    4. <sim2real>/tektonc-data-collection/tektoncsample/sim2real/ (legacy fallback)
+    """
+    if getattr(args, "pipeline_template", None):
+        p = Path(args.pipeline_template)
+        return p if p.is_dir() else p.parent
+    if (experiment_root / "pipeline.yaml.j2").exists():
+        return experiment_root
+    framework = REPO_ROOT / "pipeline" / "templates"
+    if (framework / "pipeline.yaml.j2").exists():
+        return framework
+    return REPO_ROOT / "tektonc-data-collection" / "tektoncsample" / "sim2real"
+
+
+def _display_path(p: Path) -> str:
+    """Return p relative to EXPERIMENT_ROOT if possible, else REPO_ROOT, else absolute."""
+    try:
+        return str(p.relative_to(EXPERIMENT_ROOT))
+    except ValueError:
+        pass
+    try:
+        return str(p.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(p)
+
+
 # ── Color helpers ────────────────────────────────────────────────────────────
 _tty = sys.stdout.isatty()
 
@@ -833,6 +885,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Path to transfer.yaml (default: config/transfer.yaml)")
     p.add_argument("--run", metavar="NAME",
                    help="Override run name")
+    p.add_argument("--experiment-root", metavar="PATH", dest="experiment_root",
+                   help="Root of the experiment repo (default: current directory)")
+    p.add_argument("--pipeline-template", metavar="PATH", dest="pipeline_template",
+                   help="Override Tekton pipeline template (directory or pipeline.yaml.j2 path)")
 
     sub = p.add_subparsers(dest="command")
     sub.add_parser("context", help="Rebuild context cache only")
@@ -846,6 +902,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main():
     parser = build_parser()
     args = parser.parse_args()
+
+    global EXPERIMENT_ROOT
+    EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if args.experiment_root else Path.cwd()
 
     manifest_path = args.manifest or str(REPO_ROOT / "config" / "transfer.yaml")
     try:
