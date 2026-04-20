@@ -689,7 +689,7 @@ def main() -> int:
     args = build_parser().parse_args()
 
     global EXPERIMENT_ROOT
-    EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if getattr(args, "experiment_root", None) else REPO_ROOT
+    EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if getattr(args, "experiment_root", None) else Path.cwd()
 
     # --redeploy-tasks shortcut
     if args.redeploy_tasks:

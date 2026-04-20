@@ -35,8 +35,7 @@ from pipeline.lib.tekton import compile_pipeline, make_experiment_pipeline, make
 # ── Repo layout ──────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Overridden in main() when --experiment-root is specified.
-# Defaults to REPO_ROOT for backward compatibility with monorepo layout.
+# Overridden in main() via --experiment-root (defaults to cwd).
 EXPERIMENT_ROOT = REPO_ROOT
 
 
@@ -909,7 +908,7 @@ def main():
     args = parser.parse_args()
 
     global EXPERIMENT_ROOT
-    EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if args.experiment_root else REPO_ROOT
+    EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if args.experiment_root else Path.cwd()
 
     manifest_path = args.manifest or str(_resolve_manifest_default(EXPERIMENT_ROOT))
     try:

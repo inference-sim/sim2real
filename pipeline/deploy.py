@@ -627,7 +627,7 @@ def main():
     print(_c("36", "\n━━━ sim2real-deploy ━━━\n"))
 
     global EXPERIMENT_ROOT
-    EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if args.experiment_root else REPO_ROOT
+    EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if args.experiment_root else Path.cwd()
 
     manifest_path = args.manifest or str(_resolve_manifest_default_d(EXPERIMENT_ROOT))
     try:

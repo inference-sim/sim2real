@@ -132,12 +132,14 @@ Polls PipelineRun status, extracts results from the cluster PVC, and writes to `
 Manage and switch between runs.
 
 ```bash
-python pipeline/run.py list                     # all runs: name, scenario, phase, verdict, active
-python pipeline/run.py inspect <name>           # full detail: phases, generated files, deploy stages
-python pipeline/run.py switch <name>            # set active run + sync generated/ into submodule
+python pipeline/run.py --experiment-root ../admission-control list
+python pipeline/run.py --experiment-root ../admission-control inspect <name>
+python pipeline/run.py --experiment-root ../admission-control switch <name>
 ```
 
-**`switch`** copies files listed in `translation_output.json` (`files_created` + `files_modified`) into the `llm-d-inference-scheduler` submodule and updates `setup_config.json`. Prompts before overwriting uncommitted submodule changes.
+`--experiment-root` defaults to the current working directory; omit it when running from the experiment repo root.
+
+**`switch`** copies files listed in `translation_output.json` (`files_created` + `files_modified`) into the experiment repo's `llm-d-inference-scheduler/` directory and updates `setup_config.json`. Prompts before overwriting uncommitted changes.
 
 ---
 

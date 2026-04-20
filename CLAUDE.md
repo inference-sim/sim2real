@@ -39,7 +39,7 @@ python pipeline/run.py     --experiment-root ../admission-control list
 python pipeline/run.py     --experiment-root ../admission-control switch <run-name>
 ```
 
-**Backward compat:** Omitting `--experiment-root` defaults to `REPO_ROOT` (the framework directory), so existing `config/transfer.yaml` layout continues to work.
+**Backward compat:** Omitting `--experiment-root` defaults to the current working directory. Run all pipeline commands from the experiment repo root and the default will resolve correctly without the flag.
 
 **`pipeline/setup.py`** — One-time cluster bootstrap (namespace, RBAC, secrets, PVCs, Tekton tasks). Idempotent — safe to re-run.
 
