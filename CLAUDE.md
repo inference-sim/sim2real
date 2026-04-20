@@ -17,8 +17,9 @@ inference-sim to production llm-d-inference-scheduler scorer plugins.
 ## Submodules
 
 - `inference-sim/` — Discrete-event LLM inference simulator (source of evolved algorithms)
-- `llm-d-inference-scheduler/` — Production scheduler with scorer plugin system (target)
 - `tektonc-data-collection/` — Tekton-based cluster data collection pipeline
+
+`llm-d-inference-scheduler` is not a submodule of the framework repo. Each experiment repo carries its own copy (e.g. `admission-control/llm-d-inference-scheduler/`).
 
 ## Transfer Pipeline
 
@@ -31,9 +32,11 @@ setup.py → prepare.py → [/sim2real-translate] → deploy.py
 Run all pipeline commands from the `sim2real/` directory, pointing `--experiment-root` at the experiment repo:
 
 ```bash
-python pipeline/setup.py  --experiment-root ../admission-control
+python pipeline/setup.py   --experiment-root ../admission-control
 python pipeline/prepare.py --experiment-root ../admission-control
 python pipeline/deploy.py  --experiment-root ../admission-control
+python pipeline/run.py     --experiment-root ../admission-control list
+python pipeline/run.py     --experiment-root ../admission-control switch <run-name>
 ```
 
 **Backward compat:** Omitting `--experiment-root` defaults to `REPO_ROOT` (the framework directory), so existing `config/transfer.yaml` layout continues to work.
@@ -55,7 +58,7 @@ python pipeline/deploy.py  --experiment-root ../admission-control
 
 **`pipeline/deploy.py`** — Builds EPP image, applies Tekton Pipeline resources, submits PipelineRuns. Use `deploy.py collect` to pull results from the cluster PVC after runs complete.
 
-**`pipeline/run.py`** — Lists, inspects, and switches between runs. `switch` syncs generated files into the `llm-d-inference-scheduler` submodule.
+**`pipeline/run.py`** — Lists, inspects, and switches between runs. `switch` syncs generated scorer plugin files into the experiment repo's `llm-d-inference-scheduler/` directory. Pass `--experiment-root` to point at the experiment repo (default: current directory).
 
 ## Pipeline Library (`pipeline/lib/`)
 
