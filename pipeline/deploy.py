@@ -111,7 +111,8 @@ def _build_epp_image(run_dir: Path, run_name: str, namespace: str) -> str:
         ["bash", str(build_script),
          "--run-dir", str(run_dir),
          "--run-name", run_name,
-         "--namespace", namespace],
+         "--namespace", namespace,
+         "--experiment-root", str(EXPERIMENT_ROOT)],
         check=False,
         cwd=REPO_ROOT,
     )

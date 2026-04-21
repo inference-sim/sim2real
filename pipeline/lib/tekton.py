@@ -98,6 +98,8 @@ def compile_pipeline(
         except OSError:
             return False
         if r.returncode != 0:
+            if r.stderr:
+                print(f"[tektonc] {r.stderr.strip()}", file=sys.stderr)
             return False
     finally:
         Path(tmp.name).unlink(missing_ok=True)

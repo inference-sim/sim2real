@@ -1,4 +1,5 @@
 ---
+name: sim2real-check
 description: Validate a sim2real translation bundle against its simulation bundle. Checks workloads, configs, signals, policies, and runtime health.
 ---
 

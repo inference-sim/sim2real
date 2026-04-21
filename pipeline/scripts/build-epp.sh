@@ -17,25 +17,29 @@ err()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 RUN_DIR=""
 RUN_NAME=""
 NAMESPACE=""
+EXPERIMENT_ROOT=""
 
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --run-dir)   RUN_DIR="$2"; shift 2 ;;
-    --run-name)  RUN_NAME="$2"; shift 2 ;;
-    --namespace) NAMESPACE="$2"; shift 2 ;;
+    --run-dir)          RUN_DIR="$2"; shift 2 ;;
+    --run-name)         RUN_NAME="$2"; shift 2 ;;
+    --namespace)        NAMESPACE="$2"; shift 2 ;;
+    --experiment-root)  EXPERIMENT_ROOT="$2"; shift 2 ;;
     *) err "Unknown arg: $1"; exit 1 ;;
   esac
 done
 
 if [ -z "${RUN_DIR}" ] || [ -z "${RUN_NAME}" ] || [ -z "${NAMESPACE}" ]; then
-  err "Usage: build-epp.sh --run-dir <path> --run-name <name> --namespace <ns>"
+  err "Usage: build-epp.sh --run-dir <path> --run-name <name> --namespace <ns> [--experiment-root <path>]"
   exit 1
 fi
 
 # ── Find repo root ─────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SIM2REAL_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-SCHEDULER_DIR="${SIM2REAL_ROOT}/llm-d-inference-scheduler"
+# llm-d-inference-scheduler lives in the experiment repo, not the framework.
+SCHEDULER_ROOT="${EXPERIMENT_ROOT:-${SIM2REAL_ROOT}}"
+SCHEDULER_DIR="${SCHEDULER_ROOT}/llm-d-inference-scheduler"
 
 # ── Step 1: Read metadata ─────────────────────────────────────────
 info "Reading run metadata..."
