@@ -1,10 +1,7 @@
 """Tests for pipeline/run.py CLI argument parsing and experiment-root path routing."""
 import json
 import sys
-from pathlib import Path
 from unittest.mock import patch, MagicMock
-
-import pytest
 
 
 class TestBuildParser:
