@@ -151,6 +151,8 @@ def make_pipelinerun(phase: str, workload: dict, run_name: str, namespace: str,
             ws_names = list(workspace_bindings.keys())
         spec["workspaces"] = _apply_workspace_bindings(ws_names, workspace_bindings)
 
+    spec["timeouts"] = {"pipeline": "4h"}
+
     return {
         "apiVersion": "tekton.dev/v1",
         "kind": "PipelineRun",
@@ -355,6 +357,7 @@ def make_experiment_pipeline(
             "pipelineRef": {"name": pipeline_name},
             "params": pr_params,
             "workspaces": pr_workspaces,
+            "timeouts": {"pipeline": "4h"},
         },
     }
 
@@ -460,6 +463,7 @@ def make_standby_pipeline(
             "pipelineRef": {"name": pipeline_name},
             "params": pr_params,
             "workspaces": pr_workspaces,
+            "timeouts": {"pipeline": "4h"},
         },
     }
 
