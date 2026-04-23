@@ -490,9 +490,7 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
         # ── Copy ────────────────────────────────────────────────────────
         for phase in phases:
             dest_dir = run_dir / "results" / phase
-            if dest_dir.exists():
-                shutil.rmtree(dest_dir)
-            dest_dir.mkdir(parents=True)
+            dest_dir.mkdir(parents=True, exist_ok=True)
 
             if skip_logs:
                 # Selective copy: trace files + epp_logs via kubectl cp per
@@ -802,19 +800,23 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 entry["status"] = "pending"
         elif entry["status"] == "collecting":
             result_dir = run_dir / "results" / entry.get("package", "")
-            entry["status"] = "done" if result_dir.exists() else "running"
+            if result_dir.exists():
+                entry["status"] = "done"
+            else:
+                entry["status"] = "pending"
+                entry["namespace"] = None
     store.save(progress)
 
-    # Apply shared Pipeline (if present) to the primary namespace
+    # Apply shared Pipeline (if present) to ALL namespaces
     pipeline_yaml = next(cluster_dir.glob("sim2real-*.yaml"), None)
     if pipeline_yaml:
-        ns_primary = namespaces[0]
-        r = run(["kubectl", "apply", "-f", str(pipeline_yaml), "-n", ns_primary],
-                check=False, capture=True)
-        if r.returncode == 0:
-            ok(f"Applied shared Pipeline: {pipeline_yaml.name}")
-        else:
-            warn(f"Could not apply shared Pipeline: {r.stderr.strip()}")
+        for _ns in namespaces:
+            r = run(["kubectl", "apply", "-f", str(pipeline_yaml), "-n", _ns],
+                    check=False, capture=True)
+            if r.returncode == 0:
+                ok(f"Applied shared Pipeline to {_ns}: {pipeline_yaml.name}")
+            else:
+                warn(f"Could not apply shared Pipeline to {_ns}: {r.stderr.strip()}")
 
     # Track which namespace is assigned to which pair
     slots_busy: dict[str, str] = {
@@ -858,7 +860,9 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 else:
                     warn(f"[{pair_key}] {entry['status']}")
 
-            elif status in ("Failed", "PipelineRunCancelled", "PipelineRunCouldntGetPipeline"):
+            elif status in ("Failed", "PipelineRunCancelled", "PipelineRunCouldntGetPipeline",
+                            "PipelineRunTimeout", "CreateRunFailed", "PipelineRunStopping",
+                            "PipelineRunStoppingTimeout"):
                 warn(f"[{pair_key}] hard failure ({status}) → failed")
                 entry["status"] = "failed"
                 entry["namespace"] = None
@@ -921,6 +925,11 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                     yaml.dump(pr_data, tf, default_flow_style=False)
                     tf_path = tf.name
                 pr_name = pr_data.get("metadata", {}).get("name", "")
+                # Delete any prior completed/failed PipelineRun before re-applying
+                if pr_name:
+                    run(["kubectl", "delete", "pipelinerun", pr_name, f"-n={ns}",
+                         "--ignore-not-found=true"],
+                        check=False, capture=True)
                 result = run(["kubectl", "apply", "-f", tf_path, "-n", ns],
                              check=False, capture=True)
             finally:
