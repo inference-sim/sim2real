@@ -304,3 +304,53 @@ def test_standby_pipeline_compiled_pipeline_unchanged():
     original = copy.deepcopy(_COMPILED_PIPELINE)
     make_standby_pipeline("baseline", _COMPILED_PIPELINE, "run-1", "test-ns")
     assert _COMPILED_PIPELINE == original
+
+
+# ── Tests for make_pipelinerun_parallel ──────────────────────────────────────
+
+_WORKSPACE_BINDINGS_PARALLEL = {
+    "model-cache":    {"persistentVolumeClaim": {"claimName": "model-pvc"}},
+    "data-storage":   {"persistentVolumeClaim": {"claimName": "data-pvc"}},
+    "hf-credentials": {"secret": {"secretName": "hf-secret"}},
+}
+
+
+def test_make_pipelinerun_parallel_name():
+    from pipeline.lib.tekton import make_pipelinerun_parallel
+    pr = make_pipelinerun_parallel(
+        phase="baseline", workload={"name": "wl-smoke"}, run_name="sim2real-2026-04-23",
+        namespace="sim2real-0", pipeline_name="sim2real-2026-04-23",
+        gaie_config="{}", inference_objectives="[]",
+        workspace_bindings=_WORKSPACE_BINDINGS_PARALLEL,
+    )
+    assert pr["metadata"]["name"] == "baseline-wl-smoke-sim2real-2026-04-23"
+    assert pr["metadata"]["namespace"] == "sim2real-0"
+
+
+def test_make_pipelinerun_parallel_params_include_phase_and_config():
+    from pipeline.lib.tekton import make_pipelinerun_parallel
+    pr = make_pipelinerun_parallel(
+        phase="treatment", workload={"name": "wl-load"}, run_name="run1",
+        namespace="ns", pipeline_name="sim2real-run1",
+        gaie_config='{"key":"val"}', inference_objectives='[{"name":"obj"}]',
+        workspace_bindings=_WORKSPACE_BINDINGS_PARALLEL,
+    )
+    params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
+    assert params["phase"] == "treatment"
+    assert params["gaieConfig"] == '{"key":"val"}'
+    assert params["inferenceObjectives"] == '[{"name":"obj"}]'
+    assert params["workloadName"] == "wl-load"
+
+
+def test_make_pipelinerun_parallel_workspace_bindings():
+    from pipeline.lib.tekton import make_pipelinerun_parallel
+    pr = make_pipelinerun_parallel(
+        phase="baseline", workload={"name": "wl-smoke"}, run_name="r",
+        namespace="ns", pipeline_name="sim2real-r",
+        gaie_config="{}", inference_objectives="[]",
+        workspace_bindings=_WORKSPACE_BINDINGS_PARALLEL,
+    )
+    ws_names = {ws["name"] for ws in pr["spec"]["workspaces"]}
+    assert "model-cache" in ws_names
+    assert "data-storage" in ws_names
+    assert "hf-credentials" in ws_names
