@@ -182,10 +182,14 @@ def _prefix_task(
       per-workload param names for this group.
     - $(tasks.ORIG.) result references are updated to $(tasks.PREFIX+ORIG.).
     """
-    t = copy.deepcopy(task)
-    t["name"] = prefix + t["name"]
+    def _prefixed(name: str) -> str:
+        full = prefix + name
+        return full[:63] if len(full) > 63 else full
 
-    ra = [prefix + r if r in phase_task_names else r
+    t = copy.deepcopy(task)
+    t["name"] = _prefixed(t["name"])
+
+    ra = [_prefixed(r) if r in phase_task_names else r
           for r in t.get("runAfter", [])]
     ra = extra_before + ra
     if ra:
@@ -197,7 +201,7 @@ def _prefix_task(
         if not isinstance(v, str):
             return v
         for tn in phase_task_names:
-            v = v.replace(f"$(tasks.{tn}.", f"$(tasks.{prefix}{tn}.")
+            v = v.replace(f"$(tasks.{tn}.", f"$(tasks.{_prefixed(tn)}.")
         v = v.replace("$(params.workloadName)", f"$(params.{wload_param})")
         v = v.replace("$(params.workloadSpec)", f"$(params.{wload_spec_param})")
         return v
@@ -295,7 +299,7 @@ def make_experiment_pipeline(
         for t in phase_tasks:
             for ra in t.get("runAfter", []):
                 has_successor.add(ra)
-        leaf_prefixed = [prefix + t["name"]
+        leaf_prefixed = [(prefix + t["name"])[:63]
                          for t in phase_tasks if t["name"] not in has_successor]
 
         # Regular tasks
@@ -316,7 +320,7 @@ def make_experiment_pipeline(
                 _prefix_task(task, prefix, phase_task_names, leaf_prefixed,
                              wload_param, wload_spec_param)
             )
-            finally_prefixed.append(prefix + task["name"])
+            finally_prefixed.append((prefix + task["name"])[:63])
 
             cleanup = _prefix_task(task, prefix, phase_task_names, [],
                                    wload_param, wload_spec_param)
