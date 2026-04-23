@@ -1055,7 +1055,7 @@ class TestCompileClusterPackages:
             },
         }
 
-        def _fake_compile(template_dir, values_path, phase, out_dir):
+        def _fake_compile(template_dir, values_path, phase, out_dir, **kwargs):
             out_dir.mkdir(parents=True, exist_ok=True)
             (out_dir / f"{phase}-pipeline.yaml").write_text(
                 yaml.dump(_MINIMAL_PIPELINE, default_flow_style=False)
@@ -1099,7 +1099,7 @@ class TestCompileClusterPackages:
             },
         }
 
-        def _fake_compile(template_dir, values_path, phase, out_dir):
+        def _fake_compile(template_dir, values_path, phase, out_dir, **kwargs):
             out_dir.mkdir(parents=True, exist_ok=True)
             (out_dir / f"{phase}-pipeline.yaml").write_text(
                 yaml.dump(_MINIMAL_PIPELINE, default_flow_style=False)
@@ -1147,7 +1147,7 @@ def test_compile_cluster_packages_parallel_creates_per_pair_pipelineruns(tmp_pat
         "workspaces": {"model-cache": {"persistentVolumeClaim": {"claimName": "model-pvc"}}},
     }
 
-    def _fake_compile(template_dir, values_path, phase, out_dir, run_name=""):
+    def _fake_compile(template_dir, values_path, phase, out_dir, run_name="", **kwargs):
         stub = out_dir / f"sim2real-{run_name}.yaml"
         stub.write_text("# stub\n")
         return True

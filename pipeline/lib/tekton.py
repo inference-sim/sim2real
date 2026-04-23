@@ -27,6 +27,7 @@ def compile_pipeline(
     phase: str,
     out_dir: Path,
     run_name: str = "",
+    tektonc_dir: Path | None = None,
 ) -> bool:
     """Compile a Tekton PipelineRun YAML for the given phase.
 
@@ -56,7 +57,8 @@ def compile_pipeline(
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / (f"sim2real-{run_name}.yaml" if run_name else f"{phase}-pipeline.yaml")
 
-    tektonc = REPO_ROOT / "tektonc-data-collection" / "tektonc" / "tektonc.py"
+    tektonc_base = Path(tektonc_dir) if tektonc_dir else REPO_ROOT / "tektonc-data-collection"
+    tektonc = tektonc_base / "tektonc" / "tektonc.py"
     if not tektonc.exists():
         return False
 

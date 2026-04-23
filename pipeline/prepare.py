@@ -552,7 +552,9 @@ def _compile_cluster_packages_parallel(
     cluster_dir.mkdir(parents=True, exist_ok=True)
 
     # Compile one Pipeline for the whole experiment (not per-phase)
-    ok_flag = compile_pipeline(template_dir, values_path, "baseline", cluster_dir, run_name=run_name)
+    tektonc_dir = setup_config.get("tektonc_dir")
+    ok_flag = compile_pipeline(template_dir, values_path, "baseline", cluster_dir, run_name=run_name,
+                               tektonc_dir=Path(tektonc_dir) if tektonc_dir else None)
     shared_pipeline_path = cluster_dir / f"sim2real-{run_name}.yaml"
     if not ok_flag:
         warn("compile_pipeline failed; writing stub")
@@ -642,7 +644,9 @@ def _compile_cluster_packages(args, run_dir: Path, resolved: dict, values_path: 
         # Compile Tekton Pipeline YAML for this phase
         pr_path = pkg_dir / f"{package}-pipeline.yaml"
         if tektonc_dir.exists():
-            ok_flag = compile_pipeline(tektonc_dir, values_path, package, pkg_dir)
+            sc_tektonc_dir = setup_config.get("tektonc_dir")
+            ok_flag = compile_pipeline(tektonc_dir, values_path, package, pkg_dir,
+                                       tektonc_dir=Path(sc_tektonc_dir) if sc_tektonc_dir else None)
             if not ok_flag:
                 warn(f"compile_pipeline failed for {package}; writing stub")
                 pr_path.write_text(f"# compile_pipeline failed for {package}\n")
