@@ -626,6 +626,324 @@ def _cmd_collect(args, manifest: dict, run_dir: Path, setup_config: dict):
     print()
 
 
+# ── Run helpers ─────────────────────────────────────────────────────────────
+
+def _load_pairs(cluster_dir: Path) -> dict:
+    """Discover all (workload, package) pairs from cluster/wl-*-*/ directories.
+
+    Returns dict keyed by pair name ("wl-{workload}-{package}") with metadata.
+    """
+    pairs = {}
+    if not cluster_dir.exists():
+        return pairs
+    for pair_dir in sorted(cluster_dir.iterdir()):
+        if not pair_dir.is_dir() or not pair_dir.name.startswith("wl-"):
+            continue
+        prs = list(pair_dir.glob("pipelinerun-*.yaml"))
+        if not prs:
+            continue
+        pr_path = prs[0]
+        try:
+            pr_data = yaml.safe_load(pr_path.read_text())
+        except Exception:
+            continue
+        pr_name = pr_data.get("metadata", {}).get("name", pr_path.stem)
+        params = {p["name"]: p["value"] for p in pr_data.get("spec", {}).get("params", [])}
+        workload = params.get("workloadName", "")
+        package = params.get("phase", "")
+        pairs[pair_dir.name] = {
+            "workload": workload,
+            "package": package,
+            "pr_name": pr_name,
+            "pr_path": str(pr_path),
+            "namespace": pr_data.get("metadata", {}).get("namespace", ""),
+        }
+    return pairs
+
+
+def _apply_run_filters(progress: dict, args) -> set:
+    """Return the set of pair keys that should be reset to 'pending'.
+
+    With no flags: returns empty set (resume — don't reset anything).
+    With flags: returns matching pairs.
+    """
+    only = getattr(args, "only", None)
+    workload = getattr(args, "workload", None)
+    package = getattr(args, "package", None)
+    status_filter = getattr(args, "status", None)
+
+    if only:
+        return {only} if only in progress else set()
+
+    if not any([workload, package, status_filter]):
+        return set()
+
+    candidates = set(progress.keys())
+    if workload:
+        candidates = {k for k in candidates if progress[k].get("workload") == workload}
+    if package:
+        candidates = {k for k in candidates if progress[k].get("package") == package}
+    if status_filter:
+        candidates = {k for k in candidates if progress[k].get("status") == status_filter}
+    return candidates
+
+
+def _check_slot_ready(namespace: str) -> tuple[bool, list[str]]:
+    """Check that a namespace slot is ready to accept a new PipelineRun.
+
+    Checks: PVCs bound, HF secret present.
+    Returns (ready, list_of_failure_reasons).
+    """
+    failures = []
+
+    for pvc in ["model-pvc", "data-pvc"]:
+        result = run(
+            ["kubectl", "get", "pvc", pvc, f"-n={namespace}",
+             "-o", "jsonpath={.status.phase}"],
+            check=False, capture=True,
+        )
+        if result.returncode != 0 or result.stdout.strip() != "Bound":
+            failures.append(f"PVC {pvc} not Bound in {namespace}")
+
+    result = run(
+        ["kubectl", "get", "secret", "hf-secret", f"-n={namespace}"],
+        check=False, capture=True,
+    )
+    if result.returncode != 0:
+        failures.append(f"Secret hf-secret missing in {namespace}")
+
+    return len(failures) == 0, failures
+
+
+def _collect_pair(pair_key: str, entry: dict, run_dir: Path) -> bool:
+    """Collect results for a completed pair inline. Returns True on success."""
+    namespace = entry.get("namespace", "")
+    package = entry.get("package", "")
+    run_name = run_dir.name
+
+    if not namespace or not package:
+        return False
+
+    try:
+        errors = _extract_phases_from_pvc(
+            phases=[package],
+            run_name=run_name,
+            namespace=namespace,
+            run_dir=run_dir,
+            skip_logs=False,
+        )
+        return errors.get(package) is None
+    except RuntimeError as e:
+        warn(f"Collection failed for {pair_key}: {e}")
+        return False
+
+
+def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
+    """Orchestrate parallel pool execution across namespace slots."""
+    import datetime as _dt
+    import tempfile as _tmp
+    from pipeline.lib.progress import LocalProgressStore
+
+    namespaces = setup_config.get("namespaces") or [setup_config.get("namespace", "")]
+    if not namespaces or not namespaces[0]:
+        err("No namespaces configured. Run setup.py with --namespaces."); sys.exit(1)
+
+    max_retries = getattr(args, "max_retries", 2)
+    poll_interval = getattr(args, "poll_interval", 30)
+
+    cluster_dir = run_dir / "cluster"
+    progress_path = run_dir / "progress.json"
+    store = LocalProgressStore(progress_path)
+
+    # Load or initialize progress
+    progress = store.load()
+    discovered = _load_pairs(cluster_dir)
+    if not discovered:
+        err("No pairs found in cluster/. Run prepare.py first."); sys.exit(1)
+
+    # Initialize new entries (first run or new pairs added)
+    for key, meta in discovered.items():
+        if key not in progress:
+            progress[key] = {
+                "workload": meta["workload"],
+                "package":  meta["package"],
+                "status":   "pending",
+                "namespace": None,
+                "retries":  0,
+            }
+
+    # Apply re-run filters — reset matched pairs to pending
+    to_reset = _apply_run_filters(progress, args)
+    for key in to_reset:
+        if key in progress:
+            progress[key]["status"] = "pending"
+            progress[key]["namespace"] = None
+    if to_reset:
+        store.save(progress)
+        info(f"Reset {len(to_reset)} pair(s) to pending")
+
+    # Reconcile 'running' entries against actual cluster state on resume
+    for key, entry in progress.items():
+        if entry["status"] == "running":
+            pr_meta = discovered.get(key, {})
+            pr_name = pr_meta.get("pr_name", "")
+            ns = entry.get("namespace") or ""
+            if pr_name and ns:
+                actual = _check_pipelinerun_status(pr_name, ns)
+                if actual == "Succeeded":
+                    entry["status"] = "collecting"
+                elif actual in ("Failed", "PipelineRunCancelled"):
+                    entry["status"] = "failed"
+                # If still "Running"/"Started", leave as "running" — will be monitored
+            else:
+                entry["status"] = "pending"
+        elif entry["status"] == "collecting":
+            result_dir = run_dir / "results" / entry.get("package", "")
+            entry["status"] = "done" if result_dir.exists() else "running"
+    store.save(progress)
+
+    # Apply shared Pipeline (if present) to the primary namespace
+    pipeline_yaml = next(cluster_dir.glob("sim2real-*.yaml"), None)
+    if pipeline_yaml:
+        ns_primary = namespaces[0]
+        r = run(["kubectl", "apply", "-f", str(pipeline_yaml), "-n", ns_primary],
+                check=False, capture=True)
+        if r.returncode == 0:
+            ok(f"Applied shared Pipeline: {pipeline_yaml.name}")
+        else:
+            warn(f"Could not apply shared Pipeline: {r.stderr.strip()}")
+
+    # Track which namespace is assigned to which pair
+    slots_busy: dict[str, str] = {
+        entry["namespace"]: key
+        for key, entry in progress.items()
+        if entry["status"] == "running" and entry.get("namespace")
+    }
+
+    def _pending_pairs() -> list[str]:
+        return [k for k, v in progress.items() if v["status"] == "pending"]
+
+    def _work_remaining() -> bool:
+        return any(v["status"] in ("pending", "running", "collecting")
+                   for v in progress.values())
+
+    timeout_hours = 4
+    info(f"Orchestrator: {len(discovered)} pairs, {len(namespaces)} slot(s)")
+
+    while _work_remaining() or slots_busy:
+
+        # ── Process completed/failed slots ───────────────────────────────
+        for ns in list(slots_busy):
+            pair_key = slots_busy[ns]
+            entry = progress[pair_key]
+            pr_meta = discovered.get(pair_key, {})
+            pr_name = pr_meta.get("pr_name", "")
+
+            status = _check_pipelinerun_status(pr_name, ns) if pr_name else "Unknown"
+
+            if status == "Succeeded":
+                info(f"[{pair_key}] Succeeded → collecting")
+                entry["status"] = "collecting"
+                store.save(progress)
+                ok_collect = _collect_pair(pair_key, entry, run_dir)
+                entry["status"] = "done" if ok_collect else "collect-failed"
+                entry["namespace"] = None
+                store.save(progress)
+                del slots_busy[ns]
+                if ok_collect:
+                    ok(f"[{pair_key}] {entry['status']}")
+                else:
+                    warn(f"[{pair_key}] {entry['status']}")
+
+            elif status in ("Failed", "PipelineRunCancelled", "PipelineRunCouldntGetPipeline"):
+                warn(f"[{pair_key}] hard failure ({status}) → failed")
+                entry["status"] = "failed"
+                entry["namespace"] = None
+                store.save(progress)
+                del slots_busy[ns]
+
+            elif status in ("Running", "Started"):
+                # Check for timeout
+                ts_result = run(
+                    ["kubectl", "get", "pipelinerun", pr_name, f"-n={ns}",
+                     "-o", "jsonpath={.metadata.creationTimestamp}"],
+                    check=False, capture=True,
+                )
+                if ts_result.returncode == 0 and ts_result.stdout.strip():
+                    try:
+                        created = _dt.datetime.fromisoformat(
+                            ts_result.stdout.strip().replace("Z", "+00:00"))
+                        age_h = (_dt.datetime.now(_dt.timezone.utc) - created).total_seconds() / 3600
+                        if age_h > timeout_hours:
+                            retries = entry.get("retries", 0)
+                            _cancel_and_delete_pipelinerun(pr_name, ns)
+                            if retries < max_retries:
+                                warn(f"[{pair_key}] timed out → requeue (attempt {retries + 1}/{max_retries})")
+                                entry["status"] = "pending"
+                                entry["retries"] = retries + 1
+                            else:
+                                warn(f"[{pair_key}] timed out, max retries → timed-out")
+                                entry["status"] = "timed-out"
+                            entry["namespace"] = None
+                            del slots_busy[ns]
+                            store.save(progress)
+                    except ValueError:
+                        pass
+
+        # ── Assign pending work to free slots ────────────────────────────
+        free_slots = [ns for ns in namespaces if ns not in slots_busy]
+        for ns, pair_key in zip(free_slots, _pending_pairs()):
+            ready, reasons = _check_slot_ready(ns)
+            if not ready:
+                warn(f"Slot {ns} not ready: {'; '.join(reasons)}")
+                continue
+
+            entry = progress[pair_key]
+            pr_meta = discovered.get(pair_key, {})
+            pr_path_str = pr_meta.get("pr_path", "")
+            if not pr_path_str:
+                warn(f"No PipelineRun path for {pair_key}"); continue
+
+            pr_data = yaml.safe_load(Path(pr_path_str).read_text())
+
+            # Rewrite namespace in the PipelineRun before applying
+            pr_data["metadata"]["namespace"] = ns
+            for param in pr_data.get("spec", {}).get("params", []):
+                if param["name"] == "namespace":
+                    param["value"] = ns
+
+            with _tmp.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tf:
+                yaml.dump(pr_data, tf, default_flow_style=False)
+                tf_path = tf.name
+
+            pr_name = pr_data.get("metadata", {}).get("name", "")
+            result = run(["kubectl", "apply", "-f", tf_path, "-n", ns],
+                         check=False, capture=True)
+            Path(tf_path).unlink(missing_ok=True)
+
+            if result.returncode != 0:
+                warn(f"[{pair_key}] kubectl apply failed: {result.stderr.strip()}")
+                continue
+
+            entry["status"] = "running"
+            entry["namespace"] = ns
+            slots_busy[ns] = pair_key
+            store.save(progress)
+            ok(f"[{pair_key}] → {ns} ({pr_name})")
+
+        if _work_remaining() or slots_busy:
+            time.sleep(poll_interval)
+
+    # Final summary
+    counts: dict[str, int] = {}
+    for v in progress.values():
+        counts[v["status"]] = counts.get(v["status"], 0) + 1
+    print()
+    ok("Run complete: " + "  ".join(f"{v} {k}" for k, v in sorted(counts.items())))
+    print(f"  Progress: {progress_path}")
+    print()
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -668,6 +986,16 @@ Examples:
     status_p.add_argument("--live", action="store_true",
                           help="Add CURRENT TASK column for running pairs (kubectl call per slot)")
 
+    run_p = sub.add_parser("run", help="Orchestrate parallel pool execution")
+    run_p.add_argument("--only",         metavar="PAIR",  help="Reset and run one specific pair key")
+    run_p.add_argument("--workload",     metavar="NAME",  help="Reset pairs matching this workload")
+    run_p.add_argument("--package",      metavar="NAME",  help="Reset pairs matching this package")
+    run_p.add_argument("--status",       metavar="STATE", help="Reset pairs with this status (e.g. failed, timed-out)")
+    run_p.add_argument("--max-retries",  type=int, default=2, dest="max_retries",
+                       help="Max retries for timed-out pairs [2]")
+    run_p.add_argument("--poll-interval", type=int, default=30, dest="poll_interval",
+                       help="Seconds between status polls [30]")
+
     return p
 
 
@@ -698,7 +1026,9 @@ def main():
         sys.exit(1)
 
     cmd = args.command
-    if cmd == "status":
+    if cmd == "run":
+        _cmd_run(args, run_dir, setup_config)
+    elif cmd == "status":
         progress_path = run_dir / "progress.json"
         _cmd_status(args, progress_path)
     elif cmd == "collect":

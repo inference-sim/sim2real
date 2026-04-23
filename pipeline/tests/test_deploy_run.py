@@ -90,3 +90,66 @@ def test_status_missing_progress_file(tmp_path, capsys):
     _cmd_status(_Args(), tmp_path / "missing.json")
     out = capsys.readouterr().out
     assert "0 pairs" in out
+
+
+def test_load_pairs_discovers_all_pairs(tmp_path):
+    from pipeline.deploy import _load_pairs
+    for wl, pkg in [("smoke", "baseline"), ("smoke", "treatment"), ("load", "baseline")]:
+        d = tmp_path / f"wl-{wl}-{pkg}"
+        d.mkdir()
+        pr = {
+            "apiVersion": "tekton.dev/v1", "kind": "PipelineRun",
+            "metadata": {"name": f"{pkg}-{wl}-run1", "namespace": "sim2real-0"},
+            "spec": {"params": [
+                {"name": "workloadName", "value": wl},
+                {"name": "phase", "value": pkg},
+            ]},
+        }
+        import yaml as _yaml
+        (d / f"pipelinerun-{wl}-{pkg}.yaml").write_text(_yaml.dump(pr))
+
+    pairs = _load_pairs(tmp_path)
+    assert "wl-smoke-baseline" in pairs
+    assert "wl-smoke-treatment" in pairs
+    assert "wl-load-baseline" in pairs
+    assert len(pairs) == 3
+
+
+def test_apply_run_filters_by_status():
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = None; package = None; status = "failed"
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    assert result == {"wl-heavy-baseline"}
+
+
+def test_apply_run_filters_compose():
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = None; package = "treatment"; status = "timed-out"
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    assert result == {"wl-load-treatment"}
+
+
+def test_apply_run_filters_only_flag():
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = "wl-smoke-baseline"; workload = None; package = None; status = None
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    assert result == {"wl-smoke-baseline"}
+
+
+def test_apply_run_filters_no_flags_returns_empty():
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = None; package = None; status = None
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    assert result == set()
