@@ -693,6 +693,9 @@ def _check_slot_ready(namespace: str) -> tuple[bool, list[str]]:
 
     Checks: PVCs bound, HF secret present.
     Returns (ready, list_of_failure_reasons).
+
+    Note: Tekton tasks presence check is not yet implemented; assumes
+    ``setup.py`` has been run.
     """
     failures = []
 
@@ -912,14 +915,17 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 if param["name"] == "namespace":
                     param["value"] = ns
 
-            with _tmp.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tf:
-                yaml.dump(pr_data, tf, default_flow_style=False)
-                tf_path = tf.name
-
-            pr_name = pr_data.get("metadata", {}).get("name", "")
-            result = run(["kubectl", "apply", "-f", tf_path, "-n", ns],
-                         check=False, capture=True)
-            Path(tf_path).unlink(missing_ok=True)
+            tf_path = None
+            try:
+                with _tmp.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tf:
+                    yaml.dump(pr_data, tf, default_flow_style=False)
+                    tf_path = tf.name
+                pr_name = pr_data.get("metadata", {}).get("name", "")
+                result = run(["kubectl", "apply", "-f", tf_path, "-n", ns],
+                             check=False, capture=True)
+            finally:
+                if tf_path:
+                    Path(tf_path).unlink(missing_ok=True)
 
             if result.returncode != 0:
                 warn(f"[{pair_key}] kubectl apply failed: {result.stderr.strip()}")

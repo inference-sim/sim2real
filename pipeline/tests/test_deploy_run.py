@@ -101,7 +101,7 @@ def test_load_pairs_discovers_all_pairs(tmp_path):
             "apiVersion": "tekton.dev/v1", "kind": "PipelineRun",
             "metadata": {"name": f"{pkg}-{wl}-run1", "namespace": "sim2real-0"},
             "spec": {"params": [
-                {"name": "workloadName", "value": wl},
+                {"name": "workloadName", "value": f"wl-{wl}"},
                 {"name": "phase", "value": pkg},
             ]},
         }
