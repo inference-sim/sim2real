@@ -298,24 +298,36 @@ def _cmd_deploy(args, manifest: dict, run_dir: Path, setup_config: dict):
 
     # Apply Pipeline definitions first so PipelineRuns can reference them
     step(2, "Apply Pipeline Definitions")
-    for pkg in sorted(packages):
-        # Apply all Pipeline YAMLs in the package dir (both raw compiled and sequential wrapper)
-        pipeline_yamls = [
-            cluster_dir / pkg / f"{pkg}-pipeline.yaml",
-            cluster_dir / pkg / f"sim2real-{pkg}-pipeline.yaml",
-        ]
-        applied_any = False
-        for pipeline_yaml in pipeline_yamls:
-            if pipeline_yaml.exists() and not pipeline_yaml.read_text().startswith("#"):
-                result = run(["kubectl", "apply", "-f", str(pipeline_yaml), "-n", namespace],
-                             check=False, capture=True)
-                if result.returncode != 0:
-                    err(f"kubectl apply failed for {pipeline_yaml.name}: {result.stderr}")
-                    sys.exit(1)
-                ok(f"Applied: {pipeline_yaml.name}")
-                applied_any = True
-        if not applied_any:
-            warn(f"No Pipeline definition for {pkg} — PipelineRuns may fail")
+    shared_pipelines = [p for p in cluster_dir.glob("sim2real-*.yaml")
+                        if not p.read_text().startswith("#")]
+    if shared_pipelines:
+        # Parallel layout: one shared Pipeline at cluster/sim2real-{run}.yaml
+        for pipeline_yaml in shared_pipelines:
+            result = run(["kubectl", "apply", "-f", str(pipeline_yaml), "-n", namespace],
+                         check=False, capture=True)
+            if result.returncode != 0:
+                err(f"kubectl apply failed for {pipeline_yaml.name}: {result.stderr}")
+                sys.exit(1)
+            ok(f"Applied: {pipeline_yaml.name}")
+    else:
+        # Sequential layout: Pipeline YAML lives inside each package subdirectory
+        for pkg in sorted(packages):
+            pipeline_yamls = [
+                cluster_dir / pkg / f"{pkg}-pipeline.yaml",
+                cluster_dir / pkg / f"sim2real-{pkg}-pipeline.yaml",
+            ]
+            applied_any = False
+            for pipeline_yaml in pipeline_yamls:
+                if pipeline_yaml.exists() and not pipeline_yaml.read_text().startswith("#"):
+                    result = run(["kubectl", "apply", "-f", str(pipeline_yaml), "-n", namespace],
+                                 check=False, capture=True)
+                    if result.returncode != 0:
+                        err(f"kubectl apply failed for {pipeline_yaml.name}: {result.stderr}")
+                        sys.exit(1)
+                    ok(f"Applied: {pipeline_yaml.name}")
+                    applied_any = True
+            if not applied_any:
+                warn(f"No Pipeline definition for {pkg} — PipelineRuns may fail")
 
     # Submit packages
     step(3, "Submit PipelineRuns")
