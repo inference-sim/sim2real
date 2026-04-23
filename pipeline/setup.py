@@ -243,8 +243,9 @@ def collect_config(args: argparse.Namespace) -> tuple[SetupConfig, Path, str]:
         info("Loading defaults from previous setup_config.json")
 
     # Resolve namespace list
-    if getattr(args, "namespaces", None):
-        namespaces = [n.strip() for n in args.namespaces.split(",") if n.strip()]
+    namespaces_raw = args.namespaces or os.environ.get("NAMESPACES", "")
+    if namespaces_raw:
+        namespaces = [n.strip() for n in namespaces_raw.split(",") if n.strip()]
         if not namespaces:
             err("--namespaces produced an empty list"); sys.exit(1)
         namespace = namespaces[0]
