@@ -339,6 +339,49 @@ def _cmd_deploy(args, manifest: dict, run_dir: Path, setup_config: dict):
     _print_status(submitted, namespace)
 
 
+# ── Status command ───────────────────────────────────────────────────────────
+
+def _cmd_status(args, progress_path: Path) -> None:
+    """Print a snapshot table of all (workload, package) pair statuses."""
+    from pipeline.lib.progress import LocalProgressStore
+    store = LocalProgressStore(progress_path)
+    progress = store.load()
+
+    # Apply filters
+    pairs = dict(progress)
+    if getattr(args, "workload", None):
+        pairs = {k: v for k, v in pairs.items() if v.get("workload") == args.workload}
+    if getattr(args, "package", None):
+        pairs = {k: v for k, v in pairs.items() if v.get("package") == args.package}
+
+    if not pairs:
+        print("  0 pairs" + (" (no progress file)" if not progress_path.exists() else ""))
+        return
+
+    pair_w = max(len(k) for k in pairs) + 2
+    col_status = 12
+    col_slot = 14
+    col_retries = 7
+
+    header = (f"{'PAIR':<{pair_w}} {'STATUS':<{col_status}} {'SLOT':<{col_slot}} {'RETRIES':<{col_retries}}")
+    print()
+    print(header)
+    print("-" * len(header))
+
+    counts: dict[str, int] = {}
+    for key, entry in sorted(pairs.items()):
+        status = entry.get("status", "unknown")
+        slot = entry.get("namespace") or "—"
+        retries = entry.get("retries", 0)
+        counts[status] = counts.get(status, 0) + 1
+        print(f"{key:<{pair_w}} {status:<{col_status}} {slot:<{col_slot}} {retries}")
+
+    print()
+    summary_parts = [f"{v} {k}" for k, v in sorted(counts.items())]
+    print(f"  {len(pairs)} pairs: " + "  ".join(summary_parts))
+    print()
+
+
 # ── Collect command ──────────────────────────────────────────────────────────
 
 def _check_pipelinerun_status(pr_name: str, namespace: str) -> str:
@@ -619,6 +662,12 @@ Examples:
     collect_p.add_argument("--skip-logs", action="store_true", dest="skip_logs",
                            help="Skip vLLM and EPP log files, collect only traces")
 
+    status_p = sub.add_parser("status", help="Show progress of all (workload, package) pairs")
+    status_p.add_argument("--workload", metavar="NAME", help="Filter by workload name")
+    status_p.add_argument("--package",  metavar="NAME", help="Filter by package name")
+    status_p.add_argument("--live", action="store_true",
+                          help="Add CURRENT TASK column for running pairs (kubectl call per slot)")
+
     return p
 
 
@@ -649,7 +698,10 @@ def main():
         sys.exit(1)
 
     cmd = args.command
-    if cmd == "collect":
+    if cmd == "status":
+        progress_path = run_dir / "progress.json"
+        _cmd_status(args, progress_path)
+    elif cmd == "collect":
         _cmd_collect(args, manifest, run_dir, setup_config)
     else:
         _cmd_deploy(args, manifest, run_dir, setup_config)
