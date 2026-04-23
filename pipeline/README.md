@@ -68,7 +68,7 @@ Writes `workspace/setup_config.json` and `workspace/runs/<run>/run_metadata.json
 6-phase state machine. Re-running skips completed phases.
 
 ```bash
-python pipeline/prepare.py [--force] [--rebuild-context] [--manifest PATH] [--run NAME]
+python pipeline/prepare.py [--force] [--rebuild-context] [--manifest PATH] [--run NAME] [--mode parallel|sequential]
 ```
 
 | Phase | Name | Skippable |
@@ -136,7 +136,7 @@ python pipeline/deploy.py collect [--package NAME…]
 
 **`deploy.py status`** — prints the current state of all pairs from `workspace/runs/<run>/progress.json`.
 
-**`deploy.py collect`** — polls PipelineRun status, extracts results from the cluster PVC, and writes to `workspace/runs/<run>/results/{baseline,treatment}/<workload>/`.
+**`deploy.py collect`** — extracts results from the cluster PVC and writes to `workspace/runs/<run>/results/{phase}/<workload>/`.
 
 ---
 
