@@ -1,6 +1,7 @@
 """Progress persistence for the parallel pool orchestrator."""
 from __future__ import annotations
 import json
+import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -22,10 +23,18 @@ class LocalProgressStore(ProgressStore):
     def load(self) -> dict:
         if not self._path.exists():
             return {}
-        return json.loads(self._path.read_text())
+        try:
+            return json.loads(self._path.read_text())
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Corrupt progress file: {self._path}") from exc
 
     def save(self, data: dict) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2))
-        tmp.rename(self._path)
+        fd, tmp = tempfile.mkstemp(dir=self._path.parent, suffix=".tmp")
+        try:
+            with open(fd, "w") as f:
+                json.dump(data, f, indent=2)
+            Path(tmp).replace(self._path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise

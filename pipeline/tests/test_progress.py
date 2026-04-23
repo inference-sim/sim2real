@@ -1,4 +1,5 @@
-import pytest  # noqa: F401
+import json
+import pytest
 from pipeline.lib.progress import LocalProgressStore
 
 def test_load_missing_returns_empty(tmp_path):
@@ -28,3 +29,10 @@ def test_save_overwrites_existing(tmp_path):
     store.save({"x": {"workload": "x", "package": "baseline", "status": "pending", "namespace": None, "retries": 0}})
     store.save({"y": {"workload": "y", "package": "treatment", "status": "done", "namespace": "ns", "retries": 0}})
     assert list(store.load().keys()) == ["y"]
+
+def test_load_corrupt_file_raises(tmp_path):
+    path = tmp_path / "progress.json"
+    path.write_text("{truncated")
+    store = LocalProgressStore(path)
+    with pytest.raises((json.JSONDecodeError, ValueError)):
+        store.load()
