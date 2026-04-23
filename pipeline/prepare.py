@@ -30,7 +30,7 @@ from pipeline.lib.manifest import load_manifest, ManifestError
 from pipeline.lib.state_machine import StateMachine
 from pipeline.lib.context_builder import build_context
 from pipeline.lib.values import _deep_merge, merge_values
-from pipeline.lib.tekton import compile_pipeline, make_experiment_pipeline, make_phase_pipeline, make_standby_pipeline
+from pipeline.lib.tekton import compile_pipeline, make_experiment_pipeline, make_phase_pipeline, make_standby_pipeline, make_pipelinerun_parallel
 
 # ── Repo layout ──────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -396,7 +396,19 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
 
     # 4e: Compile cluster YAMLs per package
     setup_config = _load_setup_config()
-    _compile_cluster_packages(args, run_dir, resolved, values_path, setup_config)
+    mode = getattr(args, "mode", "parallel")
+    if mode == "parallel":
+        tektonc_dir = _resolve_template_dir(args, EXPERIMENT_ROOT)
+        _compile_cluster_packages_parallel(
+            run_dir=run_dir,
+            resolved=resolved,
+            values_path=values_path,
+            setup_config=setup_config,
+            run_name=run_dir.name,
+            template_dir=tektonc_dir,
+        )
+    else:
+        _compile_cluster_packages(args, run_dir, resolved, values_path, setup_config)
 
     # 4f: Verify generated/ directory (created by translation skill)
     _verify_generated_dir(run_dir)
@@ -510,6 +522,87 @@ def _generate_algorithm_values(manifest: dict, resolved: dict, out_path: Path):
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(yaml.dump(alg_values, default_flow_style=False, sort_keys=False))
+
+
+def _compile_cluster_packages_parallel(
+    run_dir: Path, resolved: dict, values_path: Path,
+    setup_config: dict, run_name: str, template_dir: Path,
+):
+    """Generate one shared Pipeline + one PipelineRun per (workload, package) pair.
+
+    Output layout:
+      cluster/sim2real-{run_name}.yaml                       — shared Pipeline
+      cluster/wl-{workload}-{package}/
+        pipelinerun-{workload}-{package}.yaml                — one per pair
+    """
+    cluster_dir = run_dir / "cluster"
+    namespace = setup_config.get("namespace", "default")
+    if not setup_config.get("namespace"):
+        warn("namespace not found in setup_config.json; using 'default'")
+    ws_bindings = setup_config.get("workspaces") or {}
+    pipeline_name = f"sim2real-{run_name}"
+
+    values = yaml.safe_load(values_path.read_text())
+    workloads = values.get("observe", {}).get("workloads", [])
+
+    if not workloads:
+        warn("No workloads defined — cannot generate parallel PipelineRuns")
+        return
+
+    cluster_dir.mkdir(parents=True, exist_ok=True)
+
+    # Compile one Pipeline for the whole experiment (not per-phase)
+    ok_flag = compile_pipeline(template_dir, values_path, "baseline", cluster_dir, run_name=run_name)
+    shared_pipeline_path = cluster_dir / f"sim2real-{run_name}.yaml"
+    if not ok_flag:
+        warn("compile_pipeline failed; writing stub")
+        shared_pipeline_path.write_text(f"# compile_pipeline failed for {run_name}\n")
+
+    # Build gaie configs per package
+    gaie_values = values.get("stack", {}).get("gaie", {})
+    package_configs: dict[str, tuple[str, str]] = {}
+    for pkg in ["baseline", "treatment"]:
+        gaie_cfg = json.dumps(gaie_values.get(pkg, {}).get("helmValues", {}))
+        objectives = json.dumps(gaie_values.get("inferenceObjectives", []))
+        package_configs[pkg] = (gaie_cfg, objectives)
+
+    # Inject workload_name from manifest when missing
+    si_path = run_dir / "skill_input.json"
+    if si_path.exists():
+        try:
+            si = json.loads(si_path.read_text())
+            manifest_data = yaml.safe_load(Path(si["manifest_path"]).read_text()) or {}
+            wl_paths = manifest_data.get("workloads", [])
+            for i, wl in enumerate(workloads):
+                if "name" not in wl and "workload_name" not in wl and i < len(wl_paths):
+                    wl["workload_name"] = Path(wl_paths[i]).stem
+        except Exception:
+            pass
+
+    # Generate one PipelineRun per (workload, package) pair
+    for pkg in ["baseline", "treatment"]:
+        gaie_cfg, objectives = package_configs[pkg]
+        for wl in workloads:
+            wl_name = wl.get("name", wl.get("workload_name", "unknown"))
+            safe_wl = wl_name.replace("_", "-")
+            pair_dir = cluster_dir / f"wl-{safe_wl}-{pkg}"
+            pair_dir.mkdir(parents=True, exist_ok=True)
+
+            pr = make_pipelinerun_parallel(
+                phase=pkg,
+                workload=wl,
+                run_name=run_name,
+                namespace=namespace,
+                pipeline_name=pipeline_name,
+                gaie_config=gaie_cfg,
+                inference_objectives=objectives,
+                workspace_bindings=ws_bindings if ws_bindings else None,
+            )
+            pr_path = pair_dir / f"pipelinerun-{safe_wl}-{pkg}.yaml"
+            pr_path.write_text(yaml.dump(pr, default_flow_style=False, allow_unicode=True))
+
+    ok(f"Parallel cluster packages: {_display_path(cluster_dir)} "
+       f"({len(workloads) * 2} PipelineRuns)")
 
 
 def _compile_cluster_packages(args, run_dir: Path, resolved: dict, values_path: Path,
@@ -893,6 +986,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Root of the experiment repo (default: current directory)")
     p.add_argument("--pipeline-template", metavar="PATH", dest="pipeline_template",
                    help="Override Tekton pipeline template (directory or pipeline.yaml.j2 path)")
+    p.add_argument("--mode", choices=["parallel", "sequential"], default="parallel",
+                   help="parallel: one PipelineRun per (workload,package) pair (default). "
+                        "sequential: legacy combined experiment pipeline.")
 
     sub = p.add_subparsers(dest="command")
     sub.add_parser("context", help="Rebuild context cache only")
