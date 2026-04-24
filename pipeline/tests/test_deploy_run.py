@@ -153,3 +153,85 @@ def test_apply_run_filters_no_flags_returns_empty():
 
     result = _apply_run_filters(dict(_PROGRESS), _Args())
     assert result == set()
+
+
+# ── _reconcile_collecting (bugs 1+2) ─────────────────────────────────────────
+
+def test_reconcile_collecting_trace_present_marks_done(tmp_path):
+    from pipeline.deploy import _reconcile_collecting
+    pkg, wl = "baseline", "wl-smoke"
+    trace = tmp_path / "results" / pkg / wl / "trace_data.csv"
+    trace.parent.mkdir(parents=True)
+    trace.write_text("data")
+    entry = {"workload": wl, "package": pkg, "status": "collecting", "namespace": "ns", "retries": 0}
+    _reconcile_collecting("wl-smoke-baseline", entry, tmp_path)
+    assert entry["status"] == "done"
+    assert entry["namespace"] is None
+
+
+def test_reconcile_collecting_empty_dir_does_not_false_positive(tmp_path, monkeypatch):
+    """Old bug: results/baseline/ existing was enough to mark done. Fixed: must have trace_data.csv."""
+    import pipeline.deploy as mod
+    pkg, wl = "baseline", "wl-smoke"
+    (tmp_path / "results" / pkg).mkdir(parents=True)   # dir exists but no trace_data.csv
+    entry = {"workload": wl, "package": pkg, "status": "collecting", "namespace": "ns", "retries": 0}
+    collected = []
+    monkeypatch.setattr(mod, "_collect_pair", lambda k, e, d: collected.append(k) or True)
+    mod._reconcile_collecting("wl-smoke-baseline", entry, tmp_path)
+    assert "wl-smoke-baseline" in collected   # collection was attempted, not falsely skipped
+    assert entry["status"] == "done"
+    assert entry["namespace"] is None
+
+
+def test_reconcile_collecting_no_data_collect_ok_marks_done(tmp_path, monkeypatch):
+    import pipeline.deploy as mod
+    entry = {"workload": "wl-x", "package": "baseline", "status": "collecting", "namespace": "ns", "retries": 0}
+    monkeypatch.setattr(mod, "_collect_pair", lambda *a: True)
+    mod._reconcile_collecting("wl-x-baseline", entry, tmp_path)
+    assert entry["status"] == "done"
+    assert entry["namespace"] is None
+
+
+def test_reconcile_collecting_no_data_collect_fails_marks_pending(tmp_path, monkeypatch):
+    import pipeline.deploy as mod
+    entry = {"workload": "wl-x", "package": "baseline", "status": "collecting", "namespace": "ns", "retries": 0}
+    monkeypatch.setattr(mod, "_collect_pair", lambda *a: False)
+    mod._reconcile_collecting("wl-x-baseline", entry, tmp_path)
+    assert entry["status"] == "pending"
+    assert entry["namespace"] is None
+
+
+# ── _do_collect (bug 3) ───────────────────────────────────────────────────────
+
+def test_do_collect_saves_done_on_success(tmp_path, monkeypatch):
+    import pipeline.deploy as mod
+    from pipeline.lib.progress import LocalProgressStore
+    monkeypatch.setattr(mod, "_collect_pair", lambda *a: True)
+    entry = {"workload": "wl-x", "package": "baseline", "status": "collecting", "namespace": "ns", "retries": 0}
+    progress = {"wl-x-baseline": entry}
+    store = LocalProgressStore(tmp_path / "progress.json")
+    store.save(progress)
+    result = mod._do_collect("wl-x-baseline", entry, tmp_path, store, progress)
+    assert result is True
+    saved = store.load()
+    assert saved["wl-x-baseline"]["status"] == "done"
+    assert saved["wl-x-baseline"]["namespace"] is None
+
+
+def test_do_collect_interrupt_saves_collect_failed(tmp_path, monkeypatch):
+    import pytest
+    import pipeline.deploy as mod
+    from pipeline.lib.progress import LocalProgressStore
+
+    def _raise(*a):
+        raise KeyboardInterrupt()
+    monkeypatch.setattr(mod, "_collect_pair", _raise)
+    entry = {"workload": "wl-x", "package": "baseline", "status": "collecting", "namespace": "ns", "retries": 0}
+    progress = {"wl-x-baseline": entry}
+    store = LocalProgressStore(tmp_path / "progress.json")
+    store.save(progress)
+    with pytest.raises(KeyboardInterrupt):
+        mod._do_collect("wl-x-baseline", entry, tmp_path, store, progress)
+    saved = store.load()
+    assert saved["wl-x-baseline"]["status"] == "collect-failed"
+    assert saved["wl-x-baseline"]["namespace"] is None

@@ -776,7 +776,31 @@ def _collect_pair(pair_key: str, entry: dict, run_dir: Path) -> bool:
         return False
 
 
-def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
+def _reconcile_collecting(key: str, entry: dict, run_dir: Path) -> None:
+    pkg = entry.get("package", "")
+    wl = entry.get("workload", "")
+    if (run_dir / "results" / pkg / wl / "trace_data.csv").exists():
+        entry["status"] = "done"
+    else:
+        entry["status"] = "done" if _collect_pair(key, entry, run_dir) else "pending"
+    entry["namespace"] = None
+
+
+def _do_collect(pair_key: str, entry: dict, run_dir: Path, store, progress: dict) -> bool:
+    ok = False
+    try:
+        ok = _collect_pair(pair_key, entry, run_dir)
+        entry["status"] = "done" if ok else "collect-failed"
+    except BaseException:
+        entry["status"] = "collect-failed"
+        raise
+    finally:
+        entry["namespace"] = None
+        store.save(progress)
+    return ok
+
+
+def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
     """Orchestrate parallel pool execution across namespace slots."""
     import datetime as _dt
     import tempfile as _tmp
@@ -785,6 +809,22 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     namespaces = setup_config.get("namespaces") or [setup_config.get("namespace", "")]
     if not namespaces or not namespaces[0]:
         err("No namespaces configured. Run setup.py with --namespaces."); sys.exit(1)
+
+    # Build EPP image (use first namespace for the build)
+    if not args.skip_build_epp:
+        full_image = _build_epp_image(run_dir, run_dir.name, namespaces[0])
+        _inject_image_into_values(run_dir, full_image, manifest["scenario"])
+    else:
+        meta_path = run_dir / "run_metadata.json"
+        if meta_path.exists():
+            meta = json.loads(meta_path.read_text())
+            full_image = meta.get("epp_image", "")
+            if full_image:
+                info(f"Skipping EPP build. Using image: {full_image}")
+            else:
+                warn("--skip-build-epp set but no epp_image in run_metadata.json")
+        else:
+            warn("--skip-build-epp set, no run_metadata.json found")
 
     max_retries = getattr(args, "max_retries", 2)
     poll_interval = getattr(args, "poll_interval", 30)
@@ -836,12 +876,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             else:
                 entry["status"] = "pending"
         elif entry["status"] == "collecting":
-            result_dir = run_dir / "results" / entry.get("package", "")
-            if result_dir.exists():
-                entry["status"] = "done"
-            else:
-                entry["status"] = "pending"
-                entry["namespace"] = None
+            _reconcile_collecting(key, entry, run_dir)
     store.save(progress)
 
     # Apply shared Pipeline (if present) to ALL namespaces
@@ -887,11 +922,11 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 info(f"[{pair_key}] Succeeded → collecting")
                 entry["status"] = "collecting"
                 store.save(progress)
-                ok_collect = _collect_pair(pair_key, entry, run_dir)
-                entry["status"] = "done" if ok_collect else "collect-failed"
-                entry["namespace"] = None
-                store.save(progress)
-                del slots_busy[ns]
+                ok_collect = False
+                try:
+                    ok_collect = _do_collect(pair_key, entry, run_dir, store, progress)
+                finally:
+                    del slots_busy[ns]
                 if ok_collect:
                     ok(f"[{pair_key}] {entry['status']}")
                 else:
@@ -1037,6 +1072,8 @@ Examples:
     status_p.add_argument("--package",  metavar="NAME", help="Filter by package name")
 
     run_p = sub.add_parser("run", help="Orchestrate parallel pool execution")
+    run_p.add_argument("--skip-build-epp", action="store_true", dest="skip_build_epp",
+                       help="Skip EPP image build")
     run_p.add_argument("--only",         metavar="PAIR",  help="Reset and run one specific pair key")
     run_p.add_argument("--workload",     metavar="NAME",  help="Reset pairs matching this workload")
     run_p.add_argument("--package",      metavar="NAME",  help="Reset pairs matching this package")
@@ -1077,7 +1114,7 @@ def main():
 
     cmd = args.command
     if cmd == "run":
-        _cmd_run(args, run_dir, setup_config)
+        _cmd_run(args, manifest, run_dir, setup_config)
     elif cmd == "status":
         progress_path = run_dir / "progress.json"
         _cmd_status(args, progress_path)
