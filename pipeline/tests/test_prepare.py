@@ -1055,7 +1055,7 @@ class TestCompileClusterPackages:
             },
         }
 
-        def _fake_compile(template_dir, values_path, phase, out_dir):
+        def _fake_compile(template_dir, values_path, phase, out_dir, **kwargs):
             out_dir.mkdir(parents=True, exist_ok=True)
             (out_dir / f"{phase}-pipeline.yaml").write_text(
                 yaml.dump(_MINIMAL_PIPELINE, default_flow_style=False)
@@ -1099,7 +1099,7 @@ class TestCompileClusterPackages:
             },
         }
 
-        def _fake_compile(template_dir, values_path, phase, out_dir):
+        def _fake_compile(template_dir, values_path, phase, out_dir, **kwargs):
             out_dir.mkdir(parents=True, exist_ok=True)
             (out_dir / f"{phase}-pipeline.yaml").write_text(
                 yaml.dump(_MINIMAL_PIPELINE, default_flow_style=False)
@@ -1120,6 +1120,61 @@ class TestCompileClusterPackages:
         params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
         assert params["workloadName-baseline-wl1"] == "wl1"
         assert params["namespace"] == "myns"
+
+
+def test_compile_cluster_packages_parallel_creates_per_pair_pipelineruns(tmp_path, monkeypatch):
+    """Parallel mode generates one PipelineRun per (workload, package) pair."""
+    import yaml as _yaml
+    from unittest.mock import patch
+    from pipeline.prepare import _compile_cluster_packages_parallel
+
+    run_dir = tmp_path / "runs" / "sim2real-test"
+    run_dir.mkdir(parents=True)
+    values_path = run_dir / "values.yaml"
+    values_path.write_text(_yaml.dump({
+        "observe": {"workloads": [{"name": "wl-smoke"}, {"name": "wl-load"}]},
+        "stack": {
+            "gaie": {
+                "baseline":  {"helmValues": {}},
+                "treatment": {"helmValues": {}},
+                "inferenceObjectives": [],
+            }
+        },
+    }))
+    setup_config = {
+        "namespace": "sim2real-0",
+        "namespaces": ["sim2real-0", "sim2real-1"],
+        "workspaces": {"model-cache": {"persistentVolumeClaim": {"claimName": "model-pvc"}}},
+    }
+
+    def _fake_compile(template_dir, values_path, phase, out_dir, run_name="", **kwargs):
+        stub = out_dir / f"sim2real-{run_name}.yaml"
+        stub.write_text("# stub\n")
+        return True
+
+    with patch("pipeline.prepare.compile_pipeline", side_effect=_fake_compile):
+        _compile_cluster_packages_parallel(
+            run_dir=run_dir,
+            resolved={},
+            values_path=values_path,
+            setup_config=setup_config,
+            run_name="sim2real-test",
+            template_dir=tmp_path,
+        )
+
+    cluster_dir = run_dir / "cluster"
+    # Shared pipeline stub
+    assert (cluster_dir / "sim2real-sim2real-test.yaml").exists()
+
+    # One PipelineRun per pair
+    for wl in ["wl-smoke", "wl-load"]:
+        for pkg in ["baseline", "treatment"]:
+            pr_path = cluster_dir / f"wl-{wl}-{pkg}" / f"pipelinerun-{wl}-{pkg}.yaml"
+            assert pr_path.exists(), f"Missing: {pr_path}"
+            pr_data = _yaml.safe_load(pr_path.read_text())
+            params = {p["name"]: p["value"] for p in pr_data["spec"]["params"]}
+            assert params["phase"] == pkg
+            assert params["workloadName"] == wl
 
 
 class TestExperimentRootSeparation:

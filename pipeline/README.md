@@ -44,6 +44,7 @@ python pipeline/setup.py [flags]
 | Flag | Env var | Default |
 |------|---------|---------|
 | `--namespace NS` | `NAMESPACE` | interactive |
+| `--namespaces NS1,NS2,...` | — | — |
 | `--hf-token TOKEN` | `HF_TOKEN` | interactive |
 | `--registry REG` | — | interactive |
 | `--registry-user USER` | `QUAY_ROBOT_USERNAME` | interactive |
@@ -51,6 +52,8 @@ python pipeline/setup.py [flags]
 | `--run NAME` | — | `sim2real-YYYY-MM-DD` |
 | `--no-cluster` | — | false |
 | `--redeploy-tasks` | — | false |
+
+**`--namespaces NS1,NS2,...`** — provision multiple namespace slots for parallel pool execution. Each slot is bootstrapped identically to a single `--namespace`.
 
 **`--no-cluster`** — generates `setup_config.json` without touching the cluster; useful when cluster access comes later.
 
@@ -65,7 +68,7 @@ Writes `workspace/setup_config.json` and `workspace/runs/<run>/run_metadata.json
 6-phase state machine. Re-running skips completed phases.
 
 ```bash
-python pipeline/prepare.py [--force] [--rebuild-context] [--manifest PATH] [--run NAME]
+python pipeline/prepare.py [--force] [--rebuild-context] [--manifest PATH] [--run NAME] [--mode parallel|sequential]
 ```
 
 | Phase | Name | Skippable |
@@ -94,6 +97,10 @@ python pipeline/prepare.py validate-assembly   # run assembly checks standalone
 
 **`--rebuild-context`** — ignores SHA cache and re-assembles context.
 
+**`--mode parallel`** (default) — generates one shared Pipeline + one PipelineRun per `(workload, package)` pair; required for `deploy.py run`.
+
+**`--mode sequential`** — preserves legacy single-experiment pipeline behavior (one Pipeline + one PipelineRun for the whole run).
+
 Phase state is tracked per-run in `workspace/runs/<run>/.state.json`. Delete it (or use `--force`) to reset.
 
 ---
@@ -117,13 +124,33 @@ python pipeline/deploy.py [flags]
 
 **`--skip-build-epp`** — skips the image build; use when resubmitting after a failed PipelineRun without changing the scorer.
 
-**Collect results:**
+**Subcommands:**
 
 ```bash
+python pipeline/deploy.py run     [flags]   # orchestrate parallel pool execution across namespace slots
+python pipeline/deploy.py status            # show progress snapshot of all (workload, package) pairs
 python pipeline/deploy.py collect [--package NAME…]
 ```
 
-Polls PipelineRun status, extracts results from the cluster PVC, and writes to `workspace/runs/<run>/results/{baseline,treatment}/<workload>/`.
+**`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, collects results inline, and retries pairs that time out. Reads `progress.json` to resume interrupted runs. Requires `prepare.py --mode parallel`.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--only PAIR` | — | Reset and run one specific pair key |
+| `--workload NAME` | — | Reset pairs matching this workload |
+| `--package NAME` | — | Reset pairs matching this package |
+| `--status STATE` | — | Reset pairs with this status (e.g. `failed`, `timed-out`) |
+| `--max-retries N` | 2 | Max retries for timed-out pairs |
+| `--poll-interval N` | 30 | Seconds between status polls |
+
+**`deploy.py status`** — prints the current state of all pairs from `workspace/runs/<run>/progress.json`.
+
+| Flag | Description |
+|------|-------------|
+| `--workload NAME` | Filter by workload name |
+| `--package NAME` | Filter by package name |
+
+**`deploy.py collect`** — extracts results from the cluster PVC and writes to `workspace/runs/<run>/results/{phase}/<workload>/`.
 
 ---
 
@@ -175,6 +202,16 @@ context:
 ```
 
 All paths are relative to the repo root and validated at Phase 1.
+
+---
+
+## Parallel Pool Execution
+
+`setup.py --namespaces NS1,NS2,...` provisions N namespace slots, each bootstrapped identically. `prepare.py` (default `--mode parallel`) generates one shared Tekton Pipeline plus one PipelineRun per `(workload, package)` pair. `deploy.py run` orchestrates execution by assigning pairs to free slots, polling for completion, collecting results inline, and retrying on timeout. `deploy.py status` reads `workspace/runs/<run>/progress.json` and prints the current state of every pair.
+
+| Artifact | Written by | Read by |
+|----------|-----------|---------|
+| `runs/<run>/progress.json` | `deploy.py run` | `deploy.py status` |
 
 ---
 

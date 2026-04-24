@@ -3,7 +3,6 @@
 Extracted from tools/transfer_cli.py compile-pipeline subcommand.
 """
 import copy
-import json
 import subprocess
 import sys
 import tempfile
@@ -27,6 +26,8 @@ def compile_pipeline(
     values_path: Path,
     phase: str,
     out_dir: Path,
+    run_name: str = "",
+    tektonc_dir: Path | None = None,
 ) -> bool:
     """Compile a Tekton PipelineRun YAML for the given phase.
 
@@ -54,9 +55,10 @@ def compile_pipeline(
         return False
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_file = out_dir / f"{phase}-pipeline.yaml"
+    out_file = out_dir / (f"sim2real-{run_name}.yaml" if run_name else f"{phase}-pipeline.yaml")
 
-    tektonc = REPO_ROOT / "tektonc-data-collection" / "tektonc" / "tektonc.py"
+    tektonc_base = Path(tektonc_dir) if tektonc_dir else REPO_ROOT / "tektonc-data-collection"
+    tektonc = tektonc_base / "tektonc" / "tektonc.py"
     if not tektonc.exists():
         return False
 
@@ -66,17 +68,7 @@ def compile_pipeline(
     except Exception:
         return False
 
-    values["phase"] = phase
-    gaie_key = "treatment" if phase == "treatment" else "baseline"
-    # Pre-serialize to JSON string so the template's `| tojson` produces a
-    # properly-quoted YAML scalar.  Without this, an empty dict renders as `{}`
-    # (a YAML mapping), which Tekton rejects for `type: string` params.
-    values["gaie_config"] = json.dumps(
-        values.get("stack", {}).get("gaie", {}).get(gaie_key, {}).get("helmValues", {})
-    )
-    values["inference_objectives"] = json.dumps(
-        values.get("stack", {}).get("gaie", {}).get("inferenceObjectives", [])
-    )
+    values["run_name"] = run_name if run_name else phase
 
     # Write augmented values to a temp file for tektonc
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
@@ -160,6 +152,55 @@ def make_pipelinerun(phase: str, workload: dict, run_name: str, namespace: str,
             "name": pr_name,
             "namespace": namespace,
         },
+        "spec": spec,
+    }
+
+
+def make_pipelinerun_parallel(
+    phase: str,
+    workload: dict,
+    run_name: str,
+    namespace: str,
+    pipeline_name: str,
+    gaie_config: str,
+    inference_objectives: str,
+    workspace_bindings: dict | None = None,
+) -> dict:
+    """Generate a PipelineRun for one (workload, package) pair in the parallel pool model.
+
+    Unlike make_pipelinerun(), this passes gaieConfig, inferenceObjectives, and phase
+    as params rather than baking them into the Pipeline at compile time.
+    """
+    wl_name = workload.get("name", workload.get("workload_name", "unknown"))
+    safe_name = wl_name.replace("_", "-")
+    pr_name = f"{phase}-{safe_name}-{run_name}"
+
+    wl_spec = {k: v for k, v in workload.items() if k != "workload_name"}
+    wl_spec_str = yaml.dump(wl_spec, default_flow_style=True).strip()
+
+    spec: dict = {
+        "pipelineRef": {"name": pipeline_name},
+        "params": [
+            {"name": "experimentId",          "value": run_name},
+            {"name": "runName",               "value": run_name},
+            {"name": "namespace",             "value": namespace},
+            {"name": "phase",                 "value": phase},
+            {"name": "gaieConfig",            "value": gaie_config},
+            {"name": "inferenceObjectives",   "value": inference_objectives},
+            {"name": "workloadName",          "value": wl_name},
+            {"name": "workloadSpec",          "value": wl_spec_str},
+        ],
+        "timeouts": {"pipeline": "4h"},
+    }
+
+    if workspace_bindings is not None:
+        ws_names = list(workspace_bindings.keys())
+        spec["workspaces"] = _apply_workspace_bindings(ws_names, workspace_bindings)
+
+    return {
+        "apiVersion": "tekton.dev/v1",
+        "kind": "PipelineRun",
+        "metadata": {"name": pr_name, "namespace": namespace},
         "spec": spec,
     }
 

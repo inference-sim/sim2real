@@ -87,6 +87,7 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). When no `-
 | `runs/<run>/cluster/{package}/*.yaml` | `prepare.py` Phase 4 | `deploy.py` |
 | `runs/<run>/run_summary.md` | `prepare.py` Phase 5 | human review |
 | `runs/<run>/results/{phase}/` | `deploy.py collect` | `/sim2real-analyze` skill |
+| `runs/<run>/progress.json` | `deploy.py run` | `deploy.py status` |
 | `context/{scenario}/{hash}.md` | `prepare.py` Phase 2 | `prepare.py` Phase 2 (cache) |
 
 ## Development

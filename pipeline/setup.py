@@ -14,6 +14,7 @@ from pathlib import Path
 @dataclass
 class SetupConfig:
     namespace: str
+    namespaces: list[str]
     registry: str
     repo_name: str
     run_name: str
@@ -63,6 +64,8 @@ Examples:
 """,
     )
     p.add_argument("--namespace",      metavar="NS",    help="Kubernetes namespace")
+    p.add_argument("--namespaces",     metavar="NS1,NS2,...",
+                                       help="Comma-separated list of namespaces to provision (overrides --namespace)")
     p.add_argument("--hf-token",       metavar="TOKEN", help="HuggingFace API token")
     p.add_argument("--registry",       metavar="REG",   help="Container registry host (e.g. quay.io/username)")
     p.add_argument("--repo-name",      metavar="NAME",  default=None,
@@ -239,12 +242,20 @@ def collect_config(args: argparse.Namespace) -> tuple[SetupConfig, Path, str]:
     if defaults:
         info("Loading defaults from previous setup_config.json")
 
-    # Namespace
-    ns_default = defaults.get("namespace", "sim2real-" + os.environ.get("USER", "dev"))
-    namespace = args.namespace or prompt("namespace", "Kubernetes namespace",
-                                        default=ns_default, env_var="NAMESPACE")
-    if not namespace:
-        err("NAMESPACE is required"); sys.exit(1)
+    # Resolve namespace list
+    namespaces_raw = args.namespaces or os.environ.get("NAMESPACES", "")
+    if namespaces_raw:
+        namespaces = [n.strip() for n in namespaces_raw.split(",") if n.strip()]
+        if not namespaces:
+            err("--namespaces produced an empty list"); sys.exit(1)
+        namespace = namespaces[0]
+    else:
+        ns_default = defaults.get("namespace", "sim2real-" + os.environ.get("USER", "dev"))
+        namespace = args.namespace or prompt("namespace", "Kubernetes namespace",
+                                            default=ns_default, env_var="NAMESPACE")
+        if not namespace:
+            err("NAMESPACE is required"); sys.exit(1)
+        namespaces = [namespace]
 
     # Registry
     reg_default = defaults.get("registry", "")
@@ -290,7 +301,7 @@ def collect_config(args: argparse.Namespace) -> tuple[SetupConfig, Path, str]:
     container_rt = _detect_container_runtime()
 
     cfg = SetupConfig(
-        namespace=namespace, registry=registry, repo_name=repo_name,
+        namespace=namespace, namespaces=namespaces, registry=registry, repo_name=repo_name,
         run_name=run_name, hf_token=hf_token,
         registry_user=reg_user, registry_token=reg_token,
         storage_class=storage_class, is_openshift=is_openshift,
@@ -597,6 +608,7 @@ def step_config_output(cfg: SetupConfig, run_dir: Path, container_rt: str) -> No
     # setup_config.json
     setup_config = {
         "namespace": cfg.namespace,
+        "namespaces": cfg.namespaces,
         "registry": cfg.registry,
         "repo_name": cfg.repo_name,
         "storage_class": cfg.storage_class,
@@ -709,12 +721,28 @@ def main() -> int:
     # 8-step flow
     cfg, run_dir, container_rt = collect_config(args)
 
-    step_namespace(cfg)
-    step_rbac(cfg)
-    step_secrets(cfg, container_rt)
     step_test_push(cfg, container_rt, args.test_push_tag, args.test_push)
-    step_pvcs(cfg)
-    step_tekton(cfg)
+    for ns in cfg.namespaces:
+        ns_cfg = SetupConfig(
+            namespace=ns,
+            namespaces=cfg.namespaces,
+            registry=cfg.registry,
+            repo_name=cfg.repo_name,
+            run_name=cfg.run_name,
+            hf_token=cfg.hf_token,
+            registry_user=cfg.registry_user,
+            registry_token=cfg.registry_token,
+            storage_class=cfg.storage_class,
+            is_openshift=cfg.is_openshift,
+            no_cluster=cfg.no_cluster,
+        )
+        if len(cfg.namespaces) > 1:
+            print(_c("36", f"\n  ── Provisioning namespace: {ns} ──"))
+        step_namespace(ns_cfg)
+        step_rbac(ns_cfg)
+        step_secrets(ns_cfg, container_rt)
+        step_pvcs(ns_cfg)
+        step_tekton(ns_cfg)
     step_config_output(cfg, run_dir, container_rt)
 
     # Completion
