@@ -1,7 +1,7 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: sim2real-{{ phase }}
+  name: sim2real-{{ run_name }}
 spec:
   params:
     - name: experimentId
@@ -12,6 +12,12 @@ spec:
       type: string
       default: "30s"
     - name: runName
+      type: string
+    - name: phase
+      type: string
+    - name: gaieConfig
+      type: string
+    - name: inferenceObjectives
       type: string
     - name: workloadName
       type: string
@@ -52,7 +58,7 @@ spec:
         - name: modelLabel
           value: "sim2real-$(params.experimentId)"
         - name: config
-          value: {{ gaie_config | tojson }}
+          value: "$(params.gaieConfig)"
         - name: namespace
           value: "$(params.namespace)"
 
@@ -105,7 +111,7 @@ spec:
         - name: inferencepool
           value: "$(tasks.deploy-gaie.results.inferencepool)"
         - name: objectives
-          value: {{ inference_objectives | tojson }}
+          value: "$(params.inferenceObjectives)"
 
     - name: run-workload
       runAfter: ["pause-after-model-deploy", "deploy-httproute", "deploy-inference-objectives"]
@@ -124,7 +130,7 @@ spec:
         - name: blisImage
           value: "{{ observe.image }}"
         - name: resultsDir
-          value: "$(params.runName)/{{ phase }}/$(params.workloadName)"
+          value: "$(params.runName)/$(params.phase)/$(params.workloadName)"
 
     - name: collect-results
       runAfter: ["run-workload"]
@@ -139,7 +145,7 @@ spec:
         - name: modelLabel
           value: "sim2real-$(params.experimentId)"
         - name: resultsDir
-          value: "$(params.runName)/{{ phase }}/$(params.workloadName)"
+          value: "$(params.runName)/$(params.phase)/$(params.workloadName)"
         - name: containerName
           value: "$(tasks.deploy-gaie.results.epp-container)"
 
@@ -149,7 +155,7 @@ spec:
         name: delete-inference-objectives
       params:
         - name: objectives
-          value: {{ inference_objectives | tojson }}
+          value: "$(params.inferenceObjectives)"
         - name: namespace
           value: "$(params.namespace)"
     - name: delete-httproute
