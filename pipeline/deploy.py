@@ -8,7 +8,6 @@ Use `deploy.py collect` to pull results for completed packages.
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
