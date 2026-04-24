@@ -1036,8 +1036,6 @@ Examples:
     status_p = sub.add_parser("status", help="Show progress of all (workload, package) pairs")
     status_p.add_argument("--workload", metavar="NAME", help="Filter by workload name")
     status_p.add_argument("--package",  metavar="NAME", help="Filter by package name")
-    status_p.add_argument("--live", action="store_true",
-                          help="Add CURRENT TASK column for running pairs (kubectl call per slot)")
 
     run_p = sub.add_parser("run", help="Orchestrate parallel pool execution")
     run_p.add_argument("--only",         metavar="PAIR",  help="Reset and run one specific pair key")

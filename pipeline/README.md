@@ -134,7 +134,21 @@ python pipeline/deploy.py collect [--package NAME…]
 
 **`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, collects results inline, and retries pairs that time out. Reads `progress.json` to resume interrupted runs. Requires `prepare.py --mode parallel`.
 
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--only PAIR` | — | Reset and run one specific pair key |
+| `--workload NAME` | — | Reset pairs matching this workload |
+| `--package NAME` | — | Reset pairs matching this package |
+| `--status STATE` | — | Reset pairs with this status (e.g. `failed`, `timed-out`) |
+| `--max-retries N` | 2 | Max retries for timed-out pairs |
+| `--poll-interval N` | 30 | Seconds between status polls |
+
 **`deploy.py status`** — prints the current state of all pairs from `workspace/runs/<run>/progress.json`.
+
+| Flag | Description |
+|------|-------------|
+| `--workload NAME` | Filter by workload name |
+| `--package NAME` | Filter by package name |
 
 **`deploy.py collect`** — extracts results from the cluster PVC and writes to `workspace/runs/<run>/results/{phase}/<workload>/`.
 
