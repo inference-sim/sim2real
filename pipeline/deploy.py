@@ -695,10 +695,10 @@ def _load_pairs(cluster_dir: Path) -> dict:
 
 
 def _apply_run_filters(progress: dict, args) -> set:
-    """Return the set of pair keys that should be reset to 'pending'.
+    """Return the set of pair keys in scope for this invocation.
 
-    With no flags: returns empty set (resume — don't reset anything).
-    With flags: returns matching pairs.
+    With no flags: returns empty set (caller interprets as all pairs in scope).
+    With flags: returns only matching pairs.
     """
     only = getattr(args, "only", None)
     workload = getattr(args, "workload", None)
@@ -850,15 +850,21 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
                 "retries":  0,
             }
 
-    # Apply re-run filters — reset matched pairs to pending
-    to_reset = _apply_run_filters(progress, args)
-    for key in to_reset:
-        if key in progress:
-            progress[key]["status"] = "pending"
-            progress[key]["namespace"] = None
-    if to_reset:
-        store.save(progress)
-        info(f"Reset {len(to_reset)} pair(s) to pending")
+    # Compute scope: pairs this invocation is allowed to dispatch.
+    # No flags → all pairs in scope. Flags narrow scope without resetting state.
+    filters_given = any([
+        getattr(args, "only", None),
+        getattr(args, "workload", None),
+        getattr(args, "package", None),
+        getattr(args, "status", None),
+    ])
+    _filtered = _apply_run_filters(progress, args)
+    if filters_given and not _filtered:
+        err("No pairs matched the specified filter — aborting")
+        sys.exit(1)
+    _scope = _filtered or set(progress.keys())
+    if len(_scope) < len(progress):
+        info(f"Scope: {len(_scope)}/{len(progress)} pairs")
 
     # Reconcile 'running' entries against actual cluster state on resume
     for key, entry in progress.items():
@@ -898,11 +904,12 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
     }
 
     def _pending_pairs() -> list[str]:
-        return [k for k, v in progress.items() if v["status"] == "pending"]
+        return [k for k, v in progress.items()
+                if v["status"] == "pending" and k in _scope]
 
     def _work_remaining() -> bool:
         return any(v["status"] in ("pending", "running", "collecting")
-                   for v in progress.values())
+                   for k, v in progress.items() if k in _scope)
 
     timeout_hours = 4
     info(f"Orchestrator: {len(discovered)} pairs, {len(namespaces)} slot(s)")
@@ -1074,10 +1081,10 @@ Examples:
     run_p = sub.add_parser("run", help="Orchestrate parallel pool execution")
     run_p.add_argument("--skip-build-epp", action="store_true", dest="skip_build_epp",
                        help="Skip EPP image build")
-    run_p.add_argument("--only",         metavar="PAIR",  help="Reset and run one specific pair key")
-    run_p.add_argument("--workload",     metavar="NAME",  help="Reset pairs matching this workload")
-    run_p.add_argument("--package",      metavar="NAME",  help="Reset pairs matching this package")
-    run_p.add_argument("--status",       metavar="STATE", help="Reset pairs with this status (e.g. failed, timed-out)")
+    run_p.add_argument("--only",         metavar="PAIR",  help="Scope execution to one specific pair key")
+    run_p.add_argument("--workload",     metavar="NAME",  help="Scope execution to pairs matching this workload")
+    run_p.add_argument("--package",      metavar="NAME",  help="Scope execution to pairs matching this package")
+    run_p.add_argument("--status",       metavar="STATE", help="Scope execution to pairs with this status (e.g. failed, timed-out)")
     run_p.add_argument("--max-retries",  type=int, default=2, dest="max_retries",
                        help="Max retries for timed-out pairs [2]")
     run_p.add_argument("--poll-interval", type=int, default=30, dest="poll_interval",
