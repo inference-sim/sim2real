@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import dataclass
 
 
@@ -212,3 +213,48 @@ def triage_pod(
         )
 
     return None
+
+
+def _kubectl(*args: str) -> "tuple[int, str]":
+    """Run kubectl with args. Returns (returncode, stdout)."""
+    result = subprocess.run(
+        ["kubectl", *args],
+        check=False, text=True, capture_output=True,
+    )
+    return result.returncode, result.stdout
+
+
+def get_pods(namespace: str, experiment_id: str) -> list[PodState]:
+    """Return pod states for pods whose name contains experiment_id."""
+    rc, stdout = _kubectl("get", "pods", f"-n={namespace}", "-o", "json")
+    if rc != 0 or not stdout.strip():
+        return []
+    return [p for p in parse_pods(stdout) if experiment_id in p.name]
+
+
+def get_events(namespace: str) -> list[EventRecord]:
+    """Return recent events from the namespace."""
+    rc, stdout = _kubectl(
+        "get", "events", f"-n={namespace}",
+        "--sort-by=lastTimestamp", "-o", "json",
+    )
+    if rc != 0 or not stdout.strip():
+        return []
+    return parse_events(stdout)
+
+
+def get_pod_logs(namespace: str, pod_name: str,
+                 tail: int = 200, previous: bool = False) -> str:
+    """Fetch pod logs. Returns empty string on error."""
+    cmd = ["logs", pod_name, f"-n={namespace}", f"--tail={tail}"]
+    if previous:
+        cmd.append("--previous")
+    rc, stdout = _kubectl(*cmd)
+    return stdout if rc == 0 else ""
+
+
+def delete_pod(namespace: str, pod_name: str) -> bool:
+    """Delete a pod. Returns True on success."""
+    rc, _ = _kubectl("delete", "pod", pod_name,
+                     f"-n={namespace}", "--ignore-not-found")
+    return rc == 0

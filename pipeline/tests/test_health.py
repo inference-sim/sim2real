@@ -1,5 +1,6 @@
 """Tests for pipeline.lib.health."""
 import json
+from unittest.mock import patch, MagicMock
 
 
 def test_pod_state_dataclass():
@@ -265,3 +266,71 @@ def test_triage_startup_probe_unhealthy():
     assert result.tier == 2
     assert "startup probe" in result.message.lower()
     assert "failureThreshold" in result.suggestion
+
+
+def test_get_pods_calls_kubectl():
+    from pipeline.lib.health import get_pods
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = _PODS_JSON
+    with patch("subprocess.run", return_value=mock_result) as mock_run:
+        pods = get_pods("kalantar-0", "ac")
+    cmd = mock_run.call_args[0][0]
+    assert "kubectl" in cmd
+    assert "kalantar-0" in " ".join(cmd)
+    assert len(pods) == 4
+
+
+def test_get_pods_filters_by_experiment_id():
+    from pipeline.lib.health import get_pods
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = _PODS_JSON
+    with patch("subprocess.run", return_value=mock_result):
+        pods = get_pods("kalantar-0", "ac")
+    assert all("ac" in p.name for p in pods)
+
+
+def test_get_pods_returns_empty_on_error():
+    from pipeline.lib.health import get_pods
+    mock_result = MagicMock()
+    mock_result.returncode = 1
+    mock_result.stdout = ""
+    with patch("subprocess.run", return_value=mock_result):
+        assert get_pods("kalantar-0", "ac") == []
+
+
+def test_get_events_calls_kubectl():
+    from pipeline.lib.health import get_events
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = _EVENTS_JSON
+    with patch("subprocess.run", return_value=mock_result):
+        events = get_events("kalantar-0")
+    assert len(events) == 2
+
+
+def test_delete_pod_calls_kubectl():
+    from pipeline.lib.health import delete_pod
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    with patch("subprocess.run", return_value=mock_result) as mock_run:
+        result = delete_pod("kalantar-0", "sim2real-ac-decode-0")
+    assert result is True
+    cmd = mock_run.call_args[0][0]
+    assert "delete" in cmd
+    assert "sim2real-ac-decode-0" in cmd
+
+
+def test_get_pod_logs_previous_flag():
+    from pipeline.lib.health import get_pod_logs
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = "some logs"
+    with patch("subprocess.run", return_value=mock_result) as mock_run:
+        logs = get_pod_logs("kalantar-0", "sim2real-ac-decode-0",
+                            tail=200, previous=True)
+    assert logs == "some logs"
+    cmd = mock_run.call_args[0][0]
+    assert "--previous" in cmd
+    assert "--tail=200" in cmd
