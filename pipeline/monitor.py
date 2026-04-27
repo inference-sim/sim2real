@@ -6,6 +6,7 @@ import argparse
 import datetime
 import json
 import sys
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -224,7 +225,35 @@ def _poll_once(
                 info(f"{ns}: diagnosis written to {report._path.name}")
 
 
-# ── Anthropic API diagnosis (stub — implemented in Task 7) ───────────────────
+# ── Anthropic API diagnosis ───────────────────────────────────────────────────
+
+_DIAGNOSIS_MODEL = "claude-haiku-4-5-20251001"
+
+_DIAGNOSIS_PROMPT = """\
+You are a Kubernetes operations expert diagnosing a failing pod in a sim2real \
+benchmarking pipeline.
+
+Namespace: {namespace}
+Pod: {pod_name}
+Signal: {signal}
+
+--- kubectl describe pod ---
+{describe_output}
+
+--- Recent events ---
+{events_summary}
+
+--- Pod logs (last {log_lines} lines) ---
+{logs}
+
+Provide:
+1. A concise diagnosis of the root cause (2-3 sentences).
+2. A specific suggested fix: the exact config key to change and the new value, \
+or the kubectl command to run.
+
+Keep your response under 200 words.
+"""
+
 
 def _diagnose_with_api(
     pod_name: str,
@@ -235,7 +264,31 @@ def _diagnose_with_api(
     events_summary: str,
     log_lines: int = 200,
 ) -> str:
-    return "(API diagnosis not yet configured)"
+    """Call Anthropic API to diagnose a pod failure. Returns diagnosis text."""
+    if anthropic is None:
+        return "(anthropic package not installed — pip install anthropic)"
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return "(ANTHROPIC_API_KEY not set — API diagnosis unavailable)"
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        prompt = _DIAGNOSIS_PROMPT.format(
+            namespace=namespace,
+            pod_name=pod_name,
+            signal=signal,
+            describe_output=describe_output[:3000],
+            events_summary=events_summary[:1000],
+            logs=logs[:4000],
+            log_lines=log_lines,
+        )
+        message = client.messages.create(
+            model=_DIAGNOSIS_MODEL,
+            max_tokens=512,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return message.content[0].text
+    except Exception as exc:
+        return f"(API diagnosis failed: {exc})"
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

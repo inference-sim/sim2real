@@ -111,3 +111,40 @@ def test_work_remaining_true_when_running():
 def test_work_remaining_false_when_all_done():
     from pipeline.monitor import _work_remaining
     assert _work_remaining(_PROGRESS_ALL_DONE) is False
+
+
+def test_diagnose_with_api_returns_text():
+    from unittest.mock import patch, MagicMock
+    from pipeline.monitor import _diagnose_with_api
+    import os
+
+    mock_client = MagicMock()
+    mock_msg = MagicMock()
+    mock_msg.content = [MagicMock(text="The pod OOMKilled because of X.")]
+    mock_client.messages.create.return_value = mock_msg
+
+    with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+        with patch("pipeline.monitor.anthropic") as mock_anthropic:
+            mock_anthropic.Anthropic.return_value = mock_client
+            result = _diagnose_with_api(
+                pod_name="sim2real-ac-decode-0",
+                namespace="kalantar-0",
+                signal="CrashLoopBackOff",
+                describe_output="Name: sim2real-ac-decode-0\n...",
+                logs="ERROR: CUDA out of memory\n",
+                events_summary="OOMKilling: Memory cgroup out of memory",
+            )
+    assert "OOMKilled" in result
+
+
+def test_diagnose_with_api_no_key():
+    from pipeline.monitor import _diagnose_with_api
+    import os
+    from unittest.mock import patch
+
+    with patch.dict(os.environ, {}, clear=True):
+        result = _diagnose_with_api(
+            pod_name="pod", namespace="ns", signal="CrashLoopBackOff",
+            describe_output="", logs="", events_summary="",
+        )
+    assert "ANTHROPIC_API_KEY" in result or "unavailable" in result.lower() or result == ""
