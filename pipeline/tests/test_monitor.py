@@ -66,3 +66,48 @@ def test_health_report_no_snowball(tmp_path):
                    "CrashLoopBackOff", "none", "diagnosis", "", tier=3)
     content = path.read_text()
     assert content.count("Prior session findings") <= 1
+
+
+_PROGRESS_MIXED = {
+    "wl-chatbot-mid-treatment": {
+        "workload": "chatbot_mid", "package": "treatment",
+        "status": "running", "namespace": "kalantar-0", "retries": 0,
+    },
+    "wl-chatbot-mid-baseline": {
+        "workload": "chatbot_mid", "package": "baseline",
+        "status": "done", "namespace": None, "retries": 0,
+    },
+    "wl-load-treatment": {
+        "workload": "load", "package": "treatment",
+        "status": "running", "namespace": "kalantar-1", "retries": 0,
+    },
+}
+
+_PROGRESS_ALL_DONE = {
+    "wl-chatbot-mid-treatment": {
+        "workload": "chatbot_mid", "package": "treatment",
+        "status": "done", "namespace": None, "retries": 0,
+    },
+}
+
+
+def test_resolve_active_slots_returns_running_only():
+    from pipeline.monitor import _resolve_active_slots
+    slots = _resolve_active_slots(_PROGRESS_MIXED)
+    assert set(slots.keys()) == {"kalantar-0", "kalantar-1"}
+    assert "wl-chatbot-mid-treatment" in slots["kalantar-0"]
+
+
+def test_resolve_active_slots_empty_when_all_done():
+    from pipeline.monitor import _resolve_active_slots
+    assert _resolve_active_slots(_PROGRESS_ALL_DONE) == {}
+
+
+def test_work_remaining_true_when_running():
+    from pipeline.monitor import _work_remaining
+    assert _work_remaining(_PROGRESS_MIXED) is True
+
+
+def test_work_remaining_false_when_all_done():
+    from pipeline.monitor import _work_remaining
+    assert _work_remaining(_PROGRESS_ALL_DONE) is False
