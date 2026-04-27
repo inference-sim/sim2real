@@ -14,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # Tasks in the per-phase pipeline that are workload-specific and should be
 # omitted from the standby pipeline (no-workload mode).
-_WORKLOAD_TASK_NAMES = frozenset({"run-workload", "collect-results", "stream-epp-logs"})
+_WORKLOAD_TASK_NAMES = frozenset({"run-workload", "collect-results", "stream-epp-logs", "install-blis"})
 _WORKLOAD_PARAM_NAMES = frozenset({"workloadName", "workloadSpec"})
 # Duration passed to the "sleep" task in standby pipelines.  The pipeline never
 # completes naturally; spec.finally (teardown) runs on cancel, failure, and success.

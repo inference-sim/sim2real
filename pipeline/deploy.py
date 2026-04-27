@@ -744,14 +744,15 @@ def _check_slot_ready(namespace: str) -> tuple[bool, list[str]]:
     """
     failures = []
 
-    for pvc in ["model-pvc", "data-pvc"]:
+    for pvc in ["model-pvc", "data-pvc", "source-pvc"]:
         result = run(
             ["kubectl", "get", "pvc", pvc, f"-n={namespace}",
              "-o", "jsonpath={.status.phase}"],
             check=False, capture=True,
         )
         if result.returncode != 0 or result.stdout.strip() != "Bound":
-            failures.append(f"PVC {pvc} not Bound in {namespace}")
+            hint = " — re-run setup.py to provision it" if pvc == "source-pvc" else ""
+            failures.append(f"PVC {pvc} not Bound in {namespace}{hint}")
 
     result = run(
         ["kubectl", "get", "secret", "hf-secret", f"-n={namespace}"],
@@ -882,6 +883,8 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
         n = _force_reset(progress, _scope)
         if n:
             info(f"--force: reset {n} done pair(s) to pending")
+        else:
+            info("--force: no done pairs found in scope — nothing reset")
         store.save(progress)
 
     # Reconcile 'running' entries against actual cluster state on resume

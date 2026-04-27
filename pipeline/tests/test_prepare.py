@@ -56,6 +56,17 @@ def _write_text(path, text=""):
     path.write_text(text)
 
 
+import subprocess as _subprocess
+
+
+def _init_git_repo(path):
+    """Initialize a real git repo with an initial empty commit at path."""
+    _subprocess.run(["git", "init"], cwd=path, capture_output=True)
+    _subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=path, capture_output=True)
+    _subprocess.run(["git", "config", "user.name", "T"], cwd=path, capture_output=True)
+    _subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=path, capture_output=True)
+
+
 @pytest.fixture
 def repo(tmp_path):
     """Set up a minimal repo layout for prepare.py testing."""
@@ -76,10 +87,10 @@ def repo(tmp_path):
     _write_text(tmp_path / "llm-d-inference-scheduler" / "pkg" / "plugins" / "register.go",
                 'func init() {\n\tRegister("test-scorer", NewTestScorer)\n}')
 
-    # inference-sim submodule stub (for git describe --tags in _generate_algorithm_values)
+    # inference-sim submodule: real git repo so git rev-parse HEAD succeeds
     inf_sim = tmp_path / "inference-sim"
     inf_sim.mkdir()
-    _write_text(inf_sim / ".git" / "config", "[core]\nrepositoryformatversion = 0\n")
+    _init_git_repo(inf_sim)
 
     return tmp_path
 
@@ -997,6 +1008,67 @@ class TestGenerateAlgorithmValues:
             mod._generate_algorithm_values(manifest, resolved, out_path)
         texts = [str(warning.message) for warning in w]
         assert any("treatment pluginsCustomConfig" in t for t in texts)
+
+    def test_emits_blis_commit_when_git_succeeds(self, repo):
+        """observe.blis_commit is set from inference-sim HEAD when git succeeds."""
+        import subprocess
+        inf_sim = repo / "inference-sim"
+        expected_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=inf_sim, capture_output=True, text=True
+        ).stdout.strip()
+
+        run_dir = repo / "workspace" / "runs" / "test-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "translation_output.json").write_text(json.dumps({
+            "plugin_type": "test-scorer",
+            "treatment_config_generated": False,
+        }))
+
+        mod = _import_prepare_with_root(repo)
+        out_path = run_dir / "algorithm_values.yaml"
+        mod._generate_algorithm_values(dict(MINIMAL_MANIFEST), MINIMAL_ENV_DEFAULTS["scenarios"]["routing"], out_path)
+
+        result = yaml.safe_load(out_path.read_text())
+        assert result["observe"]["blis_commit"] == expected_sha
+        assert "image" not in result["observe"]
+
+    def test_raises_when_blis_commit_empty(self, repo):
+        """_generate_algorithm_values raises RuntimeError when git rev-parse returns empty output."""
+        from unittest.mock import patch, MagicMock
+        run_dir = repo / "workspace" / "runs" / "test-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "translation_output.json").write_text(json.dumps({
+            "plugin_type": "test-scorer",
+            "treatment_config_generated": False,
+        }))
+
+        mod = _import_prepare_with_root(repo)
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = ""
+        with patch.object(mod, "run", return_value=mock_result):
+            with pytest.raises(RuntimeError, match="empty output"):
+                mod._generate_algorithm_values(
+                    dict(MINIMAL_MANIFEST), MINIMAL_ENV_DEFAULTS["scenarios"]["routing"],
+                    run_dir / "algorithm_values.yaml",
+                )
+
+    def test_raises_when_git_fails(self, repo):
+        """_generate_algorithm_values raises RuntimeError when git rev-parse fails."""
+        import shutil
+        # Remove .git so git rev-parse HEAD fails (no git repo, but dir still exists)
+        shutil.rmtree(repo / "inference-sim" / ".git")
+        run_dir = repo / "workspace" / "runs" / "test-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "translation_output.json").write_text(json.dumps({
+            "plugin_type": "test-scorer",
+            "treatment_config_generated": False,
+        }))
+
+        mod = _import_prepare_with_root(repo)
+        out_path = run_dir / "algorithm_values.yaml"
+        with pytest.raises(RuntimeError, match="inference-sim commit"):
+            mod._generate_algorithm_values(dict(MINIMAL_MANIFEST), MINIMAL_ENV_DEFAULTS["scenarios"]["routing"], out_path)
 
 
 # ── _compile_cluster_packages ───────────────────────────────────────────────

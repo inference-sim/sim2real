@@ -355,7 +355,11 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
 
     # 4c: Generate algorithm_values.yaml
     alg_values_path = run_dir / "algorithm_values.yaml"
-    _generate_algorithm_values(manifest, resolved, alg_values_path)
+    try:
+        _generate_algorithm_values(manifest, resolved, alg_values_path)
+    except RuntimeError as e:
+        err(str(e))
+        sys.exit(1)
     ok(f"Algorithm values: {_display_path(alg_values_path)}")
 
     # 4c.5: Re-inject EPP image if one was already built for this run
@@ -434,18 +438,25 @@ def _generate_algorithm_values(manifest: dict, resolved: dict, out_path: Path):
             wl_data["num_requests"] = int(wl_data["num_requests"] * multiplier)
         workloads.append(wl_data)
 
-    # Resolve inference-sim image tag for blis observe container
+    # Resolve inference-sim commit SHA for install-blis task
     inference_sim_dir = REPO_ROOT / "inference-sim"
-    blis_tag_result = run(
-        ["git", "describe", "--tags"],
+    blis_commit_result = run(
+        ["git", "rev-parse", "HEAD"],
         check=False, capture=True, cwd=inference_sim_dir,
     )
-    blis_tag = blis_tag_result.stdout.strip() if blis_tag_result.returncode == 0 else ""
+    if blis_commit_result.returncode != 0:
+        raise RuntimeError(
+            f"Cannot resolve inference-sim commit: git rev-parse HEAD failed in {inference_sim_dir}"
+        )
+    blis_commit = blis_commit_result.stdout.strip()
+    if not blis_commit:
+        raise RuntimeError(
+            f"Cannot resolve inference-sim commit: git rev-parse HEAD returned empty output in {inference_sim_dir}"
+        )
 
     # Build algorithm values
     observe = {"workloads": workloads}
-    if blis_tag:
-        observe["image"] = f"ghcr.io/inference-sim/blis:{blis_tag}"
+    observe["blis_commit"] = blis_commit
     # Set GAIE_RELEASE_NAME_POSTFIX so the kv-events-config endpoint resolves correctly.
     # The EPP service is named sim2real-{run_name}-gaie-epp by the Tekton deploy-gaie task.
     run_name = out_path.parent.name

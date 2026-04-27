@@ -27,6 +27,7 @@ spec:
     - name: model-cache
     - name: hf-credentials
     - name: data-storage
+    - name: source
   tasks:
     - name: download-model
       taskRef:
@@ -61,6 +62,16 @@ spec:
           value: "$(params.gaieConfig)"
         - name: namespace
           value: "$(params.namespace)"
+
+    - name: install-blis
+      taskRef:
+        name: install-blis
+      workspaces:
+        - name: source
+          workspace: source
+      params:
+        - name: git_commit
+          value: "{{ observe.blis_commit }}"
 
     - name: deploy-model
       runAfter: ["download-model", "deploy-gaie"]
@@ -114,12 +125,14 @@ spec:
           value: "$(params.inferenceObjectives)"
 
     - name: run-workload
-      runAfter: ["pause-after-model-deploy", "deploy-httproute", "deploy-inference-objectives"]
+      runAfter: ["pause-after-model-deploy", "deploy-httproute", "deploy-inference-objectives", "install-blis"]
       taskRef:
-        name: run-workload-blis-observe
+        name: run-workload-blis-observe-binary
       workspaces:
         - name: data
           workspace: data-storage
+        - name: source
+          workspace: source
       params:
         - name: endpoint
           value: "http://$(tasks.deploy-gateway.results.endpoint)/sim2real-$(params.experimentId)"
@@ -127,8 +140,6 @@ spec:
           value: "{{ stack.model.modelName }}"
         - name: workloadSpec
           value: "$(params.workloadSpec)"
-        - name: blisImage
-          value: "{{ observe.image }}"
         - name: resultsDir
           value: "$(params.runName)/$(params.phase)/$(params.workloadName)"
 

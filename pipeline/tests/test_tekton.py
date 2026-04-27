@@ -22,11 +22,17 @@ _COMPILED_PIPELINE = {
             {"name": "model-cache"},
             {"name": "hf-credentials"},
             {"name": "data-storage"},
+            {"name": "source"},
         ],
         "tasks": [
             {"name": "download-model", "taskRef": {"name": "download-model"}, "params": []},
             {"name": "deploy-gateway", "taskRef": {"name": "deploy-gateway"}, "params": []},
             {"name": "deploy-gaie", "taskRef": {"name": "deploy-gaie"}, "params": []},
+            {
+                "name": "install-blis",
+                "taskRef": {"name": "install-blis"},
+                "params": [{"name": "git_commit", "value": "$(params.gitCommit)"}],
+            },
             {
                 "name": "deploy-model",
                 "taskRef": {"name": "deploy-model"},
@@ -59,11 +65,12 @@ _COMPILED_PIPELINE = {
             },
             {
                 "name": "run-workload",
-                "taskRef": {"name": "run-workload-blis-observe"},
+                "taskRef": {"name": "run-workload-blis-observe-binary"},
                 "runAfter": [
                     "pause-after-model-deploy",
                     "deploy-httproute",
                     "deploy-inference-objectives",
+                    "install-blis",
                 ],
                 "params": [
                     {"name": "workloadSpec", "value": "$(params.workloadSpec)"},
@@ -266,8 +273,8 @@ def test_standby_pipeline_standby_runs_after_leaves():
     pipeline, _ = make_standby_pipeline("baseline", _COMPILED_PIPELINE, "run-1", "test-ns")
     standby = next(t for t in pipeline["spec"]["tasks"] if t["name"] == "standby")
 
-    # After removing workload tasks, leaves are: pause-after-model-deploy,
-    # deploy-httproute, deploy-inference-objectives
+    # After removing workload tasks (including install-blis), leaves are:
+    # pause-after-model-deploy, deploy-httproute, deploy-inference-objectives
     run_after = set(standby.get("runAfter", []))
     assert "pause-after-model-deploy" in run_after
     assert "deploy-httproute" in run_after
@@ -312,6 +319,7 @@ _WORKSPACE_BINDINGS_PARALLEL = {
     "model-cache":    {"persistentVolumeClaim": {"claimName": "model-pvc"}},
     "data-storage":   {"persistentVolumeClaim": {"claimName": "data-pvc"}},
     "hf-credentials": {"secret": {"secretName": "hf-secret"}},
+    "source":         {"persistentVolumeClaim": {"claimName": "source-pvc"}},
 }
 
 
@@ -354,3 +362,4 @@ def test_make_pipelinerun_parallel_workspace_bindings():
     assert "model-cache" in ws_names
     assert "data-storage" in ws_names
     assert "hf-credentials" in ws_names
+    assert "source" in ws_names
