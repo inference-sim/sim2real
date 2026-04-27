@@ -148,4 +148,4 @@ def test_diagnose_with_api_no_key():
                 pod_name="pod", namespace="ns", signal="CrashLoopBackOff",
                 describe_output="", logs="", events_summary="",
             )
-    assert "ANTHROPIC_API_KEY" in result or "unavailable" in result.lower() or result == ""
+    assert "ANTHROPIC_API_KEY" in result
