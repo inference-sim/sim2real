@@ -22,6 +22,7 @@ _COMPILED_PIPELINE = {
             {"name": "model-cache"},
             {"name": "hf-credentials"},
             {"name": "data-storage"},
+            {"name": "source"},
         ],
         "tasks": [
             {"name": "download-model", "taskRef": {"name": "download-model"}, "params": []},
@@ -312,6 +313,7 @@ _WORKSPACE_BINDINGS_PARALLEL = {
     "model-cache":    {"persistentVolumeClaim": {"claimName": "model-pvc"}},
     "data-storage":   {"persistentVolumeClaim": {"claimName": "data-pvc"}},
     "hf-credentials": {"secret": {"secretName": "hf-secret"}},
+    "source":         {"persistentVolumeClaim": {"claimName": "source-pvc"}},
 }
 
 
@@ -354,3 +356,4 @@ def test_make_pipelinerun_parallel_workspace_bindings():
     assert "model-cache" in ws_names
     assert "data-storage" in ws_names
     assert "hf-credentials" in ws_names
+    assert "source" in ws_names
