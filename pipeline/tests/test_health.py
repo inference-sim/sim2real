@@ -58,6 +58,20 @@ _PODS_JSON = json.dumps({
                 }],
             },
         },
+        {
+            "metadata": {"name": "sim2real-ac-evicted-0"},
+            "status": {
+                "phase": "Failed",
+                "reason": "Evicted",
+                "message": "The node was low on resource: memory.",
+                "conditions": [],
+                "containerStatuses": [{
+                    "name": "vllm", "ready": False, "restartCount": 1,
+                    "lastState": {"terminated": {"reason": "OOMKilled", "exitCode": 137}},
+                    "state": {"terminated": {"reason": "Error"}},
+                }],
+            },
+        },
     ]
 })
 
@@ -83,7 +97,7 @@ _EVENTS_JSON = json.dumps({
 
 def test_parse_pods_count():
     from pipeline.lib.health import parse_pods
-    assert len(parse_pods(_PODS_JSON)) == 3
+    assert len(parse_pods(_PODS_JSON)) == 4
 
 
 def test_parse_pods_oom_killed():
@@ -109,6 +123,14 @@ def test_parse_pods_healthy():
     p = next(x for x in pods if x.name == "sim2real-ac-decode-1")
     assert p.ready is True
     assert p.reason == ""
+
+
+def test_parse_pods_evicted_overrides_oom():
+    from pipeline.lib.health import parse_pods
+    pods = parse_pods(_PODS_JSON)
+    p = next(x for x in pods if x.name == "sim2real-ac-evicted-0")
+    assert p.reason == "Evicted"
+    assert "memory" in p.message.lower()
 
 
 def test_parse_events_count():
