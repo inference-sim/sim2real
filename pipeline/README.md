@@ -154,6 +154,33 @@ python pipeline/deploy.py collect [--package NAME…]
 
 ---
 
+## monitor.py
+
+Watches active namespace slots while `deploy.py run` is running. Detects pod failures,
+auto-remediates transient issues (tier 1), emits rules-based suggestions (tier 2), and
+calls the Anthropic API for novel failures (tier 3). Writes all findings to
+`workspace/runs/<run>/health_report.md`.
+
+```bash
+# Start in a second terminal alongside deploy.py run
+python pipeline/monitor.py --experiment-root ../admission-control
+
+# Or background it
+python pipeline/monitor.py --experiment-root ../admission-control &
+```
+
+**Requires:** `ANTHROPIC_API_KEY` in the environment for tier-3 API diagnosis.
+If unset, tier-3 findings are written with a placeholder and no API call is made.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--experiment-root PATH` | cwd | Root of the experiment repo |
+| `--run NAME` | `current_run` from setup_config.json | Run name |
+| `--interval SECONDS` | 30 | Poll interval |
+| `--log-lines N` | 200 | Tail depth for pod logs sent to API |
+
+---
+
 ## run.py
 
 Manage and switch between runs.
