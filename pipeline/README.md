@@ -136,10 +136,11 @@ python pipeline/deploy.py collect [--package NAME…]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--only PAIR` | — | Reset and run one specific pair key |
-| `--workload NAME` | — | Reset pairs matching this workload |
-| `--package NAME` | — | Reset pairs matching this package |
-| `--status STATE` | — | Reset pairs with this status (e.g. `failed`, `timed-out`) |
+| `--only PAIR` | — | Scope execution to one specific pair key |
+| `--workload NAME` | — | Scope execution to pairs matching this workload |
+| `--package NAME` | — | Scope execution to pairs matching this package |
+| `--status STATE` | — | Scope execution to pairs with this status (e.g. `failed`, `timed-out`) |
+| `--force` | — | Reset `done` pairs in scope back to `pending` (clears retries) |
 | `--max-retries N` | 2 | Max retries for timed-out pairs |
 | `--poll-interval N` | 30 | Seconds between status polls |
 

@@ -694,6 +694,18 @@ def _load_pairs(cluster_dir: Path) -> dict:
     return pairs
 
 
+def _force_reset(progress: dict, scope: set) -> int:
+    """Reset done pairs in scope to pending. Returns count of pairs reset."""
+    reset = 0
+    for key in scope:
+        if progress.get(key, {}).get("status") == "done":
+            progress[key]["status"] = "pending"
+            progress[key]["namespace"] = None
+            progress[key]["retries"] = 0
+            reset += 1
+    return reset
+
+
 def _apply_run_filters(progress: dict, args) -> set:
     """Return the set of pair keys in scope for this invocation.
 
@@ -865,6 +877,12 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
     _scope = _filtered or set(progress.keys())
     if len(_scope) < len(progress):
         info(f"Scope: {len(_scope)}/{len(progress)} pairs")
+
+    if getattr(args, "force", False):
+        n = _force_reset(progress, _scope)
+        if n:
+            info(f"--force: reset {n} done pair(s) to pending")
+        store.save(progress)
 
     # Reconcile 'running' entries against actual cluster state on resume
     for key, entry in progress.items():
@@ -1085,6 +1103,8 @@ Examples:
     run_p.add_argument("--workload",     metavar="NAME",  help="Scope execution to pairs matching this workload")
     run_p.add_argument("--package",      metavar="NAME",  help="Scope execution to pairs matching this package")
     run_p.add_argument("--status",       metavar="STATE", help="Scope execution to pairs with this status (e.g. failed, timed-out)")
+    run_p.add_argument("--force",        action="store_true",
+                       help="Re-run completed pairs in scope (resets done → pending, clears retries)")
     run_p.add_argument("--max-retries",  type=int, default=2, dest="max_retries",
                        help="Max retries for timed-out pairs [2]")
     run_p.add_argument("--poll-interval", type=int, default=30, dest="poll_interval",
