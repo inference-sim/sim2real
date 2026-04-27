@@ -140,11 +140,12 @@ def test_diagnose_with_api_returns_text():
 def test_diagnose_with_api_no_key():
     from pipeline.monitor import _diagnose_with_api
     import os
-    from unittest.mock import patch
+    from unittest.mock import patch, MagicMock
 
     with patch.dict(os.environ, {}, clear=True):
-        result = _diagnose_with_api(
-            pod_name="pod", namespace="ns", signal="CrashLoopBackOff",
-            describe_output="", logs="", events_summary="",
-        )
+        with patch("pipeline.monitor.anthropic", MagicMock()):
+            result = _diagnose_with_api(
+                pod_name="pod", namespace="ns", signal="CrashLoopBackOff",
+                describe_output="", logs="", events_summary="",
+            )
     assert "ANTHROPIC_API_KEY" in result or "unavailable" in result.lower() or result == ""
