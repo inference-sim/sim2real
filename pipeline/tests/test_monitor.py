@@ -66,6 +66,8 @@ def test_health_report_no_snowball(tmp_path):
                    "CrashLoopBackOff", "none", "diagnosis", "", tier=3)
     content = path.read_text()
     assert content.count("Prior session findings") <= 1
+    assert "wl-a" in content  # session 1 finding survives to session 3
+    assert "wl-b" in content  # session 2 finding survives to session 3
 
 
 _PROGRESS_MIXED = {
@@ -149,3 +151,56 @@ def test_diagnose_with_api_no_key():
                 describe_output="", logs="", events_summary="",
             )
     assert "ANTHROPIC_API_KEY" in result
+
+
+_PROGRESS_RUNNING = {
+    "wl-a": {
+        "workload": "chatbot_mid", "package": "treatment",
+        "status": "running", "namespace": "kalantar-0", "retries": 0,
+    },
+}
+
+
+def test_poll_once_tier1_evicted_deletes_and_records(tmp_path):
+    from unittest.mock import patch
+    from pipeline.monitor import _poll_once, HealthReport
+    from pipeline.lib.health import PodState, RemediationTracker
+
+    pod = PodState(
+        name="sim2real-ac-decode-0", phase="Failed", reason="Evicted",
+        message="", ready=False, restart_count=0,
+    )
+    tracker = RemediationTracker()
+    report = HealthReport(tmp_path / "health_report.md")
+    with patch("pipeline.monitor.get_pods", return_value=[pod]), \
+         patch("pipeline.monitor.get_events", return_value=[]), \
+         patch("pipeline.monitor.delete_pod", return_value=True):
+        _poll_once(_PROGRESS_RUNNING, "ac", tracker, report, 200)
+
+    content = (tmp_path / "health_report.md").read_text()
+    assert "Evicted" in content
+    assert "deleted pod" in content
+    assert tracker.count("sim2real-ac-decode-0") == 1
+
+
+def test_poll_once_tier3_crash_calls_api(tmp_path):
+    from unittest.mock import patch
+    from pipeline.monitor import _poll_once, HealthReport
+    from pipeline.lib.health import PodState, RemediationTracker
+
+    pod = PodState(
+        name="sim2real-ac-decode-0", phase="Running", reason="CrashLoopBackOff",
+        message="", ready=False, restart_count=3,
+    )
+    tracker = RemediationTracker()
+    report = HealthReport(tmp_path / "health_report.md")
+    with patch("pipeline.monitor.get_pods", return_value=[pod]), \
+         patch("pipeline.monitor.get_events", return_value=[]), \
+         patch("pipeline.monitor.get_pod_logs", return_value="error log"), \
+         patch("pipeline.monitor._kubectl", return_value=(0, "describe output")), \
+         patch("pipeline.monitor._diagnose_with_api", return_value="crash root cause"):
+        _poll_once(_PROGRESS_RUNNING, "ac", tracker, report, 200)
+
+    content = (tmp_path / "health_report.md").read_text()
+    assert "CrashLoopBackOff" in content
+    assert "crash root cause" in content

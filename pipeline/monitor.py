@@ -65,7 +65,11 @@ class HealthReport:
         if self._path.exists():
             raw = self._path.read_text()
             sep = "\n---\n\n## Prior session findings\n\n"
-            self._prior_text = raw.split(sep)[0] if sep in raw else raw
+            if sep in raw:
+                before, after = raw.split(sep, 1)
+                self._prior_text = before + "\n\n" + after
+            else:
+                self._prior_text = raw
 
     def add_finding(
         self,
@@ -164,8 +168,7 @@ def _poll_once(
         for pod in pods:
             result = triage_pod(pod, events, tracker)
             if result is None:
-                if pod.ready:
-                    tracker.reset(pod.name)
+                tracker.reset(pod.name)
                 continue
 
             ts = _now()
