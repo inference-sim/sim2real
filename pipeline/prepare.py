@@ -434,18 +434,21 @@ def _generate_algorithm_values(manifest: dict, resolved: dict, out_path: Path):
             wl_data["num_requests"] = int(wl_data["num_requests"] * multiplier)
         workloads.append(wl_data)
 
-    # Resolve inference-sim image tag for blis observe container
+    # Resolve inference-sim commit SHA for install-blis task
     inference_sim_dir = REPO_ROOT / "inference-sim"
-    blis_tag_result = run(
-        ["git", "describe", "--tags"],
+    blis_commit_result = run(
+        ["git", "rev-parse", "HEAD"],
         check=False, capture=True, cwd=inference_sim_dir,
     )
-    blis_tag = blis_tag_result.stdout.strip() if blis_tag_result.returncode == 0 else ""
+    if blis_commit_result.returncode != 0:
+        raise RuntimeError(
+            f"Cannot resolve inference-sim commit: git rev-parse HEAD failed in {inference_sim_dir}"
+        )
+    blis_commit = blis_commit_result.stdout.strip()
 
     # Build algorithm values
     observe = {"workloads": workloads}
-    if blis_tag:
-        observe["image"] = f"ghcr.io/inference-sim/blis:{blis_tag}"
+    observe["blis_commit"] = blis_commit
     # Set GAIE_RELEASE_NAME_POSTFIX so the kv-events-config endpoint resolves correctly.
     # The EPP service is named sim2real-{run_name}-gaie-epp by the Tekton deploy-gaie task.
     run_name = out_path.parent.name
