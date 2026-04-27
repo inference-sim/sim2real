@@ -127,7 +127,7 @@ spec:
     - name: run-workload
       runAfter: ["pause-after-model-deploy", "deploy-httproute", "deploy-inference-objectives", "install-blis"]
       taskRef:
-        name: run-workload-blis-observe
+        name: run-workload-blis-observe-binary
       workspaces:
         - name: data
           workspace: data-storage

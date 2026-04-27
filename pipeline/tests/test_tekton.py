@@ -65,7 +65,7 @@ _COMPILED_PIPELINE = {
             },
             {
                 "name": "run-workload",
-                "taskRef": {"name": "run-workload-blis-observe"},
+                "taskRef": {"name": "run-workload-blis-observe-binary"},
                 "runAfter": [
                     "pause-after-model-deploy",
                     "deploy-httproute",
