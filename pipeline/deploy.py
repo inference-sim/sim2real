@@ -744,7 +744,7 @@ def _check_slot_ready(namespace: str) -> tuple[bool, list[str]]:
     """
     failures = []
 
-    for pvc in ["model-pvc", "data-pvc"]:
+    for pvc in ["model-pvc", "data-pvc", "source-pvc"]:
         result = run(
             ["kubectl", "get", "pvc", pvc, f"-n={namespace}",
              "-o", "jsonpath={.status.phase}"],
