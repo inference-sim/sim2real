@@ -99,3 +99,115 @@ def parse_events(json_str: str) -> list[EventRecord]:
         )
         for item in data.get("items", [])
     ]
+
+
+_OOM_MAX_ATTEMPTS = 2  # tier-1 retries before escalating
+
+
+def triage_pod(
+    pod: PodState,
+    events: list[EventRecord],
+    tracker: RemediationTracker,
+) -> "TriageResult | None":
+    """Return a TriageResult if the pod needs attention, None if healthy.
+
+    Does NOT modify tracker — caller records remediation after acting.
+    """
+    pod_events = [e for e in events if e.involved_object == pod.name]
+
+    if pod.phase == "Running" and pod.ready:
+        return None
+
+    # Tier 1: Evicted
+    if pod.reason == "Evicted":
+        return TriageResult(
+            tier=1, action="delete_pod", needs_logs=False,
+            message=f"{pod.name}: Evicted → deleting pod",
+            suggestion="",
+        )
+
+    # Tier 1/2: OOMKilled
+    if pod.reason == "OOMKilled":
+        attempt = tracker.count(pod.name) + 1
+        if attempt <= _OOM_MAX_ATTEMPTS:
+            return TriageResult(
+                tier=1, action="delete_pod", needs_logs=False,
+                message=f"{pod.name}: OOMKilled (attempt {attempt}/{_OOM_MAX_ATTEMPTS}) → deleting pod",
+                suggestion="",
+            )
+        return TriageResult(
+            tier=2, action="suggest", needs_logs=False,
+            message=f"{pod.name}: OOMKilled (attempt {attempt}) — persistent",
+            suggestion=(
+                "Persistent OOM: reduce --gpu-memory-utilization (e.g. 0.85), "
+                "--max-model-len, or replica count in "
+                "env_defaults.yaml → stack.model.helmValues.decode.containers"
+            ),
+        )
+
+    # Tier 2: Image pull failure
+    if pod.reason in ("ImagePullBackOff", "ErrImagePull"):
+        img_detail = next(
+            (e.message for e in pod_events if "pull" in e.message.lower()),
+            pod.message,
+        )
+        return TriageResult(
+            tier=2, action="suggest", needs_logs=False,
+            message=f"{pod.name}: {pod.reason}",
+            suggestion=(
+                f"Image pull failed: {img_detail}\n"
+                "Check env_defaults.yaml → stack.model.vllm_image "
+                "or stack.gaie.epp_image.build.tag"
+            ),
+        )
+
+    # Tier 2: Scheduling failure
+    if pod.phase == "Pending":
+        sched = next((e for e in pod_events if e.reason == "FailedScheduling"), None)
+        if sched:
+            msg_lower = sched.message.lower()
+            if "quota" in msg_lower or "exceeded" in msg_lower:
+                return TriageResult(
+                    tier=2, action="suggest", needs_logs=False,
+                    message=f"{pod.name}: Pending (resource quota exceeded)",
+                    suggestion=f"Resource quota exhausted: {sched.message}",
+                )
+            if "insufficient" in msg_lower or "nodes available" in msg_lower:
+                return TriageResult(
+                    tier=2, action="suggest", needs_logs=False,
+                    message=f"{pod.name}: Pending (no nodes match GPU affinity)",
+                    suggestion=(
+                        f"No schedulable nodes: {sched.message}\n"
+                        "Check nodeAffinity in env_defaults.yaml → "
+                        "stack.model.helmValues.decode.extraConfig.affinity"
+                    ),
+                )
+
+    # Tier 2: Startup probe timeout
+    if pod.phase == "Running" and not pod.ready:
+        startup_fail = next(
+            (e for e in pod_events
+             if e.reason == "Unhealthy" and "startup probe" in e.message.lower()),
+            None,
+        )
+        if startup_fail:
+            return TriageResult(
+                tier=2, action="suggest", needs_logs=False,
+                message=f"{pod.name}: startup probe failing",
+                suggestion=(
+                    "Startup probe timing out before model finishes loading.\n"
+                    "Increase failureThreshold in "
+                    "env_defaults.yaml → stack.model.helmValues.decode.containers"
+                    "[].extraConfig.startupProbe.failureThreshold"
+                ),
+            )
+
+    # Tier 3: CrashLoopBackOff or other failure requiring log analysis
+    if pod.reason == "CrashLoopBackOff" or pod.phase in ("Failed", "Unknown"):
+        return TriageResult(
+            tier=3, action="api", needs_logs=True,
+            message=f"{pod.name}: {pod.reason or pod.phase} — API diagnosis",
+            suggestion="",
+        )
+
+    return None

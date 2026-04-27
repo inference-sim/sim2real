@@ -144,3 +144,101 @@ def test_parse_events_fields():
     sched = next(e for e in events if e.reason == "FailedScheduling")
     assert sched.involved_object == "sim2real-ac-epp-0"
     assert sched.count == 3
+
+
+def _make_pod(**kwargs):
+    from pipeline.lib.health import PodState
+    defaults = dict(name="p", phase="Running", ready=False,
+                    restart_count=0, reason="", message="")
+    defaults.update(kwargs)
+    return PodState(**defaults)
+
+
+def _make_event(reason="", message="", involved_object="p"):
+    from pipeline.lib.health import EventRecord
+    return EventRecord(reason=reason, message=message, count=1,
+                       last_timestamp="", involved_object=involved_object)
+
+
+def test_triage_healthy_pod_returns_none():
+    from pipeline.lib.health import triage_pod, RemediationTracker
+    pod = _make_pod(phase="Running", ready=True, reason="")
+    assert triage_pod(pod, [], RemediationTracker()) is None
+
+
+def test_triage_evicted():
+    from pipeline.lib.health import triage_pod, RemediationTracker
+    pod = _make_pod(reason="Evicted", phase="Failed")
+    result = triage_pod(pod, [], RemediationTracker())
+    assert result.tier == 1
+    assert result.action == "delete_pod"
+
+
+def test_triage_oom_first_attempt():
+    from pipeline.lib.health import triage_pod, RemediationTracker
+    pod = _make_pod(reason="OOMKilled")
+    result = triage_pod(pod, [], RemediationTracker())
+    assert result.tier == 1
+    assert result.action == "delete_pod"
+    assert "1/2" in result.message
+
+
+def test_triage_oom_second_attempt():
+    from pipeline.lib.health import triage_pod, RemediationTracker
+    tracker = RemediationTracker()
+    tracker.record("p")  # first attempt already recorded
+    pod = _make_pod(name="p", reason="OOMKilled")
+    result = triage_pod(pod, [], tracker)
+    assert result.tier == 1
+    assert result.action == "delete_pod"
+    assert "2/2" in result.message
+
+
+def test_triage_oom_escalates_on_third():
+    from pipeline.lib.health import triage_pod, RemediationTracker
+    tracker = RemediationTracker()
+    tracker.record("p")
+    tracker.record("p")  # count is now 2; next call sees attempt 3
+    pod = _make_pod(name="p", reason="OOMKilled")
+    result = triage_pod(pod, [], tracker)
+    assert result.tier == 2
+    assert result.action == "suggest"
+    assert "gpu-memory-utilization" in result.suggestion
+
+
+def test_triage_image_pull_backoff():
+    from pipeline.lib.health import triage_pod, RemediationTracker
+    pod = _make_pod(reason="ImagePullBackOff", phase="Pending",
+                    message="Back-off pulling ghcr.io/example/bad:tag")
+    result = triage_pod(pod, [], RemediationTracker())
+    assert result.tier == 2
+    assert result.action == "suggest"
+    assert "env_defaults.yaml" in result.suggestion
+
+
+def test_triage_failed_scheduling_gpu():
+    from pipeline.lib.health import triage_pod, RemediationTracker
+    pod = _make_pod(phase="Pending")
+    events = [_make_event(reason="FailedScheduling",
+                          message="0/5 nodes available: 5 Insufficient nvidia.com/gpu")]
+    result = triage_pod(pod, events, RemediationTracker())
+    assert result.tier == 2
+    assert "affinity" in result.suggestion.lower() or "nvidia" in result.suggestion.lower()
+
+
+def test_triage_quota_exceeded():
+    from pipeline.lib.health import triage_pod, RemediationTracker
+    pod = _make_pod(phase="Pending")
+    events = [_make_event(reason="FailedScheduling",
+                          message="exceeded quota: requests.nvidia.com/gpu=4")]
+    result = triage_pod(pod, events, RemediationTracker())
+    assert result.tier == 2
+    assert "quota" in result.suggestion.lower()
+
+
+def test_triage_crash_loop_tier3():
+    from pipeline.lib.health import triage_pod, RemediationTracker
+    pod = _make_pod(reason="CrashLoopBackOff", restart_count=5)
+    result = triage_pod(pod, [], RemediationTracker())
+    assert result.tier == 3
+    assert result.needs_logs is True
