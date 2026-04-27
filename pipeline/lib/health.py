@@ -182,6 +182,7 @@ def triage_pod(
                         "stack.model.helmValues.decode.extraConfig.affinity"
                     ),
                 )
+            # unrecognized scheduling message — falls through to None
 
     # Tier 2: Startup probe timeout
     if pod.phase == "Running" and not pod.ready:

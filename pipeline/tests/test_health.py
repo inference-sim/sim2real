@@ -242,3 +242,26 @@ def test_triage_crash_loop_tier3():
     result = triage_pod(pod, [], RemediationTracker())
     assert result.tier == 3
     assert result.needs_logs is True
+
+
+def test_triage_does_not_modify_tracker():
+    from pipeline.lib.health import triage_pod, RemediationTracker
+    tracker = RemediationTracker()
+    tracker.record("p")
+    tracker.record("p")
+    before = tracker.count("p")
+    pod = _make_pod(name="p", reason="OOMKilled")
+    triage_pod(pod, [], tracker)
+    assert tracker.count("p") == before, "triage_pod must not modify tracker"
+
+
+def test_triage_startup_probe_unhealthy():
+    from pipeline.lib.health import triage_pod, RemediationTracker
+    pod = _make_pod(phase="Running", ready=False)
+    events = [_make_event(reason="Unhealthy",
+                          message="Startup probe failed: connection refused")]
+    result = triage_pod(pod, events, RemediationTracker())
+    assert result is not None
+    assert result.tier == 2
+    assert "startup probe" in result.message.lower()
+    assert "failureThreshold" in result.suggestion
