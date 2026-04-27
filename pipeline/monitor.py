@@ -22,7 +22,7 @@ except ImportError:
 
 from pipeline.lib.health import (
     RemediationTracker, get_pods, get_events, get_pod_logs,
-    delete_pod, triage_pod, _kubectl,
+    delete_pod, describe_pod, triage_pod,
 )
 from pipeline.lib.progress import LocalProgressStore
 
@@ -34,10 +34,9 @@ def _c(code: str, text: str) -> str:
     return f"\033[{code}m{text}\033[0m" if _tty else text
 
 
-def info(msg: str)  -> None: print(_c("34", "[INFO]  ") + msg)
-def ok(msg: str)    -> None: print(_c("32", "[OK]    ") + msg)
-def warn(msg: str)  -> None: print(_c("33", "[WARN]  ") + msg)
-def err(msg: str)   -> None: print(_c("31", "[ERROR] ") + msg, file=sys.stderr)
+def info(msg: str) -> None: print(_c("34", "[INFO]  ") + msg)
+def warn(msg: str) -> None: print(_c("33", "[WARN]  ") + msg)
+def err(msg: str)  -> None: print(_c("31", "[ERROR] ") + msg, file=sys.stderr)
 
 
 # ── Health report ─────────────────────────────────────────────────────────────
@@ -132,7 +131,10 @@ def _resolve_active_slots(progress: dict) -> dict[str, list[str]]:
 
 
 def _work_remaining(progress: dict) -> bool:
-    return any(v.get("status") == "running" for v in progress.values())
+    return any(
+        v.get("status") in ("pending", "running", "collecting")
+        for v in progress.values()
+    )
 
 
 # ── Setup config ──────────────────────────────────────────────────────────────
@@ -143,7 +145,11 @@ def _load_setup_config(experiment_root: Path) -> dict:
         _REPO_ROOT / "workspace" / "setup_config.json",
     ]:
         if p.exists():
-            return json.loads(p.read_text())
+            try:
+                return json.loads(p.read_text())
+            except json.JSONDecodeError as exc:
+                err(f"Malformed setup_config.json at {p}: {exc}")
+                sys.exit(1)
     return {}
 
 
@@ -168,7 +174,8 @@ def _poll_once(
         for pod in pods:
             result = triage_pod(pod, events, tracker)
             if result is None:
-                tracker.reset(pod.name)
+                if pod.phase == "Running" and pod.ready:
+                    tracker.reset(pod.name)
                 continue
 
             ts = _now()
@@ -179,8 +186,9 @@ def _poll_once(
 
             if result.tier == 1:
                 if result.action == "delete_pod":
-                    tracker.record(pod.name)
                     success = delete_pod(ns, pod.name)
+                    if success:
+                        tracker.record(pod.name)
                     action_taken = "deleted pod" if success else "delete failed"
                 warn(f"{ns} / {pair_label}: {result.message}")
                 report.add_finding(
@@ -209,7 +217,9 @@ def _poll_once(
                         if prev:
                             logs = (f"=== previous container ===\n{prev}\n"
                                     f"=== current ===\n{logs}")
-                _, describe_out = _kubectl("describe", "pod", pod.name, f"-n={ns}")
+                describe_out = describe_pod(ns, pod.name)
+                if not describe_out:
+                    warn(f"{ns}: kubectl describe failed for {pod.name} — diagnosis context degraded")
                 events_summary = "\n".join(
                     f"{e.reason}: {e.message}"
                     for e in events if e.involved_object == pod.name
@@ -289,8 +299,11 @@ def _diagnose_with_api(
             max_tokens=512,
             messages=[{"role": "user", "content": prompt}],
         )
+        if not message.content:
+            return "(API returned empty response)"
         return message.content[0].text
     except Exception as exc:
+        warn(f"Anthropic API call failed: {exc}")
         return f"(API diagnosis failed: {exc})"
 
 
@@ -336,9 +349,18 @@ def main() -> None:
 
     info(f"Monitoring run '{run_name}' (interval: {args.interval}s)")
     info(f"Report: {run_dir}/health_report.md")
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        info("ANTHROPIC_API_KEY set — tier-3 pod data will be sent to Anthropic API")
+    else:
+        info("ANTHROPIC_API_KEY not set — tier-3 findings recorded without API diagnosis")
 
     while True:
-        progress = store.load()
+        try:
+            progress = store.load()
+        except ValueError as exc:
+            warn(f"progress.json unreadable ({exc}) — retrying next interval")
+            time.sleep(args.interval)
+            continue
         if not _work_remaining(progress):
             info("No active pairs remaining — exiting.")
             break

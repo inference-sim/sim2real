@@ -360,3 +360,50 @@ def test_delete_pod_returns_false_on_error():
     mock_result.returncode = 1
     with patch("subprocess.run", return_value=mock_result):
         assert delete_pod("kalantar-0", "sim2real-ac-decode-0") is False
+
+
+def test_triage_failed_phase_no_reason_is_tier3():
+    from pipeline.lib.health import triage_pod, PodState, RemediationTracker
+    pod = PodState(name="sim2real-ac-decode-0", phase="Failed",
+                   reason="", message="", ready=False, restart_count=0)
+    result = triage_pod(pod, [], RemediationTracker())
+    assert result is not None
+    assert result.tier == 3
+
+
+def test_triage_unknown_phase_is_tier3():
+    from pipeline.lib.health import triage_pod, PodState, RemediationTracker
+    pod = PodState(name="sim2real-ac-decode-0", phase="Unknown",
+                   reason="", message="", ready=False, restart_count=0)
+    result = triage_pod(pod, [], RemediationTracker())
+    assert result is not None
+    assert result.tier == 3
+
+
+def test_triage_err_image_pull_is_tier2():
+    from pipeline.lib.health import triage_pod, PodState, RemediationTracker
+    pod = PodState(name="sim2real-ac-epp-0", phase="Pending",
+                   reason="ErrImagePull", message="", ready=False, restart_count=0)
+    result = triage_pod(pod, [], RemediationTracker())
+    assert result is not None
+    assert result.tier == 2
+    assert "ErrImagePull" in result.message
+
+
+def test_kubectl_timeout_returns_error():
+    import subprocess
+    from pipeline.lib.health import _kubectl
+    with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("kubectl", 30)):
+        rc, stdout = _kubectl("get", "pods")
+    assert rc != 0
+    assert stdout == ""
+
+
+def test_parse_pods_bad_json_returns_empty():
+    from pipeline.lib.health import parse_pods
+    assert parse_pods("not json") == []
+
+
+def test_parse_events_bad_json_returns_empty():
+    from pipeline.lib.health import parse_events
+    assert parse_events("{invalid}") == []

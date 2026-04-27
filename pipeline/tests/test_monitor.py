@@ -197,10 +197,109 @@ def test_poll_once_tier3_crash_calls_api(tmp_path):
     with patch("pipeline.monitor.get_pods", return_value=[pod]), \
          patch("pipeline.monitor.get_events", return_value=[]), \
          patch("pipeline.monitor.get_pod_logs", return_value="error log"), \
-         patch("pipeline.monitor._kubectl", return_value=(0, "describe output")), \
+         patch("pipeline.monitor.describe_pod", return_value="describe output"), \
          patch("pipeline.monitor._diagnose_with_api", return_value="crash root cause"):
         _poll_once(_PROGRESS_RUNNING, "ac", tracker, report, 200)
 
     content = (tmp_path / "health_report.md").read_text()
     assert "CrashLoopBackOff" in content
     assert "crash root cause" in content
+
+
+def test_poll_once_tier2_oom_persistent_records_suggestion(tmp_path):
+    from unittest.mock import patch
+    from pipeline.monitor import _poll_once, HealthReport
+    from pipeline.lib.health import PodState, RemediationTracker
+
+    pod = PodState(
+        name="sim2real-ac-decode-0", phase="Running", reason="OOMKilled",
+        message="", ready=False, restart_count=3,
+    )
+    # Pre-fill tracker so OOM is past the max attempts → tier-2
+    tracker = RemediationTracker()
+    tracker.record(pod.name)
+    tracker.record(pod.name)
+    report = HealthReport(tmp_path / "health_report.md")
+    with patch("pipeline.monitor.get_pods", return_value=[pod]), \
+         patch("pipeline.monitor.get_events", return_value=[]):
+        _poll_once(_PROGRESS_RUNNING, "ac", tracker, report, 200)
+
+    content = (tmp_path / "health_report.md").read_text()
+    assert "OOMKilled" in content
+    assert "tier-2: 1" in content
+
+
+def test_poll_once_failed_delete_does_not_increment_tracker(tmp_path):
+    from unittest.mock import patch
+    from pipeline.monitor import _poll_once, HealthReport
+    from pipeline.lib.health import PodState, RemediationTracker
+
+    pod = PodState(
+        name="sim2real-ac-decode-0", phase="Failed", reason="Evicted",
+        message="", ready=False, restart_count=0,
+    )
+    tracker = RemediationTracker()
+    report = HealthReport(tmp_path / "health_report.md")
+    with patch("pipeline.monitor.get_pods", return_value=[pod]), \
+         patch("pipeline.monitor.get_events", return_value=[]), \
+         patch("pipeline.monitor.delete_pod", return_value=False):
+        _poll_once(_PROGRESS_RUNNING, "ac", tracker, report, 200)
+
+    assert tracker.count("sim2real-ac-decode-0") == 0
+
+
+def test_poll_once_tracker_not_reset_for_unmatched_pending(tmp_path):
+    from unittest.mock import patch
+    from pipeline.monitor import _poll_once, HealthReport
+    from pipeline.lib.health import PodState, RemediationTracker
+
+    # OOM seen once, then pod enters Pending with no FailedScheduling event
+    pod = PodState(
+        name="sim2real-ac-decode-0", phase="Pending", reason="",
+        message="", ready=False, restart_count=1,
+    )
+    tracker = RemediationTracker()
+    tracker.record(pod.name)  # simulates prior OOM attempt
+    report = HealthReport(tmp_path / "health_report.md")
+    with patch("pipeline.monitor.get_pods", return_value=[pod]), \
+         patch("pipeline.monitor.get_events", return_value=[]):
+        _poll_once(_PROGRESS_RUNNING, "ac", tracker, report, 200)
+
+    # Count must not be reset — unmatched Pending is not a healthy recovery
+    assert tracker.count("sim2real-ac-decode-0") == 1
+
+
+def test_diagnose_with_api_anthropic_not_installed():
+    from pipeline.monitor import _diagnose_with_api
+    from unittest.mock import patch
+
+    with patch("pipeline.monitor.anthropic", None):
+        result = _diagnose_with_api(
+            pod_name="pod", namespace="ns", signal="crash",
+            describe_output="", logs="", events_summary="",
+        )
+    assert "anthropic" in result.lower()
+
+
+def test_diagnose_with_api_exception_path():
+    from pipeline.monitor import _diagnose_with_api
+    from unittest.mock import patch, MagicMock
+    import os
+
+    mock_client = MagicMock()
+    mock_client.messages.create.side_effect = RuntimeError("connection refused")
+    with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+        with patch("pipeline.monitor.anthropic") as mock_anthropic:
+            mock_anthropic.Anthropic.return_value = mock_client
+            result = _diagnose_with_api(
+                pod_name="pod", namespace="ns", signal="crash",
+                describe_output="", logs="", events_summary="",
+            )
+    assert "API diagnosis failed" in result
+
+
+def test_work_remaining_includes_pending_and_collecting():
+    from pipeline.monitor import _work_remaining
+    assert _work_remaining({"a": {"status": "pending"}}) is True
+    assert _work_remaining({"a": {"status": "collecting"}}) is True
+    assert _work_remaining({"a": {"status": "done"}}) is False

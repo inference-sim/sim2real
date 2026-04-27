@@ -55,10 +55,15 @@ class RemediationTracker:
 
 def parse_pods(json_str: str) -> list[PodState]:
     """Parse `kubectl get pods -o json` output into PodState list."""
-    data = json.loads(json_str)
+    try:
+        data = json.loads(json_str)
+    except json.JSONDecodeError:
+        return []
     pods = []
     for item in data.get("items", []):
-        name = item["metadata"]["name"]
+        name = item.get("metadata", {}).get("name", "")
+        if not name:
+            continue
         status = item.get("status", {})
         phase = status.get("phase", "Unknown")
         ready = any(
@@ -89,7 +94,10 @@ def parse_pods(json_str: str) -> list[PodState]:
 
 def parse_events(json_str: str) -> list[EventRecord]:
     """Parse `kubectl get events -o json` output into EventRecord list."""
-    data = json.loads(json_str)
+    try:
+        data = json.loads(json_str)
+    except json.JSONDecodeError:
+        return []
     return [
         EventRecord(
             reason=item.get("reason", ""),
@@ -217,11 +225,15 @@ def triage_pod(
 
 def _kubectl(*args: str) -> "tuple[int, str]":
     """Run kubectl with args. Returns (returncode, stdout)."""
-    result = subprocess.run(
-        ["kubectl", *args],
-        check=False, text=True, capture_output=True,
-    )
-    return result.returncode, result.stdout
+    try:
+        result = subprocess.run(
+            ["kubectl", *args],
+            check=False, text=True, capture_output=True,
+            timeout=30,
+        )
+        return result.returncode, result.stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return 1, ""
 
 
 def get_pods(namespace: str, experiment_id: str) -> list[PodState]:
@@ -258,3 +270,9 @@ def delete_pod(namespace: str, pod_name: str) -> bool:
     rc, _ = _kubectl("delete", "pod", pod_name,
                      f"-n={namespace}", "--ignore-not-found")
     return rc == 0
+
+
+def describe_pod(namespace: str, pod_name: str) -> str:
+    """Fetch kubectl describe pod output. Returns empty string on error."""
+    rc, stdout = _kubectl("describe", "pod", pod_name, f"-n={namespace}")
+    return stdout if rc == 0 else ""
