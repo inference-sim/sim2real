@@ -61,6 +61,8 @@ python pipeline/setup.py [flags]
 
 Writes `workspace/setup_config.json` and `workspace/runs/<run>/run_metadata.json`. Subsequent scripts read namespace, registry, and run name from `setup_config.json`.
 
+`setup_config.json` includes workspace bindings for four PVCs: `model-cache` (`model-pvc`), `data-storage` (`data-pvc`), `hf-credentials` (secret), and `source` (`source-pvc`). `source-pvc` holds the BLIS binary built at pipeline runtime by the `install-blis` task. All four must be bound before `deploy.py run` accepts a namespace slot.
+
 ---
 
 ## prepare.py
@@ -81,6 +83,8 @@ python pipeline/prepare.py [--force] [--rebuild-context] [--manifest PATH] [--ru
 | 6 | **Gate** — `[d]eploy / [e]dit / [q]uit` | on re-run |
 
 **Phase 3 checkpoint**: writes `skill_input.json` and exits cleanly (exit 0). Run `/sim2real-translate` in Claude Code, then re-run `prepare.py` to continue from Phase 4.
+
+**Phase 4 assembly** resolves the `inference-sim` submodule HEAD commit (`git rev-parse HEAD`) and writes it as `observe.blis_commit` in `algorithm_values.yaml`. This value is rendered into the Tekton Pipeline template as the commit the `install-blis` task clones and builds. Fails hard if the submodule is not a valid git repository.
 
 **Phase 6 gate**: `d` marks the run `READY TO DEPLOY` (required by `deploy.py`). `e` drops you back to edit files, then re-displays the summary. `q` marks `abandoned` and exits.
 

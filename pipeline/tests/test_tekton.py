@@ -273,8 +273,8 @@ def test_standby_pipeline_standby_runs_after_leaves():
     pipeline, _ = make_standby_pipeline("baseline", _COMPILED_PIPELINE, "run-1", "test-ns")
     standby = next(t for t in pipeline["spec"]["tasks"] if t["name"] == "standby")
 
-    # After removing workload tasks, leaves are: pause-after-model-deploy,
-    # deploy-httproute, deploy-inference-objectives
+    # After removing workload tasks (including install-blis), leaves are:
+    # pause-after-model-deploy, deploy-httproute, deploy-inference-objectives
     run_after = set(standby.get("runAfter", []))
     assert "pause-after-model-deploy" in run_after
     assert "deploy-httproute" in run_after

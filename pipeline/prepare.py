@@ -355,7 +355,11 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
 
     # 4c: Generate algorithm_values.yaml
     alg_values_path = run_dir / "algorithm_values.yaml"
-    _generate_algorithm_values(manifest, resolved, alg_values_path)
+    try:
+        _generate_algorithm_values(manifest, resolved, alg_values_path)
+    except RuntimeError as e:
+        err(str(e))
+        sys.exit(1)
     ok(f"Algorithm values: {_display_path(alg_values_path)}")
 
     # 4c.5: Re-inject EPP image if one was already built for this run
@@ -445,6 +449,10 @@ def _generate_algorithm_values(manifest: dict, resolved: dict, out_path: Path):
             f"Cannot resolve inference-sim commit: git rev-parse HEAD failed in {inference_sim_dir}"
         )
     blis_commit = blis_commit_result.stdout.strip()
+    if not blis_commit:
+        raise RuntimeError(
+            f"Cannot resolve inference-sim commit: git rev-parse HEAD returned empty output in {inference_sim_dir}"
+        )
 
     # Build algorithm values
     observe = {"workloads": workloads}

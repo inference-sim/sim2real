@@ -1032,6 +1032,27 @@ class TestGenerateAlgorithmValues:
         assert result["observe"]["blis_commit"] == expected_sha
         assert "image" not in result["observe"]
 
+    def test_raises_when_blis_commit_empty(self, repo):
+        """_generate_algorithm_values raises RuntimeError when git rev-parse returns empty output."""
+        from unittest.mock import patch, MagicMock
+        run_dir = repo / "workspace" / "runs" / "test-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "translation_output.json").write_text(json.dumps({
+            "plugin_type": "test-scorer",
+            "treatment_config_generated": False,
+        }))
+
+        mod = _import_prepare_with_root(repo)
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = ""
+        with patch.object(mod, "run", return_value=mock_result):
+            with pytest.raises(RuntimeError, match="empty output"):
+                mod._generate_algorithm_values(
+                    dict(MINIMAL_MANIFEST), MINIMAL_ENV_DEFAULTS["scenarios"]["routing"],
+                    run_dir / "algorithm_values.yaml",
+                )
+
     def test_raises_when_git_fails(self, repo):
         """_generate_algorithm_values raises RuntimeError when git rev-parse fails."""
         import shutil
