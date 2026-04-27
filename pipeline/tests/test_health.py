@@ -334,3 +334,29 @@ def test_get_pod_logs_previous_flag():
     cmd = mock_run.call_args[0][0]
     assert "--previous" in cmd
     assert "--tail=200" in cmd
+
+
+def test_get_events_returns_empty_on_error():
+    from pipeline.lib.health import get_events
+    mock_result = MagicMock()
+    mock_result.returncode = 1
+    mock_result.stdout = ""
+    with patch("subprocess.run", return_value=mock_result):
+        assert get_events("kalantar-0") == []
+
+
+def test_get_pod_logs_returns_empty_on_error():
+    from pipeline.lib.health import get_pod_logs
+    mock_result = MagicMock()
+    mock_result.returncode = 1
+    mock_result.stdout = ""
+    with patch("subprocess.run", return_value=mock_result):
+        assert get_pod_logs("kalantar-0", "sim2real-ac-decode-0") == ""
+
+
+def test_delete_pod_returns_false_on_error():
+    from pipeline.lib.health import delete_pod
+    mock_result = MagicMock()
+    mock_result.returncode = 1
+    with patch("subprocess.run", return_value=mock_result):
+        assert delete_pod("kalantar-0", "sim2real-ac-decode-0") is False
