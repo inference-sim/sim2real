@@ -168,7 +168,9 @@ def _poll_once(
                 continue
 
             ts = _now()
-            pair_label = pair_keys[0] if pair_keys else "?"
+            # Each running pair gets its own namespace in sim2real; pair_keys[0]
+            # is the correct label unless the user deliberately shares a namespace.
+            pair_label = pair_keys[0]
             action_taken = "none"
 
             if result.tier == 1:
