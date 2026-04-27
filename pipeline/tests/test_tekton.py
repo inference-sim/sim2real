@@ -29,6 +29,11 @@ _COMPILED_PIPELINE = {
             {"name": "deploy-gateway", "taskRef": {"name": "deploy-gateway"}, "params": []},
             {"name": "deploy-gaie", "taskRef": {"name": "deploy-gaie"}, "params": []},
             {
+                "name": "install-blis",
+                "taskRef": {"name": "install-blis"},
+                "params": [{"name": "git_commit", "value": "$(params.gitCommit)"}],
+            },
+            {
                 "name": "deploy-model",
                 "taskRef": {"name": "deploy-model"},
                 "runAfter": ["download-model", "deploy-gaie"],
@@ -65,6 +70,7 @@ _COMPILED_PIPELINE = {
                     "pause-after-model-deploy",
                     "deploy-httproute",
                     "deploy-inference-objectives",
+                    "install-blis",
                 ],
                 "params": [
                     {"name": "workloadSpec", "value": "$(params.workloadSpec)"},
