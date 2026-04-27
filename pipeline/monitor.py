@@ -52,7 +52,9 @@ class HealthReport:
         self._findings: list[_Finding] = []
         self._prior_text = ""
         if self._path.exists():
-            self._prior_text = self._path.read_text()
+            raw = self._path.read_text()
+            sep = "\n---\n\n## Prior session findings\n\n"
+            self._prior_text = raw.split(sep)[0] if sep in raw else raw
 
     def add_finding(
         self,

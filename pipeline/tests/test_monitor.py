@@ -32,6 +32,8 @@ def test_health_report_summary_counts(tmp_path):
                        "OOMKilled", "none", "analysis", "fix", tier=3)
     content = path.read_text()
     assert "2 finding" in content.lower()
+    assert "tier-1: 1" in content
+    assert "tier-3: 1" in content
 
 
 def test_health_report_preserves_on_reopen(tmp_path):
@@ -46,3 +48,21 @@ def test_health_report_preserves_on_reopen(tmp_path):
     content = path.read_text()
     assert "wl-a" in content
     assert "wl-b" in content
+    assert "1 finding this session" in content.lower()  # session 2 has only 1 new finding
+    assert "Prior session findings" in content           # session 1 is in the prior block
+
+
+def test_health_report_no_snowball(tmp_path):
+    from pipeline.monitor import HealthReport
+    path = tmp_path / "health_report.md"
+    r1 = HealthReport(path)
+    r1.add_finding("2026-04-27 14:00:00", "ns-0", "wl-a", "pod-a",
+                   "Evicted", "deleted", "", "", tier=1)
+    r2 = HealthReport(path)
+    r2.add_finding("2026-04-27 14:01:00", "ns-0", "wl-b", "pod-b",
+                   "OOMKilled", "deleted", "", "", tier=1)
+    r3 = HealthReport(path)
+    r3.add_finding("2026-04-27 14:02:00", "ns-0", "wl-c", "pod-c",
+                   "CrashLoopBackOff", "none", "diagnosis", "", tier=3)
+    content = path.read_text()
+    assert content.count("Prior session findings") <= 1
