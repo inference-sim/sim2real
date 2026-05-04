@@ -346,7 +346,9 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     # The image tag is deterministic: {registry}/{repo_name}:{run_name} — same as
     # what build-epp.sh pushes. Read from run_metadata.json (written by setup.py).
     meta_path = run_dir / "run_metadata.json"
-    if meta_path.exists():
+    if not meta_path.exists():
+        warn("run_metadata.json absent — EPP image injection skipped (re-run setup.py)")
+    else:
         try:
             meta = json.loads(meta_path.read_text())
         except json.JSONDecodeError as e:
@@ -355,7 +357,9 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
         registry = meta.get("registry", "")
         repo_name = meta.get("repo_name", "llm-d-inference-scheduler")
         run_name_tag = run_dir.name
-        if registry:
+        if not registry:
+            warn("run_metadata.json has no registry — EPP image injection skipped")
+        else:
             epp_img = {
                 "repository": f"{registry}/{repo_name}",
                 "tag": run_name_tag,
@@ -391,6 +395,9 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
             wl_data = yaml.safe_load(wl_path.read_text())
         except yaml.YAMLError as e:
             err(f"Invalid YAML in workload file {wl_path}: {e}")
+            sys.exit(1)
+        if not isinstance(wl_data, dict):
+            err(f"Workload file is not a YAML mapping: {wl_path}")
             sys.exit(1)
         if "name" not in wl_data and "workload_name" not in wl_data:
             wl_data["workload_name"] = Path(wl_path_str).stem
@@ -574,10 +581,7 @@ def _phase_summary(state: StateMachine, manifest: dict, run_dir: Path, resolved:
     # Baseline vs Treatment config comparison
     lines.extend(["", "**Packages**", ""])
     cluster_dir = run_dir / "cluster"
-    exp_pr = cluster_dir / "experiment" / "pipelinerun-experiment.yaml"
-    if exp_pr.exists():
-        lines.append(f"- `{exp_pr}` (sequential)")
-    elif cluster_dir.exists():
+    if cluster_dir.exists():
         for pkg_dir in sorted(cluster_dir.iterdir()):
             if pkg_dir.is_dir() and any(pkg_dir.glob("pipelinerun-*.yaml")):
                 for p in sorted(pkg_dir.glob("pipelinerun-*.yaml")):

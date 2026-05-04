@@ -19,7 +19,7 @@ Main session name: {MAIN_SESSION_NAME}
 
 Verify before each major step:
 ```bash
-test -f config/env_defaults.yaml || { echo "ERROR: not in sim2real root"; exit 1; }
+test -f config/transfer.yaml || { echo "ERROR: not in sim2real root"; exit 1; }
 ```
 
 ## Inputs — Read These Now

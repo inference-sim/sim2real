@@ -206,7 +206,7 @@ Manifest consumed by `prepare.py`. Version 3 required.
 ```yaml
 kind: sim2real-transfer
 version: 3
-scenario: <name>            # must match a scenario in config/env_defaults.yaml
+scenario: <name>            # scenario name used in generated PipelineRun labels
 
 algorithm:
   source: <path>            # sim algorithm implementation

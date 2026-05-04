@@ -681,6 +681,6 @@ TeamDelete()
 ## What This Skill Does NOT Do
 
 - Does not assemble values.yaml or cluster YAMLs (prepare.py Phase 4)
-- Does not touch env_defaults.yaml or cluster config
+- Does not touch cluster config or bundle inputs (baseline.yaml, treatment.yaml)
 - Does not generate run_summary.md or perform the human gate
 - Job: produce working, reviewed Go code + treatment config + metadata in generated/

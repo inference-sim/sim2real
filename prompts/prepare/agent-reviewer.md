@@ -27,7 +27,7 @@ Read and hold in context:
    available plugin types and their type strings
 2. **Algorithm source** `{ALGO_SOURCE}` — the simulation Go file being translated
 3. If `{ALGO_CONFIG}` is non-empty: read it — weights and thresholds (ground truth)
-4. **env_defaults** `config/env_defaults.yaml` — Helm structure and baseline EPP config
+4. If `{BASELINE_REAL_CONFIG}` is non-null: **Baseline EPP template** — the real EPP YAML structure that treatment must mirror
 
 You will read the generated plugin files and treatment config fresh on each review request.
 
@@ -140,36 +140,32 @@ This is the most common failure mode — check it carefully.
 
 ### Criterion 5: Assembly Simulation (CRITICAL)
 
-This verifies that `prepare.py` Phase 4 Assembly will succeed when it embeds the treatment
-config as a raw string.
+This verifies that `prepare.py` Phase 4 Assembly will succeed when it deep-merges the
+treatment overlay into the baseline-resolved scenario.
 
 **Step A — Find the baseline shape:**
-In `config/env_defaults.yaml`, find the key path:
-`stack.{SCENARIO}.gaie.baseline.helmValues.inferenceExtension.pluginsCustomConfig["custom-plugins.yaml"]`
-This contains an inline YAML string. Parse it mentally. This is the canonical structure
-that the treatment config must mirror — same top-level keys, same nesting depth.
+If `{BASELINE_REAL_CONFIG}` is non-null, read it — find the `inferenceExtension.pluginsCustomConfig["custom-plugins.yaml"]`
+content within the scenario. Parse it mentally. This is the canonical structure
+that the treatment overlay must mirror — same top-level keys, same nesting depth.
+If null, infer structure from the context document's plugin type descriptions.
 
-Note: `values.yaml` does not exist at translation time (it is generated in Phase 4),
-so you MUST use `env_defaults.yaml` as the reference.
+Note: resolved scenario files do not exist at translation time (they are generated in Phase 4),
+so you MUST use the baseline EPP template as the structural reference.
 
-**Step B — Simulate the embed:**
-`prepare.py` will do exactly this (Python pseudocode):
+**Step B — Simulate the merge:**
+`prepare.py` Phase 4 calls `assemble_scenarios()` which does:
 ```python
-tc_content = open("{RUN_DIR}/generated/treatment_config.yaml").read()
-alg_values["stack"]["gaie"]["treatment"]["helmValues"]["inferenceExtension"]["pluginsCustomConfig"] = {
-    "custom-plugins.yaml": tc_content
-}
-yaml.dump(alg_values)  # must not raise
+baseline_resolved = deep_merge(baseline_bundle, baseline_overlay)
+treatment_resolved = deep_merge(deep_merge(baseline_resolved, treatment_diffs), treatment_overlay)
 ```
 
 Verify:
-- `treatment_config.yaml` is valid YAML (mentally parse it — check for unescaped colons,
-  wrong indentation, missing quotes around values with special characters)
+- `treatment_config.yaml` is valid scenario-format YAML (`scenario: [{ name: ..., ... }]`) —
+  check for unescaped colons, wrong indentation, missing quotes around values with special characters
 - `treatment_config_generated: true` is set in `translation_output.json`
-- Every key in the treatment config also appears in the baseline config, or is explicitly
+- Every key in the treatment overlay also appears in the baseline structure, or is explicitly
   justified (no invented keys that would silently be ignored by the EPP)
-- `helm_path` in `translation_output.json` is exactly:
-  `gaie.treatment.helmValues.inferenceExtension.pluginsCustomConfig.custom-plugins.yaml`
+- `helm_path` in `translation_output.json` matches `config.helm_path` from the manifest
 
 Raise any problem as `[assembly]` NEEDS_CHANGES. Assembly failures only manifest at
 Phase 4 and are silent — catch them here.
@@ -212,7 +208,7 @@ Verification summary (required — one line per criterion):
 - Code quality: [confirm interfaces correct, no dead code, patterns followed]
 - Registration: TypeConst=<exact value>, Factory=<name>, register.go line ~<N>
 - Config: kind=<value>, all plugin types registered, keys match baseline
-- Assembly: env_defaults baseline shape matches, YAML valid, helm_path correct,
+- Assembly: baseline bundle shape matches, overlay YAML valid, helm_path correct,
   treatment_config_generated=true
 ```
 
