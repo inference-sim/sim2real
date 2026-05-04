@@ -22,21 +22,12 @@ if str(_REPO_ROOT) not in sys.path:
 
 from pipeline.lib.manifest import load_manifest, ManifestError
 from pipeline.lib.state_machine import StateMachine
-from pipeline.lib.values import merge_values
 
 # ── Repo layout ──────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Overridden in main() when --experiment-root is specified.
 EXPERIMENT_ROOT = REPO_ROOT
-
-
-def _resolve_env_defaults_d(experiment_root: Path) -> Path:
-    """Resolve env_defaults.yaml: experiment root first, then config/ subdirectory."""
-    direct = experiment_root / "env_defaults.yaml"
-    if direct.exists():
-        return direct
-    return experiment_root / "config" / "env_defaults.yaml"
 
 
 def _resolve_manifest_default_d(experiment_root: Path) -> Path:
@@ -130,47 +121,6 @@ def _build_epp_image(run_dir: Path, run_name: str, namespace: str) -> str:
 
     err("EPP build completed but epp_image not set in run_metadata.json")
     sys.exit(1)
-
-
-def _inject_image_into_values(run_dir: Path, full_image: str, scenario: str):
-    """Re-merge values with the EPP image reference injected."""
-    step("1a", "Injecting EPP image into values")
-
-    alg_values_path = run_dir / "algorithm_values.yaml"
-    if not alg_values_path.exists():
-        warn("algorithm_values.yaml not found, skipping image injection")
-        return
-
-    alg_values = yaml.safe_load(alg_values_path.read_text())
-
-    # Read hub+name from env_defaults
-    env_path = _resolve_env_defaults_d(EXPERIMENT_ROOT)
-    env_data = yaml.safe_load(env_path.read_text())
-    common = env_data.get("common", {})
-    build_cfg = common.get("stack", {}).get("gaie", {}).get("epp_image", {}).get("build", {})
-    epp_hub = build_cfg.get("hub", "")
-    epp_name = build_cfg.get("name", "")
-    epp_tag = full_image.rsplit(":", 1)[1] if ":" in full_image else ""
-
-    # Inject into algorithm_values
-    (alg_values
-        .setdefault("stack", {})
-        .setdefault("gaie", {})
-        .setdefault("treatment", {})
-        .setdefault("helmValues", {})
-        .setdefault("inferenceExtension", {})
-        ["image"]) = {"hub": epp_hub, "name": epp_name, "tag": epp_tag}
-    alg_values_path.write_text(yaml.dump(alg_values, default_flow_style=False, sort_keys=False))
-    ok("algorithm_values.yaml updated with EPP image")
-
-    # Re-merge values
-    values_path = run_dir / "values.yaml"
-    try:
-        merge_values(env_path, alg_values_path, values_path, scenario=scenario)
-    except (FileNotFoundError, yaml.YAMLError, ValueError, OSError) as e:
-        err(f"merge-values failed: {e}")
-        sys.exit(1)
-    ok("values.yaml re-merged with EPP image")
 
 
 # ── PipelineRun helpers ──────────────────────────────────────────────────────
@@ -279,21 +229,11 @@ def _cmd_deploy(args, manifest: dict, run_dir: Path, setup_config: dict):
         _print_dry_run(packages, cluster_dir)
         return
 
-    # Build EPP image
+    # Build EPP image (tag is deterministic — already embedded in PipelineRuns by prepare.py)
     if not args.skip_build_epp:
-        full_image = _build_epp_image(run_dir, state.run_name, namespace)
-        _inject_image_into_values(run_dir, full_image, manifest["scenario"])
+        _build_epp_image(run_dir, state.run_name, namespace)
     else:
-        meta_path = run_dir / "run_metadata.json"
-        if meta_path.exists():
-            meta = json.loads(meta_path.read_text())
-            full_image = meta.get("epp_image", "")
-            if full_image:
-                info(f"Skipping EPP build. Using image: {full_image}")
-            else:
-                warn("--skip-build-epp set but no epp_image in run_metadata.json")
-        else:
-            warn("--skip-build-epp set, no run_metadata.json found")
+        info("Skipping EPP build (--skip-build-epp)")
 
     # Apply Pipeline definitions first so PipelineRuns can reference them
     step(2, "Apply Pipeline Definitions")
@@ -823,21 +763,11 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
     if not namespaces or not namespaces[0]:
         err("No namespaces configured. Run setup.py with --namespaces."); sys.exit(1)
 
-    # Build EPP image (use first namespace for the build)
+    # Build EPP image (tag is deterministic — already embedded in PipelineRuns by prepare.py)
     if not args.skip_build_epp:
-        full_image = _build_epp_image(run_dir, run_dir.name, namespaces[0])
-        _inject_image_into_values(run_dir, full_image, manifest["scenario"])
+        _build_epp_image(run_dir, run_dir.name, namespaces[0])
     else:
-        meta_path = run_dir / "run_metadata.json"
-        if meta_path.exists():
-            meta = json.loads(meta_path.read_text())
-            full_image = meta.get("epp_image", "")
-            if full_image:
-                info(f"Skipping EPP build. Using image: {full_image}")
-            else:
-                warn("--skip-build-epp set but no epp_image in run_metadata.json")
-        else:
-            warn("--skip-build-epp set, no run_metadata.json found")
+        info("Skipping EPP build (--skip-build-epp)")
 
     max_retries = getattr(args, "max_retries", 2)
     poll_interval = getattr(args, "poll_interval", 30)

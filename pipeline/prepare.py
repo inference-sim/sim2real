@@ -338,18 +338,25 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
         treatment_overlay_path=treatment_overlay,
     )
 
-    # 4b.5: Inject EPP build image into treatment scenario
-    epp_build = manifest.get("epp_image", {}).get("build", {})
-    if epp_build.get("hub") and epp_build.get("name") and epp_build.get("tag"):
-        epp_img = {
-            "repository": f"{epp_build['hub']}/{epp_build['name']}",
-            "tag": epp_build["tag"],
-            "pullPolicy": epp_build.get("pullPolicy", "Always"),
-        }
-        scenario_list = treatment_resolved.get("scenario", [])
-        for entry in scenario_list:
-            entry.setdefault("images", {})["inferenceScheduler"] = epp_img
-        ok(f"EPP image injected: {epp_build['hub']}/{epp_build['name']}:{epp_build['tag']}")
+    # 4b.5: Inject deterministic EPP image into treatment scenario
+    # The image tag is deterministic: {registry}/{repo_name}:{run_name} — same as
+    # what build-epp.sh pushes. Read from run_metadata.json (written by setup.py).
+    meta_path = run_dir / "run_metadata.json"
+    if meta_path.exists():
+        meta = json.loads(meta_path.read_text())
+        registry = meta.get("registry", "")
+        repo_name = meta.get("repo_name", "llm-d-inference-scheduler")
+        run_name_tag = run_dir.name
+        if registry:
+            epp_img = {
+                "repository": f"{registry}/{repo_name}",
+                "tag": run_name_tag,
+                "pullPolicy": "Always",
+            }
+            scenario_list = treatment_resolved.get("scenario", [])
+            for entry in scenario_list:
+                entry.setdefault("images", {})["inferenceScheduler"] = epp_img
+            ok(f"EPP image injected: {registry}/{repo_name}:{run_name_tag}")
 
     # 4c: Write resolved scenarios
     cluster_dir = run_dir / "cluster"
@@ -419,14 +426,6 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
 
     state.mark_done("assembly", packages=["baseline", "treatment"])
     ok("Assembly complete")
-
-
-
-
-
-
-
-
 
 
 def _verify_generated_dir(run_dir: Path):
