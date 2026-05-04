@@ -121,21 +121,23 @@ def _validate_v3_fields(data: dict) -> None:
 
     # target (required)
     target = data.get("target")
-    if target is not None:
-        if not isinstance(target, dict):
-            raise ManifestError("target must be a mapping")
-        if "repo" not in target:
-            raise ManifestError("Missing required field: target.repo")
+    if target is None:
+        raise ManifestError("Missing required field: target")
+    if not isinstance(target, dict):
+        raise ManifestError("target must be a mapping")
+    if "repo" not in target:
+        raise ManifestError("Missing required field: target.repo")
 
     # config (required)
     config = data.get("config")
-    if config is not None:
-        if not isinstance(config, dict):
-            raise ManifestError("config must be a mapping")
-        if "kind" not in config:
-            raise ManifestError("Missing required field: config.kind")
-        if "helm_path" not in config:
-            raise ManifestError("Missing required field: config.helm_path")
+    if config is None:
+        raise ManifestError("Missing required field: config")
+    if not isinstance(config, dict):
+        raise ManifestError("config must be a mapping")
+    if "kind" not in config:
+        raise ManifestError("Missing required field: config.kind")
+    if "helm_path" not in config:
+        raise ManifestError("Missing required field: config.helm_path")
 
     # observe (optional, defaults applied)
     observe = data.get("observe")

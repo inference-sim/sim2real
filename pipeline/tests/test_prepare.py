@@ -21,6 +21,11 @@ MINIMAL_MANIFEST = {
         "real": {"config": None, "notes": ""},
     },
     "workloads": ["sim2real_golden/workloads/wl1.yaml"],
+    "target": {"repo": "llm-d-inference-scheduler"},
+    "config": {
+        "kind": "EndpointPickerConfig",
+        "helm_path": "gaie.treatment.helmValues.inferenceExtension.pluginsCustomConfig.custom-plugins.yaml",
+    },
 }
 
 MINIMAL_ENV_DEFAULTS = {
@@ -616,6 +621,11 @@ class TestPhaseTranslate:
                 },
             },
             "workloads": ["sim2real_golden/workloads/wl1.yaml"],
+            "target": {"repo": "llm-d-inference-scheduler"},
+            "config": {
+                "kind": "EndpointPickerConfig",
+                "helm_path": "gaie.treatment.helmValues.inferenceExtension.pluginsCustomConfig.custom-plugins.yaml",
+            },
         }
         _write_yaml(repo / "config" / "transfer.yaml", v3_data)
         # Create the real config file so manifest validation passes
@@ -1274,6 +1284,8 @@ class TestExperimentRootSeparation:
             "algorithm": {"source": "algorithm/admission.go"},
             "baseline": {"sim": {"config": None}, "real": {"config": None, "notes": ""}},
             "workloads": ["workloads/w1.yaml"],
+            "target": {"repo": "llm-d-inference-scheduler"},
+            "config": {"kind": "AdmissionConfig", "helm_path": "x"},
         }
         _write_yaml(exp / "transfer.yaml", manifest_data)
         env = {

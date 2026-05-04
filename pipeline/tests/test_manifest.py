@@ -423,20 +423,20 @@ def test_v3_epp_image_optional(tmp_path):
     assert "epp_image" not in m
 
 
-def test_v3_target_optional(tmp_path):
-    """v3 without target is valid."""
+def test_v3_target_absent_raises(tmp_path):
+    """v3 without target raises."""
     data = {k: v for k, v in MINIMAL_V3.items() if k != "target"}
     path = _write_manifest(tmp_path, data)
-    m = load_manifest(path)
-    assert "target" not in m
+    with pytest.raises(ManifestError, match="target"):
+        load_manifest(path)
 
 
-def test_v3_config_optional(tmp_path):
-    """v3 without config is valid."""
+def test_v3_config_absent_raises(tmp_path):
+    """v3 without config raises."""
     data = {k: v for k, v in MINIMAL_V3.items() if k != "config"}
     path = _write_manifest(tmp_path, data)
-    m = load_manifest(path)
-    assert "config" not in m
+    with pytest.raises(ManifestError, match="config"):
+        load_manifest(path)
 
 
 def test_v3_config_missing_kind_raises(tmp_path):
