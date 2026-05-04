@@ -530,9 +530,9 @@ def step_test_push(cfg: SetupConfig, container_rt: str, test_push_tag: str,
 # ── Step 6: PVCs ─────────────────────────────────────────────────────
 
 def step_pvcs(cfg: SetupConfig) -> None:
-    """Step 6: Create PVCs for model, data, and source."""
+    """Step 6: Create PVCs for data and source."""
     step(6, 8, "PVCs")
-    pvcs = [("model-pvc", "300Gi"), ("data-pvc", "50Gi"), ("source-pvc", "50Gi")]
+    pvcs = [("data-pvc", "50Gi"), ("source-pvc", "50Gi")]
     sc_line = f"  storageClassName: {cfg.storage_class}" if cfg.storage_class else ""
 
     for name, size in pvcs:
