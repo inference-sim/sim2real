@@ -415,7 +415,7 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     # No compilation step needed — deploy.py applies the static pipeline directly.
     setup_config = _load_setup_config()
     run_name = run_dir.name
-    pipeline_name = f"sim2real-{run_name}"
+    pipeline_name = "sim2real"
 
     # 4f: Generate PipelineRuns
     namespace = setup_config.get("namespace", "default")
