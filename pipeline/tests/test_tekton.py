@@ -3,10 +3,8 @@
 
 # ── Tests for make_pipelinerun_scenario ──────────────────────────────────────
 
-_WORKSPACE_BINDINGS_PARALLEL = {
-    "model-cache":    {"persistentVolumeClaim": {"claimName": "model-pvc"}},
+_WORKSPACE_BINDINGS = {
     "data-storage":   {"persistentVolumeClaim": {"claimName": "data-pvc"}},
-    "hf-credentials": {"secret": {"secretName": "hf-secret"}},
     "source":         {"persistentVolumeClaim": {"claimName": "source-pvc"}},
 }
 
@@ -16,7 +14,7 @@ def test_make_pipelinerun_scenario_name():
         phase="baseline", workload={"name": "wl-smoke"}, run_name="ac",
         namespace="kalantar-0", pipeline_name="sim2real-ac",
         scenario_content="scenario: []",
-        workspace_bindings=_WORKSPACE_BINDINGS_PARALLEL,
+        workspace_bindings=_WORKSPACE_BINDINGS,
     )
     assert pr["metadata"]["name"] == "baseline-wl-smoke-ac"
     assert pr["metadata"]["namespace"] == "kalantar-0"
@@ -28,7 +26,7 @@ def test_make_pipelinerun_scenario_params():
         phase="treatment", workload={"name": "chatbot-mid"}, run_name="ac",
         namespace="ns", pipeline_name="sim2real-ac",
         scenario_content="scenario:\n- name: test\n",
-        workspace_bindings=_WORKSPACE_BINDINGS_PARALLEL,
+        workspace_bindings=_WORKSPACE_BINDINGS,
     )
     params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
     assert params["phase"] == "treatment"
@@ -44,7 +42,7 @@ def test_make_pipelinerun_scenario_spec_content_default():
         phase="baseline", workload={"name": "wl"}, run_name="r",
         namespace="ns", pipeline_name="sim2real-r",
         scenario_content="{}",
-        workspace_bindings=_WORKSPACE_BINDINGS_PARALLEL,
+        workspace_bindings=_WORKSPACE_BINDINGS,
     )
     params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
     assert "specContent" in params
@@ -62,7 +60,7 @@ def test_make_pipelinerun_scenario_spec_content_custom():
         phase="baseline", workload={"name": "wl"}, run_name="r",
         namespace="ns", pipeline_name="sim2real-r",
         scenario_content="{}",
-        workspace_bindings=_WORKSPACE_BINDINGS_PARALLEL,
+        workspace_bindings=_WORKSPACE_BINDINGS,
         spec_content=custom_spec,
     )
     params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
@@ -75,8 +73,10 @@ def test_make_pipelinerun_scenario_workspace_bindings():
         phase="baseline", workload={"name": "wl"}, run_name="r",
         namespace="ns", pipeline_name="sim2real-r",
         scenario_content="{}",
-        workspace_bindings=_WORKSPACE_BINDINGS_PARALLEL,
+        workspace_bindings=_WORKSPACE_BINDINGS,
     )
     ws_names = {ws["name"] for ws in pr["spec"]["workspaces"]}
-    assert "model-cache" in ws_names
+    assert "source" in ws_names
     assert "data-storage" in ws_names
+    assert "model-cache" not in ws_names
+    assert "hf-credentials" not in ws_names

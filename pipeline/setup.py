@@ -619,9 +619,7 @@ def step_config_output(cfg: SetupConfig, run_dir: Path, container_rt: str) -> No
         "current_run": cfg.run_name,
         "setup_timestamp": now_iso,
         "workspaces": {
-            "model-cache":    {"persistentVolumeClaim": {"claimName": "model-pvc"}},
             "data-storage":   {"persistentVolumeClaim": {"claimName": "data-pvc"}},
-            "hf-credentials": {"secret": {"secretName": "hf-secret"}},
             "source":         {"persistentVolumeClaim": {"claimName": "source-pvc"}},
         },
     }
