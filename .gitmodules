@@ -4,3 +4,8 @@
 [submodule "tektonc-data-collection"]
 	path = tektonc-data-collection
 	url = https://github.com/inference-sim/tektonc-data-collection.git
+	branch = main
+[submodule "llm-d-benchmark"]
+	path = llm-d-benchmark
+	url = https://github.com/llm-d/llm-d-benchmark.git
+	branch = main
