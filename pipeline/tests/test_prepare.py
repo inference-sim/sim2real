@@ -201,7 +201,8 @@ class TestPhaseInit:
         with pytest.raises(SystemExit):
             mod._phase_init(Args(), manifest, run_dir)
 
-    def test_init_unknown_scenario_exits(self, repo):
+    def test_init_unknown_scenario_no_env_defaults(self, repo):
+        """Unknown scenario is OK when env_defaults.yaml is absent (new flow)."""
         mod = _import_prepare_with_root(repo)
         manifest = dict(MINIMAL_MANIFEST)
         manifest["scenario"] = "unknown_scenario"
@@ -213,8 +214,8 @@ class TestPhaseInit:
             manifest = None
             rebuild_context = False
 
-        with pytest.raises(SystemExit):
-            mod._phase_init(Args(), manifest, run_dir)
+        state = mod._phase_init(Args(), manifest, run_dir)
+        assert state is not None
 
 
 # ── Phase 3: Translation Checkpoint ────────────────────────────────────────

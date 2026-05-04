@@ -40,7 +40,13 @@ EXPERIMENT_ROOT = REPO_ROOT
 
 
 def _resolve_env_defaults(experiment_root: Path) -> Path:
-    """Resolve env_defaults.yaml: experiment root first, then config/ subdirectory."""
+    """Resolve env_defaults.yaml: experiment root first, then config/ subdirectory.
+
+    .. deprecated::
+        env_defaults.yaml is replaced by baseline.yaml / treatment.yaml / transfer.yaml.
+        This function is retained only for backward compatibility with merge_values();
+        it will be removed when Phase 4 is rewritten (#26).
+    """
     direct = experiment_root / "env_defaults.yaml"
     if direct.exists():
         return direct
@@ -127,17 +133,30 @@ def _load_setup_config() -> dict:
 
 
 def _load_resolved_config(manifest: dict) -> dict:
-    """Load env_defaults, merge common + scenario, return resolved config."""
+    """Build resolved config from manifest fields.
+
+    In the old flow this loaded env_defaults.yaml and merged common + scenario.
+    Now the relevant fields live directly in transfer.yaml (loaded by manifest.py):
+    target, config, observe, build, epp_image.
+    """
     env_path = _resolve_env_defaults(EXPERIMENT_ROOT)
-    env_data = yaml.safe_load(env_path.read_text())
-    common = env_data.get("common", {})
-    scenarios = env_data.get("scenarios", {})
-    scenario = manifest["scenario"]
-    if scenario not in scenarios:
-        err(f"Scenario '{scenario}' not found in env_defaults.yaml. "
-            f"Available: {list(scenarios.keys())}")
-        sys.exit(1)
-    return _deep_merge(common, scenarios[scenario])
+    if env_path.exists():
+        env_data = yaml.safe_load(env_path.read_text()) or {}
+        common = env_data.get("common", {})
+        scenarios = env_data.get("scenarios", {})
+        scenario = manifest["scenario"]
+        if scenario in scenarios:
+            resolved = _deep_merge(common, scenarios[scenario])
+        else:
+            resolved = dict(common)
+    else:
+        resolved = {}
+
+    for key in ("target", "config", "observe", "build", "epp_image"):
+        if key in manifest:
+            resolved[key] = manifest[key]
+
+    return resolved
 
 
 def _get_submodule_shas() -> dict[str, str]:

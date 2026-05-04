@@ -100,6 +100,10 @@ def load_manifest(path: "Path | str") -> dict:
         hints_files.append({"path": str(fp), "content": fp.read_text()})
     data["hints"] = {"text": hints_text, "files": hints_files}
 
+    # ── v3 fields (migrated from env_defaults.yaml) ────────────────────────────
+    if version >= 3:
+        _validate_v3_fields(data)
+
     # Deprecation warning for context.notes
     if data.get("context", {}).get("notes"):
         warnings.warn(
@@ -110,3 +114,67 @@ def load_manifest(path: "Path | str") -> dict:
         )
 
     return data
+
+
+def _validate_v3_fields(data: dict) -> None:
+    """Validate and apply defaults for v3 fields migrated from env_defaults.yaml."""
+
+    # target (required)
+    target = data.get("target")
+    if target is not None:
+        if not isinstance(target, dict):
+            raise ManifestError("target must be a mapping")
+        if "repo" not in target:
+            raise ManifestError("Missing required field: target.repo")
+
+    # config (required)
+    config = data.get("config")
+    if config is not None:
+        if not isinstance(config, dict):
+            raise ManifestError("config must be a mapping")
+        if "kind" not in config:
+            raise ManifestError("Missing required field: config.kind")
+        if "helm_path" not in config:
+            raise ManifestError("Missing required field: config.helm_path")
+
+    # observe (optional, defaults applied)
+    observe = data.get("observe")
+    if observe is None:
+        data["observe"] = {"request_multiplier": 1}
+    elif not isinstance(observe, dict):
+        raise ManifestError("observe must be a mapping")
+    else:
+        observe.setdefault("request_multiplier", 1)
+
+    # build (optional, defaults applied)
+    build = data.get("build")
+    if build is None:
+        data["build"] = {"commands": []}
+    elif not isinstance(build, dict):
+        raise ManifestError("build must be a mapping")
+    else:
+        build.setdefault("commands", [])
+        cmds = build["commands"]
+        if not isinstance(cmds, list):
+            raise ManifestError("build.commands must be a list")
+
+    # epp_image (optional)
+    epp = data.get("epp_image")
+    if epp is not None:
+        if not isinstance(epp, dict):
+            raise ManifestError("epp_image must be a mapping")
+        upstream = epp.get("upstream")
+        if upstream is None:
+            raise ManifestError("Missing required field: epp_image.upstream")
+        if not isinstance(upstream, dict):
+            raise ManifestError("epp_image.upstream must be a mapping")
+        for f in ("hub", "name", "tag"):
+            if f not in upstream:
+                raise ManifestError(f"Missing required field: epp_image.upstream.{f}")
+        build_img = epp.get("build")
+        if build_img is not None:
+            if not isinstance(build_img, dict):
+                raise ManifestError("epp_image.build must be a mapping")
+            for f in ("hub", "name", "tag"):
+                if f not in build_img:
+                    raise ManifestError(f"Missing required field: epp_image.build.{f}")

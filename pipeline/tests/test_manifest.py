@@ -201,6 +201,19 @@ MINIMAL_V3 = {
         "sim": {"config": "sim2real_golden/routers/policy_baseline_211.yaml"},
     },
     "workloads": ["sim2real_golden/workloads/wl1.yaml"],
+    "target": {"repo": "llm-d-inference-scheduler"},
+    "config": {
+        "kind": "EndpointPickerConfig",
+        "helm_path": "gaie.treatment.helmValues.inferenceExtension.pluginsCustomConfig.custom-plugins.yaml",
+    },
+    "epp_image": {
+        "upstream": {
+            "hub": "ghcr.io/llm-d",
+            "name": "llm-d-inference-scheduler",
+            "tag": "v0.7.1",
+            "pullPolicy": "Always",
+        },
+    },
 }
 
 
@@ -295,3 +308,156 @@ def test_v3_accepted_alongside_v2(tmp_path):
         path = _write_manifest(ver_dir, data)
         m = load_manifest(path)
         assert m["version"] == ver
+
+
+# ── v3 fields (migrated from env_defaults.yaml) ─────────────────────────────
+
+def test_v3_target_and_config_loaded(tmp_path):
+    """v3 target and config fields are loaded and preserved."""
+    path = _write_manifest(tmp_path, MINIMAL_V3)
+    m = load_manifest(path)
+    assert m["target"]["repo"] == "llm-d-inference-scheduler"
+    assert m["config"]["kind"] == "EndpointPickerConfig"
+    assert "helm_path" in m["config"]
+
+
+def test_v3_observe_defaults(tmp_path):
+    """v3 without observe section gets default request_multiplier=1."""
+    data = {k: v for k, v in MINIMAL_V3.items() if k != "observe"}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["observe"]["request_multiplier"] == 1
+
+
+def test_v3_observe_explicit(tmp_path):
+    """v3 with explicit observe.request_multiplier preserves value."""
+    data = {**MINIMAL_V3, "observe": {"request_multiplier": 10}}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["observe"]["request_multiplier"] == 10
+
+
+def test_v3_build_defaults(tmp_path):
+    """v3 without build section gets default commands=[]."""
+    data = {k: v for k, v in MINIMAL_V3.items() if k != "build"}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["build"]["commands"] == []
+
+
+def test_v3_build_commands_loaded(tmp_path):
+    """v3 with build.commands preserves the list."""
+    data = {**MINIMAL_V3, "build": {"commands": [["go", "build", "./..."]]}}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["build"]["commands"] == [["go", "build", "./..."]]
+
+
+def test_v3_build_commands_not_list_raises(tmp_path):
+    """build.commands must be a list."""
+    data = {**MINIMAL_V3, "build": {"commands": "go build"}}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="build.commands.*list"):
+        load_manifest(path)
+
+
+def test_v3_epp_image_loaded(tmp_path):
+    """v3 epp_image.upstream fields are loaded."""
+    path = _write_manifest(tmp_path, MINIMAL_V3)
+    m = load_manifest(path)
+    assert m["epp_image"]["upstream"]["hub"] == "ghcr.io/llm-d"
+    assert m["epp_image"]["upstream"]["name"] == "llm-d-inference-scheduler"
+    assert m["epp_image"]["upstream"]["tag"] == "v0.7.1"
+
+
+def test_v3_epp_image_with_build(tmp_path):
+    """v3 epp_image with both upstream and build loads both."""
+    data = {**MINIMAL_V3, "epp_image": {
+        "upstream": {"hub": "ghcr.io/llm-d", "name": "epp", "tag": "v1"},
+        "build": {"hub": "ghcr.io/me", "name": "epp", "tag": "dev", "platform": "linux/amd64"},
+    }}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["epp_image"]["build"]["hub"] == "ghcr.io/me"
+    assert m["epp_image"]["build"]["tag"] == "dev"
+
+
+def test_v3_epp_image_missing_upstream_raises(tmp_path):
+    """epp_image without upstream raises."""
+    data = {**MINIMAL_V3, "epp_image": {"build": {"hub": "x", "name": "y", "tag": "z"}}}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="epp_image.upstream"):
+        load_manifest(path)
+
+
+def test_v3_epp_image_upstream_missing_field_raises(tmp_path):
+    """epp_image.upstream missing hub/name/tag raises."""
+    for field in ("hub", "name", "tag"):
+        upstream = {"hub": "a", "name": "b", "tag": "c"}
+        del upstream[field]
+        data = {**MINIMAL_V3, "epp_image": {"upstream": upstream}}
+        path = _write_manifest(tmp_path, data)
+        with pytest.raises(ManifestError, match=f"epp_image.upstream.{field}"):
+            load_manifest(path)
+
+
+def test_v3_epp_image_build_missing_field_raises(tmp_path):
+    """epp_image.build missing hub/name/tag raises."""
+    for field in ("hub", "name", "tag"):
+        build = {"hub": "a", "name": "b", "tag": "c"}
+        del build[field]
+        data = {**MINIMAL_V3, "epp_image": {
+            "upstream": {"hub": "x", "name": "y", "tag": "z"},
+            "build": build,
+        }}
+        path = _write_manifest(tmp_path, data)
+        with pytest.raises(ManifestError, match=f"epp_image.build.{field}"):
+            load_manifest(path)
+
+
+def test_v3_epp_image_optional(tmp_path):
+    """v3 without epp_image is valid."""
+    data = {k: v for k, v in MINIMAL_V3.items() if k != "epp_image"}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert "epp_image" not in m
+
+
+def test_v3_target_optional(tmp_path):
+    """v3 without target is valid."""
+    data = {k: v for k, v in MINIMAL_V3.items() if k != "target"}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert "target" not in m
+
+
+def test_v3_config_optional(tmp_path):
+    """v3 without config is valid."""
+    data = {k: v for k, v in MINIMAL_V3.items() if k != "config"}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert "config" not in m
+
+
+def test_v3_config_missing_kind_raises(tmp_path):
+    """config without kind raises."""
+    data = {**MINIMAL_V3, "config": {"helm_path": "x"}}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="config.kind"):
+        load_manifest(path)
+
+
+def test_v3_config_missing_helm_path_raises(tmp_path):
+    """config without helm_path raises."""
+    data = {**MINIMAL_V3, "config": {"kind": "EndpointPickerConfig"}}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="config.helm_path"):
+        load_manifest(path)
+
+
+def test_v3_target_missing_repo_raises(tmp_path):
+    """target without repo raises."""
+    data = {**MINIMAL_V3, "target": {}}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="target.repo"):
+        load_manifest(path)
