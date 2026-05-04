@@ -896,9 +896,9 @@ class TestExperimentRootSeparation:
         # inference-sim stub
         (fw / "inference-sim" / ".git").mkdir(parents=True)
         _write_text(fw / "inference-sim" / ".git" / "config", "[core]\n")
-        # pipeline/templates (framework default template)
-        (fw / "pipeline" / "templates").mkdir(parents=True)
-        _write_text(fw / "pipeline" / "templates" / "pipeline.yaml.j2", "# template\n")
+        # pipeline/pipeline.yaml (static Pipeline resource)
+        (fw / "pipeline").mkdir(parents=True, exist_ok=True)
+        _write_text(fw / "pipeline" / "pipeline.yaml", "apiVersion: tekton.dev/v1\nkind: Pipeline\nmetadata:\n  name: sim2real\n")
         return fw
 
     def _make_experiment(self, tmp_path):
