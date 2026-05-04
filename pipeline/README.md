@@ -28,7 +28,7 @@ The experiment repo must contain:
 - `algorithm/` and `workloads/` directories as referenced in `transfer.yaml`
 - `workspace/` in `.gitignore`
 
-`pipeline/templates/pipeline.yaml.j2` is the framework default Tekton template. Override it per-experiment by placing `pipeline.yaml.j2` in the experiment root, or pass `--pipeline-template PATH` to `prepare.py`.
+`pipeline/templates/pipeline.yaml.j2` is the framework default Tekton template (used for reference; Phase 4 generates resolved PipelineRuns directly).
 
 Omitting `--experiment-root` defaults to the framework directory — backward compatible with the existing `config/transfer.yaml` layout.
 
@@ -71,7 +71,7 @@ Writes `workspace/setup_config.json` and `workspace/runs/<run>/run_metadata.json
 6-phase state machine. Re-running skips completed phases.
 
 ```bash
-python pipeline/prepare.py [--force] [--rebuild-context] [--manifest PATH] [--run NAME] [--mode parallel|sequential]
+python pipeline/prepare.py [--force] [--rebuild-context] [--manifest PATH] [--run NAME]
 ```
 
 | Phase | Name | Skippable |
@@ -117,11 +117,11 @@ python pipeline/deploy.py [flags]
 | Flag | Default | Notes |
 |------|---------|-------|
 | `--run NAME` | from `setup_config.json` | override active run |
-| `--package NAME…` | `experiment` | `baseline`, `treatment`, or `experiment` |
+| `--package NAME…` | all discovered | Filter to specific `wl-{workload}-{pkg}` packages |
 | `--skip-build-epp` | false | reuse `epp_image` from `run_metadata.json` |
 | `--dry-run` | false | print kubectl commands without applying |
 
-**Default package is `experiment`** — a sequential baseline-then-treatment pipeline. Pass `--package baseline treatment` to submit them independently.
+**Package discovery** — `deploy.py` discovers all `wl-{workload}-{pkg}/` directories under `cluster/` that contain `pipelinerun-*.yaml` files. Use `--package` to filter to specific packages.
 
 **`--skip-build-epp`** — skips the image build; use when resubmitting after a failed PipelineRun without changing the scorer.
 
@@ -133,7 +133,7 @@ python pipeline/deploy.py status            # show progress snapshot of all (wor
 python pipeline/deploy.py collect [--package NAME…]
 ```
 
-**`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, collects results inline, and retries pairs that time out. Reads `progress.json` to resume interrupted runs. Requires `prepare.py --mode parallel`.
+**`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, collects results inline, and retries pairs that time out. Reads `progress.json` to resume interrupted runs.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -236,7 +236,7 @@ All paths are relative to the repo root and validated at Phase 1.
 
 ## Parallel Pool Execution
 
-`setup.py --namespaces NS1,NS2,...` provisions N namespace slots, each bootstrapped identically. `prepare.py` (default `--mode parallel`) generates one shared Tekton Pipeline plus one PipelineRun per `(workload, package)` pair. `deploy.py run` orchestrates execution by assigning pairs to free slots, polling for completion, collecting results inline, and retrying on timeout. `deploy.py status` reads `workspace/runs/<run>/progress.json` and prints the current state of every pair.
+`setup.py --namespaces NS1,NS2,...` provisions N namespace slots, each bootstrapped identically. `prepare.py` generates one shared Tekton Pipeline plus one PipelineRun per `(workload, package)` pair. `deploy.py run` orchestrates execution by assigning pairs to free slots, polling for completion, collecting results inline, and retrying on timeout. `deploy.py status` reads `workspace/runs/<run>/progress.json` and prints the current state of every pair.
 
 | Artifact | Written by | Read by |
 |----------|-----------|---------|

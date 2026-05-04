@@ -7,7 +7,7 @@ to produce fully resolved scenario files.
 import yaml
 from pathlib import Path
 
-from pipeline.lib.values import _deep_merge
+from pipeline.lib.values import deep_merge
 
 
 def assemble_scenarios(
@@ -30,7 +30,7 @@ def assemble_scenarios(
     """
     baseline = yaml.safe_load(baseline_path.read_text()) or {}
     baseline_overlay = yaml.safe_load(baseline_overlay_path.read_text()) or {} if baseline_overlay_path.exists() else {}
-    baseline_resolved = _deep_merge(baseline, baseline_overlay)
+    baseline_resolved = deep_merge(baseline, baseline_overlay)
 
     treatment_diffs = {}
     if treatment_path is not None and treatment_path.exists():
@@ -38,7 +38,7 @@ def assemble_scenarios(
 
     treatment_overlay = yaml.safe_load(treatment_overlay_path.read_text()) or {} if treatment_overlay_path.exists() else {}
 
-    treatment_resolved = _deep_merge(baseline_resolved, treatment_diffs)
-    treatment_resolved = _deep_merge(treatment_resolved, treatment_overlay)
+    treatment_resolved = deep_merge(baseline_resolved, treatment_diffs)
+    treatment_resolved = deep_merge(treatment_resolved, treatment_overlay)
 
     return baseline_resolved, treatment_resolved

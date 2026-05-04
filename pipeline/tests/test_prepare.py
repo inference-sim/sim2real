@@ -657,10 +657,10 @@ class TestValidateAssembly:
         register_path = repo / "llm-d-inference-scheduler" / "pkg" / "plugins" / "register.go"
         register_path.write_text('Register("test-scorer", NewTestScorer)')
 
-        # Create treatment-pipeline.yaml with plugin type
-        pkg_dir = run_dir / "cluster" / "treatment"
-        pkg_dir.mkdir(parents=True)
-        (pkg_dir / "treatment-pipeline.yaml").write_text("- type: test-scorer\n")
+        # Create treatment.yaml with plugin type
+        cluster_dir = run_dir / "cluster"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        (cluster_dir / "treatment.yaml").write_text("- type: test-scorer\n")
 
         # Create treatment_config with correct kind
         (run_dir / "generated").mkdir(parents=True, exist_ok=True)
@@ -693,16 +693,16 @@ class TestValidateAssembly:
         register_path = repo / "llm-d-inference-scheduler" / "pkg" / "plugins" / "register.go"
         register_path.write_text('Register("test-scorer", NewTestScorer)')
 
-        # Create treatment-pipeline.yaml with the plugin type so Check 2 passes
-        pkg_dir = run_dir / "cluster" / "treatment"
-        pkg_dir.mkdir(parents=True)
-        (pkg_dir / "treatment-pipeline.yaml").write_text("- type: missing-scorer\n")
+        # Create treatment.yaml with the plugin type so Check 2 passes
+        cluster_dir = run_dir / "cluster"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        (cluster_dir / "treatment.yaml").write_text("- type: missing-scorer\n")
 
         with pytest.raises(SystemExit):
             mod._validate_assembly(run_dir, resolved)
 
     def test_fails_plugin_type_not_in_pipeline(self, repo):
-        """Check 2 now reads treatment-pipeline.yaml, not epp.yaml."""
+        """Check 2 reads cluster/treatment.yaml for plugin_type."""
         mod = _import_prepare_with_root(repo)
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -722,10 +722,10 @@ class TestValidateAssembly:
         register_path = repo / "llm-d-inference-scheduler" / "pkg" / "plugins" / "register.go"
         register_path.write_text('Register("test-scorer", NewTestScorer)')
 
-        # treatment-pipeline.yaml does NOT contain the plugin type
-        pkg_dir = run_dir / "cluster" / "treatment"
-        pkg_dir.mkdir(parents=True)
-        (pkg_dir / "treatment-pipeline.yaml").write_text("- type: other-scorer\n")
+        # treatment.yaml does NOT contain the plugin type
+        cluster_dir = run_dir / "cluster"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        (cluster_dir / "treatment.yaml").write_text("- type: other-scorer\n")
 
         with pytest.raises(SystemExit):
             mod._validate_assembly(run_dir, resolved)
@@ -750,10 +750,10 @@ class TestValidateAssembly:
         register_path = repo / "llm-d-inference-scheduler" / "pkg" / "plugins" / "register.go"
         register_path.write_text('Register("test-scorer", NewTestScorer)')
 
-        # treatment-pipeline.yaml contains the plugin type
-        pkg_dir = run_dir / "cluster" / "treatment"
-        pkg_dir.mkdir(parents=True)
-        (pkg_dir / "treatment-pipeline.yaml").write_text("- type: test-scorer\n")
+        # treatment.yaml contains the plugin type
+        cluster_dir = run_dir / "cluster"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        (cluster_dir / "treatment.yaml").write_text("- type: test-scorer\n")
 
         # treatment_config has wrong kind
         (run_dir / "generated").mkdir(parents=True, exist_ok=True)
@@ -782,10 +782,10 @@ class TestValidateAssembly:
         register_path = repo / "llm-d-inference-scheduler" / "pkg" / "plugins" / "register.go"
         register_path.write_text('Register("test-scorer", NewTestScorer)')
 
-        # treatment-pipeline.yaml contains the plugin type
-        pkg_dir = run_dir / "cluster" / "treatment"
-        pkg_dir.mkdir(parents=True)
-        (pkg_dir / "treatment-pipeline.yaml").write_text("- type: test-scorer\n")
+        # treatment.yaml contains the plugin type
+        cluster_dir = run_dir / "cluster"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        (cluster_dir / "treatment.yaml").write_text("- type: test-scorer\n")
 
         with pytest.raises(SystemExit):
             mod._validate_assembly(run_dir, resolved)
@@ -806,9 +806,9 @@ class TestValidateAssembly:
         }
         (run_dir / "translation_output.json").write_text(json.dumps(output))
 
-        pkg_dir = run_dir / "cluster" / "treatment"
-        pkg_dir.mkdir(parents=True)
-        (pkg_dir / "treatment-pipeline.yaml").write_text("type: test-scorer\n")
+        cluster_dir = run_dir / "cluster"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        (cluster_dir / "treatment.yaml").write_text("type: test-scorer\n")
         (run_dir / "generated").mkdir(parents=True, exist_ok=True)
         _write_yaml(run_dir / "generated" / "treatment_config.yaml", {"kind": "EndpointPickerConfig"})
 
@@ -818,8 +818,8 @@ class TestValidateAssembly:
 
         mod._validate_assembly(run_dir, resolved)  # should not raise
 
-    def test_check2_uses_pipeline_yaml_not_epp(self, repo):
-        """Check 2 now reads treatment-pipeline.yaml, not epp.yaml."""
+    def test_check2_uses_treatment_yaml(self, repo):
+        """Check 2 reads cluster/treatment.yaml for plugin_type."""
         mod = _import_prepare_with_root(repo)
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -837,9 +837,9 @@ class TestValidateAssembly:
         register = repo / "llm-d-inference-scheduler" / "pkg" / "plugins" / "register.go"
         register.write_text('Register("test-scorer", NewTestScorer)')
 
-        pkg_dir = run_dir / "cluster" / "treatment"
-        pkg_dir.mkdir(parents=True)
-        (pkg_dir / "treatment-pipeline.yaml").write_text("type: test-scorer\n")
+        cluster_dir = run_dir / "cluster"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        (cluster_dir / "treatment.yaml").write_text("type: test-scorer\n")
         (run_dir / "generated").mkdir(parents=True, exist_ok=True)
         _write_yaml(run_dir / "generated" / "treatment_config.yaml", {"kind": "EndpointPickerConfig"})
 
@@ -864,9 +864,9 @@ class TestValidateAssembly:
         register = repo / "llm-d-inference-scheduler" / "pkg" / "plugins" / "register.go"
         register.write_text('Register("test-scorer", NewTestScorer)')
 
-        pkg_dir = run_dir / "cluster" / "treatment"
-        pkg_dir.mkdir(parents=True)
-        (pkg_dir / "treatment-pipeline.yaml").write_text("type: test-scorer\n")
+        cluster_dir = run_dir / "cluster"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        (cluster_dir / "treatment.yaml").write_text("type: test-scorer\n")
         # No treatment_config.yaml — but treatment_config_generated=False, so Check 3 is skipped
 
         mod._validate_assembly(run_dir, resolved)  # should not raise

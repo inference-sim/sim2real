@@ -1,6 +1,26 @@
 """Tekton PipelineRun generation for sim2real."""
 import yaml
 
+_SPEC_BASE_DIR = "/workspace/source/llm-d-benchmark"
+_SCENARIO_FILE_PATH = "/tmp/llmdbench-config/scenario.yaml"
+
+
+def _default_spec_content(base_dir: str = _SPEC_BASE_DIR,
+                          scenario_file: str = _SCENARIO_FILE_PATH) -> str:
+    """Return the llmdbenchmark spec content string with PVC paths."""
+    return (
+        f"base_dir: {base_dir}\n"
+        f"\n"
+        f"values_file:\n"
+        f"  path: {base_dir}/config/templates/values/defaults.yaml\n"
+        f"\n"
+        f"template_dir:\n"
+        f"  path: {base_dir}/config/templates/jinja\n"
+        f"\n"
+        f"scenario_file:\n"
+        f"  path: {scenario_file}\n"
+    )
+
 
 def _apply_workspace_bindings(ws_names: list, bindings: dict) -> list:
     """Map workspace names to their PVC/secret bindings.
@@ -21,12 +41,15 @@ def make_pipelinerun_scenario(
     pipeline_name: str,
     scenario_content: str,
     workspace_bindings: dict | None = None,
+    spec_content: str | None = None,
 ) -> dict:
     """Generate a PipelineRun with resolved scenario content.
 
     Replaces gaieConfig + inferenceObjectives with a single scenarioContent
     param containing the fully resolved llmdbenchmark scenario YAML.
     """
+    if spec_content is None:
+        spec_content = _default_spec_content()
     wl_name = workload.get("name", workload.get("workload_name", "unknown"))
     safe_name = wl_name.replace("_", "-")
     pr_name = f"{phase}-{safe_name}-{run_name}"
@@ -42,6 +65,7 @@ def make_pipelinerun_scenario(
             {"name": "namespace",         "value": namespace},
             {"name": "phase",             "value": phase},
             {"name": "scenarioContent",   "value": scenario_content},
+            {"name": "specContent",       "value": spec_content},
             {"name": "workloadName",      "value": wl_name},
             {"name": "workloadSpec",      "value": wl_spec_str},
         ],

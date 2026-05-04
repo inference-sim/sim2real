@@ -331,19 +331,27 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     baseline_overlay = run_dir / "generated" / "baseline_config.yaml"
     treatment_overlay = run_dir / "generated" / "treatment_config.yaml"
 
-    baseline_resolved, treatment_resolved = assemble_scenarios(
-        baseline_path=baseline_path,
-        treatment_path=treatment_path if treatment_path.exists() else None,
-        baseline_overlay_path=baseline_overlay,
-        treatment_overlay_path=treatment_overlay,
-    )
+    try:
+        baseline_resolved, treatment_resolved = assemble_scenarios(
+            baseline_path=baseline_path,
+            treatment_path=treatment_path if treatment_path.exists() else None,
+            baseline_overlay_path=baseline_overlay,
+            treatment_overlay_path=treatment_overlay,
+        )
+    except yaml.YAMLError as e:
+        err(f"YAML parse error during scenario assembly: {e}")
+        sys.exit(1)
 
     # 4b.5: Inject deterministic EPP image into treatment scenario
     # The image tag is deterministic: {registry}/{repo_name}:{run_name} — same as
     # what build-epp.sh pushes. Read from run_metadata.json (written by setup.py).
     meta_path = run_dir / "run_metadata.json"
     if meta_path.exists():
-        meta = json.loads(meta_path.read_text())
+        try:
+            meta = json.loads(meta_path.read_text())
+        except json.JSONDecodeError as e:
+            err(f"run_metadata.json is not valid JSON: {e}. Re-run setup.py.")
+            sys.exit(1)
         registry = meta.get("registry", "")
         repo_name = meta.get("repo_name", "llm-d-inference-scheduler")
         run_name_tag = run_dir.name
@@ -354,9 +362,12 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
                 "pullPolicy": "Always",
             }
             scenario_list = treatment_resolved.get("scenario", [])
-            for entry in scenario_list:
-                entry.setdefault("images", {})["inferenceScheduler"] = epp_img
-            ok(f"EPP image injected: {registry}/{repo_name}:{run_name_tag}")
+            if not scenario_list:
+                warn("treatment has no 'scenario' entries — EPP image not injected")
+            else:
+                for entry in scenario_list:
+                    entry.setdefault("images", {})["inferenceScheduler"] = epp_img
+                ok(f"EPP image injected: {registry}/{repo_name}:{run_name_tag}")
 
     # 4c: Write resolved scenarios
     cluster_dir = run_dir / "cluster"
@@ -373,7 +384,14 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     workloads = []
     for wl_path_str in manifest.get("workloads", []):
         wl_path = EXPERIMENT_ROOT / wl_path_str
-        wl_data = yaml.safe_load(wl_path.read_text())
+        if not wl_path.exists():
+            err(f"Workload file not found: {wl_path}")
+            sys.exit(1)
+        try:
+            wl_data = yaml.safe_load(wl_path.read_text())
+        except yaml.YAMLError as e:
+            err(f"Invalid YAML in workload file {wl_path}: {e}")
+            sys.exit(1)
         if "name" not in wl_data and "workload_name" not in wl_data:
             wl_data["workload_name"] = Path(wl_path_str).stem
         if multiplier > 1 and "num_requests" in wl_data:
@@ -438,6 +456,7 @@ def _verify_generated_dir(run_dir: Path):
 
     output_path = run_dir / "translation_output.json"
     if not output_path.exists():
+        warn("translation_output.json not found — skipping generated file verification")
         return
 
     try:
@@ -453,7 +472,14 @@ def _verify_generated_dir(run_dir: Path):
 
 def _validate_assembly(run_dir: Path, resolved: dict):
     """Phase 4g: Deterministic consistency checks."""
-    output = json.loads((run_dir / "translation_output.json").read_text())
+    output_path = run_dir / "translation_output.json"
+    if not output_path.exists():
+        return
+    try:
+        output = json.loads(output_path.read_text())
+    except json.JSONDecodeError:
+        warn("translation_output.json is not valid JSON — skipping validation")
+        return
     plugin_type = output["plugin_type"]
     config_cfg = resolved.get("config", {})
     target = resolved.get("target", {})
@@ -480,16 +506,15 @@ def _validate_assembly(run_dir: Path, resolved: dict):
         else:
             errors.append(f"register_file not found on disk: {register_file}")
 
-    # Check 2: plugin_type string present inside treatment-pipeline.yaml
-    # (EPP config is embedded in the compiled Pipeline YAML — no separate epp.yaml)
+    # Check 2: plugin_type string present inside treatment scenario YAML
     # Skip when treatment_config_generated=False: baseline config is copied instead,
-    # and plugin_type may not appear in the treatment pipeline YAML.
+    # and plugin_type may not appear in the treatment YAML.
     if treatment_config_generated:
-        pipeline_yaml = run_dir / "cluster" / "treatment" / "treatment-pipeline.yaml"
-        if pipeline_yaml.exists():
-            if plugin_type not in pipeline_yaml.read_text():
+        treatment_yaml = run_dir / "cluster" / "treatment.yaml"
+        if treatment_yaml.exists():
+            if plugin_type not in treatment_yaml.read_text():
                 errors.append(
-                    f"plugin_type '{plugin_type}' not found in treatment-pipeline.yaml")
+                    f"plugin_type '{plugin_type}' not found in treatment.yaml")
 
     # Check 3: treatment_config kind matches scenario (only if custom config generated)
     if treatment_config_generated and config_cfg.get("kind"):

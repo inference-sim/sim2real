@@ -1,7 +1,7 @@
 """Tests for pipeline/lib/values.py — deep-merge logic."""
 
 from pipeline.lib.values import (
-    _deep_merge,
+    deep_merge,
     _merge_lists,
 )
 
@@ -46,33 +46,33 @@ class TestMergeLists:
         assert result[1]["a"] == 2
 
 
-# ── _deep_merge ───────────────────────────────────────────────────────────────
+# ── deep_merge ───────────────────────────────────────────────────────────────
 
 class TestDeepMerge:
     def test_nested_dict_merge(self):
         base = {"a": {"b": 1, "c": 2}}
         overlay = {"a": {"b": 99}}
-        result = _deep_merge(base, overlay)
+        result = deep_merge(base, overlay)
         assert result == {"a": {"b": 99, "c": 2}}
 
     def test_overlay_adds_new_key(self):
-        result = _deep_merge({"a": 1}, {"b": 2})
+        result = deep_merge({"a": 1}, {"b": 2})
         assert result == {"a": 1, "b": 2}
 
     def test_does_not_mutate_base(self):
         base = {"a": {"b": 1}}
         overlay = {"a": {"b": 2}}
-        _deep_merge(base, overlay)
+        deep_merge(base, overlay)
         assert base == {"a": {"b": 1}}
 
     def test_does_not_mutate_overlay(self):
         base = {"a": {"b": 1}}
         overlay = {"a": {"b": 2}}
-        _deep_merge(base, overlay)
+        deep_merge(base, overlay)
         assert overlay == {"a": {"b": 2}}
 
     def test_list_delegated_to_merge_lists(self):
         base = {"items": [{"name": "x", "v": 1}]}
         overlay = {"items": [{"name": "x", "v": 99}]}
-        result = _deep_merge(base, overlay)
+        result = deep_merge(base, overlay)
         assert result["items"] == [{"name": "x", "v": 99}]

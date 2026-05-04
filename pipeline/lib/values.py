@@ -47,7 +47,7 @@ def _merge_lists(base_list: list, overlay_list: list) -> list:
             k = bitem[key_field]
             seen_keys.add(k)
             if k in overlay_by_key:
-                result.append(_deep_merge(bitem, overlay_by_key[k]))
+                result.append(deep_merge(bitem, overlay_by_key[k]))
             else:
                 result.append(copy.deepcopy(bitem))
         for oitem in overlay_list:
@@ -59,7 +59,7 @@ def _merge_lists(base_list: list, overlay_list: list) -> list:
     result = []
     for i in range(max(len(base_list), len(overlay_list))):
         if i < len(base_list) and i < len(overlay_list):
-            result.append(_deep_merge(base_list[i], overlay_list[i]))
+            result.append(deep_merge(base_list[i], overlay_list[i]))
         elif i < len(base_list):
             result.append(copy.deepcopy(base_list[i]))
         else:
@@ -67,7 +67,7 @@ def _merge_lists(base_list: list, overlay_list: list) -> list:
     return result
 
 
-def _deep_merge(base: dict, overlay: dict) -> dict:
+def deep_merge(base: dict, overlay: dict) -> dict:
     """Deep-merge overlay onto base. Dict keys merged recursively.
 
     Lists of dicts are merged by named key or positional index (see _merge_lists).
@@ -76,7 +76,7 @@ def _deep_merge(base: dict, overlay: dict) -> dict:
     result = copy.deepcopy(base)
     for key, oval in overlay.items():
         if key in result and isinstance(result[key], dict) and isinstance(oval, dict):
-            result[key] = _deep_merge(result[key], oval)
+            result[key] = deep_merge(result[key], oval)
         elif key in result and isinstance(result[key], list) and isinstance(oval, list):
             result[key] = _merge_lists(result[key], oval)
         else:
