@@ -1,7 +1,6 @@
 """Tests for prepare.py — Phase 1 (Init), Phase 3 (Translation Checkpoint), validate-assembly."""
 import json
 import pytest
-import warnings
 import yaml
 
 from pipeline.lib.state_machine import StateMachine
@@ -26,28 +25,8 @@ MINIMAL_MANIFEST = {
         "kind": "EndpointPickerConfig",
         "helm_path": "gaie.treatment.helmValues.inferenceExtension.pluginsCustomConfig.custom-plugins.yaml",
     },
-}
-
-MINIMAL_ENV_DEFAULTS = {
-    "common": {
-        "observe": {"request_multiplier": 10},
-        "build": {
-            "commands": [["go", "build", "./..."]],
-        },
-    },
-    "scenarios": {
-        "routing": {
-            "target": {
-                "repo": "llm-d-inference-scheduler",
-            },
-            "build": {},
-            "config": {
-                "kind": "EndpointPickerConfig",
-                "helm_path": "gaie.treatment.helmValues.inferenceExtension.pluginsCustomConfig.custom-plugins.yaml",
-            },
-            "gaie": {"baseline": {"helmValues": {}}},
-        },
-    },
+    "observe": {"request_multiplier": 10},
+    "build": {"commands": [["go", "build", "./..."]]},
 }
 
 
@@ -76,7 +55,6 @@ def _init_git_repo(path):
 def repo(tmp_path):
     """Set up a minimal repo layout for prepare.py testing."""
     # Config files
-    _write_yaml(tmp_path / "config" / "env_defaults.yaml", MINIMAL_ENV_DEFAULTS)
     manifest_data = dict(MINIMAL_MANIFEST)
     _write_yaml(tmp_path / "config" / "transfer.yaml", manifest_data)
 
@@ -206,8 +184,8 @@ class TestPhaseInit:
         with pytest.raises(SystemExit):
             mod._phase_init(Args(), manifest, run_dir)
 
-    def test_init_unknown_scenario_no_env_defaults(self, repo):
-        """Unknown scenario is OK when env_defaults.yaml is absent (new flow)."""
+    def test_init_unknown_scenario_succeeds(self, repo):
+        """Unknown scenario no longer requires matching env_defaults entry."""
         mod = _import_prepare_with_root(repo)
         manifest = dict(MINIMAL_MANIFEST)
         manifest["scenario"] = "unknown_scenario"
@@ -567,9 +545,8 @@ class TestPhaseTranslate:
             mod._phase_translate(Args(), state, manifest, run_dir, resolved, context_path)
 
         si = json.loads((run_dir / "skill_input.json").read_text())
-        # Should only have the build commands from config, not test appended
+        # Should only have the build commands from manifest, not test appended
         build_cmds = si["build_commands"]
-        # From MINIMAL_ENV_DEFAULTS, common.build.commands has [["go", "build", "./..."]]
         assert len(build_cmds) == 1
         assert build_cmds[0] == ["go", "build", "./..."]
         # Should NOT have go test appended
@@ -664,7 +641,7 @@ class TestValidateAssembly:
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]
+        resolved = {"target": {"repo": "llm-d-inference-scheduler"}, "config": {"kind": "EndpointPickerConfig"}}
 
         # Set up translation output
         output = {
@@ -701,7 +678,7 @@ class TestValidateAssembly:
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]
+        resolved = {"target": {"repo": "llm-d-inference-scheduler"}, "config": {"kind": "EndpointPickerConfig"}}
 
         output = {
             "plugin_type": "missing-scorer",
@@ -730,7 +707,7 @@ class TestValidateAssembly:
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]
+        resolved = {"target": {"repo": "llm-d-inference-scheduler"}, "config": {"kind": "EndpointPickerConfig"}}
 
         output = {
             "plugin_type": "test-scorer",
@@ -758,7 +735,7 @@ class TestValidateAssembly:
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]
+        resolved = {"target": {"repo": "llm-d-inference-scheduler"}, "config": {"kind": "EndpointPickerConfig"}}
 
         output = {
             "plugin_type": "test-scorer",
@@ -790,7 +767,7 @@ class TestValidateAssembly:
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]
+        resolved = {"target": {"repo": "llm-d-inference-scheduler"}, "config": {"kind": "EndpointPickerConfig"}}
 
         output = {
             "plugin_type": "test-scorer",
@@ -819,7 +796,7 @@ class TestValidateAssembly:
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]
+        resolved = {"target": {"repo": "llm-d-inference-scheduler"}, "config": {"kind": "EndpointPickerConfig"}}
         output = {
             "plugin_type": "test-scorer",
             "files_created": [],
@@ -847,7 +824,7 @@ class TestValidateAssembly:
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]
+        resolved = {"target": {"repo": "llm-d-inference-scheduler"}, "config": {"kind": "EndpointPickerConfig"}}
         output = {
             "plugin_type": "test-scorer",
             "files_created": [],
@@ -874,7 +851,7 @@ class TestValidateAssembly:
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]
+        resolved = {"target": {"repo": "llm-d-inference-scheduler"}, "config": {"kind": "EndpointPickerConfig"}}
         output = {
             "plugin_type": "test-scorer",
             "files_created": [],
@@ -898,21 +875,6 @@ class TestValidateAssembly:
 # ── Config resolution ───────────────────────────────────────────────────────
 
 class TestConfigResolution:
-    def test_deep_merge(self, repo):
-        mod = _import_prepare_with_root(repo)
-        base = {"a": 1, "nested": {"x": 1, "y": 2}}
-        overlay = {"b": 2, "nested": {"y": 3, "z": 4}}
-        result = mod._deep_merge(base, overlay)
-        assert result == {"a": 1, "b": 2, "nested": {"x": 1, "y": 3, "z": 4}}
-
-    def test_deep_merge_does_not_mutate(self, repo):
-        mod = _import_prepare_with_root(repo)
-        base = {"nested": {"x": 1}}
-        overlay = {"nested": {"x": 2}}
-        result = mod._deep_merge(base, overlay)
-        assert base["nested"]["x"] == 1
-        assert result["nested"]["x"] == 2
-
     def test_load_resolved_config(self, repo):
         mod = _import_prepare_with_root(repo)
         manifest = dict(MINIMAL_MANIFEST)
@@ -923,341 +885,6 @@ class TestConfigResolution:
         assert resolved["config"]["kind"] == "EndpointPickerConfig"
 
 
-# ── _generate_algorithm_values ──────────────────────────────────────────────
-
-class TestGenerateAlgorithmValues:
-    def test_embeds_treatment_config_when_generated(self, repo):
-        """treatment_config_generated=true → treatment slot gets custom EPP config."""
-        mod = _import_prepare_with_root(repo)
-        run_dir = repo / "workspace" / "runs" / "test-run"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "translation_output.json").write_text(json.dumps({
-            "plugin_type": "test-scorer",
-            "treatment_config_generated": True,
-        }))
-        tc_yaml = "kind: EndpointPickerConfig\npluginType: test-scorer\n"
-        (run_dir / "generated").mkdir(parents=True, exist_ok=True)
-        (run_dir / "generated" / "treatment_config.yaml").write_text(tc_yaml)
-
-        manifest = dict(MINIMAL_MANIFEST)
-        resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]
-        out_path = run_dir / "algorithm_values.yaml"
-
-        mod._generate_algorithm_values(manifest, resolved, out_path)
-        result = yaml.safe_load(out_path.read_text())
-        custom = (result["stack"]["gaie"]["treatment"]["helmValues"]
-                  ["inferenceExtension"]["pluginsCustomConfig"])
-        assert custom["custom-plugins.yaml"] == tc_yaml
-
-    def test_copies_baseline_config_when_not_generated(self, repo):
-        """treatment_config_generated=false → baseline EPP config copied to treatment."""
-        mod = _import_prepare_with_root(repo)
-        run_dir = repo / "workspace" / "runs" / "test-run"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "translation_output.json").write_text(json.dumps({
-            "plugin_type": "test-scorer",
-            "treatment_config_generated": False,
-        }))
-
-        baseline_cfg = {"custom-plugins.yaml": "baseline epp config"}
-        manifest = dict(MINIMAL_MANIFEST)
-        resolved = {
-            **MINIMAL_ENV_DEFAULTS["scenarios"]["routing"],
-            "stack": {
-                "gaie": {
-                    "baseline": {
-                        "helmValues": {
-                            "inferenceExtension": {
-                                "pluginsCustomConfig": baseline_cfg
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        out_path = run_dir / "algorithm_values.yaml"
-
-        mod._generate_algorithm_values(manifest, resolved, out_path)
-        result = yaml.safe_load(out_path.read_text())
-        custom = (result["stack"]["gaie"]["treatment"]["helmValues"]
-                  ["inferenceExtension"]["pluginsCustomConfig"])
-        assert custom == baseline_cfg
-
-    def test_raises_when_treatment_config_missing(self, repo):
-        """treatment_config_generated=true but no treatment_config.yaml → RuntimeError."""
-        mod = _import_prepare_with_root(repo)
-        run_dir = repo / "workspace" / "runs" / "test-run"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "translation_output.json").write_text(json.dumps({
-            "plugin_type": "test-scorer",
-            "treatment_config_generated": True,
-        }))
-
-        manifest = dict(MINIMAL_MANIFEST)
-        resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]
-        out_path = run_dir / "algorithm_values.yaml"
-
-        with pytest.raises(RuntimeError, match="generated/treatment_config.yaml"):
-            mod._generate_algorithm_values(manifest, resolved, out_path)
-
-    def test_warns_when_no_baseline_and_not_generated(self, repo):
-        """treatment_config_generated=false, baseline has no EPP config → warning emitted."""
-        mod = _import_prepare_with_root(repo)
-        run_dir = repo / "workspace" / "runs" / "test-run"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "translation_output.json").write_text(json.dumps({
-            "plugin_type": "test-scorer",
-            "treatment_config_generated": False,
-        }))
-
-        manifest = dict(MINIMAL_MANIFEST)
-        resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]  # gaie.baseline has no pluginsCustomConfig
-        out_path = run_dir / "algorithm_values.yaml"
-
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            mod._generate_algorithm_values(manifest, resolved, out_path)
-        texts = [str(warning.message) for warning in w]
-        assert any("treatment pluginsCustomConfig" in t for t in texts)
-
-    def test_emits_blis_commit_when_git_succeeds(self, repo):
-        """observe.blis_commit is set from inference-sim HEAD when git succeeds."""
-        import subprocess
-        inf_sim = repo / "inference-sim"
-        expected_sha = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=inf_sim, capture_output=True, text=True
-        ).stdout.strip()
-
-        run_dir = repo / "workspace" / "runs" / "test-run"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "translation_output.json").write_text(json.dumps({
-            "plugin_type": "test-scorer",
-            "treatment_config_generated": False,
-        }))
-
-        mod = _import_prepare_with_root(repo)
-        out_path = run_dir / "algorithm_values.yaml"
-        mod._generate_algorithm_values(dict(MINIMAL_MANIFEST), MINIMAL_ENV_DEFAULTS["scenarios"]["routing"], out_path)
-
-        result = yaml.safe_load(out_path.read_text())
-        assert result["observe"]["blis_commit"] == expected_sha
-        assert "image" not in result["observe"]
-
-    def test_raises_when_blis_commit_empty(self, repo):
-        """_generate_algorithm_values raises RuntimeError when git rev-parse returns empty output."""
-        from unittest.mock import patch, MagicMock
-        run_dir = repo / "workspace" / "runs" / "test-run"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "translation_output.json").write_text(json.dumps({
-            "plugin_type": "test-scorer",
-            "treatment_config_generated": False,
-        }))
-
-        mod = _import_prepare_with_root(repo)
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = ""
-        with patch.object(mod, "run", return_value=mock_result):
-            with pytest.raises(RuntimeError, match="empty output"):
-                mod._generate_algorithm_values(
-                    dict(MINIMAL_MANIFEST), MINIMAL_ENV_DEFAULTS["scenarios"]["routing"],
-                    run_dir / "algorithm_values.yaml",
-                )
-
-    def test_raises_when_git_fails(self, repo):
-        """_generate_algorithm_values raises RuntimeError when git rev-parse fails."""
-        import shutil
-        # Remove .git so git rev-parse HEAD fails (no git repo, but dir still exists)
-        shutil.rmtree(repo / "inference-sim" / ".git")
-        run_dir = repo / "workspace" / "runs" / "test-run"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "translation_output.json").write_text(json.dumps({
-            "plugin_type": "test-scorer",
-            "treatment_config_generated": False,
-        }))
-
-        mod = _import_prepare_with_root(repo)
-        out_path = run_dir / "algorithm_values.yaml"
-        with pytest.raises(RuntimeError, match="inference-sim commit"):
-            mod._generate_algorithm_values(dict(MINIMAL_MANIFEST), MINIMAL_ENV_DEFAULTS["scenarios"]["routing"], out_path)
-
-
-# ── _compile_cluster_packages ───────────────────────────────────────────────
-
-class TestCompileClusterPackages:
-    def test_no_epp_yaml_generated(self, repo):
-        """epp.yaml must NOT be generated."""
-        mod = _import_prepare_with_root(repo)
-        run_dir = repo / "workspace" / "runs" / "test-run"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        values_path = run_dir / "values.yaml"
-        values_path.write_text(yaml.dump({
-            "observe": {"workloads": [{"name": "wl1", "num_requests": 10}]},
-            "gaie": {"baseline": {}, "treatment": {}},
-        }))
-        setup_config = {"namespace": "sim2real"}
-
-        class Args:
-            pipeline_template = None
-
-        mod._compile_cluster_packages(Args(), run_dir, {}, values_path, setup_config)
-
-        assert not (run_dir / "cluster" / "baseline" / "epp.yaml").exists()
-        assert not (run_dir / "cluster" / "treatment" / "epp.yaml").exists()
-
-    def test_pipelinerun_yaml_per_phase(self, repo):
-        """One pipelinerun-{phase}.yaml per package (baseline and treatment)."""
-        from unittest.mock import patch as _patch
-        mod = _import_prepare_with_root(repo)
-        # Create tektonc_dir so the compile_pipeline branch is taken
-        (repo / "tektonc-data-collection" / "tektoncsample" / "sim2real").mkdir(parents=True)
-        run_dir = repo / "workspace" / "runs" / "test-run"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        values_path = run_dir / "values.yaml"
-        values_path.write_text(yaml.dump({
-            "observe": {
-                "workloads": [
-                    {"name": "bursty", "num_requests": 50},
-                    {"name": "steady", "num_requests": 100},
-                ]
-            },
-        }))
-        setup_config = {"namespace": "test-ns"}
-
-        _MINIMAL_PIPELINE = {
-            "apiVersion": "tekton.dev/v1", "kind": "Pipeline",
-            "metadata": {"name": "test-pipeline"},
-            "spec": {
-                "params": [
-                    {"name": "workloadName", "type": "string"},
-                    {"name": "workloadSpec", "type": "string"},
-                ],
-                "tasks": [{"name": "run-task", "taskRef": {"name": "t"},
-                            "params": [{"name": "workloadName",
-                                        "value": "$(params.workloadName)"}]}],
-            },
-        }
-
-        def _fake_compile(template_dir, values_path, phase, out_dir, **kwargs):
-            out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / f"{phase}-pipeline.yaml").write_text(
-                yaml.dump(_MINIMAL_PIPELINE, default_flow_style=False)
-            )
-            return True
-
-        class Args:
-            pipeline_template = None
-
-        with _patch.object(mod, "compile_pipeline", side_effect=_fake_compile):
-            mod._compile_cluster_packages(Args(), run_dir, {}, values_path, setup_config)
-
-        for phase in ["baseline", "treatment"]:
-            assert (run_dir / "cluster" / phase / f"pipelinerun-{phase}.yaml").exists()
-
-    def test_pipelinerun_content_is_valid_k8s(self, repo):
-        """PipelineRun YAML is a valid Tekton PipelineRun resource."""
-        from unittest.mock import patch as _patch
-        mod = _import_prepare_with_root(repo)
-        # Create tektonc_dir so the compile_pipeline branch is taken
-        (repo / "tektonc-data-collection" / "tektoncsample" / "sim2real").mkdir(parents=True)
-        run_dir = repo / "workspace" / "runs" / "my-run"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        values_path = run_dir / "values.yaml"
-        values_path.write_text(yaml.dump({
-            "observe": {"workloads": [{"name": "wl1", "num_requests": 5}]},
-        }))
-        setup_config = {"namespace": "myns"}
-
-        _MINIMAL_PIPELINE = {
-            "apiVersion": "tekton.dev/v1", "kind": "Pipeline",
-            "metadata": {"name": "test-pipeline"},
-            "spec": {
-                "params": [
-                    {"name": "workloadName", "type": "string"},
-                    {"name": "workloadSpec", "type": "string"},
-                ],
-                "tasks": [{"name": "run-task", "taskRef": {"name": "t"},
-                            "params": [{"name": "workloadName",
-                                        "value": "$(params.workloadName)"}]}],
-            },
-        }
-
-        def _fake_compile(template_dir, values_path, phase, out_dir, **kwargs):
-            out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / f"{phase}-pipeline.yaml").write_text(
-                yaml.dump(_MINIMAL_PIPELINE, default_flow_style=False)
-            )
-            return True
-
-        class Args:
-            pipeline_template = None
-
-        with _patch.object(mod, "compile_pipeline", side_effect=_fake_compile):
-            mod._compile_cluster_packages(Args(), run_dir, {}, values_path, setup_config)
-
-        pr_path = run_dir / "cluster" / "baseline" / "pipelinerun-baseline.yaml"
-        pr = yaml.safe_load(pr_path.read_text())
-        assert pr["apiVersion"] == "tekton.dev/v1"
-        assert pr["kind"] == "PipelineRun"
-        assert pr["metadata"]["namespace"] == "myns"
-        params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
-        assert params["workloadName-baseline-wl1"] == "wl1"
-        assert params["namespace"] == "myns"
-
-
-def test_compile_cluster_packages_parallel_creates_per_pair_pipelineruns(tmp_path, monkeypatch):
-    """Parallel mode generates one PipelineRun per (workload, package) pair."""
-    import yaml as _yaml
-    from unittest.mock import patch
-    from pipeline.prepare import _compile_cluster_packages_parallel
-
-    run_dir = tmp_path / "runs" / "sim2real-test"
-    run_dir.mkdir(parents=True)
-    values_path = run_dir / "values.yaml"
-    values_path.write_text(_yaml.dump({
-        "observe": {"workloads": [{"name": "wl-smoke"}, {"name": "wl-load"}]},
-        "stack": {
-            "gaie": {
-                "baseline":  {"helmValues": {}},
-                "treatment": {"helmValues": {}},
-                "inferenceObjectives": [],
-            }
-        },
-    }))
-    setup_config = {
-        "namespace": "sim2real-0",
-        "namespaces": ["sim2real-0", "sim2real-1"],
-        "workspaces": {"model-cache": {"persistentVolumeClaim": {"claimName": "model-pvc"}}},
-    }
-
-    def _fake_compile(template_dir, values_path, phase, out_dir, run_name="", **kwargs):
-        stub = out_dir / f"sim2real-{run_name}.yaml"
-        stub.write_text("# stub\n")
-        return True
-
-    with patch("pipeline.prepare.compile_pipeline", side_effect=_fake_compile):
-        _compile_cluster_packages_parallel(
-            run_dir=run_dir,
-            resolved={},
-            values_path=values_path,
-            setup_config=setup_config,
-            run_name="sim2real-test",
-            template_dir=tmp_path,
-        )
-
-    cluster_dir = run_dir / "cluster"
-    # Shared pipeline stub
-    assert (cluster_dir / "sim2real-sim2real-test.yaml").exists()
-
-    # One PipelineRun per pair
-    for wl in ["wl-smoke", "wl-load"]:
-        for pkg in ["baseline", "treatment"]:
-            pr_path = cluster_dir / f"wl-{wl}-{pkg}" / f"pipelinerun-{wl}-{pkg}.yaml"
-            assert pr_path.exists(), f"Missing: {pr_path}"
-            pr_data = _yaml.safe_load(pr_path.read_text())
-            params = {p["name"]: p["value"] for p in pr_data["spec"]["params"]}
-            assert params["phase"] == pkg
-            assert params["workloadName"] == wl
 
 
 class TestExperimentRootSeparation:
@@ -1275,7 +902,7 @@ class TestExperimentRootSeparation:
         return fw
 
     def _make_experiment(self, tmp_path):
-        """Create a minimal experiment repo (transfer.yaml and env_defaults.yaml at root)."""
+        """Create a minimal experiment repo (transfer.yaml at root)."""
         exp = tmp_path / "admission-control"
         manifest_data = {
             "kind": "sim2real-transfer",
@@ -1288,18 +915,6 @@ class TestExperimentRootSeparation:
             "config": {"kind": "AdmissionConfig", "helm_path": "x"},
         }
         _write_yaml(exp / "transfer.yaml", manifest_data)
-        env = {
-            "common": {"observe": {"request_multiplier": 1}},
-            "scenarios": {
-                "admission_control": {
-                    "target": {"repo": "llm-d-inference-scheduler"},
-                    "build": {},
-                    "config": {"kind": "AdmissionConfig", "helm_path": "x"},
-                    "gaie": {"baseline": {"helmValues": {}}},
-                },
-            },
-        }
-        _write_yaml(exp / "env_defaults.yaml", env)
         _write_text(exp / "algorithm" / "admission.go", "package main\n")
         _write_text(exp / "workloads" / "w1.yaml",
                     "version: '2'\nnum_requests: 10\naggregate_rate: 10\n")
@@ -1351,37 +966,6 @@ class TestExperimentRootSeparation:
         manifest = load_manifest(exp / "transfer.yaml")
         resolved = mod._load_resolved_config(manifest)
         assert resolved["target"]["repo"] == "llm-d-inference-scheduler"
-
-    def test_template_dir_resolves_framework_default(self, tmp_path):
-        fw = self._make_framework(tmp_path)
-        exp = self._make_experiment(tmp_path)
-
-        import importlib
-        import pipeline.prepare as mod
-        importlib.reload(mod)
-        self._patch(mod, fw, exp)
-
-        class Args:
-            pipeline_template = None
-
-        result = mod._resolve_template_dir(Args(), exp)
-        assert result == fw / "pipeline" / "templates"
-
-    def test_template_dir_resolves_experiment_override(self, tmp_path):
-        fw = self._make_framework(tmp_path)
-        exp = self._make_experiment(tmp_path)
-        _write_text(exp / "pipeline.yaml.j2", "# experiment override\n")
-
-        import importlib
-        import pipeline.prepare as mod
-        importlib.reload(mod)
-        self._patch(mod, fw, exp)
-
-        class Args:
-            pipeline_template = None
-
-        result = mod._resolve_template_dir(Args(), exp)
-        assert result == exp
 
     def test_workspace_created_in_experiment_root(self, tmp_path):
         """run_dir should be under EXPERIMENT_ROOT, not REPO_ROOT."""

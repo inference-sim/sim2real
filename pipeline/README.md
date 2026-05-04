@@ -22,8 +22,9 @@ python pipeline/deploy.py  --experiment-root ../admission-control
 ```
 
 The experiment repo must contain:
-- `transfer.yaml` (or `config/transfer.yaml` for backward compat)
-- `env_defaults.yaml` (or `config/env_defaults.yaml`)
+- `transfer.yaml` (or `config/transfer.yaml` for backward compat) — v3 schema with `target`, `config`, `observe`, `build`, `epp_image` fields
+- `baseline.yaml` — llmdbenchmark-style scenario file (required for Phase 4 assembly)
+- `treatment.yaml` (optional) — merged into `baseline.yaml` for the treatment scenario
 - `algorithm/` and `workloads/` directories as referenced in `transfer.yaml`
 - `workspace/` in `.gitignore`
 
@@ -78,13 +79,13 @@ python pipeline/prepare.py [--force] [--rebuild-context] [--manifest PATH] [--ru
 | 1 | Init — validate manifest + prerequisites | on re-run |
 | 2 | Context — assemble + cache context doc (SHA-256) | on cache hit |
 | 3 | **Translate checkpoint** — write `skill_input.json`, wait | resumes on re-run |
-| 4 | Assembly — `algorithm_values.yaml`, `values.yaml`, cluster YAMLs | on re-run |
+| 4 | Assembly — resolved scenarios, cluster YAMLs, PipelineRuns | on re-run |
 | 5 | Summary — write `run_summary.md` | on re-run |
 | 6 | **Gate** — `[d]eploy / [e]dit / [q]uit` | on re-run |
 
 **Phase 3 checkpoint**: writes `skill_input.json` and exits cleanly (exit 0). Run `/sim2real-translate` in Claude Code, then re-run `prepare.py` to continue from Phase 4.
 
-**Phase 4 assembly** resolves the `inference-sim` submodule HEAD commit (`git rev-parse HEAD`) and writes it as `observe.blis_commit` in `algorithm_values.yaml`. This value is rendered into the Tekton Pipeline template as the commit the `install-blis` task clones and builds. Fails hard if the submodule is not a valid git repository.
+**Phase 4 assembly** reads `baseline.yaml` and `treatment.yaml` from the experiment root, merges them with skill-generated overlay files (`generated/baseline_config.yaml`, `generated/treatment_config.yaml`), and writes resolved scenario files to `cluster/`. PipelineRuns are generated with a `scenarioContent` param containing the fully resolved scenario YAML. Workloads are loaded from the manifest and scaled by `observe.request_multiplier`.
 
 **Phase 6 gate**: `d` marks the run `READY TO DEPLOY` (required by `deploy.py`). `e` drops you back to edit files, then re-displays the summary. `q` marks `abandoned` and exits.
 
@@ -100,10 +101,6 @@ python pipeline/prepare.py validate-assembly   # run assembly checks standalone
 **`--force`** — ignores `.state.json` and regenerates all phases.
 
 **`--rebuild-context`** — ignores SHA cache and re-assembles context.
-
-**`--mode parallel`** (default) — generates one shared Pipeline + one PipelineRun per `(workload, package)` pair; required for `deploy.py run`.
-
-**`--mode sequential`** — preserves legacy single-experiment pipeline behavior (one Pipeline + one PipelineRun for the whole run).
 
 Phase state is tracked per-run in `workspace/runs/<run>/.state.json`. Delete it (or use `--force`) to reset.
 

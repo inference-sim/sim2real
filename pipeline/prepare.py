@@ -2,10 +2,10 @@
 """sim2real prepare — 6-phase state machine for algorithm transfer.
 
 Phases:
-  1. Init       — load manifest v2, resolve scenario config, validate prerequisites
+  1. Init       — load manifest v3, validate prerequisites
   2. Context    — assemble + cache context document
   3. Translate  — checkpoint: write skill_input.json, check for translation_output.json
-  4. Assembly   — treatment config, algorithm values, merge-values, cluster packages
+  4. Assembly   — assemble resolved scenarios, generate PipelineRuns
   5. Summary    — generate run_summary.md
   6. Gate       — human review: [d]eploy / [e]dit / [q]uit
 
@@ -16,7 +16,6 @@ import argparse
 import json
 import subprocess
 import sys
-import warnings
 import yaml
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,8 +28,8 @@ if str(_REPO_ROOT) not in sys.path:
 from pipeline.lib.manifest import load_manifest, ManifestError
 from pipeline.lib.state_machine import StateMachine
 from pipeline.lib.context_builder import build_context
-from pipeline.lib.values import _deep_merge, merge_values
-from pipeline.lib.tekton import compile_pipeline, make_experiment_pipeline, make_phase_pipeline, make_standby_pipeline, make_pipelinerun_parallel
+from pipeline.lib.tekton import make_pipelinerun_scenario
+from pipeline.lib.assemble import assemble_scenarios
 
 # ── Repo layout ──────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -39,18 +38,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 EXPERIMENT_ROOT = REPO_ROOT
 
 
-def _resolve_env_defaults(experiment_root: Path) -> Path:
-    """Resolve env_defaults.yaml: experiment root first, then config/ subdirectory.
-
-    .. deprecated::
-        env_defaults.yaml is replaced by baseline.yaml / treatment.yaml / transfer.yaml.
-        This function is retained only for backward compatibility with merge_values();
-        it will be removed when Phase 4 is rewritten (#26).
-    """
-    direct = experiment_root / "env_defaults.yaml"
-    if direct.exists():
-        return direct
-    return experiment_root / "config" / "env_defaults.yaml"
 
 
 def _resolve_manifest_default(experiment_root: Path) -> Path:
@@ -61,23 +48,6 @@ def _resolve_manifest_default(experiment_root: Path) -> Path:
     return experiment_root / "config" / "transfer.yaml"
 
 
-def _resolve_template_dir(args, experiment_root: Path) -> Path:
-    """Resolve Tekton pipeline template directory per spec resolution order.
-
-    1. --pipeline-template flag (explicit directory or parent of explicit file)
-    2. <experiment-root>/ if pipeline.yaml.j2 exists there
-    3. <sim2real>/pipeline/templates/ (framework default)
-    4. <sim2real>/tektonc-data-collection/tektoncsample/sim2real/ (legacy fallback)
-    """
-    if getattr(args, "pipeline_template", None):
-        p = Path(args.pipeline_template)
-        return p if p.is_dir() else p.parent
-    if (experiment_root / "pipeline.yaml.j2").exists():
-        return experiment_root
-    framework = REPO_ROOT / "pipeline" / "templates"
-    if (framework / "pipeline.yaml.j2").exists():
-        return framework
-    return REPO_ROOT / "tektonc-data-collection" / "tektoncsample" / "sim2real"
 
 
 def _display_path(p: Path) -> str:
@@ -133,29 +103,11 @@ def _load_setup_config() -> dict:
 
 
 def _load_resolved_config(manifest: dict) -> dict:
-    """Build resolved config from manifest fields.
-
-    In the old flow this loaded env_defaults.yaml and merged common + scenario.
-    Now the relevant fields live directly in transfer.yaml (loaded by manifest.py):
-    target, config, observe, build, epp_image.
-    """
-    env_path = _resolve_env_defaults(EXPERIMENT_ROOT)
-    if env_path.exists():
-        env_data = yaml.safe_load(env_path.read_text()) or {}
-        common = env_data.get("common", {})
-        scenarios = env_data.get("scenarios", {})
-        scenario = manifest["scenario"]
-        if scenario in scenarios:
-            resolved = _deep_merge(common, scenarios[scenario])
-        else:
-            resolved = dict(common)
-    else:
-        resolved = {}
-
+    """Build resolved config from manifest v3 fields (target, config, observe, build, epp_image)."""
+    resolved = {}
     for key in ("target", "config", "observe", "build", "epp_image"):
         if key in manifest:
             resolved[key] = manifest[key]
-
     return resolved
 
 
@@ -352,103 +304,67 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
 
 def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
                     resolved: dict):
-    """Phase 4: Assemble cluster artifacts from translation output."""
+    """Phase 4: Assemble resolved scenarios from baseline/treatment + overlays."""
     step(4, "Assembly")
 
     if state.is_done("assembly") and not args.force:
         info("[skip] Assembly already complete")
         return
 
-    # 4a: Validate treatment config
+    # 4a: Validate treatment config kind
+    config_kind = resolved.get("config", {}).get("kind")
     tc_path = run_dir / "generated" / "treatment_config.yaml"
-    if tc_path.exists():
+    if tc_path.exists() and config_kind:
         tc = yaml.safe_load(tc_path.read_text())
-        expected_kind = resolved.get("config", {}).get("kind")
-        if expected_kind and isinstance(tc, dict) and tc.get("kind") != expected_kind:
-            err(f"treatment_config kind mismatch: got '{tc.get('kind')}', expected '{expected_kind}'")
+        if isinstance(tc, dict) and tc.get("kind") != config_kind:
+            err(f"treatment_config kind mismatch: got '{tc.get('kind')}', expected '{config_kind}'")
             sys.exit(1)
         ok("Treatment config validated")
 
-    # 4b: Baseline config — from generated/baseline_config.yaml (if skill ran),
-    # otherwise falls back to env_defaults (scenarios.<scenario>.gaie.baseline)
-
-    # 4c: Generate algorithm_values.yaml
-    alg_values_path = run_dir / "algorithm_values.yaml"
-    try:
-        _generate_algorithm_values(manifest, resolved, alg_values_path)
-    except RuntimeError as e:
-        err(str(e))
+    # 4b: Assemble scenarios
+    baseline_path = EXPERIMENT_ROOT / "baseline.yaml"
+    if not baseline_path.exists():
+        err(f"baseline.yaml not found: {baseline_path}. "
+            f"Create baseline.yaml in the experiment root.")
         sys.exit(1)
-    ok(f"Algorithm values: {_display_path(alg_values_path)}")
+    treatment_path = EXPERIMENT_ROOT / "treatment.yaml"
+    baseline_overlay = run_dir / "generated" / "baseline_config.yaml"
+    treatment_overlay = run_dir / "generated" / "treatment_config.yaml"
 
-    # 4c.5: Re-inject EPP image if one was already built for this run
-    meta_path = run_dir / "run_metadata.json"
-    if meta_path.exists():
-        meta = json.loads(meta_path.read_text())
-        epp_image = meta.get("epp_image", "")
-        if epp_image:
-            # epp_image is "hub/name:tag" — split on last colon for tag, then last slash for hub
-            tag = epp_image.rsplit(":", 1)[-1] if ":" in epp_image else ""
-            repo = epp_image.rsplit(":", 1)[0] if ":" in epp_image else epp_image
-            name = repo.rsplit("/", 1)[-1] if "/" in repo else repo
-            hub = repo.rsplit("/", 1)[0] if "/" in repo else ""
-            alg_values = yaml.safe_load(alg_values_path.read_text())
-            (alg_values
-                .setdefault("stack", {})
-                .setdefault("gaie", {})
-                .setdefault("treatment", {})
-                .setdefault("helmValues", {})
-                .setdefault("inferenceExtension", {})
-                ["image"]) = {"hub": hub, "name": name, "tag": tag, "pullPolicy": "Always"}
-            alg_values_path.write_text(yaml.dump(alg_values, default_flow_style=False, allow_unicode=True))
-            ok(f"EPP image re-injected: {epp_image}")
+    baseline_resolved, treatment_resolved = assemble_scenarios(
+        baseline_path=baseline_path,
+        treatment_path=treatment_path if treatment_path.exists() else None,
+        baseline_overlay_path=baseline_overlay,
+        treatment_overlay_path=treatment_overlay,
+    )
 
-    # 4d: Merge values
-    values_path = run_dir / "values.yaml"
-    try:
-        merge_values(
-            _resolve_env_defaults(EXPERIMENT_ROOT),
-            alg_values_path,
-            values_path,
-            scenario=manifest["scenario"],
-        )
-    except (FileNotFoundError, yaml.YAMLError, ValueError, OSError) as e:
-        err(f"merge-values failed: {e}")
-        sys.exit(1)
-    ok(f"Values merged: {_display_path(values_path)}")
+    # 4b.5: Inject EPP build image into treatment scenario
+    epp_build = manifest.get("epp_image", {}).get("build", {})
+    if epp_build.get("hub") and epp_build.get("name") and epp_build.get("tag"):
+        epp_img = {
+            "repository": f"{epp_build['hub']}/{epp_build['name']}",
+            "tag": epp_build["tag"],
+            "pullPolicy": epp_build.get("pullPolicy", "Always"),
+        }
+        scenario_list = treatment_resolved.get("scenario", [])
+        for entry in scenario_list:
+            entry.setdefault("images", {})["inferenceScheduler"] = epp_img
+        ok(f"EPP image injected: {epp_build['hub']}/{epp_build['name']}:{epp_build['tag']}")
 
-    # 4e: Compile cluster YAMLs per package
-    setup_config = _load_setup_config()
-    mode = getattr(args, "mode", "parallel")
-    if mode == "parallel":
-        tektonc_dir = _resolve_template_dir(args, EXPERIMENT_ROOT)
-        _compile_cluster_packages_parallel(
-            run_dir=run_dir,
-            resolved=resolved,
-            values_path=values_path,
-            setup_config=setup_config,
-            run_name=run_dir.name,
-            template_dir=tektonc_dir,
-        )
-    else:
-        _compile_cluster_packages(args, run_dir, resolved, values_path, setup_config)
+    # 4c: Write resolved scenarios
+    cluster_dir = run_dir / "cluster"
+    cluster_dir.mkdir(parents=True, exist_ok=True)
 
-    # 4f: Verify generated/ directory (created by translation skill)
-    _verify_generated_dir(run_dir)
+    baseline_out = cluster_dir / "baseline.yaml"
+    treatment_out = cluster_dir / "treatment.yaml"
+    baseline_out.write_text(yaml.dump(baseline_resolved, default_flow_style=False, allow_unicode=True))
+    treatment_out.write_text(yaml.dump(treatment_resolved, default_flow_style=False, allow_unicode=True))
+    ok(f"Resolved scenarios: {_display_path(cluster_dir)}")
 
-    # 4g: validate-assembly
-    _validate_assembly(run_dir, resolved)
-
-    state.mark_done("assembly", packages=["baseline", "treatment"])
-    ok("Assembly complete")
-
-
-def _generate_algorithm_values(manifest: dict, resolved: dict, out_path: Path):
-    """Generate algorithm_values.yaml from manifest + resolved config."""
-    # Parse workloads
+    # 4d: Load and scale workloads
+    multiplier = manifest.get("observe", {}).get("request_multiplier", 1)
     workloads = []
-    multiplier = resolved.get("observe", {}).get("request_multiplier", 1)
-    for wl_path_str in manifest["workloads"]:
+    for wl_path_str in manifest.get("workloads", []):
         wl_path = EXPERIMENT_ROOT / wl_path_str
         wl_data = yaml.safe_load(wl_path.read_text())
         if "name" not in wl_data and "workload_name" not in wl_data:
@@ -457,297 +373,60 @@ def _generate_algorithm_values(manifest: dict, resolved: dict, out_path: Path):
             wl_data["num_requests"] = int(wl_data["num_requests"] * multiplier)
         workloads.append(wl_data)
 
-    # Resolve inference-sim commit SHA for install-blis task
-    inference_sim_dir = REPO_ROOT / "inference-sim"
-    blis_commit_result = run(
-        ["git", "rev-parse", "HEAD"],
-        check=False, capture=True, cwd=inference_sim_dir,
-    )
-    if blis_commit_result.returncode != 0:
-        raise RuntimeError(
-            f"Cannot resolve inference-sim commit: git rev-parse HEAD failed in {inference_sim_dir}"
-        )
-    blis_commit = blis_commit_result.stdout.strip()
-    if not blis_commit:
-        raise RuntimeError(
-            f"Cannot resolve inference-sim commit: git rev-parse HEAD returned empty output in {inference_sim_dir}"
-        )
-
-    # Build algorithm values
-    observe = {"workloads": workloads}
-    observe["blis_commit"] = blis_commit
-    # Set GAIE_RELEASE_NAME_POSTFIX so the kv-events-config endpoint resolves correctly.
-    # The EPP service is named sim2real-{run_name}-gaie-epp by the Tekton deploy-gaie task.
-    run_name = out_path.parent.name
-    alg_values = {
-        "stack": {
-            "model": {
-                "helmValues": {
-                    "decode": {
-                        "containers": [{"env": [{"name": "GAIE_RELEASE_NAME_POSTFIX",
-                                                 "value": f"sim2real-{run_name}"}]}],
-                    },
-                },
-            },
-        },
-        "observe": observe,
-    }
-
-    # Embed treatment EPP config based on treatment_config_generated flag
-    output_path = out_path.parent / "translation_output.json"
-    if output_path.exists():
-        translation_output = json.loads(output_path.read_text())
-        treatment_config_generated = translation_output.get("treatment_config_generated", False)
-    else:
-        treatment_config_generated = False
-
-    if treatment_config_generated:
-        tc_path = out_path.parent / "generated" / "treatment_config.yaml"
-        if not tc_path.exists():
-            raise RuntimeError(
-                f"treatment_config_generated=true but generated/treatment_config.yaml "
-                f"not found at {tc_path}")
-        tc_content = tc_path.read_text()
-        (alg_values["stack"]
-         .setdefault("gaie", {})
-         .setdefault("treatment", {})
-         .setdefault("helmValues", {})
-         .setdefault("inferenceExtension", {})
-         ["pluginsCustomConfig"]) = {"custom-plugins.yaml": tc_content}
-    else:
-        # treatment_config_generated=false — copy baseline EPP config to treatment slot
-        baseline_cfg = (resolved
-                        .get("stack", {})
-                        .get("gaie", {})
-                        .get("baseline", {})
-                        .get("helmValues", {})
-                        .get("inferenceExtension", {})
-                        .get("pluginsCustomConfig", {}))
-        if baseline_cfg:
-            (alg_values["stack"]
-             .setdefault("gaie", {})
-             .setdefault("treatment", {})
-             .setdefault("helmValues", {})
-             .setdefault("inferenceExtension", {})
-             ["pluginsCustomConfig"]) = baseline_cfg
-        else:
-            warnings.warn(
-                "treatment_config_generated=false and baseline has no EPP config; "
-                "treatment pluginsCustomConfig will be empty",
-                UserWarning,
-                stacklevel=2,
-            )
-
-    # Embed baseline EPP config if derived in Phase 2 (overrides env_defaults static value)
-    # Skip if file is empty — empty baseline means "use EPP defaults, no custom config"
-    baseline_cfg_path = out_path.parent / "generated" / "baseline_config.yaml"
-    if baseline_cfg_path.exists() and baseline_cfg_path.read_text().strip():
-        bc_content = baseline_cfg_path.read_text()
-        (alg_values["stack"]
-         .setdefault("gaie", {})
-         .setdefault("baseline", {})
-         .setdefault("helmValues", {})
-         .setdefault("inferenceExtension", {})
-         ["pluginsCustomConfig"]) = {"custom-plugins.yaml": bc_content}
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(yaml.dump(alg_values, default_flow_style=False, sort_keys=False))
-
-
-def _compile_cluster_packages_parallel(
-    run_dir: Path, resolved: dict, values_path: Path,
-    setup_config: dict, run_name: str, template_dir: Path,
-):
-    """Generate one shared Pipeline + one PipelineRun per (workload, package) pair.
-
-    Output layout:
-      cluster/sim2real-{run_name}.yaml                       — shared Pipeline
-      cluster/wl-{workload}-{package}/
-        pipelinerun-{workload}-{package}.yaml                — one per pair
-    """
-    cluster_dir = run_dir / "cluster"
-    namespace = setup_config.get("namespace", "default")
-    if not setup_config.get("namespace"):
-        warn("namespace not found in setup_config.json; using 'default'")
-    ws_bindings = setup_config.get("workspaces") or {}
-    pipeline_name = f"sim2real-{run_name}"
-
-    values = yaml.safe_load(values_path.read_text())
-    workloads = values.get("observe", {}).get("workloads", [])
-
     if not workloads:
-        warn("No workloads defined — cannot generate parallel PipelineRuns")
+        warn("No workloads defined — cannot generate PipelineRuns")
+        state.mark_done("assembly", packages=["baseline", "treatment"])
         return
 
-    cluster_dir.mkdir(parents=True, exist_ok=True)
+    # 4e: Pipeline resource
+    # The static pipeline.yaml (#23) provides the Pipeline that PipelineRuns reference.
+    # No compilation step needed — deploy.py applies the static pipeline directly.
+    setup_config = _load_setup_config()
+    run_name = run_dir.name
+    pipeline_name = f"sim2real-{run_name}"
 
-    # Compile one Pipeline for the whole experiment (not per-phase)
-    tektonc_dir = setup_config.get("tektonc_dir")
-    ok_flag = compile_pipeline(template_dir, values_path, "baseline", cluster_dir, run_name=run_name,
-                               tektonc_dir=Path(tektonc_dir) if tektonc_dir else None)
-    shared_pipeline_path = cluster_dir / f"sim2real-{run_name}.yaml"
-    if not ok_flag:
-        warn("compile_pipeline failed; writing stub")
-        shared_pipeline_path.write_text(f"# compile_pipeline failed for {run_name}\n")
+    # 4f: Generate PipelineRuns
+    namespace = setup_config.get("namespace", "default")
+    ws_bindings = setup_config.get("workspaces") or {}
 
-    # Build gaie configs per package
-    gaie_values = values.get("stack", {}).get("gaie", {})
-    package_configs: dict[str, tuple[str, str]] = {}
-    for pkg in ["baseline", "treatment"]:
-        gaie_cfg = json.dumps(gaie_values.get(pkg, {}).get("helmValues", {}))
-        objectives = json.dumps(gaie_values.get("inferenceObjectives", []))
-        package_configs[pkg] = (gaie_cfg, objectives)
-
-    # Inject workload_name from manifest when missing
-    si_path = run_dir / "skill_input.json"
-    if si_path.exists():
-        try:
-            si = json.loads(si_path.read_text())
-            manifest_data = yaml.safe_load(Path(si["manifest_path"]).read_text()) or {}
-            wl_paths = manifest_data.get("workloads", [])
-            for i, wl in enumerate(workloads):
-                if "name" not in wl and "workload_name" not in wl and i < len(wl_paths):
-                    wl["workload_name"] = Path(wl_paths[i]).stem
-        except Exception:
-            pass
-
-    # Generate one PipelineRun per (workload, package) pair
-    for pkg in ["baseline", "treatment"]:
-        gaie_cfg, objectives = package_configs[pkg]
+    for pkg, scenario in [("baseline", baseline_resolved), ("treatment", treatment_resolved)]:
+        scenario_content = yaml.dump(scenario, default_flow_style=False, allow_unicode=True)
         for wl in workloads:
             wl_name = wl.get("name", wl.get("workload_name", "unknown"))
             safe_wl = wl_name.replace("_", "-")
             pair_dir = cluster_dir / f"wl-{safe_wl}-{pkg}"
             pair_dir.mkdir(parents=True, exist_ok=True)
 
-            pr = make_pipelinerun_parallel(
+            pr = make_pipelinerun_scenario(
                 phase=pkg,
                 workload=wl,
                 run_name=run_name,
                 namespace=namespace,
                 pipeline_name=pipeline_name,
-                gaie_config=gaie_cfg,
-                inference_objectives=objectives,
+                scenario_content=scenario_content,
                 workspace_bindings=ws_bindings if ws_bindings else None,
             )
             pr_path = pair_dir / f"pipelinerun-{safe_wl}-{pkg}.yaml"
             pr_path.write_text(yaml.dump(pr, default_flow_style=False, allow_unicode=True))
 
-    ok(f"Parallel cluster packages: {_display_path(cluster_dir)} "
-       f"({len(workloads) * 2} PipelineRuns)")
+    ok(f"PipelineRuns: {len(workloads) * 2} generated")
+
+    # 4g: Verify generated dir
+    _verify_generated_dir(run_dir)
+
+    # 4h: validate-assembly
+    _validate_assembly(run_dir, resolved)
+
+    state.mark_done("assembly", packages=["baseline", "treatment"])
+    ok("Assembly complete")
 
 
-def _compile_cluster_packages(args, run_dir: Path, resolved: dict, values_path: Path,
-                               setup_config: dict):
-    """Compile cluster YAMLs organized by package (baseline, treatment)."""
-    cluster_dir = run_dir / "cluster"
-    namespace = setup_config.get("namespace", "default")
-    if not setup_config.get("namespace"):
-        warn("namespace not found in setup_config.json; using 'default'")
 
-    values = yaml.safe_load(values_path.read_text())
-    workloads = values.get("observe", {}).get("workloads", [])
 
-    # Inject workload_name from manifest file stems when workload dicts lack a name.
-    # values.yaml embeds workload data without preserving source filenames, so we
-    # cross-reference the manifest by index to get a stable, human-readable name.
-    si_path = run_dir / "skill_input.json"
-    if si_path.exists():
-        try:
-            si = json.loads(si_path.read_text())
-            manifest = yaml.safe_load(Path(si["manifest_path"]).read_text()) or {}
-            wl_paths = manifest.get("workloads", [])
-            for i, wl in enumerate(workloads):
-                if "name" not in wl and "workload_name" not in wl and i < len(wl_paths):
-                    wl["workload_name"] = Path(wl_paths[i]).stem
-        except Exception:
-            pass
 
-    tektonc_dir = _resolve_template_dir(args, EXPERIMENT_ROOT)
-    run_name = run_dir.name
-    compiled_pipelines: dict = {}
 
-    for package in ["baseline", "treatment"]:
-        pkg_dir = cluster_dir / package
-        pkg_dir.mkdir(parents=True, exist_ok=True)
 
-        # Compile Tekton Pipeline YAML for this phase
-        pr_path = pkg_dir / f"{package}-pipeline.yaml"
-        if tektonc_dir.exists():
-            sc_tektonc_dir = setup_config.get("tektonc_dir")
-            ok_flag = compile_pipeline(tektonc_dir, values_path, package, pkg_dir,
-                                       tektonc_dir=Path(sc_tektonc_dir) if sc_tektonc_dir else None)
-            if not ok_flag:
-                warn(f"compile_pipeline failed for {package}; writing stub")
-                pr_path.write_text(f"# compile_pipeline failed for {package}\n")
-        else:
-            pr_path.write_text(f"# PipelineRun stub for {package}\n"
-                               f"# tektonc-data-collection not available\n")
 
-        # Load compiled pipeline for the experiment combiner and per-package pipelineruns
-        if pr_path.exists() and not pr_path.read_text().startswith("#"):
-            try:
-                compiled_pipelines[package] = yaml.safe_load(pr_path.read_text())
-            except Exception:
-                pass
-
-        # Remove any stale per-workload pipelineruns from earlier pipeline versions
-        for stale in pkg_dir.glob("pipelinerun-workload-*.yaml"):
-            stale.unlink()
-
-        # Generate a Pipeline + PipelineRun for standalone package execution.
-        # When no workloads are defined, emit a standby pipeline: stack deploys
-        # normally, then a sleep-infinity task runs indefinitely.  spec.finally
-        # (teardown) only fires on cancel/stop, never on normal completion.
-        if package in compiled_pipelines:
-            if workloads:
-                phase_pipeline, phase_pr = make_phase_pipeline(
-                    package, workloads, compiled_pipelines[package],
-                    run_name, namespace,
-                    workspace_bindings=setup_config.get("workspaces"),
-                )
-            else:
-                phase_pipeline, phase_pr = make_standby_pipeline(
-                    package, compiled_pipelines[package],
-                    run_name, namespace,
-                    workspace_bindings=setup_config.get("workspaces"),
-                )
-            (pkg_dir / f"sim2real-{package}-pipeline.yaml").write_text(
-                yaml.dump(phase_pipeline, default_flow_style=False, allow_unicode=True)
-            )
-            (pkg_dir / f"pipelinerun-{package}.yaml").write_text(
-                yaml.dump(phase_pr, default_flow_style=False, allow_unicode=True)
-            )
-
-    # No workloads → standby pipelines only; no combined experiment pipeline.
-    if not workloads:
-        ok(f"Standby pipelines generated (no workloads): {_display_path(cluster_dir)}")
-        return
-
-    # Generate the single sequential experiment pipeline (all baselines then all
-    # treatments, one after another). This replaces the per-workload PipelineRuns.
-    if len(compiled_pipelines) == 2:
-        phase_workloads = (
-            [("baseline", wl.get("name", wl.get("workload_name", f"workload-{i}")), wl)
-             for i, wl in enumerate(workloads)]
-            + [("treatment", wl.get("name", wl.get("workload_name", f"workload-{i}")), wl)
-               for i, wl in enumerate(workloads)]
-        )
-        experiment_pipeline, experiment_pr = make_experiment_pipeline(
-            phase_workloads, compiled_pipelines, run_name, namespace,
-            workspace_bindings=setup_config.get("workspaces"),
-        )
-        exp_dir = cluster_dir / "experiment"
-        exp_dir.mkdir(parents=True, exist_ok=True)
-        (exp_dir / "experiment-pipeline.yaml").write_text(
-            yaml.dump(experiment_pipeline, default_flow_style=False, allow_unicode=True))
-        (exp_dir / "pipelinerun-experiment.yaml").write_text(
-            yaml.dump(experiment_pr, default_flow_style=False, allow_unicode=True))
-        ok(f"Experiment pipeline: {_display_path(exp_dir)}/")
-    else:
-        warn("Could not generate experiment pipeline: missing compiled phase pipelines")
-
-    ok(f"Cluster packages: {_display_path(cluster_dir)}")
 
 
 def _verify_generated_dir(run_dir: Path):
@@ -758,7 +437,16 @@ def _verify_generated_dir(run_dir: Path):
         warn("Continuing without generated file copies.")
         return
 
-    output = json.loads((run_dir / "translation_output.json").read_text())
+    output_path = run_dir / "translation_output.json"
+    if not output_path.exists():
+        return
+
+    try:
+        output = json.loads(output_path.read_text())
+    except json.JSONDecodeError:
+        warn("translation_output.json is not valid JSON — skipping verification")
+        return
+
     for f in output.get("files_created", []) + output.get("files_modified", []):
         if not (generated_dir / Path(f).name).exists():
             warn(f"generated/ missing: {Path(f).name}")
@@ -1018,11 +706,6 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Override run name")
     p.add_argument("--experiment-root", metavar="PATH", dest="experiment_root",
                    help="Root of the experiment repo (default: current directory)")
-    p.add_argument("--pipeline-template", metavar="PATH", dest="pipeline_template",
-                   help="Override Tekton pipeline template (directory or pipeline.yaml.j2 path)")
-    p.add_argument("--mode", choices=["parallel", "sequential"], default="parallel",
-                   help="parallel: one PipelineRun per (workload,package) pair (default). "
-                        "sequential: legacy combined experiment pipeline.")
 
     sub = p.add_subparsers(dest="command")
     sub.add_parser("context", help="Rebuild context cache only")
