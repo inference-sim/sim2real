@@ -11,7 +11,7 @@ inference-sim to production llm-d-inference-scheduler scorer plugins.
 - `docs/transfer/` — Mapping artifacts, scorer template, calibration log
 - `docs/plans/` — Design docs and implementation plans
 - `pipeline/` — Pipeline entry points and shared library (see [`pipeline/README.md`](pipeline/README.md))
-- `pipeline/templates/` — Default Tekton Pipeline template (`pipeline.yaml.j2`)
+- `pipeline/pipeline.yaml` — Static Tekton Pipeline definition (applied by `deploy.py run`)
 - `workspace/` — Inter-stage artifacts (gitignored, not committed)
 
 ## Submodules

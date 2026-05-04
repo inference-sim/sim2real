@@ -28,7 +28,7 @@ The experiment repo must contain:
 - `algorithm/` and `workloads/` directories as referenced in `transfer.yaml`
 - `workspace/` in `.gitignore`
 
-`pipeline/templates/pipeline.yaml.j2` is the framework default Tekton template (used for reference; Phase 4 generates resolved PipelineRuns directly).
+`pipeline/pipeline.yaml` is the static Tekton Pipeline definition (applied by `deploy.py run`; Phase 4 generates PipelineRuns that reference it).
 
 Omitting `--experiment-root` defaults to the framework directory — backward compatible with the existing `config/transfer.yaml` layout.
 
