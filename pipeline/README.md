@@ -244,6 +244,98 @@ All paths are relative to the repo root and validated at Phase 1.
 
 ---
 
+## Scenario Overlay Format
+
+The `/sim2real-translate` skill produces two overlay files in `workspace/runs/<run>/generated/`:
+
+- `baseline_config.yaml` — overlay merged onto `baseline.yaml`
+- `treatment_config.yaml` — overlay merged onto the already-resolved baseline
+
+### Assembly formula
+
+```python
+baseline_resolved = deep_merge(baseline_bundle, baseline_overlay)
+treatment_resolved = deep_merge(deep_merge(baseline_resolved, treatment_diffs), treatment_overlay)
+```
+
+Where `baseline_bundle` is the experiment's `baseline.yaml`, `treatment_diffs` is the experiment's optional `treatment.yaml`, and the overlays are the skill outputs.
+
+### Deep merge semantics
+
+- Dict keys merge recursively (overlay overrides base)
+- Lists of dicts with a common `name` field merge by name
+- Lists of dicts without a common key merge positionally
+- Lists of scalars are replaced entirely
+- Treatment overlay only needs the delta from baseline_resolved (shared config propagates automatically)
+
+### Required structure
+
+Both overlays are llmdbenchmark scenario overlays. They must be valid YAML with a top-level `scenario:` list containing a single dict:
+
+```yaml
+scenario:
+  - name: "<scenario-name>"
+
+    # Fields to add or override (only include what you're changing)
+    extraObjects: [...]
+    inferenceExtension: {...}
+    images: {...}
+```
+
+### InferenceObjective requirements
+
+InferenceObjectives go in `extraObjects`. Each must include `spec.poolRef.name` referencing the InferencePool created by the gaie Helm chart:
+
+```yaml
+extraObjects:
+  - apiVersion: inference.networking.x-k8s.io/v1alpha2
+    kind: InferenceObjective
+    metadata:
+      name: critical
+    spec:
+      poolRef:
+        name: ${model.idLabel}-gaie
+      priority: 100
+```
+
+`${model.idLabel}` is resolved by llm-d-benchmark at render time (requires llm-d-benchmark >= PR #1103).
+
+### Plugin config
+
+The EPP plugin configuration goes inside `inferenceExtension.pluginsCustomConfig` as a YAML-in-YAML string:
+
+```yaml
+inferenceExtension:
+  pluginsConfigFile: custom-plugins.yaml
+  pluginsCustomConfig:
+    custom-plugins.yaml: |
+      apiVersion: inference.networking.x-k8s.io/v1alpha1
+      kind: EndpointPickerConfig
+      plugins:
+      - type: my-plugin
+        name: my-plugin
+        parameters:
+          threshold: 5
+      schedulingProfiles:
+      - name: default
+        plugins:
+        - pluginRef: my-plugin
+```
+
+### Typical overlay content
+
+**Baseline overlay** — adds InferenceObjectives and the baseline EPP plugin config:
+- `extraObjects` (InferenceObjectives with `poolRef`)
+- `inferenceExtension.pluginsCustomConfig` (baseline scorer config)
+
+**Treatment overlay** — only the delta from baseline:
+- `inferenceExtension.pluginsCustomConfig` (evolved scorer config)
+- `images.inferenceScheduler` (custom EPP image — injected by `prepare.py`, not the skill)
+
+If treatment uses the same InferenceObjectives as baseline, do NOT repeat them — they propagate from `baseline_resolved`.
+
+---
+
 ## Common patterns
 
 ```bash

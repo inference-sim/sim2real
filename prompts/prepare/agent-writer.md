@@ -76,19 +76,28 @@ Example queries:
 Use TaskCreate: `"Phase 2: Baseline Config Derivation"` → TaskUpdate in_progress
 
 Read:
-1. `{BASELINE_SIM_CONFIG}` — the sim baseline policy (scorer names + weights)
-2. `{BASELINE_REAL_CONFIG}` (if not null) — the real EPP YAML template
-3. `{BASELINE_REAL_NOTES}` — translation hints for baseline mapping
+1. `{REPO_ROOT}/pipeline/README.md` — the "Scenario Overlay Format" section defines the
+   required output structure. Follow it exactly.
+2. `{BASELINE_SIM_CONFIG}` (if non-null) — the sim baseline policy (scorer names + weights)
+3. `{BASELINE_REAL_CONFIG}` (if not null) — a reference EPP YAML (for guidance, not literal copy)
+4. `{BASELINE_REAL_NOTES}` — translation hints describing what the baseline should contain
 
-Your goal: produce `{RUN_DIR}/generated/baseline_config.yaml` — a real, functional EPP YAML with the
-actual scorer names and weights from `{BASELINE_SIM_CONFIG}` substituted into the real template.
+Your goal: produce `{RUN_DIR}/generated/baseline_config.yaml` — a **llmdbenchmark scenario overlay**
+that will be deep-merged onto the experiment's `baseline.yaml` by `prepare.py`.
 
-Rules:
-- Every scorer in `{BASELINE_SIM_CONFIG}` must appear in `baseline_config.yaml` (mapped to
-  its real EPP type via the signal mapping in `{CONTEXT_PATH}` and `{BASELINE_REAL_NOTES}`)
-- Weights must match exactly — do not approximate or normalize unless the real config requires it
+**Output format** (from pipeline/README.md "Scenario Overlay Format"):
+- Top-level `scenario:` list with one dict
+- InferenceObjectives in `extraObjects` — each MUST include `spec.poolRef.name: ${{model.idLabel}}-gaie`
+- Plugin config in `inferenceExtension.pluginsCustomConfig` as a YAML-in-YAML string
+- Only include fields you are adding or overriding
+
+**Content rules:**
+- Use `{BASELINE_REAL_NOTES}` and `{BASELINE_SIM_CONFIG}` to determine WHAT scorers, priorities,
+  and plugin config to include — these are guidance, not literal output templates
+- Map sim scorer names to real EPP type strings via the signal mapping in `{CONTEXT_PATH}`
+- Weights must match the sim config exactly
 - Ask the Expert if you are unsure about any scorer type string or config field name
-- If `{BASELINE_REAL_CONFIG}` is null, derive the structure from the context document and Expert
+- If `{BASELINE_REAL_CONFIG}` is null, derive content from the context document and Expert
 
 Create the `generated/` directory if needed, then write `{RUN_DIR}/generated/baseline_config.yaml`.
 Then send to main session:
@@ -107,21 +116,28 @@ TaskUpdate Phase 2 → completed
 Use TaskCreate: `"Phase 3: Treatment Config Derivation"` → TaskUpdate in_progress
 
 Read:
-1. `{RUN_DIR}/generated/baseline_config.yaml` — the approved real baseline EPP YAML
+1. `{RUN_DIR}/generated/baseline_config.yaml` — the approved baseline overlay
 2. If `{ALGO_CONFIG}` is non-empty: read it — the algorithm policy config (what changes from baseline)
 3. `{ALGO_SOURCE}` — the algorithm source (regime detection logic, thresholds)
 
-Your goal: produce `{RUN_DIR}/generated/treatment_config.yaml` — start from `generated/baseline_config.yaml` and
-apply the algorithm's changes. The treatment config must be **functional** (the Go code you
-will write in Phase 4 must read its parameters from this YAML, not hardcode them).
+Your goal: produce `{RUN_DIR}/generated/treatment_config.yaml` — a **llmdbenchmark scenario overlay**
+containing ONLY what differs from the baseline. Since assembly computes
+`treatment_resolved = deep_merge(baseline_resolved, treatment_overlay)`, anything already in
+baseline propagates automatically.
 
-Rules:
-- Start from `baseline_config.yaml` as the structural base
-- Identify the delta: which scorers change, which weights change, any new logic or thresholds
-- Every scoring threshold and weight must have a corresponding YAML field in
-  `treatment_config.yaml` — you will wire the Go code to read from these fields in Phase 4.
-  Source of truth: `{ALGO_CONFIG}` if non-empty, otherwise extract configurable parameters
-  directly from `{ALGO_SOURCE}` (any numeric threshold or weight visible in the source)
+**Output format** (same structure as baseline overlay):
+- Top-level `scenario:` list with one dict
+- Only include fields that DIFFER from baseline
+- Typically just `inferenceExtension.pluginsCustomConfig` with the evolved plugin config
+- Do NOT repeat `extraObjects` (InferenceObjectives) unless treatment adds new ones
+
+**Content rules:**
+- The plugin config in `pluginsCustomConfig` must reference the new plugin type you will
+  create in Phase 4 — every configurable threshold and weight from the algorithm must have
+  a corresponding `parameters:` field in the plugin config YAML
+- Source of truth for parameters: `{ALGO_CONFIG}` if non-empty, otherwise extract from
+  `{ALGO_SOURCE}` (any numeric threshold or weight visible in the source)
+- The Go code you write in Phase 4 must read its parameters from this config, not hardcode them
 - Ask the Expert about config struct field names and yaml tags if needed
 
 Write `{RUN_DIR}/generated/treatment_config.yaml`. Then send to main session:
@@ -142,7 +158,8 @@ Follow `prompts/prepare/translate.md`. Specifically:
 3. Write the production plugin code into `{TARGET_REPO}` at the correct package path
 4. Define a `Type` constant (kebab-case string) and a `Factory` function in your plugin file
 5. Register the plugin in `{TARGET_REPO}/pkg/plugins/register.go` with `plugin.Register(pkg.TypeConst, pkg.FactoryFunc)`
-6. Write `{RUN_DIR}/generated/treatment_config.yaml` with `kind: {CONFIG_KIND}`
+6. Update `{RUN_DIR}/generated/treatment_config.yaml` if the plugin type or parameters changed
+   (the file was already written in Phase 3 — update it to match the final plugin type string)
 7. **Add logging** — follow the pattern established by `preemptiveshed.go`:
    - In Factory: use `logger := log.Log.WithName(Type)` and log all config parameters at
      `logger.V(logutil.TRACE).Info("Creating <PluginName>", "name", name, "param1", val1, ...)`
