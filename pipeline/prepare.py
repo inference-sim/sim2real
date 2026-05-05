@@ -29,7 +29,7 @@ from pipeline.lib.manifest import load_manifest, ManifestError
 from pipeline.lib.state_machine import StateMachine
 from pipeline.lib.context_builder import build_context
 from pipeline.lib.tekton import make_pipelinerun_scenario
-from pipeline.lib.assemble import assemble_scenarios
+from pipeline.lib.assemble import assemble_scenarios, AssemblyError
 
 # ── Repo layout ──────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -315,7 +315,11 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     config_kind = resolved.get("config", {}).get("kind")
     tc_path = run_dir / "generated" / "treatment_config.yaml"
     if tc_path.exists() and config_kind:
-        tc = yaml.safe_load(tc_path.read_text())
+        try:
+            tc = yaml.safe_load(tc_path.read_text())
+        except (OSError, yaml.YAMLError) as exc:
+            err(f"Cannot read/parse {tc_path}: {exc}")
+            sys.exit(1)
         if isinstance(tc, dict) and tc.get("kind") != config_kind:
             err(f"treatment_config kind mismatch: got '{tc.get('kind')}', expected '{config_kind}'")
             sys.exit(1)
@@ -338,8 +342,8 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
             baseline_overlay_path=baseline_overlay,
             treatment_overlay_path=treatment_overlay,
         )
-    except yaml.YAMLError as e:
-        err(f"YAML parse error during scenario assembly: {e}")
+    except AssemblyError as e:
+        err(str(e))
         sys.exit(1)
 
     # 4b.5: Inject deterministic EPP image into treatment scenario

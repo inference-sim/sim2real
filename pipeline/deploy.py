@@ -715,6 +715,7 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
     if not pipeline_yaml.exists():
         err(f"Static pipeline not found: {pipeline_yaml.relative_to(REPO_ROOT)}")
         sys.exit(1)
+    failed_ns = set()
     for _ns in namespaces:
         r = run(["kubectl", "apply", "-f", str(pipeline_yaml), "-n", _ns],
                 check=False, capture=True)
@@ -722,6 +723,11 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
             ok(f"Applied Pipeline to {_ns}")
         else:
             warn(f"Could not apply Pipeline to {_ns}: {r.stderr.strip()}")
+            failed_ns.add(_ns)
+    namespaces = [ns for ns in namespaces if ns not in failed_ns]
+    if not namespaces:
+        err("No namespaces available after Pipeline apply failures")
+        sys.exit(1)
 
     # Track which namespace is assigned to which pair
     slots_busy: dict[str, str] = {
