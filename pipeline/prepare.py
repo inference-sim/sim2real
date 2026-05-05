@@ -115,8 +115,9 @@ def _get_submodule_shas() -> dict[str, str]:
     """Get HEAD commit SHAs for submodules."""
     shas = {}
     for name, path in [("inference-sim", "inference-sim"),
-                       ("llm-d-inference-scheduler", "llm-d-inference-scheduler")]:
-        if name == "inference-sim":
+                       ("llm-d-inference-scheduler", "llm-d-inference-scheduler"),
+                       ("llm-d-benchmark", "llm-d-benchmark")]:
+        if name == "inference-sim" or name == "llm-d-benchmark":
             sub = REPO_ROOT / path
         else:
             sub = EXPERIMENT_ROOT / path
@@ -311,20 +312,6 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
         info("[skip] Assembly already complete")
         return
 
-    # 4a: Validate treatment config kind
-    config_kind = resolved.get("config", {}).get("kind")
-    tc_path = run_dir / "generated" / "treatment_config.yaml"
-    if tc_path.exists() and config_kind:
-        try:
-            tc = yaml.safe_load(tc_path.read_text())
-        except (OSError, yaml.YAMLError) as exc:
-            err(f"Cannot read/parse {tc_path}: {exc}")
-            sys.exit(1)
-        if isinstance(tc, dict) and tc.get("kind") != config_kind:
-            err(f"treatment_config kind mismatch: got '{tc.get('kind')}', expected '{config_kind}'")
-            sys.exit(1)
-        ok("Treatment config validated")
-
     # 4b: Assemble scenarios
     baseline_path = EXPERIMENT_ROOT / "baseline.yaml"
     if not baseline_path.exists():
@@ -424,6 +411,16 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     # 4f: Generate PipelineRuns
     namespace = setup_config.get("namespace", "default")
     ws_bindings = setup_config.get("workspaces") or {}
+    shas = _get_submodule_shas()
+    benchmark_commit = shas.get("llm-d-benchmark", "")
+    blis_commit = shas.get("inference-sim", "")
+    benchmark_sub = REPO_ROOT / "llm-d-benchmark"
+    benchmark_repo_url = ""
+    if benchmark_sub.exists() and (benchmark_sub / ".git").exists():
+        result = run(["git", "remote", "get-url", "origin"], capture=True, cwd=benchmark_sub)
+        benchmark_repo_url = result.stdout.strip()
+    scenarios = baseline_resolved.get("scenario", [])
+    model_name = scenarios[0].get("model", {}).get("name", "") if scenarios else ""
 
     for pkg, scenario in [("baseline", baseline_resolved), ("treatment", treatment_resolved)]:
         scenario_content = yaml.dump(scenario, default_flow_style=False, allow_unicode=True)
@@ -441,6 +438,10 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
                 pipeline_name=pipeline_name,
                 scenario_content=scenario_content,
                 workspace_bindings=ws_bindings if ws_bindings else None,
+                benchmark_git_commit=benchmark_commit,
+                benchmark_git_repo_url=benchmark_repo_url,
+                blis_git_commit=blis_commit,
+                model=model_name,
             )
             pr_path = pair_dir / f"pipelinerun-{safe_wl}-{pkg}.yaml"
             pr_path.write_text(yaml.dump(pr, default_flow_style=False, allow_unicode=True))
@@ -527,15 +528,15 @@ def _validate_assembly(run_dir: Path, resolved: dict):
                 errors.append(
                     f"plugin_type '{plugin_type}' not found in treatment.yaml")
 
-    # Check 3: treatment_config kind matches scenario (only if custom config generated)
+    # Check 3: treatment_config contains expected kind (may be nested in scenario overlay)
     if treatment_config_generated and config_cfg.get("kind"):
         tc_path = run_dir / "generated" / "treatment_config.yaml"
         if tc_path.exists():
-            tc = yaml.safe_load(tc_path.read_text())
-            if isinstance(tc, dict) and tc.get("kind") != config_cfg["kind"]:
+            tc_text = tc_path.read_text()
+            expected_kind = config_cfg["kind"]
+            if f"kind: {expected_kind}" not in tc_text:
                 errors.append(
-                    f"treatment_config kind '{tc.get('kind')}' != expected "
-                    f"'{config_cfg['kind']}'")
+                    f"treatment_config does not contain 'kind: {expected_kind}'")
 
     # Check 4: all files_created exist in target repo
     target_repo = target.get("repo", "")

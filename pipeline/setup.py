@@ -19,6 +19,7 @@ class SetupConfig:
     repo_name: str
     run_name: str
     hf_token: str
+    github_token: str
     registry_user: str
     registry_token: str
     storage_class: str
@@ -67,6 +68,7 @@ Examples:
     p.add_argument("--namespaces",     metavar="NS1,NS2,...",
                                        help="Comma-separated list of namespaces to provision (overrides --namespace)")
     p.add_argument("--hf-token",       metavar="TOKEN", help="HuggingFace API token")
+    p.add_argument("--github-token",   metavar="TOKEN", help="GitHub token for private repo access")
     p.add_argument("--registry",       metavar="REG",   help="Container registry host (e.g. quay.io/username)")
     p.add_argument("--repo-name",      metavar="NAME",  default=None,
                                                         help="Registry repository name [llm-d-inference-scheduler]")
@@ -251,11 +253,13 @@ def collect_config(args: argparse.Namespace) -> tuple[SetupConfig, Path, str]:
         namespace = namespaces[0]
     else:
         ns_default = defaults.get("namespace", "sim2real-" + os.environ.get("USER", "dev"))
-        namespace = args.namespace or prompt("namespace", "Kubernetes namespace",
+        ns_input = args.namespace or prompt("namespace",
+                                            "Kubernetes namespace(s) (comma-separated for multiple)",
                                             default=ns_default, env_var="NAMESPACE")
-        if not namespace:
+        if not ns_input:
             err("NAMESPACE is required"); sys.exit(1)
-        namespaces = [namespace]
+        namespaces = [n.strip() for n in ns_input.split(",") if n.strip()]
+        namespace = namespaces[0]
 
     # Registry
     reg_default = defaults.get("registry", "")
@@ -281,6 +285,9 @@ def collect_config(args: argparse.Namespace) -> tuple[SetupConfig, Path, str]:
     # HuggingFace token — empty string means "reuse existing secret" (checked in step_secrets)
     hf_token = args.hf_token or prompt_secret("HuggingFace token", env_var="HF_TOKEN")
 
+    # GitHub token — used by install-llmdbenchmark to clone repos
+    gh_token = args.github_token or os.environ.get("GITHUB_TOKEN", "")
+
     # Registry credentials — resolve from args > env > ghcr.io fallback > prompt
     docker_server = registry.split("/")[0] if registry else ""
     reg_user = args.registry_user or os.environ.get("QUAY_ROBOT_USERNAME", "")
@@ -302,12 +309,13 @@ def collect_config(args: argparse.Namespace) -> tuple[SetupConfig, Path, str]:
 
     cfg = SetupConfig(
         namespace=namespace, namespaces=namespaces, registry=registry, repo_name=repo_name,
-        run_name=run_name, hf_token=hf_token,
+        run_name=run_name, hf_token=hf_token, github_token=gh_token,
         registry_user=reg_user, registry_token=reg_token,
         storage_class=storage_class, is_openshift=is_openshift,
         no_cluster=args.no_cluster,
     )
-    ok(f"Configuration complete (namespace={namespace}, registry={registry or '(none)'})")
+    ns_display = ",".join(namespaces) if len(namespaces) > 1 else namespace
+    ok(f"Configuration complete (namespace={ns_display}, registry={registry or '(none)'})")
     return cfg, run_dir, container_rt
 
 # ── Step 2: Namespace ────────────────────────────────────────────────
@@ -392,6 +400,24 @@ def step_secrets(cfg: SetupConfig, container_rt: str) -> None:
         ).stdout
         run(["kubectl", "apply", "-f", "-"], input=yaml_out)
         ok("hf-secret created/updated")
+
+    # github-token — used by install-llmdbenchmark to clone private repos
+    github_token = cfg.github_token
+    if not github_token and secret_exists("github-token", cfg.namespace):
+        ok("github-token already exists (reusing)")
+    elif not github_token:
+        warn("GITHUB_TOKEN not set and github-token secret does not exist — "
+             "install-llmdbenchmark will fail if repo requires auth")
+    else:
+        yaml_out = run(
+            ["kubectl", "create", "secret", "generic", "github-token",
+             f"--namespace={cfg.namespace}",
+             f"--from-literal=token={github_token}",
+             "--dry-run=client", "-o", "yaml"],
+            capture=True,
+        ).stdout
+        run(["kubectl", "apply", "-f", "-"], input=yaml_out)
+        ok("github-token created/updated")
 
     # registry-secret
     if not cfg.registry:
@@ -729,6 +755,7 @@ def main() -> int:
             repo_name=cfg.repo_name,
             run_name=cfg.run_name,
             hf_token=cfg.hf_token,
+            github_token=cfg.github_token,
             registry_user=cfg.registry_user,
             registry_token=cfg.registry_token,
             storage_class=cfg.storage_class,

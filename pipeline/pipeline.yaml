@@ -20,6 +20,14 @@ spec:
       type: string
     - name: workloadSpec
       type: string
+    - name: benchmarkGitRepoUrl
+      type: string
+    - name: benchmarkGitCommit
+      type: string
+    - name: blisGitCommit
+      type: string
+    - name: model
+      type: string
   workspaces:
     - name: source
     - name: data-storage
@@ -30,6 +38,11 @@ spec:
       workspaces:
         - name: source
           workspace: source
+      params:
+        - name: git_repo_url
+          value: "$(params.benchmarkGitRepoUrl)"
+        - name: git_commit
+          value: "$(params.benchmarkGitCommit)"
 
     - name: install-blis
       taskRef:
@@ -37,6 +50,9 @@ spec:
       workspaces:
         - name: source
           workspace: source
+      params:
+        - name: git_commit
+          value: "$(params.blisGitCommit)"
 
     - name: llmdbenchmark-standup
       runAfter: ["install-llmdbenchmark"]
@@ -60,9 +76,11 @@ spec:
       workspaces:
         - name: source
           workspace: source
-        - name: data-storage
+        - name: data
           workspace: data-storage
       params:
+        - name: model
+          value: "$(params.model)"
         - name: endpoint
           value: "$(tasks.llmdbenchmark-standup.results.endpoint)"
         - name: workloadSpec
