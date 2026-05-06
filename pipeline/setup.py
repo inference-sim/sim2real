@@ -72,8 +72,8 @@ Examples:
     p.add_argument("--registry",       metavar="REG",   help="Container registry host (e.g. quay.io/username)")
     p.add_argument("--repo-name",      metavar="NAME",  default=None,
                                                         help="Registry repository name [llm-d-inference-scheduler]")
-    p.add_argument("--registry-user",  metavar="USER",  help="Registry robot username")
-    p.add_argument("--registry-token", metavar="TOKEN", help="Registry robot token")
+    p.add_argument("--registry-user",  metavar="USER",  help="Registry username")
+    p.add_argument("--registry-token", metavar="TOKEN", help="Registry token")
     p.add_argument("--storage-class",  metavar="SC",    help="PVC storageClassName (auto-detected for OpenShift)")
     p.add_argument("--run",            metavar="NAME",  help="Run name [sim2real-YYYY-MM-DD]")
     p.add_argument("--experiment-root", metavar="PATH", dest="experiment_root",
