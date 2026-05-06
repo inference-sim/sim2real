@@ -751,7 +751,7 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
                    for k, v in progress.items() if k in _scope)
 
     timeout_hours = 4
-    info(f"Orchestrator: {len(discovered)} pairs, {len(namespaces)} slot(s)")
+    info(f"Orchestrator: {len(_scope)} pairs in scope, {len(namespaces)} slot(s)")
 
     while _work_remaining() or slots_busy:
 
