@@ -49,8 +49,8 @@ python pipeline/setup.py [flags]
 | `--hf-token TOKEN` | `HF_TOKEN` | interactive |
 | `--github-token TOKEN` | `GITHUB_TOKEN` | — |
 | `--registry REG` | — | interactive |
-| `--registry-user USER` | `QUAY_ROBOT_USERNAME` | interactive |
-| `--registry-token TOKEN` | `QUAY_ROBOT_TOKEN` | interactive |
+| `--registry-user USER` | `REGISTRY_USER` | interactive |
+| `--registry-token TOKEN` | `REGISTRY_TOKEN` | interactive |
 | `--run NAME` | — | `sim2real-YYYY-MM-DD` |
 | `--no-cluster` | — | false |
 | `--redeploy-tasks` | — | false |
