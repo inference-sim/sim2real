@@ -63,17 +63,8 @@ def run(cmd: list[str], *, check: bool = True, capture: bool = False,
     return subprocess.run(cmd, check=check, text=True, capture_output=capture, cwd=cwd)
 
 
-# ── Package discovery ────────────────────────────────────────────────────────
-
-def _discover_packages(cluster_dir: Path) -> list[str]:
-    """A package is any subdirectory of cluster/ containing pipelinerun-*.yaml."""
-    if not cluster_dir.exists():
-        return []
-    return sorted(
-        d.name for d in cluster_dir.iterdir()
-        if d.is_dir() and any(d.glob("pipelinerun-*.yaml"))
-    )
-
+# ── Data phases ─────────────────────────────────────────────────────────────
+DATA_PHASES = ["baseline", "treatment"]
 
 # ── Setup config ─────────────────────────────────────────────────────────────
 
@@ -407,37 +398,24 @@ def _cmd_collect(args, manifest: dict, run_dir: Path, setup_config: dict):
         sys.exit(1)
 
     run_name = run_dir.name
-    cluster_dir = run_dir / "cluster"
-    all_packages = _discover_packages(cluster_dir)
-    if not all_packages:
-        err("No packages found in cluster/.")
-        sys.exit(1)
-
-    # Data phases are baseline and treatment (experiment is the sequencing wrapper).
-    data_phases = [p for p in ["baseline", "treatment"] if p in all_packages]
 
     if args.package:
-        # Validate requested packages exist; expand "experiment" to its phases.
-        unknown = set(args.package) - set(all_packages)
+        valid = set(DATA_PHASES) | {"experiment"}
+        unknown = set(args.package) - valid
         if unknown:
-            err(f"Unknown packages: {sorted(unknown)}. Available: {all_packages}")
+            err(f"Unknown packages: {sorted(unknown)}. Valid: {sorted(valid)}")
             sys.exit(1)
         phases_to_collect: list[str] = []
         for p in args.package:
             if p == "experiment":
-                phases_to_collect.extend(data_phases)
+                phases_to_collect.extend(DATA_PHASES)
             else:
                 phases_to_collect.append(p)
-        # Deduplicate while preserving order
         seen: set[str] = set()
         phases_to_collect = [p for p in phases_to_collect
                              if not (p in seen or seen.add(p))]  # type: ignore[func-returns-value]
     else:
-        phases_to_collect = data_phases
-
-    if not phases_to_collect:
-        err("No data phases to collect (expected baseline and/or treatment packages).")
-        sys.exit(1)
+        phases_to_collect = list(DATA_PHASES)
 
     step(1, "Collecting Results")
 
@@ -476,20 +454,14 @@ def _cmd_collect(args, manifest: dict, run_dir: Path, setup_config: dict):
 # ── Run helpers ─────────────────────────────────────────────────────────────
 
 def _load_pairs(cluster_dir: Path) -> dict:
-    """Discover all (workload, package) pairs from cluster/wl-*-*/ directories.
+    """Discover all (workload, package) pairs from pipelinerun-*.yaml at cluster/ root.
 
     Returns dict keyed by pair name ("wl-{workload}-{package}") with metadata.
     """
     pairs = {}
     if not cluster_dir.exists():
         return pairs
-    for pair_dir in sorted(cluster_dir.iterdir()):
-        if not pair_dir.is_dir() or not pair_dir.name.startswith("wl-"):
-            continue
-        prs = list(pair_dir.glob("pipelinerun-*.yaml"))
-        if not prs:
-            continue
-        pr_path = prs[0]
+    for pr_path in sorted(cluster_dir.glob("pipelinerun-*.yaml")):
         try:
             pr_data = yaml.safe_load(pr_path.read_text())
         except Exception:
@@ -498,7 +470,8 @@ def _load_pairs(cluster_dir: Path) -> dict:
         params = {p["name"]: p["value"] for p in pr_data.get("spec", {}).get("params", [])}
         workload = params.get("workloadName", "")
         package = params.get("phase", "")
-        pairs[pair_dir.name] = {
+        key = "wl-" + pr_path.stem.removeprefix("pipelinerun-")
+        pairs[key] = {
             "workload": workload,
             "package": package,
             "pr_name": pr_name,

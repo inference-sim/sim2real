@@ -54,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Environment variables (alternatives to --flags):
-  NAMESPACE, HF_TOKEN, QUAY_ROBOT_USERNAME, QUAY_ROBOT_TOKEN, GITHUB_TOKEN
+  NAMESPACE, HF_TOKEN, REGISTRY_USER, REGISTRY_TOKEN, GITHUB_TOKEN
 
 Examples:
   python pipeline/setup.py                         # fully interactive
@@ -72,8 +72,8 @@ Examples:
     p.add_argument("--registry",       metavar="REG",   help="Container registry host (e.g. quay.io/username)")
     p.add_argument("--repo-name",      metavar="NAME",  default=None,
                                                         help="Registry repository name [llm-d-inference-scheduler]")
-    p.add_argument("--registry-user",  metavar="USER",  help="Registry robot username")
-    p.add_argument("--registry-token", metavar="TOKEN", help="Registry robot token")
+    p.add_argument("--registry-user",  metavar="USER",  help="Registry username")
+    p.add_argument("--registry-token", metavar="TOKEN", help="Registry token")
     p.add_argument("--storage-class",  metavar="SC",    help="PVC storageClassName (auto-detected for OpenShift)")
     p.add_argument("--run",            metavar="NAME",  help="Run name [sim2real-YYYY-MM-DD]")
     p.add_argument("--experiment-root", metavar="PATH", dest="experiment_root",
@@ -109,7 +109,7 @@ def prompt(var_name: str, message: str, default: str = "", env_var: str = "") ->
 def prompt_secret(message: str, env_var: str = "") -> str:
     """Return env var value, or prompt with hidden input.
 
-    At the prompt the user may also type an env var name (e.g. QUAY_ROBOT_TOKEN)
+    At the prompt the user may also type an env var name (e.g. REGISTRY_TOKEN)
     instead of the secret itself — the script will resolve it from the environment.
     Character count is printed after entry so the user can confirm input was received.
     """
@@ -290,8 +290,8 @@ def collect_config(args: argparse.Namespace) -> tuple[SetupConfig, Path, str]:
 
     # Registry credentials — resolve from args > env > ghcr.io fallback > prompt
     docker_server = registry.split("/")[0] if registry else ""
-    reg_user = args.registry_user or os.environ.get("QUAY_ROBOT_USERNAME", "")
-    reg_token = args.registry_token or os.environ.get("QUAY_ROBOT_TOKEN", "")
+    reg_user = args.registry_user or os.environ.get("REGISTRY_USER", "")
+    reg_token = args.registry_token or os.environ.get("REGISTRY_TOKEN", "")
     if not reg_user and not reg_token and docker_server == "ghcr.io":
         github_token = os.environ.get("GITHUB_TOKEN", "")
         if github_token:
@@ -302,7 +302,7 @@ def collect_config(args: argparse.Namespace) -> tuple[SetupConfig, Path, str]:
         reg_user = prompt("registry_user",
             "Registry username (or press Enter to use container login)", default="")
     if registry and reg_user and not reg_token:
-        reg_token = prompt_secret("Registry token", env_var="QUAY_ROBOT_TOKEN")
+        reg_token = prompt_secret("Registry token", env_var="REGISTRY_TOKEN")
 
     # Auto-detect container runtime (not prompted)
     container_rt = _detect_container_runtime()

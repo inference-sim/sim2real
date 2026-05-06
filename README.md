@@ -24,8 +24,8 @@ The pipeline has four entry points:
 | Variable | Used by | Description |
 |----------|---------|-------------|
 | `HF_TOKEN` | `setup.py` | HuggingFace API token for model image pull |
-| `QUAY_ROBOT_USERNAME` + `QUAY_ROBOT_TOKEN` | `setup.py` | Quay robot credentials (use this **or** GitHub) |
-| `GITHUB_TOKEN` | `setup.py` | GitHub PAT (`write:packages`) for ghcr.io (use this **or** Quay) |
+| `REGISTRY_USER` + `REGISTRY_TOKEN` | `setup.py` | Container registry credentials for image push |
+| `GITHUB_TOKEN` | `setup.py` | GitHub PAT for private repo cloning; also used as ghcr.io push fallback when registry credentials are not set |
 | `NAMESPACE` | `setup.py`, `deploy.py` | Kubernetes namespace (falls back to value saved by setup) |
 
 All of these can also be passed as `--flags` to `setup.py` — run `python pipeline/setup.py --help` to see all options. `deploy.py` reads `NAMESPACE` from the saved setup config if the env var is not set.

@@ -49,8 +49,8 @@ python pipeline/setup.py [flags]
 | `--hf-token TOKEN` | `HF_TOKEN` | interactive |
 | `--github-token TOKEN` | `GITHUB_TOKEN` | — |
 | `--registry REG` | — | interactive |
-| `--registry-user USER` | `QUAY_ROBOT_USERNAME` | interactive |
-| `--registry-token TOKEN` | `QUAY_ROBOT_TOKEN` | interactive |
+| `--registry-user USER` | `REGISTRY_USER` | interactive |
+| `--registry-token TOKEN` | `REGISTRY_TOKEN` | interactive |
 | `--run NAME` | — | `sim2real-YYYY-MM-DD` |
 | `--no-cluster` | — | false |
 | `--redeploy-tasks` | — | false |
@@ -121,6 +121,13 @@ Common flags (all subcommands):
 |------|---------|-------|
 | `--run NAME` | from `setup_config.json` | override active run |
 | `--experiment-root PATH` | cwd | path to experiment repo |
+| `--skip-build-epp` | false | reuse `epp_image` from `run_metadata.json` |
+
+**Pair discovery** — `deploy.py run` discovers `pipelinerun-*.yaml` files at the `cluster/` root. Each file's pair key is derived as `wl-` + filename stem minus the `pipelinerun-` prefix.
+
+**Collection phases** — `deploy.py collect` operates on fixed phases (`baseline`, `treatment`). Use `--package` to filter: `--package baseline`, `--package treatment`, or `--package experiment` (both).
+
+**`--skip-build-epp`** — skips the image build; use when resubmitting after a failed PipelineRun without changing the scorer.
 
 **Subcommands:**
 

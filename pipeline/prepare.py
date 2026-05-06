@@ -453,8 +453,6 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
         for wl in workloads:
             wl_name = wl.get("name", wl.get("workload_name", "unknown"))
             safe_wl = wl_name.replace("_", "-")
-            pair_dir = cluster_dir / f"wl-{safe_wl}-{pkg}"
-            pair_dir.mkdir(parents=True, exist_ok=True)
 
             pr = make_pipelinerun_scenario(
                 phase=pkg,
@@ -470,7 +468,7 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
                 blis_git_repo_url=blis_repo_url,
                 model=model_name,
             )
-            pr_path = pair_dir / f"pipelinerun-{safe_wl}-{pkg}.yaml"
+            pr_path = cluster_dir / f"pipelinerun-{safe_wl}-{pkg}.yaml"
             pr_path.write_text(yaml.dump(pr, default_flow_style=False, allow_unicode=True))
 
     ok(f"PipelineRuns: {len(workloads) * 2} generated")
@@ -615,10 +613,8 @@ def _phase_summary(state: StateMachine, manifest: dict, run_dir: Path, resolved:
     lines.extend(["", "**Packages**", ""])
     cluster_dir = run_dir / "cluster"
     if cluster_dir.exists():
-        for pkg_dir in sorted(cluster_dir.iterdir()):
-            if pkg_dir.is_dir() and any(pkg_dir.glob("pipelinerun-*.yaml")):
-                for p in sorted(pkg_dir.glob("pipelinerun-*.yaml")):
-                    lines.append(f"- `{p}`")
+        for p in sorted(cluster_dir.glob("pipelinerun-*.yaml")):
+            lines.append(f"- `{p}`")
 
     # Workloads
     lines.extend(["", "**Workloads**", ""])
