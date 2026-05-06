@@ -56,7 +56,7 @@ python pipeline/run.py     --experiment-root ../admission-control switch <run-na
 
 **`/sim2real-translate`** — AI skill that reads `skill_input.json` and writes `translation_output.json`. Run this after prepare exits at Phase 3, then re-run prepare to continue.
 
-**`pipeline/deploy.py`** — Builds EPP image, applies Tekton Pipeline resources, submits PipelineRuns. Use `deploy.py collect` to pull results from the cluster PVC after runs complete.
+**`pipeline/deploy.py`** — Builds EPP image, applies the static Pipeline, and orchestrates PipelineRun execution across namespace slots (`deploy.py run`). Use `deploy.py collect` to pull results from the cluster PVC after runs complete.
 
 **`pipeline/run.py`** — Lists, inspects, and switches between runs. `switch` syncs generated scorer plugin files into the experiment repo's `llm-d-inference-scheduler/` directory. Pass `--experiment-root` to point at the experiment repo (default: current directory).
 
@@ -91,6 +91,7 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). When no `-
 | `runs/<run>/run_summary.md` | `prepare.py` Phase 5 | human review |
 | `runs/<run>/results/{phase}/` | `deploy.py collect` | `/sim2real-analyze` skill |
 | `runs/<run>/progress.json` | `deploy.py run` | `deploy.py status` |
+| `runs/<run>/plans/<phase>/<workload>/` | `deploy.py run` | workload tasks |
 | `context/{scenario}/{hash}.md` | `prepare.py` Phase 2 | `prepare.py` Phase 2 (cache) |
 
 ## Development

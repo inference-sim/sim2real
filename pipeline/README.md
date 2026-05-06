@@ -47,6 +47,7 @@ python pipeline/setup.py [flags]
 | `--namespace NS` | `NAMESPACE` | interactive |
 | `--namespaces NS1,NS2,...` | — | — |
 | `--hf-token TOKEN` | `HF_TOKEN` | interactive |
+| `--github-token TOKEN` | `GITHUB_TOKEN` | — |
 | `--registry REG` | — | interactive |
 | `--registry-user USER` | `QUAY_ROBOT_USERNAME` | interactive |
 | `--registry-token TOKEN` | `QUAY_ROBOT_TOKEN` | interactive |
@@ -62,7 +63,7 @@ python pipeline/setup.py [flags]
 
 Writes `workspace/setup_config.json` and `workspace/runs/<run>/run_metadata.json`. Subsequent scripts read namespace, registry, and run name from `setup_config.json`.
 
-`setup_config.json` includes workspace bindings for four PVCs: `model-cache` (`model-pvc`), `data-storage` (`data-pvc`), `hf-credentials` (secret), and `source` (`source-pvc`). `source-pvc` holds the BLIS binary built at pipeline runtime by the `install-blis` task. All four must be bound before `deploy.py run` accepts a namespace slot.
+`setup_config.json` includes workspace bindings for two PVCs: `data-storage` (`data-pvc`) and `source` (`source-pvc`). `source-pvc` holds the BLIS binary built at pipeline runtime by the `install-blis` task. Both must be bound before `deploy.py run` accepts a namespace slot.
 
 ---
 
@@ -141,7 +142,7 @@ python pipeline/deploy.py collect [--package NAME…]
 | `--workload NAME` | — | Scope execution to pairs matching this workload |
 | `--package NAME` | — | Scope execution to pairs matching this package |
 | `--status STATE` | — | Scope execution to pairs with this status (e.g. `failed`, `timed-out`) |
-| `--force` | — | Reset `done` pairs in scope back to `pending` (clears retries) |
+| `--force` | — | Reset all non-pending pairs in scope back to `pending` (clears retries) |
 | `--max-retries N` | 2 | Max retries for timed-out pairs |
 | `--poll-interval N` | 30 | Seconds between status polls |
 
@@ -228,6 +229,26 @@ hints:
 
 context:
   files: [<path>, ...]      # files assembled into context document (Phase 2)
+
+# v3 fields (required unless noted)
+target:
+  repo: <path>              # llm-d-inference-scheduler repo path
+config:
+  kind: <string>            # config kind (e.g. "gaie")
+  helm_path: <path>         # Helm chart path within target repo
+observe:                    # optional — defaults applied if absent
+  request_multiplier: 10    # scales workload num_requests for real-cluster benchmarks
+build:                      # optional — defaults applied if absent
+  commands: []              # EPP build commands
+epp_image:                  # optional
+  upstream:
+    hub: <registry>
+    name: <repo>
+    tag: <tag>
+  build:                    # override for built EPP image coordinates
+    hub: <registry>
+    name: <repo>
+    tag: <tag>
 ```
 
 All paths are relative to the repo root and validated at Phase 1.
