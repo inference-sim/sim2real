@@ -754,6 +754,7 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
     info(f"Orchestrator: {len(_scope)} pairs in scope, {len(namespaces)} slot(s)")
     if not _work_remaining() and not slots_busy:
         info(f"All {len(_scope)} pairs in scope already done — nothing to dispatch (use --force to reset)")
+        return
 
     while _work_remaining() or slots_busy:
 
@@ -922,7 +923,7 @@ Examples:
     run_p.add_argument("--package",      metavar="NAME",  help="Scope execution to pairs matching this package")
     run_p.add_argument("--status",       metavar="STATE", help="Scope execution to pairs with this status (e.g. failed, timed-out)")
     run_p.add_argument("--force",        action="store_true",
-                       help="Re-run completed pairs in scope (resets done → pending, clears retries)")
+                       help="Reset non-pending pairs in scope to pending (clears retries)")
     run_p.add_argument("--max-retries",  type=int, default=2, dest="max_retries",
                        help="Max retries for timed-out pairs [2]")
     run_p.add_argument("--poll-interval", type=int, default=30, dest="poll_interval",

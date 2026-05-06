@@ -109,22 +109,18 @@ Phase state is tracked per-run in `workspace/runs/<run>/.state.json`. Delete it 
 
 ## deploy.py
 
-Builds the EPP image, applies Tekton resources, and submits PipelineRuns. Requires gate verdict `READY TO DEPLOY`.
+Builds the EPP image, applies Tekton resources, and orchestrates PipelineRun execution across namespace slots.
 
 ```bash
-python pipeline/deploy.py [flags]
+python pipeline/deploy.py {run|status|collect} [flags]
 ```
+
+Common flags (all subcommands):
 
 | Flag | Default | Notes |
 |------|---------|-------|
 | `--run NAME` | from `setup_config.json` | override active run |
-| `--package NAME…` | all discovered | Filter to specific `wl-{workload}-{pkg}` packages |
-| `--skip-build-epp` | false | reuse `epp_image` from `run_metadata.json` |
-| `--dry-run` | false | print kubectl commands without applying |
-
-**Package discovery** — `deploy.py` discovers all `wl-{workload}-{pkg}/` directories under `cluster/` that contain `pipelinerun-*.yaml` files. Use `--package` to filter to specific packages.
-
-**`--skip-build-epp`** — skips the image build; use when resubmitting after a failed PipelineRun without changing the scorer.
+| `--experiment-root PATH` | cwd | path to experiment repo |
 
 **Subcommands:**
 
