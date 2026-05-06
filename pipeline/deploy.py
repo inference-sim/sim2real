@@ -417,10 +417,6 @@ def _cmd_collect(args, manifest: dict, run_dir: Path, setup_config: dict):
     else:
         phases_to_collect = list(DATA_PHASES)
 
-    if not phases_to_collect:
-        err("No data phases to collect (expected baseline and/or treatment packages).")
-        sys.exit(1)
-
     step(1, "Collecting Results")
 
     collected: list[str] = []

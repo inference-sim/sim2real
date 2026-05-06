@@ -87,7 +87,7 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). When no `-
 | `runs/<run>/generated/treatment_config.yaml` | `/sim2real-translate` skill | `prepare.py` Phase 4 (overlay) |
 | `runs/<run>/cluster/baseline.yaml` | `prepare.py` Phase 4 | `deploy.py` |
 | `runs/<run>/cluster/treatment.yaml` | `prepare.py` Phase 4 | `deploy.py` |
-| `runs/<run>/cluster/pipelinerun-*.yaml` | `prepare.py` Phase 4 | `deploy.py` |
+| `runs/<run>/cluster/pipelinerun-*.yaml` | `prepare.py` Phase 4 | `deploy.py run` |
 | `runs/<run>/run_summary.md` | `prepare.py` Phase 5 | human review |
 | `runs/<run>/results/{phase}/` | `deploy.py collect` | `/sim2real-analyze` skill |
 | `runs/<run>/progress.json` | `deploy.py run` | `deploy.py status` |

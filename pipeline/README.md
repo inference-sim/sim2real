@@ -122,7 +122,9 @@ python pipeline/deploy.py [flags]
 | `--skip-build-epp` | false | reuse `epp_image` from `run_metadata.json` |
 | `--dry-run` | false | print kubectl commands without applying |
 
-**Package discovery** — `deploy.py` discovers `pipelinerun-*.yaml` files at the `cluster/` root. Each file's pair key is derived as `wl-` + filename stem minus the `pipelinerun-` prefix. Use `--package` to filter collect phases (`baseline`, `treatment`, or `experiment` for both).
+**Pair discovery** — `deploy.py run` discovers `pipelinerun-*.yaml` files at the `cluster/` root. Each file's pair key is derived as `wl-` + filename stem minus the `pipelinerun-` prefix.
+
+**Collection phases** — `deploy.py collect` operates on fixed phases (`baseline`, `treatment`). Use `--package` to filter: `--package baseline`, `--package treatment`, or `--package experiment` (both).
 
 **`--skip-build-epp`** — skips the image build; use when resubmitting after a failed PipelineRun without changing the scorer.
 
