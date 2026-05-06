@@ -476,20 +476,14 @@ def _cmd_collect(args, manifest: dict, run_dir: Path, setup_config: dict):
 # ── Run helpers ─────────────────────────────────────────────────────────────
 
 def _load_pairs(cluster_dir: Path) -> dict:
-    """Discover all (workload, package) pairs from cluster/wl-*-*/ directories.
+    """Discover all (workload, package) pairs from pipelinerun-*.yaml at cluster/ root.
 
     Returns dict keyed by pair name ("wl-{workload}-{package}") with metadata.
     """
     pairs = {}
     if not cluster_dir.exists():
         return pairs
-    for pair_dir in sorted(cluster_dir.iterdir()):
-        if not pair_dir.is_dir() or not pair_dir.name.startswith("wl-"):
-            continue
-        prs = list(pair_dir.glob("pipelinerun-*.yaml"))
-        if not prs:
-            continue
-        pr_path = prs[0]
+    for pr_path in sorted(cluster_dir.glob("pipelinerun-*.yaml")):
         try:
             pr_data = yaml.safe_load(pr_path.read_text())
         except Exception:
@@ -498,7 +492,8 @@ def _load_pairs(cluster_dir: Path) -> dict:
         params = {p["name"]: p["value"] for p in pr_data.get("spec", {}).get("params", [])}
         workload = params.get("workloadName", "")
         package = params.get("phase", "")
-        pairs[pair_dir.name] = {
+        key = "wl-" + pr_path.stem.removeprefix("pipelinerun-")
+        pairs[key] = {
             "workload": workload,
             "package": package,
             "pr_name": pr_name,
