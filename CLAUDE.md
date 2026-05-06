@@ -34,7 +34,7 @@ Run all pipeline commands from the `sim2real/` directory, pointing `--experiment
 ```bash
 python pipeline/setup.py   --experiment-root ../admission-control
 python pipeline/prepare.py --experiment-root ../admission-control
-python pipeline/deploy.py  --experiment-root ../admission-control
+python pipeline/deploy.py run --experiment-root ../admission-control
 python pipeline/run.py     --experiment-root ../admission-control list
 python pipeline/run.py     --experiment-root ../admission-control switch <run-name>
 ```
