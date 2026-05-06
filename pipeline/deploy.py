@@ -63,17 +63,8 @@ def run(cmd: list[str], *, check: bool = True, capture: bool = False,
     return subprocess.run(cmd, check=check, text=True, capture_output=capture, cwd=cwd)
 
 
-# ── Package discovery ────────────────────────────────────────────────────────
-
-def _discover_packages(cluster_dir: Path) -> list[str]:
-    """A package is any subdirectory of cluster/ containing pipelinerun-*.yaml."""
-    if not cluster_dir.exists():
-        return []
-    return sorted(
-        d.name for d in cluster_dir.iterdir()
-        if d.is_dir() and any(d.glob("pipelinerun-*.yaml"))
-    )
-
+# ── Data phases ─────────────────────────────────────────────────────────────
+DATA_PHASES = ["baseline", "treatment"]
 
 # ── Setup config ─────────────────────────────────────────────────────────────
 
@@ -407,33 +398,24 @@ def _cmd_collect(args, manifest: dict, run_dir: Path, setup_config: dict):
         sys.exit(1)
 
     run_name = run_dir.name
-    cluster_dir = run_dir / "cluster"
-    all_packages = _discover_packages(cluster_dir)
-    if not all_packages:
-        err("No packages found in cluster/.")
-        sys.exit(1)
-
-    # Data phases are baseline and treatment (experiment is the sequencing wrapper).
-    data_phases = [p for p in ["baseline", "treatment"] if p in all_packages]
 
     if args.package:
-        # Validate requested packages exist; expand "experiment" to its phases.
-        unknown = set(args.package) - set(all_packages)
+        valid = set(DATA_PHASES) | {"experiment"}
+        unknown = set(args.package) - valid
         if unknown:
-            err(f"Unknown packages: {sorted(unknown)}. Available: {all_packages}")
+            err(f"Unknown packages: {sorted(unknown)}. Valid: {sorted(valid)}")
             sys.exit(1)
         phases_to_collect: list[str] = []
         for p in args.package:
             if p == "experiment":
-                phases_to_collect.extend(data_phases)
+                phases_to_collect.extend(DATA_PHASES)
             else:
                 phases_to_collect.append(p)
-        # Deduplicate while preserving order
         seen: set[str] = set()
         phases_to_collect = [p for p in phases_to_collect
                              if not (p in seen or seen.add(p))]  # type: ignore[func-returns-value]
     else:
-        phases_to_collect = data_phases
+        phases_to_collect = list(DATA_PHASES)
 
     if not phases_to_collect:
         err("No data phases to collect (expected baseline and/or treatment packages).")
