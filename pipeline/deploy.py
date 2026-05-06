@@ -871,8 +871,9 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
 
     # Final summary
     counts: dict[str, int] = {}
-    for v in progress.values():
-        counts[v["status"]] = counts.get(v["status"], 0) + 1
+    for k, v in progress.items():
+        if k in _scope:
+            counts[v["status"]] = counts.get(v["status"], 0) + 1
     print()
     ok("Run complete: " + "  ".join(f"{v} {k}" for k, v in sorted(counts.items())))
     print(f"  Progress: {progress_path}")
