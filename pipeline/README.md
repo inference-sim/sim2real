@@ -118,11 +118,13 @@ python pipeline/deploy.py [flags]
 | Flag | Default | Notes |
 |------|---------|-------|
 | `--run NAME` | from `setup_config.json` | override active run |
-| `--package NAME…` | all discovered | Filter to specific `wl-{workload}-{pkg}` packages |
+| `--package NAME…` | all phases | Filter to `baseline`, `treatment`, or `experiment` (both) |
 | `--skip-build-epp` | false | reuse `epp_image` from `run_metadata.json` |
 | `--dry-run` | false | print kubectl commands without applying |
 
-**Package discovery** — `deploy.py` discovers all `wl-{workload}-{pkg}/` directories under `cluster/` that contain `pipelinerun-*.yaml` files. Use `--package` to filter to specific packages.
+**Pair discovery** — `deploy.py run` discovers `pipelinerun-*.yaml` files at the `cluster/` root. Each file's pair key is derived as `wl-` + filename stem minus the `pipelinerun-` prefix.
+
+**Collection phases** — `deploy.py collect` operates on fixed phases (`baseline`, `treatment`). Use `--package` to filter: `--package baseline`, `--package treatment`, or `--package experiment` (both).
 
 **`--skip-build-epp`** — skips the image build; use when resubmitting after a failed PipelineRun without changing the scorer.
 

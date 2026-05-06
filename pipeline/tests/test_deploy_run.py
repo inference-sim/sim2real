@@ -94,9 +94,8 @@ def test_status_missing_progress_file(tmp_path, capsys):
 
 def test_load_pairs_discovers_all_pairs(tmp_path):
     from pipeline.deploy import _load_pairs
+    import yaml as _yaml
     for wl, pkg in [("smoke", "baseline"), ("smoke", "treatment"), ("load", "baseline")]:
-        d = tmp_path / f"wl-{wl}-{pkg}"
-        d.mkdir()
         pr = {
             "apiVersion": "tekton.dev/v1", "kind": "PipelineRun",
             "metadata": {"name": f"{pkg}-{wl}-run1", "namespace": "sim2real-0"},
@@ -105,8 +104,7 @@ def test_load_pairs_discovers_all_pairs(tmp_path):
                 {"name": "phase", "value": pkg},
             ]},
         }
-        import yaml as _yaml
-        (d / f"pipelinerun-{wl}-{pkg}.yaml").write_text(_yaml.dump(pr))
+        (tmp_path / f"pipelinerun-{wl}-{pkg}.yaml").write_text(_yaml.dump(pr))
 
     pairs = _load_pairs(tmp_path)
     assert "wl-smoke-baseline" in pairs
