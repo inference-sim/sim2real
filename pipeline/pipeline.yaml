@@ -101,7 +101,7 @@ spec:
       taskRef:
         name: collect-results
       workspaces:
-        - name: data-storage
+        - name: data
           workspace: data-storage
       params:
         - name: modelLabel
