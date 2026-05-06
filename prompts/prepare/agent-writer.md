@@ -87,6 +87,8 @@ that will be deep-merged onto the experiment's `baseline.yaml` by `prepare.py`.
 
 **Output format** (from pipeline/README.md "Scenario Overlay Format"):
 - Top-level `scenario:` list with one dict
+- The `name` field MUST match the experiment's `baseline.yaml` scenario name exactly
+  (mismatched names cause llmdbenchmark to deploy multiple scenarios instead of merging)
 - InferenceObjectives in `extraObjects` — each MUST include `spec.poolRef.name: ${{model.idLabel}}-gaie`
 - Plugin config in `inferenceExtension.pluginsCustomConfig` as a YAML-in-YAML string
 - Only include fields you are adding or overriding

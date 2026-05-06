@@ -45,6 +45,7 @@ def make_pipelinerun_scenario(
     benchmark_git_commit: str = "",
     benchmark_git_repo_url: str = "",
     blis_git_commit: str = "",
+    blis_git_repo_url: str = "",
     model: str = "",
 ) -> dict:
     """Generate a PipelineRun with resolved scenario content.
@@ -74,6 +75,7 @@ def make_pipelinerun_scenario(
             {"name": "workloadSpec",      "value": wl_spec_str},
             {"name": "benchmarkGitRepoUrl", "value": benchmark_git_repo_url},
             {"name": "benchmarkGitCommit", "value": benchmark_git_commit},
+            {"name": "blisGitRepoUrl",   "value": blis_git_repo_url},
             {"name": "blisGitCommit",     "value": blis_git_commit},
             {"name": "model",            "value": model},
         ],

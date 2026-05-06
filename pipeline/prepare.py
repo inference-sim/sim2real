@@ -419,6 +419,11 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     if benchmark_sub.exists() and (benchmark_sub / ".git").exists():
         result = run(["git", "remote", "get-url", "origin"], capture=True, cwd=benchmark_sub)
         benchmark_repo_url = result.stdout.strip()
+    blis_sub = REPO_ROOT / "inference-sim"
+    blis_repo_url = ""
+    if blis_sub.exists() and (blis_sub / ".git").exists():
+        result = run(["git", "remote", "get-url", "origin"], capture=True, cwd=blis_sub)
+        blis_repo_url = result.stdout.strip()
     scenarios = baseline_resolved.get("scenario", [])
     model_name = scenarios[0].get("model", {}).get("name", "") if scenarios else ""
 
@@ -441,6 +446,7 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
                 benchmark_git_commit=benchmark_commit,
                 benchmark_git_repo_url=benchmark_repo_url,
                 blis_git_commit=blis_commit,
+                blis_git_repo_url=blis_repo_url,
                 model=model_name,
             )
             pr_path = pair_dir / f"pipelinerun-{safe_wl}-{pkg}.yaml"

@@ -239,27 +239,25 @@ def test_do_collect_interrupt_saves_collect_failed(tmp_path, monkeypatch):
 
 # ── _force_reset ──────────────────────────────────────────────────────────────
 
-def test_force_reset_resets_done_pairs():
+def test_force_reset_resets_non_pending_pairs():
     from pipeline.deploy import _force_reset
     progress = dict(_PROGRESS)
     scope = set(progress.keys())
     n = _force_reset(progress, scope)
-    assert n == 1
-    entry = progress["wl-smoke-baseline"]
-    assert entry["status"] == "pending"
-    assert entry["namespace"] is None
-    assert entry["retries"] == 0
+    # All non-pending pairs reset (done, running, timed-out, failed)
+    assert n == 4
+    for key in ("wl-smoke-baseline", "wl-smoke-treatment", "wl-load-treatment", "wl-heavy-baseline"):
+        assert progress[key]["status"] == "pending"
+        assert progress[key]["namespace"] is None
+        assert progress[key]["retries"] == 0
 
 
-def test_force_reset_leaves_non_done_pairs_unchanged():
+def test_force_reset_leaves_pending_pairs_unchanged():
     from pipeline.deploy import _force_reset
     progress = dict(_PROGRESS)
     scope = set(progress.keys())
     _force_reset(progress, scope)
-    assert progress["wl-smoke-treatment"]["status"] == "running"
     assert progress["wl-load-baseline"]["status"] == "pending"
-    assert progress["wl-load-treatment"]["status"] == "timed-out"
-    assert progress["wl-heavy-baseline"]["status"] == "failed"
 
 
 def test_force_reset_scoped_to_package():

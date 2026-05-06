@@ -26,6 +26,22 @@ def _load_yaml(path: Path) -> dict:
         raise AssemblyError(f"YAML parse error in {path}: {exc}") from exc
 
 
+def _align_overlay_name(base: dict, overlay: dict) -> dict:
+    """Ensure overlay scenario name matches base to prevent list-merge duplication.
+
+    The deep_merge list strategy merges by 'name' key. If the overlay has a
+    different scenario name, it would be appended as a new entry instead of
+    merged into the existing one.
+    """
+    base_scenarios = base.get("scenario", [])
+    overlay_scenarios = overlay.get("scenario", [])
+    if base_scenarios and overlay_scenarios:
+        base_name = base_scenarios[0].get("name", "")
+        if base_name and overlay_scenarios[0].get("name", "") != base_name:
+            overlay_scenarios[0]["name"] = base_name
+    return overlay
+
+
 def assemble_scenarios(
     baseline_path: Path,
     treatment_path: Path | None,
@@ -49,6 +65,7 @@ def assemble_scenarios(
     """
     baseline = _load_yaml(baseline_path)
     baseline_overlay = _load_yaml(baseline_overlay_path) if baseline_overlay_path.exists() else {}
+    baseline_overlay = _align_overlay_name(baseline, baseline_overlay)
     baseline_resolved = deep_merge(baseline, baseline_overlay)
 
     treatment_diffs = {}
@@ -56,6 +73,7 @@ def assemble_scenarios(
         treatment_diffs = _load_yaml(treatment_path)
 
     treatment_overlay = _load_yaml(treatment_overlay_path) if treatment_overlay_path.exists() else {}
+    treatment_overlay = _align_overlay_name(baseline_resolved, treatment_overlay)
 
     treatment_resolved = deep_merge(baseline_resolved, treatment_diffs)
     treatment_resolved = deep_merge(treatment_resolved, treatment_overlay)

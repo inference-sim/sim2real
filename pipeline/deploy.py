@@ -509,13 +509,14 @@ def _load_pairs(cluster_dir: Path) -> dict:
 
 
 def _force_reset(progress: dict, scope: set) -> int:
-    """Reset done pairs in scope to pending. Returns count of pairs reset."""
+    """Reset non-pending pairs in scope to pending. Returns count of pairs reset."""
     reset = 0
     for key in scope:
-        if progress.get(key, {}).get("status") == "done":
-            progress[key]["status"] = "pending"
-            progress[key]["namespace"] = None
-            progress[key]["retries"] = 0
+        entry = progress.get(key, {})
+        if entry.get("status") not in (None, "pending"):
+            entry["status"] = "pending"
+            entry["namespace"] = None
+            entry["retries"] = 0
             reset += 1
     return reset
 
@@ -703,9 +704,14 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
                     entry["status"] = "collecting"
                 elif actual in ("Failed", "PipelineRunCancelled"):
                     entry["status"] = "failed"
+                elif actual == "Unknown":
+                    warn(f"[{key}] PipelineRun not found on cluster → resetting to pending")
+                    entry["status"] = "pending"
+                    entry["namespace"] = None
                 # If still "Running"/"Started", leave as "running" — will be monitored
             else:
                 entry["status"] = "pending"
+                entry["namespace"] = None
         elif entry["status"] == "collecting":
             _reconcile_collecting(key, entry, run_dir)
     store.save(progress)
