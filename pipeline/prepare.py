@@ -322,12 +322,16 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     baseline_overlay = run_dir / "generated" / "baseline_config.yaml"
     treatment_overlay = run_dir / "generated" / "treatment_config.yaml"
 
+    translation_output_path = run_dir / "translation_output.json"
+    overlays_expected = translation_output_path.exists()
+
     try:
         baseline_resolved, treatment_resolved = assemble_scenarios(
             baseline_path=baseline_path,
             treatment_path=treatment_path if treatment_path.exists() else None,
             baseline_overlay_path=baseline_overlay,
             treatment_overlay_path=treatment_overlay,
+            overlays_expected=overlays_expected,
         )
     except AssemblyError as e:
         err(str(e))
@@ -375,7 +379,11 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     ok(f"Resolved scenarios: {_display_path(cluster_dir)}")
 
     # 4d: Load and scale workloads
-    multiplier = manifest.get("observe", {}).get("request_multiplier", 1)
+    try:
+        multiplier = int(manifest.get("observe", {}).get("request_multiplier", 1))
+    except (TypeError, ValueError):
+        err("observe.request_multiplier must be a number")
+        sys.exit(1)
     workloads = []
     for wl_path_str in manifest.get("workloads", []):
         wl_path = EXPERIMENT_ROOT / wl_path_str
@@ -405,6 +413,9 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     # The static pipeline.yaml (#23) provides the Pipeline that PipelineRuns reference.
     # No compilation step needed — deploy.py applies the static pipeline directly.
     setup_config = _load_setup_config()
+    if not setup_config:
+        err("setup_config.json not found. Run setup.py first to bootstrap cluster resources.")
+        sys.exit(1)
     run_name = run_dir.name
     pipeline_name = "sim2real"
 
@@ -424,6 +435,16 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     if blis_sub.exists() and (blis_sub / ".git").exists():
         result = run(["git", "remote", "get-url", "origin"], capture=True, cwd=blis_sub)
         blis_repo_url = result.stdout.strip()
+
+    missing_params = []
+    if not benchmark_repo_url:
+        missing_params.append("benchmark_repo_url (llm-d-benchmark submodule)")
+    if not blis_repo_url:
+        missing_params.append("blis_repo_url (inference-sim submodule)")
+    if missing_params:
+        err(f"Critical PipelineRun params resolved to empty: {', '.join(missing_params)}. "
+            "Initialize submodules with: git submodule update --init")
+        sys.exit(1)
     scenarios = baseline_resolved.get("scenario", [])
     model_name = scenarios[0].get("model", {}).get("name", "") if scenarios else ""
 
@@ -480,8 +501,9 @@ def _verify_generated_dir(run_dir: Path):
     try:
         output = json.loads(output_path.read_text())
     except json.JSONDecodeError:
-        warn("translation_output.json is not valid JSON — skipping verification")
-        return
+        err("translation_output.json is not valid JSON — translation may have failed. "
+            "Re-run the /sim2real-translate skill.")
+        sys.exit(1)
 
     for f in output.get("files_created", []) + output.get("files_modified", []):
         if not (generated_dir / Path(f).name).exists():

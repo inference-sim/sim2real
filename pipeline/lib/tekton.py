@@ -48,11 +48,7 @@ def make_pipelinerun_scenario(
     blis_git_repo_url: str = "",
     model: str = "",
 ) -> dict:
-    """Generate a PipelineRun with resolved scenario content.
-
-    Replaces gaieConfig + inferenceObjectives with a single scenarioContent
-    param containing the fully resolved llmdbenchmark scenario YAML.
-    """
+    """Generate a PipelineRun with resolved scenario content."""
     if spec_content is None:
         spec_content = _default_spec_content()
     wl_name = workload.get("name", workload.get("workload_name", "unknown"))

@@ -687,9 +687,9 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
     if getattr(args, "force", False):
         n = _force_reset(progress, _scope)
         if n:
-            info(f"--force: reset {n} done pair(s) to pending")
+            info(f"--force: reset {n} non-pending pair(s) to pending")
         else:
-            info("--force: no done pairs found in scope — nothing reset")
+            info("--force: no non-pending pairs found in scope — nothing reset")
         store.save(progress)
 
     # Reconcile 'running' entries against actual cluster state on resume

@@ -47,6 +47,7 @@ def assemble_scenarios(
     treatment_path: Path | None,
     baseline_overlay_path: Path,
     treatment_overlay_path: Path,
+    overlays_expected: bool = False,
 ) -> tuple[dict, dict]:
     """Assemble resolved baseline and treatment scenarios.
 
@@ -55,14 +56,28 @@ def assemble_scenarios(
         treatment_path: Path to treatment.yaml (bundle input, optional).
         baseline_overlay_path: Path to generated/baseline_config.yaml (skill output).
         treatment_overlay_path: Path to generated/treatment_config.yaml (skill output).
+        overlays_expected: If True, raise AssemblyError when overlay files are missing.
 
     Returns:
         (baseline_resolved, treatment_resolved) — two scenario dicts ready to
         be serialized as scenarioContent in PipelineRun params.
 
     Raises:
-        AssemblyError: If any input file is unreadable or contains invalid YAML.
+        AssemblyError: If any input file is unreadable or contains invalid YAML,
+            or if overlays_expected is True and overlay files are missing.
     """
+    if overlays_expected:
+        missing = []
+        if not baseline_overlay_path.exists():
+            missing.append(str(baseline_overlay_path))
+        if not treatment_overlay_path.exists():
+            missing.append(str(treatment_overlay_path))
+        if missing:
+            raise AssemblyError(
+                f"Overlay files expected but missing: {', '.join(missing)}. "
+                "Translation skill may have failed or written files to the wrong path."
+            )
+
     baseline = _load_yaml(baseline_path)
     baseline_overlay = _load_yaml(baseline_overlay_path) if baseline_overlay_path.exists() else {}
     baseline_overlay = _align_overlay_name(baseline, baseline_overlay)

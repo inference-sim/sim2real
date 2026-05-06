@@ -170,4 +170,5 @@ If a fix only exists in `workspace/`, it will be silently lost the next time tha
 **Deploy-time config** — `config/env_defaults.yaml` (version-controlled):
 - `epp_image.build.{hub, name, platform}` — EPP image build settings
 - `pipeline.fast_iteration` (boolean, default `true`): when `true`, skips noise gate and mechanism check
-- `observe.request_multiplier` (number, default `10`): multiplies each workload's `num_requests` for real-cluster benchmarks
+
+**Manifest config** — `observe.request_multiplier` (number, default `1`): multiplies each workload's `num_requests` for real-cluster benchmarks. Set in `transfer.yaml` under `observe:`.

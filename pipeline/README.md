@@ -237,7 +237,7 @@ config:
   kind: <string>            # config kind (e.g. "gaie")
   helm_path: <path>         # Helm chart path within target repo
 observe:                    # optional — defaults applied if absent
-  request_multiplier: 10    # scales workload num_requests for real-cluster benchmarks
+  request_multiplier: 1     # scales workload num_requests for real-cluster benchmarks (default: 1)
 build:                      # optional — defaults applied if absent
   commands: []              # EPP build commands
 epp_image:                  # optional
