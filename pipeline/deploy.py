@@ -752,6 +752,8 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
 
     timeout_hours = 4
     info(f"Orchestrator: {len(_scope)} pairs in scope, {len(namespaces)} slot(s)")
+    if not _work_remaining() and not slots_busy:
+        info(f"All {len(_scope)} pairs in scope already done — nothing to dispatch (use --force to reset)")
 
     while _work_remaining() or slots_busy:
 
