@@ -22,12 +22,13 @@ python pipeline/deploy.py  --experiment-root ../admission-control
 ```
 
 The experiment repo must contain:
-- `transfer.yaml` (or `config/transfer.yaml` for backward compat)
-- `env_defaults.yaml` (or `config/env_defaults.yaml`)
+- `transfer.yaml` (or `config/transfer.yaml` for backward compat) — v3 schema with `target`, `config`, `observe`, `build`, `epp_image` fields
+- `baseline.yaml` — llmdbenchmark-style scenario file (required for Phase 4 assembly)
+- `treatment.yaml` (optional) — merged into `baseline.yaml` for the treatment scenario
 - `algorithm/` and `workloads/` directories as referenced in `transfer.yaml`
 - `workspace/` in `.gitignore`
 
-`pipeline/templates/pipeline.yaml.j2` is the framework default Tekton template. Override it per-experiment by placing `pipeline.yaml.j2` in the experiment root, or pass `--pipeline-template PATH` to `prepare.py`.
+`pipeline/pipeline.yaml` is the static Tekton Pipeline definition (applied by `deploy.py run`; Phase 4 generates PipelineRuns that reference it).
 
 Omitting `--experiment-root` defaults to the framework directory — backward compatible with the existing `config/transfer.yaml` layout.
 
@@ -46,6 +47,7 @@ python pipeline/setup.py [flags]
 | `--namespace NS` | `NAMESPACE` | interactive |
 | `--namespaces NS1,NS2,...` | — | — |
 | `--hf-token TOKEN` | `HF_TOKEN` | interactive |
+| `--github-token TOKEN` | `GITHUB_TOKEN` | — |
 | `--registry REG` | — | interactive |
 | `--registry-user USER` | `QUAY_ROBOT_USERNAME` | interactive |
 | `--registry-token TOKEN` | `QUAY_ROBOT_TOKEN` | interactive |
@@ -61,7 +63,7 @@ python pipeline/setup.py [flags]
 
 Writes `workspace/setup_config.json` and `workspace/runs/<run>/run_metadata.json`. Subsequent scripts read namespace, registry, and run name from `setup_config.json`.
 
-`setup_config.json` includes workspace bindings for four PVCs: `model-cache` (`model-pvc`), `data-storage` (`data-pvc`), `hf-credentials` (secret), and `source` (`source-pvc`). `source-pvc` holds the BLIS binary built at pipeline runtime by the `install-blis` task. All four must be bound before `deploy.py run` accepts a namespace slot.
+`setup_config.json` includes workspace bindings for two PVCs: `data-storage` (`data-pvc`) and `source` (`source-pvc`). `source-pvc` holds the BLIS binary built at pipeline runtime by the `install-blis` task. Both must be bound before `deploy.py run` accepts a namespace slot.
 
 ---
 
@@ -70,7 +72,7 @@ Writes `workspace/setup_config.json` and `workspace/runs/<run>/run_metadata.json
 6-phase state machine. Re-running skips completed phases.
 
 ```bash
-python pipeline/prepare.py [--force] [--rebuild-context] [--manifest PATH] [--run NAME] [--mode parallel|sequential]
+python pipeline/prepare.py [--force] [--rebuild-context] [--manifest PATH] [--run NAME]
 ```
 
 | Phase | Name | Skippable |
@@ -78,13 +80,13 @@ python pipeline/prepare.py [--force] [--rebuild-context] [--manifest PATH] [--ru
 | 1 | Init — validate manifest + prerequisites | on re-run |
 | 2 | Context — assemble + cache context doc (SHA-256) | on cache hit |
 | 3 | **Translate checkpoint** — write `skill_input.json`, wait | resumes on re-run |
-| 4 | Assembly — `algorithm_values.yaml`, `values.yaml`, cluster YAMLs | on re-run |
+| 4 | Assembly — resolved scenarios, cluster YAMLs, PipelineRuns | on re-run |
 | 5 | Summary — write `run_summary.md` | on re-run |
 | 6 | **Gate** — `[d]eploy / [e]dit / [q]uit` | on re-run |
 
 **Phase 3 checkpoint**: writes `skill_input.json` and exits cleanly (exit 0). Run `/sim2real-translate` in Claude Code, then re-run `prepare.py` to continue from Phase 4.
 
-**Phase 4 assembly** resolves the `inference-sim` submodule HEAD commit (`git rev-parse HEAD`) and writes it as `observe.blis_commit` in `algorithm_values.yaml`. This value is rendered into the Tekton Pipeline template as the commit the `install-blis` task clones and builds. Fails hard if the submodule is not a valid git repository.
+**Phase 4 assembly** reads `baseline.yaml` and `treatment.yaml` from the experiment root, merges them with skill-generated overlay files (`generated/baseline_config.yaml`, `generated/treatment_config.yaml`), and writes resolved scenario files to `cluster/`. PipelineRuns are generated with a `scenarioContent` param containing the fully resolved scenario YAML. Workloads are loaded from the manifest and scaled by `observe.request_multiplier`.
 
 **Phase 6 gate**: `d` marks the run `READY TO DEPLOY` (required by `deploy.py`). `e` drops you back to edit files, then re-displays the summary. `q` marks `abandoned` and exits.
 
@@ -101,10 +103,6 @@ python pipeline/prepare.py validate-assembly   # run assembly checks standalone
 
 **`--rebuild-context`** — ignores SHA cache and re-assembles context.
 
-**`--mode parallel`** (default) — generates one shared Pipeline + one PipelineRun per `(workload, package)` pair; required for `deploy.py run`.
-
-**`--mode sequential`** — preserves legacy single-experiment pipeline behavior (one Pipeline + one PipelineRun for the whole run).
-
 Phase state is tracked per-run in `workspace/runs/<run>/.state.json`. Delete it (or use `--force`) to reset.
 
 ---
@@ -120,11 +118,11 @@ python pipeline/deploy.py [flags]
 | Flag | Default | Notes |
 |------|---------|-------|
 | `--run NAME` | from `setup_config.json` | override active run |
-| `--package NAME…` | `experiment` | `baseline`, `treatment`, or `experiment` |
+| `--package NAME…` | all discovered | Filter to specific `wl-{workload}-{pkg}` packages |
 | `--skip-build-epp` | false | reuse `epp_image` from `run_metadata.json` |
 | `--dry-run` | false | print kubectl commands without applying |
 
-**Default package is `experiment`** — a sequential baseline-then-treatment pipeline. Pass `--package baseline treatment` to submit them independently.
+**Package discovery** — `deploy.py` discovers all `wl-{workload}-{pkg}/` directories under `cluster/` that contain `pipelinerun-*.yaml` files. Use `--package` to filter to specific packages.
 
 **`--skip-build-epp`** — skips the image build; use when resubmitting after a failed PipelineRun without changing the scorer.
 
@@ -136,7 +134,7 @@ python pipeline/deploy.py status            # show progress snapshot of all (wor
 python pipeline/deploy.py collect [--package NAME…]
 ```
 
-**`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, collects results inline, and retries pairs that time out. Reads `progress.json` to resume interrupted runs. Requires `prepare.py --mode parallel`.
+**`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, collects results inline, and retries pairs that time out. Reads `progress.json` to resume interrupted runs.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -144,7 +142,7 @@ python pipeline/deploy.py collect [--package NAME…]
 | `--workload NAME` | — | Scope execution to pairs matching this workload |
 | `--package NAME` | — | Scope execution to pairs matching this package |
 | `--status STATE` | — | Scope execution to pairs with this status (e.g. `failed`, `timed-out`) |
-| `--force` | — | Reset `done` pairs in scope back to `pending` (clears retries) |
+| `--force` | — | Reset all non-pending pairs in scope back to `pending` (clears retries) |
 | `--max-retries N` | 2 | Max retries for timed-out pairs |
 | `--poll-interval N` | 30 | Seconds between status polls |
 
@@ -209,7 +207,7 @@ Manifest consumed by `prepare.py`. Version 3 required.
 ```yaml
 kind: sim2real-transfer
 version: 3
-scenario: <name>            # must match a scenario in config/env_defaults.yaml
+scenario: <name>            # scenario name used in generated PipelineRun labels
 
 algorithm:
   source: <path>            # sim algorithm implementation
@@ -231,6 +229,26 @@ hints:
 
 context:
   files: [<path>, ...]      # files assembled into context document (Phase 2)
+
+# v3 fields (required unless noted)
+target:
+  repo: <path>              # llm-d-inference-scheduler repo path
+config:
+  kind: <string>            # config kind (e.g. "gaie")
+  helm_path: <path>         # Helm chart path within target repo
+observe:                    # optional — defaults applied if absent
+  request_multiplier: 1     # scales workload num_requests for real-cluster benchmarks (default: 1)
+build:                      # optional — defaults applied if absent
+  commands: []              # EPP build commands
+epp_image:                  # optional
+  upstream:
+    hub: <registry>
+    name: <repo>
+    tag: <tag>
+  build:                    # override for built EPP image coordinates
+    hub: <registry>
+    name: <repo>
+    tag: <tag>
 ```
 
 All paths are relative to the repo root and validated at Phase 1.
@@ -239,11 +257,103 @@ All paths are relative to the repo root and validated at Phase 1.
 
 ## Parallel Pool Execution
 
-`setup.py --namespaces NS1,NS2,...` provisions N namespace slots, each bootstrapped identically. `prepare.py` (default `--mode parallel`) generates one shared Tekton Pipeline plus one PipelineRun per `(workload, package)` pair. `deploy.py run` orchestrates execution by assigning pairs to free slots, polling for completion, collecting results inline, and retrying on timeout. `deploy.py status` reads `workspace/runs/<run>/progress.json` and prints the current state of every pair.
+`setup.py --namespaces NS1,NS2,...` provisions N namespace slots, each bootstrapped identically. `prepare.py` generates one shared Tekton Pipeline plus one PipelineRun per `(workload, package)` pair. `deploy.py run` orchestrates execution by assigning pairs to free slots, polling for completion, collecting results inline, and retrying on timeout. `deploy.py status` reads `workspace/runs/<run>/progress.json` and prints the current state of every pair.
 
 | Artifact | Written by | Read by |
 |----------|-----------|---------|
 | `runs/<run>/progress.json` | `deploy.py run` | `deploy.py status` |
+
+---
+
+## Scenario Overlay Format
+
+The `/sim2real-translate` skill produces two overlay files in `workspace/runs/<run>/generated/`:
+
+- `baseline_config.yaml` — overlay merged onto `baseline.yaml`
+- `treatment_config.yaml` — overlay merged onto the already-resolved baseline
+
+### Assembly formula
+
+```python
+baseline_resolved = deep_merge(baseline_bundle, baseline_overlay)
+treatment_resolved = deep_merge(deep_merge(baseline_resolved, treatment_diffs), treatment_overlay)
+```
+
+Where `baseline_bundle` is the experiment's `baseline.yaml`, `treatment_diffs` is the experiment's optional `treatment.yaml`, and the overlays are the skill outputs.
+
+### Deep merge semantics
+
+- Dict keys merge recursively (overlay overrides base)
+- Lists of dicts with a common `name` field merge by name
+- Lists of dicts without a common key merge positionally
+- Lists of scalars are replaced entirely
+- Treatment overlay only needs the delta from baseline_resolved (shared config propagates automatically)
+
+### Required structure
+
+Both overlays are llmdbenchmark scenario overlays. They must be valid YAML with a top-level `scenario:` list containing a single dict:
+
+```yaml
+scenario:
+  - name: "<scenario-name>"
+
+    # Fields to add or override (only include what you're changing)
+    extraObjects: [...]
+    inferenceExtension: {...}
+    images: {...}
+```
+
+### InferenceObjective requirements
+
+InferenceObjectives go in `extraObjects`. Each must include `spec.poolRef.name` referencing the InferencePool created by the gaie Helm chart:
+
+```yaml
+extraObjects:
+  - apiVersion: inference.networking.x-k8s.io/v1alpha2
+    kind: InferenceObjective
+    metadata:
+      name: critical
+    spec:
+      poolRef:
+        name: ${model.idLabel}-gaie
+      priority: 100
+```
+
+`${model.idLabel}` is resolved by llm-d-benchmark at render time (requires llm-d-benchmark >= PR #1103).
+
+### Plugin config
+
+The EPP plugin configuration goes inside `inferenceExtension.pluginsCustomConfig` as a YAML-in-YAML string:
+
+```yaml
+inferenceExtension:
+  pluginsConfigFile: custom-plugins.yaml
+  pluginsCustomConfig:
+    custom-plugins.yaml: |
+      apiVersion: inference.networking.x-k8s.io/v1alpha1
+      kind: EndpointPickerConfig
+      plugins:
+      - type: my-plugin
+        name: my-plugin
+        parameters:
+          threshold: 5
+      schedulingProfiles:
+      - name: default
+        plugins:
+        - pluginRef: my-plugin
+```
+
+### Typical overlay content
+
+**Baseline overlay** — adds InferenceObjectives and the baseline EPP plugin config:
+- `extraObjects` (InferenceObjectives with `poolRef`)
+- `inferenceExtension.pluginsCustomConfig` (baseline scorer config)
+
+**Treatment overlay** — only the delta from baseline:
+- `inferenceExtension.pluginsCustomConfig` (evolved scorer config)
+- `images.inferenceScheduler` (custom EPP image — injected by `prepare.py`, not the skill)
+
+If treatment uses the same InferenceObjectives as baseline, do NOT repeat them — they propagate from `baseline_resolved`.
 
 ---
 

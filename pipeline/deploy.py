@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""sim2real deploy — Build EPP, submit packages, collect results.
+"""sim2real deploy — Build EPP, orchestrate runs, collect results.
 
-Fire-and-forget: builds EPP image, applies PipelineRuns per package, exits.
-Use `deploy.py collect` to pull results for completed packages.
+Subcommands:
+  run      Build EPP image, apply Pipeline, submit PipelineRuns
+  status   Show progress of all (workload, package) pairs
+  collect  Pull results from cluster for completed phases
 """
 
 import argparse
@@ -21,22 +23,12 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from pipeline.lib.manifest import load_manifest, ManifestError
-from pipeline.lib.state_machine import StateMachine
-from pipeline.lib.values import merge_values
 
 # ── Repo layout ──────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Overridden in main() when --experiment-root is specified.
 EXPERIMENT_ROOT = REPO_ROOT
-
-
-def _resolve_env_defaults_d(experiment_root: Path) -> Path:
-    """Resolve env_defaults.yaml: experiment root first, then config/ subdirectory."""
-    direct = experiment_root / "env_defaults.yaml"
-    if direct.exists():
-        return direct
-    return experiment_root / "config" / "env_defaults.yaml"
 
 
 def _resolve_manifest_default_d(experiment_root: Path) -> Path:
@@ -132,47 +124,6 @@ def _build_epp_image(run_dir: Path, run_name: str, namespace: str) -> str:
     sys.exit(1)
 
 
-def _inject_image_into_values(run_dir: Path, full_image: str, scenario: str):
-    """Re-merge values with the EPP image reference injected."""
-    step("1a", "Injecting EPP image into values")
-
-    alg_values_path = run_dir / "algorithm_values.yaml"
-    if not alg_values_path.exists():
-        warn("algorithm_values.yaml not found, skipping image injection")
-        return
-
-    alg_values = yaml.safe_load(alg_values_path.read_text())
-
-    # Read hub+name from env_defaults
-    env_path = _resolve_env_defaults_d(EXPERIMENT_ROOT)
-    env_data = yaml.safe_load(env_path.read_text())
-    common = env_data.get("common", {})
-    build_cfg = common.get("stack", {}).get("gaie", {}).get("epp_image", {}).get("build", {})
-    epp_hub = build_cfg.get("hub", "")
-    epp_name = build_cfg.get("name", "")
-    epp_tag = full_image.rsplit(":", 1)[1] if ":" in full_image else ""
-
-    # Inject into algorithm_values
-    (alg_values
-        .setdefault("stack", {})
-        .setdefault("gaie", {})
-        .setdefault("treatment", {})
-        .setdefault("helmValues", {})
-        .setdefault("inferenceExtension", {})
-        ["image"]) = {"hub": epp_hub, "name": epp_name, "tag": epp_tag}
-    alg_values_path.write_text(yaml.dump(alg_values, default_flow_style=False, sort_keys=False))
-    ok("algorithm_values.yaml updated with EPP image")
-
-    # Re-merge values
-    values_path = run_dir / "values.yaml"
-    try:
-        merge_values(env_path, alg_values_path, values_path, scenario=scenario)
-    except (FileNotFoundError, yaml.YAMLError, ValueError, OSError) as e:
-        err(f"merge-values failed: {e}")
-        sys.exit(1)
-    ok("values.yaml re-merged with EPP image")
-
-
 # ── PipelineRun helpers ──────────────────────────────────────────────────────
 
 def _cancel_and_delete_pipelinerun(pr_name: str, namespace: str) -> None:
@@ -212,143 +163,6 @@ def _cancel_and_delete_pipelinerun(pr_name: str, namespace: str) -> None:
 
 
 # ── Deploy command ───────────────────────────────────────────────────────────
-
-def _print_dry_run(packages: list[str], cluster_dir: Path):
-    """Print what would be applied without actually doing it."""
-    print("\n  DRY RUN — would apply:\n")
-    for pkg in sorted(packages):
-        pipeline_yaml = cluster_dir / pkg / f"{pkg}-pipeline.yaml"
-        if pipeline_yaml.exists() and not pipeline_yaml.read_text().startswith("#"):
-            print(f"    kubectl apply -f {pipeline_yaml}")
-        for pr_path in sorted((cluster_dir / pkg).glob("pipelinerun-*.yaml")):
-            print(f"    kubectl apply -f {pr_path}")
-    print()
-
-
-def _print_status(submitted: dict[str, str], namespace: str):
-    """Print submitted PipelineRuns and how to check status."""
-    print(f"\n  Submitted {len(submitted)} package(s) to namespace '{namespace}':")
-    for pkg, pr_name in sorted(submitted.items()):
-        print(f"    {pkg:20s} → {pr_name}")
-    print(f"\n  Check status:  kubectl get pipelineruns -n {namespace}")
-    print("  Collect:       python pipeline/deploy.py collect")
-    print()
-
-
-def _cmd_deploy(args, manifest: dict, run_dir: Path, setup_config: dict):
-    """Build EPP + submit packages, then exit."""
-    # Pre-flight: check state
-    try:
-        state = StateMachine.load(run_dir)
-    except FileNotFoundError:
-        err("No state file. Run prepare.py first.")
-        sys.exit(1)
-
-    if not state.is_done("gate"):
-        err("Cannot deploy: prepare not complete (gate not passed).")
-        sys.exit(1)
-
-    verdict = state.get_phase("gate").get("verdict", "")
-    if verdict != "READY TO DEPLOY":
-        err(f"Cannot deploy: gate verdict is '{verdict}', expected 'READY TO DEPLOY'.")
-        sys.exit(1)
-
-    namespace = os.environ.get("NAMESPACE", setup_config.get("namespace", ""))
-    if not namespace:
-        err("No namespace configured. Run setup.py or set NAMESPACE env var.")
-        sys.exit(1)
-
-    # Discover packages
-    cluster_dir = run_dir / "cluster"
-    packages = _discover_packages(cluster_dir)
-    if not packages:
-        err("No packages found in cluster/. Run prepare.py first.")
-        sys.exit(1)
-
-    if args.package:
-        selected = [p for p in packages if p in args.package]
-        missing = set(args.package) - set(packages)
-        if missing:
-            err(f"Packages not found: {missing}. Available: {packages}")
-            sys.exit(1)
-        packages = selected
-    elif "experiment" in packages:
-        packages = ["experiment"]
-
-    if args.dry_run:
-        _print_dry_run(packages, cluster_dir)
-        return
-
-    # Build EPP image
-    if not args.skip_build_epp:
-        full_image = _build_epp_image(run_dir, state.run_name, namespace)
-        _inject_image_into_values(run_dir, full_image, manifest["scenario"])
-    else:
-        meta_path = run_dir / "run_metadata.json"
-        if meta_path.exists():
-            meta = json.loads(meta_path.read_text())
-            full_image = meta.get("epp_image", "")
-            if full_image:
-                info(f"Skipping EPP build. Using image: {full_image}")
-            else:
-                warn("--skip-build-epp set but no epp_image in run_metadata.json")
-        else:
-            warn("--skip-build-epp set, no run_metadata.json found")
-
-    # Apply Pipeline definitions first so PipelineRuns can reference them
-    step(2, "Apply Pipeline Definitions")
-    shared_pipelines = [p for p in cluster_dir.glob("sim2real-*.yaml")
-                        if not p.read_text().startswith("#")]
-    if shared_pipelines:
-        # Parallel layout: one shared Pipeline at cluster/sim2real-{run}.yaml
-        for pipeline_yaml in shared_pipelines:
-            result = run(["kubectl", "apply", "-f", str(pipeline_yaml), "-n", namespace],
-                         check=False, capture=True)
-            if result.returncode != 0:
-                err(f"kubectl apply failed for {pipeline_yaml.name}: {result.stderr}")
-                sys.exit(1)
-            ok(f"Applied: {pipeline_yaml.name}")
-    else:
-        # Sequential layout: Pipeline YAML lives inside each package subdirectory
-        for pkg in sorted(packages):
-            pipeline_yamls = [
-                cluster_dir / pkg / f"{pkg}-pipeline.yaml",
-                cluster_dir / pkg / f"sim2real-{pkg}-pipeline.yaml",
-            ]
-            applied_any = False
-            for pipeline_yaml in pipeline_yamls:
-                if pipeline_yaml.exists() and not pipeline_yaml.read_text().startswith("#"):
-                    result = run(["kubectl", "apply", "-f", str(pipeline_yaml), "-n", namespace],
-                                 check=False, capture=True)
-                    if result.returncode != 0:
-                        err(f"kubectl apply failed for {pipeline_yaml.name}: {result.stderr}")
-                        sys.exit(1)
-                    ok(f"Applied: {pipeline_yaml.name}")
-                    applied_any = True
-            if not applied_any:
-                warn(f"No Pipeline definition for {pkg} — PipelineRuns may fail")
-
-    # Submit packages
-    step(3, "Submit PipelineRuns")
-    submitted = {}
-    for pkg in sorted(packages):
-        for pr_path in sorted((cluster_dir / pkg).glob("pipelinerun-*.yaml")):
-            pr_data = yaml.safe_load(pr_path.read_text())
-            pr_name = pr_data.get("metadata", {}).get("name", pr_path.stem)
-
-            _cancel_and_delete_pipelinerun(pr_name, namespace)
-
-            result = run(["kubectl", "apply", "-f", str(pr_path), "-n", namespace],
-                         check=False, capture=True)
-            if result.returncode != 0:
-                err(f"kubectl apply failed for {pr_path.name}: {result.stderr}")
-                continue
-            key = f"{pkg}/{pr_path.stem}"
-            submitted[key] = pr_name
-            ok(f"Submitted: {key} → {pr_name}")
-
-    _print_status(submitted, namespace)
-
 
 # ── Status command ───────────────────────────────────────────────────────────
 
@@ -695,13 +509,14 @@ def _load_pairs(cluster_dir: Path) -> dict:
 
 
 def _force_reset(progress: dict, scope: set) -> int:
-    """Reset done pairs in scope to pending. Returns count of pairs reset."""
+    """Reset non-pending pairs in scope to pending. Returns count of pairs reset."""
     reset = 0
     for key in scope:
-        if progress.get(key, {}).get("status") == "done":
-            progress[key]["status"] = "pending"
-            progress[key]["namespace"] = None
-            progress[key]["retries"] = 0
+        entry = progress.get(key, {})
+        if entry.get("status") not in (None, "pending"):
+            entry["status"] = "pending"
+            entry["namespace"] = None
+            entry["retries"] = 0
             reset += 1
     return reset
 
@@ -744,7 +559,7 @@ def _check_slot_ready(namespace: str) -> tuple[bool, list[str]]:
     """
     failures = []
 
-    for pvc in ["model-pvc", "data-pvc", "source-pvc"]:
+    for pvc in ["data-pvc", "source-pvc"]:
         result = run(
             ["kubectl", "get", "pvc", pvc, f"-n={namespace}",
              "-o", "jsonpath={.status.phase}"],
@@ -823,21 +638,11 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
     if not namespaces or not namespaces[0]:
         err("No namespaces configured. Run setup.py with --namespaces."); sys.exit(1)
 
-    # Build EPP image (use first namespace for the build)
+    # Build EPP image (tag is deterministic — already embedded in PipelineRuns by prepare.py)
     if not args.skip_build_epp:
-        full_image = _build_epp_image(run_dir, run_dir.name, namespaces[0])
-        _inject_image_into_values(run_dir, full_image, manifest["scenario"])
+        _build_epp_image(run_dir, run_dir.name, namespaces[0])
     else:
-        meta_path = run_dir / "run_metadata.json"
-        if meta_path.exists():
-            meta = json.loads(meta_path.read_text())
-            full_image = meta.get("epp_image", "")
-            if full_image:
-                info(f"Skipping EPP build. Using image: {full_image}")
-            else:
-                warn("--skip-build-epp set but no epp_image in run_metadata.json")
-        else:
-            warn("--skip-build-epp set, no run_metadata.json found")
+        info("Skipping EPP build (--skip-build-epp)")
 
     max_retries = getattr(args, "max_retries", 2)
     poll_interval = getattr(args, "poll_interval", 30)
@@ -882,9 +687,9 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
     if getattr(args, "force", False):
         n = _force_reset(progress, _scope)
         if n:
-            info(f"--force: reset {n} done pair(s) to pending")
+            info(f"--force: reset {n} non-pending pair(s) to pending")
         else:
-            info("--force: no done pairs found in scope — nothing reset")
+            info("--force: no non-pending pairs found in scope — nothing reset")
         store.save(progress)
 
     # Reconcile 'running' entries against actual cluster state on resume
@@ -899,23 +704,36 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
                     entry["status"] = "collecting"
                 elif actual in ("Failed", "PipelineRunCancelled"):
                     entry["status"] = "failed"
+                elif actual == "Unknown":
+                    warn(f"[{key}] PipelineRun not found on cluster → resetting to pending")
+                    entry["status"] = "pending"
+                    entry["namespace"] = None
                 # If still "Running"/"Started", leave as "running" — will be monitored
             else:
                 entry["status"] = "pending"
+                entry["namespace"] = None
         elif entry["status"] == "collecting":
             _reconcile_collecting(key, entry, run_dir)
     store.save(progress)
 
-    # Apply shared Pipeline (if present) to ALL namespaces
-    pipeline_yaml = next(cluster_dir.glob("sim2real-*.yaml"), None)
-    if pipeline_yaml:
-        for _ns in namespaces:
-            r = run(["kubectl", "apply", "-f", str(pipeline_yaml), "-n", _ns],
-                    check=False, capture=True)
-            if r.returncode == 0:
-                ok(f"Applied shared Pipeline to {_ns}: {pipeline_yaml.name}")
-            else:
-                warn(f"Could not apply shared Pipeline to {_ns}: {r.stderr.strip()}")
+    # Apply static Pipeline definition to all namespace slots
+    pipeline_yaml = REPO_ROOT / "pipeline" / "pipeline.yaml"
+    if not pipeline_yaml.exists():
+        err(f"Static pipeline not found: {pipeline_yaml.relative_to(REPO_ROOT)}")
+        sys.exit(1)
+    failed_ns = set()
+    for _ns in namespaces:
+        r = run(["kubectl", "apply", "-f", str(pipeline_yaml), "-n", _ns],
+                check=False, capture=True)
+        if r.returncode == 0:
+            ok(f"Applied Pipeline to {_ns}")
+        else:
+            warn(f"Could not apply Pipeline to {_ns}: {r.stderr.strip()}")
+            failed_ns.add(_ns)
+    namespaces = [ns for ns in namespaces if ns not in failed_ns]
+    if not namespaces:
+        err("No namespaces available after Pipeline apply failures")
+        sys.exit(1)
 
     # Track which namespace is assigned to which pair
     slots_busy: dict[str, str] = {
@@ -1064,15 +882,15 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="deploy.py",
-        description="sim2real deploy — Build EPP, submit packages, collect results",
+        description="sim2real deploy — Build EPP, orchestrate runs, collect results",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python pipeline/deploy.py                     # Build EPP + submit all packages
-  python pipeline/deploy.py --dry-run           # Show what would be applied
-  python pipeline/deploy.py --skip-build-epp    # Submit packages (EPP already built)
-  python pipeline/deploy.py --package treatment # Deploy only treatment package
-  python pipeline/deploy.py collect             # Pull results for completed packages
+  python pipeline/deploy.py run                        # Build EPP + orchestrate all pairs
+  python pipeline/deploy.py run --skip-build-epp       # Orchestrate without EPP build
+  python pipeline/deploy.py status                     # Show progress snapshot
+  python pipeline/deploy.py collect                    # Pull results for completed phases
+  python pipeline/deploy.py collect --skip-logs        # Collect traces only (skip large logs)
 """,
     )
     p.add_argument("--run", metavar="NAME",
@@ -1081,12 +899,6 @@ Examples:
                    help="Path to transfer.yaml (default: config/transfer.yaml)")
     p.add_argument("--experiment-root", metavar="PATH", dest="experiment_root",
                    help="Root of the experiment repo (default: framework directory)")
-    p.add_argument("--skip-build-epp", action="store_true", dest="skip_build_epp",
-                   help="Skip EPP image build")
-    p.add_argument("--package", nargs="+", metavar="NAME",
-                   help="Deploy only these packages")
-    p.add_argument("--dry-run", action="store_true", dest="dry_run",
-                   help="Show what would be applied without actually applying")
 
     sub = p.add_subparsers(dest="command")
     collect_p = sub.add_parser("collect", help="Pull results for completed packages")
@@ -1151,7 +963,8 @@ def main():
     elif cmd == "collect":
         _cmd_collect(args, manifest, run_dir, setup_config)
     else:
-        _cmd_deploy(args, manifest, run_dir, setup_config)
+        err("No subcommand specified. Use: deploy.py run | status | collect")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
