@@ -482,6 +482,43 @@ def _load_pairs(cluster_dir: Path) -> dict:
     return pairs
 
 
+def _cleanup_pair(key: str, entry: dict, discovered: dict, *, dry_run: bool = False) -> bool:
+    """Delete PipelineRun and Helm releases for a pair, reset to pending.
+
+    Returns True if cleanup was performed, False if skipped (no namespace).
+    """
+    ns = entry.get("namespace")
+    if not ns:
+        return False
+
+    pr_name = discovered.get(key, {}).get("pr_name", "")
+
+    if dry_run:
+        info(f"[DRY-RUN] {key}: would delete pipelinerun {pr_name} in {ns}")
+        info(f"[DRY-RUN] {key}: would uninstall all helm releases in {ns}")
+        return True
+
+    # Cancel running PipelineRuns; delete non-running ones directly
+    if entry.get("status") == "running" and pr_name:
+        _cancel_and_delete_pipelinerun(pr_name, ns)
+    elif pr_name:
+        run(["kubectl", "delete", "pipelinerun", pr_name, "-n", ns,
+             "--ignore-not-found"], check=False, capture=True)
+
+    # Discover and uninstall all Helm releases in the namespace
+    result = run(["helm", "list", "-n", ns, "-q"], check=False, capture=True)
+    if result.returncode == 0 and result.stdout.strip():
+        for release in result.stdout.strip().splitlines():
+            run(["helm", "uninstall", release, "-n", ns], check=False, capture=True)
+            ok(f"Uninstalled: {release} (ns: {ns})")
+
+    # Reset state
+    entry["status"] = "pending"
+    entry["namespace"] = None
+    entry["retries"] = 0
+    return True
+
+
 def _force_reset(progress: dict, scope: set) -> int:
     """Reset non-pending pairs in scope to pending. Returns count of pairs reset."""
     reset = 0
