@@ -249,6 +249,9 @@ epp_image:                  # optional
     hub: <registry>
     name: <repo>
     tag: <tag>
+pipeline:                   # optional — defaults applied if absent
+  name: sim2real            # Pipeline resource name referenced in PipelineRuns (default: "sim2real")
+  yaml: pipeline/pipeline.yaml  # path relative to repo root (default: "pipeline/pipeline.yaml")
 ```
 
 All paths are relative to the repo root and validated at Phase 1.
