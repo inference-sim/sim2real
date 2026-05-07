@@ -114,7 +114,7 @@ def test_load_pairs_discovers_all_pairs(tmp_path):
 
 
 def test_load_pairs_skips_corrupt_yaml(tmp_path, capsys):
-    """BC-1: Corrupt YAML files are skipped, valid ones still loaded."""
+    """Corrupt YAML files are skipped with a warning; valid ones still loaded."""
     import yaml as _yaml
     from pipeline.deploy import _load_pairs
 
@@ -135,8 +135,8 @@ def test_load_pairs_skips_corrupt_yaml(tmp_path, capsys):
     assert "pipelinerun-bad.yaml" in capsys.readouterr().out
 
 
-def test_load_pairs_skips_malformed_params(tmp_path):
-    """BC-3: Missing 'value' key in params does not crash."""
+def test_load_pairs_skips_malformed_params(tmp_path, capsys):
+    """Missing 'value' key in a param entry skips the file with a warning."""
     import yaml as _yaml
     from pipeline.deploy import _load_pairs
 
@@ -149,12 +149,12 @@ def test_load_pairs_skips_malformed_params(tmp_path):
     }
     (tmp_path / "pipelinerun-test.yaml").write_text(_yaml.dump(pr))
     pairs = _load_pairs(tmp_path)
-    assert len(pairs) == 1
-    assert pairs["wl-test"]["workload"] == ""
+    assert len(pairs) == 0
+    assert "pipelinerun-test.yaml" in capsys.readouterr().out
 
 
 def test_load_pairs_warns_on_skip(tmp_path, capsys):
-    """BC-2, BC-4: Warning is emitted when a file is skipped."""
+    """Warning is emitted with filename when a file is skipped."""
     from pipeline.deploy import _load_pairs
 
     (tmp_path / "pipelinerun-broken.yaml").write_text("not: valid: yaml: [[[")
