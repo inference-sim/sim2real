@@ -214,7 +214,7 @@ python pipeline/run.py --experiment-root ../admission-control switch <name>
 
 ---
 
-## config/transfer.yaml
+## <experiment-repo>/transfer.yaml
 
 Manifest consumed by `prepare.py`. Version 3 required.
 
