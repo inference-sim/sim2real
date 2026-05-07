@@ -8,8 +8,6 @@ inference-sim to production llm-d-inference-scheduler scorer plugins.
 ## Repository Structure
 
 - `config/` — Version-controlled configuration. `transfer.yaml` defines the experiment manifest; `env_defaults.yaml` provides deploy-time infrastructure defaults (image registry, fast-iteration flag). Experiment repos carry their own `transfer.yaml` at their root.
-- `docs/transfer/` — Mapping artifacts, scorer template, calibration log
-- `docs/plans/` — Design docs and implementation plans
 - `pipeline/` — Pipeline entry points and shared library (see [`pipeline/README.md`](pipeline/README.md))
 - `pipeline/pipeline.yaml` — Static Tekton Pipeline definition (applied by `deploy.py run`)
 - `workspace/` — Inter-stage artifacts (gitignored, not committed)
