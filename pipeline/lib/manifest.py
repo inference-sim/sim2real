@@ -13,7 +13,7 @@ _REQUIRED_ALGORITHM = ["source"]
 
 
 def load_manifest(path: "Path | str") -> dict:
-    """Load and validate a v2 sim2real transfer manifest."""
+    """Load and validate a sim2real transfer manifest (v2 or v3)."""
     path = Path(path)
     if not path.exists():
         raise ManifestError(f"Manifest not found: {path}")
@@ -191,9 +191,9 @@ def _validate_v3_fields(data: dict) -> None:
         pipeline.setdefault("name", "sim2real")
         pipeline.setdefault("yaml", "pipeline/pipeline.yaml")
     pipeline = data["pipeline"]
-    if not pipeline["name"] or not pipeline["name"].strip():
+    if not isinstance(pipeline["name"], str) or not pipeline["name"].strip():
         raise ManifestError("pipeline.name must be a non-empty string")
-    if not pipeline["yaml"] or not pipeline["yaml"].strip():
+    if not isinstance(pipeline["yaml"], str) or not pipeline["yaml"].strip():
         raise ManifestError("pipeline.yaml must be a non-empty string")
     if Path(pipeline["yaml"]).is_absolute():
         raise ManifestError(

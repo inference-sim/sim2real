@@ -1,5 +1,13 @@
 """Tests for pipeline manifest override in prepare.py and deploy.py."""
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+import yaml
+
+from pipeline.lib.manifest import load_manifest, ManifestError
 from pipeline.lib.tekton import make_pipelinerun_scenario
+from pipeline.tests.test_manifest import MINIMAL_V3
 
 
 def test_pipelinerun_uses_custom_pipeline_name():
@@ -30,12 +38,6 @@ def test_pipelinerun_uses_default_pipeline_name():
 
 def test_manifest_rejects_absolute_pipeline_yaml(tmp_path):
     """Absolute pipeline.yaml path is rejected at manifest load time."""
-    import pytest
-    import yaml
-    from pipeline.lib.manifest import load_manifest, ManifestError
-
-    from pipeline.tests.test_manifest import MINIMAL_V3
-
     data = {**MINIMAL_V3, "pipeline": {"yaml": "/etc/passwd"}}
     p = tmp_path / "transfer.yaml"
     p.write_text(yaml.dump(data))
@@ -45,14 +47,37 @@ def test_manifest_rejects_absolute_pipeline_yaml(tmp_path):
 
 def test_manifest_rejects_empty_pipeline_name(tmp_path):
     """Empty pipeline.name is rejected."""
-    import pytest
-    import yaml
-    from pipeline.lib.manifest import load_manifest, ManifestError
-
-    from pipeline.tests.test_manifest import MINIMAL_V3
-
     data = {**MINIMAL_V3, "pipeline": {"name": "", "yaml": "pipeline/pipeline.yaml"}}
     p = tmp_path / "transfer.yaml"
     p.write_text(yaml.dump(data))
     with pytest.raises(ManifestError, match="pipeline.name.*non-empty"):
         load_manifest(p)
+
+
+def test_manifest_rejects_non_string_pipeline_name(tmp_path):
+    """Non-string pipeline.name (e.g. YAML boolean) is rejected."""
+    data = {**MINIMAL_V3, "pipeline": {"name": True, "yaml": "pipeline/pipeline.yaml"}}
+    p = tmp_path / "transfer.yaml"
+    p.write_text(yaml.dump(data))
+    with pytest.raises(ManifestError, match="pipeline.name.*non-empty"):
+        load_manifest(p)
+
+
+def test_manifest_rejects_non_string_pipeline_yaml(tmp_path):
+    """Non-string pipeline.yaml (e.g. YAML integer) is rejected."""
+    data = {**MINIMAL_V3, "pipeline": {"name": "sim2real", "yaml": 42}}
+    p = tmp_path / "transfer.yaml"
+    p.write_text(yaml.dump(data))
+    with pytest.raises(ManifestError, match="pipeline.yaml.*non-empty"):
+        load_manifest(p)
+
+
+def test_deploy_rejects_traversal_path(tmp_path):
+    """deploy.py rejects pipeline.yaml that resolves outside REPO_ROOT."""
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    manifest = {"pipeline": {"yaml": "../../etc/passwd"}}
+    pipeline_yaml_rel = manifest.get("pipeline", {}).get("yaml", "pipeline/pipeline.yaml")
+    pipeline_yaml = (repo_root / pipeline_yaml_rel).resolve()
+    assert not pipeline_yaml.is_relative_to(repo_root.resolve())
