@@ -1,7 +1,4 @@
 """Tests for pipeline manifest override in prepare.py and deploy.py."""
-from pathlib import Path
-from unittest.mock import patch
-
 import pytest
 import yaml
 
