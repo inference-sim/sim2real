@@ -4,8 +4,8 @@ Replaces blind trust of translation_output.json lists with git-based
 discovery. Uses uncommitted working-tree state (git diff HEAD + untracked)
 as the source of truth.
 
-Precondition: the target repo must not have committed changes beyond its
-pinned HEAD during this translation run.
+Precondition: the target repo working tree must contain only changes from
+this translation run (no pre-existing uncommitted edits from other sources).
 """
 import json
 import shutil
