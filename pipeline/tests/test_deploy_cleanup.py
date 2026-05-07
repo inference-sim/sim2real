@@ -82,16 +82,99 @@ def test_cleanup_pair_running_cancels_first(monkeypatch):
     assert entry["namespace"] is None
 
 
-def test_cleanup_pair_skips_none_namespace(monkeypatch):
-    """Pairs with no namespace are no-ops (returns False)."""
+def test_cleanup_pair_none_namespace_resets_state(monkeypatch):
+    """Pairs with no namespace still get reset (e.g. collect-failed)."""
     import pipeline.deploy as mod
 
-    entry = {"workload": "wl-load", "package": "baseline", "status": "pending",
-             "namespace": None, "retries": 0}
+    entry = {"workload": "wl-load", "package": "baseline", "status": "collect-failed",
+             "namespace": None, "retries": 2}
 
     result = mod._cleanup_pair("wl-load-baseline", entry, _DISCOVERED)
-    assert result is False
+    assert result is True
     assert entry["status"] == "pending"
+    assert entry["retries"] == 0
+
+
+def test_cleanup_pair_helm_list_failure_does_not_reset(monkeypatch):
+    """When helm list fails, state is NOT reset — operator needs manual intervention."""
+    import pipeline.deploy as mod
+
+    entry = {"workload": "wl-heavy", "package": "baseline", "status": "failed",
+             "namespace": "sim2real-0", "retries": 0}
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 1 if cmd[:2] == ["helm", "list"] else 0
+            stdout = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    result = mod._cleanup_pair("wl-heavy-baseline", entry, _DISCOVERED)
+    assert result is False
+    assert entry["status"] == "failed"
+    assert entry["namespace"] == "sim2real-0"
+
+
+def test_cleanup_pair_missing_pr_name_warns(monkeypatch, capsys):
+    """When pr_name is not in discovered, a warning is emitted."""
+    import pipeline.deploy as mod
+
+    entry = {"workload": "wl-unknown", "package": "baseline", "status": "failed",
+             "namespace": "sim2real-0", "retries": 0}
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    result = mod._cleanup_pair("wl-unknown-baseline", entry, {})
+    assert result is True
+    assert entry["status"] == "pending"
+    out = capsys.readouterr().out
+    assert "no PipelineRun name found" in out
+
+
+def test_cmd_cleanup_continues_on_exception(tmp_path, monkeypatch, capsys):
+    """One pair raising an exception does not abort cleanup of remaining pairs."""
+    import pipeline.deploy as mod
+
+    progress = {
+        "wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "failed",
+                          "namespace": "sim2real-0", "retries": 0},
+        "wl-b-baseline": {"workload": "wl-b", "package": "baseline", "status": "failed",
+                          "namespace": "sim2real-1", "retries": 0},
+    }
+    progress_path = tmp_path / "progress.json"
+    progress_path.write_text(json.dumps(progress))
+
+    call_count = []
+
+    def exploding_cleanup(key, entry, disc, dry_run=False):
+        call_count.append(key)
+        if key == "wl-a-baseline":
+            raise RuntimeError("kubectl not found")
+        entry["status"] = "pending"
+        entry["namespace"] = None
+        entry["retries"] = 0
+        return True
+
+    monkeypatch.setattr(mod, "_cleanup_pair", exploding_cleanup)
+
+    class _Args:
+        only = None; workload = None; package = None; status = None; dry_run = False
+
+    mod._cmd_cleanup(_Args(), progress_path, _DISCOVERED)
+
+    # Both pairs should have been attempted
+    assert "wl-a-baseline" in call_count
+    assert "wl-b-baseline" in call_count
+    # Progress should still be saved (wl-b was cleaned)
+    saved = json.loads(progress_path.read_text())
+    assert saved["wl-b-baseline"]["status"] == "pending"
 
 
 def test_cmd_cleanup_skips_done_and_pending(tmp_path, monkeypatch, capsys):

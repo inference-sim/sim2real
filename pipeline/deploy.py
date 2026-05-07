@@ -486,16 +486,22 @@ def _load_pairs(cluster_dir: Path) -> dict:
 def _cleanup_pair(key: str, entry: dict, discovered: dict, *, dry_run: bool = False) -> bool:
     """Delete PipelineRun and Helm releases for a pair, reset to pending.
 
-    Returns True if cleanup was performed, False if skipped (no namespace).
+    Returns True if cleanup was performed (or no cluster teardown needed),
+    False if cluster teardown failed and state was NOT reset.
     """
     ns = entry.get("namespace")
     if not ns:
-        return False
+        # No namespace — no cluster resources to clean (e.g. collect-failed).
+        # Still reset state so the pair can be re-dispatched.
+        if not dry_run:
+            entry["status"] = "pending"
+            entry["retries"] = 0
+        return True
 
     pr_name = discovered.get(key, {}).get("pr_name", "")
 
     if dry_run:
-        info(f"[DRY-RUN] {key}: would delete pipelinerun {pr_name} in {ns}")
+        info(f"[DRY-RUN] {key}: would delete pipelinerun {pr_name or '(unknown)'} in {ns}")
         info(f"[DRY-RUN] {key}: would uninstall all helm releases in {ns}")
         return True
 
@@ -505,13 +511,21 @@ def _cleanup_pair(key: str, entry: dict, discovered: dict, *, dry_run: bool = Fa
     elif pr_name:
         run(["kubectl", "delete", "pipelinerun", pr_name, "-n", ns,
              "--ignore-not-found"], check=False, capture=True)
+    else:
+        warn(f"{key}: no PipelineRun name found — skipping PR deletion (manual check needed)")
 
     # Discover and uninstall all Helm releases in the namespace
     result = run(["helm", "list", "-n", ns, "-q"], check=False, capture=True)
-    if result.returncode == 0 and result.stdout.strip():
+    if result.returncode != 0:
+        warn(f"{key}: helm list failed in {ns} — skipping cleanup (manual intervention needed)")
+        return False
+    if result.stdout.strip():
         for release in result.stdout.strip().splitlines():
-            run(["helm", "uninstall", release, "-n", ns], check=False, capture=True)
-            ok(f"Uninstalled: {release} (ns: {ns})")
+            ur = run(["helm", "uninstall", release, "-n", ns], check=False, capture=True)
+            if ur.returncode == 0:
+                ok(f"Uninstalled: {release} (ns: {ns})")
+            else:
+                warn(f"Failed to uninstall {release} in {ns}")
 
     # Reset state
     entry["status"] = "pending"
@@ -928,15 +942,25 @@ def _cmd_cleanup(args, progress_path: Path, discovered: dict) -> None:
          + (" [DRY-RUN]" if dry_run else ""))
 
     cleaned = 0
+    errors = 0
     for key in sorted(actionable):
         entry = progress[key]
-        if _cleanup_pair(key, entry, discovered, dry_run=dry_run):
-            cleaned += 1
+        try:
+            if _cleanup_pair(key, entry, discovered, dry_run=dry_run):
+                cleaned += 1
+            else:
+                errors += 1
+        except Exception as e:
+            err(f"{key}: cleanup failed — {e}")
+            errors += 1
 
     if not dry_run:
         store.save(progress)
 
-    ok(f"{cleaned} pair(s) cleaned up" + (" and reset to pending" if not dry_run else ""))
+    msg = f"{cleaned} pair(s) cleaned up" + (" and reset to pending" if not dry_run else "")
+    if errors:
+        msg += f" ({errors} failed — manual intervention needed)"
+    ok(msg)
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -983,7 +1007,7 @@ Examples:
     run_p.add_argument("--package",      metavar="NAME",  help="Scope execution to pairs matching this package")
     run_p.add_argument("--status",       metavar="STATE", help="Scope execution to pairs with this status (e.g. failed, timed-out)")
     run_p.add_argument("--force",        action="store_true",
-                       help="Reset non-pending pairs in scope to pending (clears retries)")
+                       help="Reset non-pending pairs to pending, cleaning cluster resources for pairs with assigned namespaces")
     run_p.add_argument("--max-retries",  type=int, default=2, dest="max_retries",
                        help="Max retries for timed-out pairs [2]")
     run_p.add_argument("--poll-interval", type=int, default=30, dest="poll_interval",
