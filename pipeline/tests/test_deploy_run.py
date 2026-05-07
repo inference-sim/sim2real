@@ -289,8 +289,22 @@ def test_do_collect_interrupt_saves_collect_failed(tmp_path, monkeypatch):
 
 # ── _force_reset ──────────────────────────────────────────────────────────────
 
-def test_force_reset_resets_non_pending_non_done_pairs():
+def _mock_run(monkeypatch):
+    """Mock subprocess.run for _force_reset tests (no real kubectl/helm)."""
+    import pipeline.deploy as mod
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+
+def test_force_reset_resets_non_pending_non_done_pairs(monkeypatch):
     from pipeline.deploy import _force_reset
+    _mock_run(monkeypatch)
     progress = dict(_PROGRESS)
     scope = set(progress.keys())
     n = _force_reset(progress, scope)
@@ -303,16 +317,18 @@ def test_force_reset_resets_non_pending_non_done_pairs():
     assert progress["wl-smoke-baseline"]["status"] == "done"
 
 
-def test_force_reset_leaves_pending_pairs_unchanged():
+def test_force_reset_leaves_pending_pairs_unchanged(monkeypatch):
     from pipeline.deploy import _force_reset
+    _mock_run(monkeypatch)
     progress = dict(_PROGRESS)
     scope = set(progress.keys())
     _force_reset(progress, scope)
     assert progress["wl-load-baseline"]["status"] == "pending"
 
 
-def test_force_reset_scoped_to_package():
+def test_force_reset_scoped_to_package(monkeypatch):
     from pipeline.deploy import _force_reset
+    _mock_run(monkeypatch)
     progress = {
         "wl-a-baseline":  {"workload": "wl-a", "package": "baseline",  "status": "failed", "namespace": "ns-0", "retries": 2},
         "wl-a-treatment": {"workload": "wl-a", "package": "treatment", "status": "failed", "namespace": "ns-1", "retries": 1},
@@ -335,8 +351,9 @@ def test_force_reset_returns_zero_when_nothing_to_reset():
     assert progress["wl-a-baseline"]["status"] == "pending"
 
 
-def test_force_reset_clears_retries():
+def test_force_reset_clears_retries(monkeypatch):
     from pipeline.deploy import _force_reset
+    _mock_run(monkeypatch)
     progress = {
         "wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "timed-out", "namespace": "ns-0", "retries": 3},
     }
