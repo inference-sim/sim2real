@@ -26,3 +26,16 @@ def test_pipelinerun_uses_default_pipeline_name():
         scenario_content="kind: scenario",
     )
     assert pr["spec"]["pipelineRef"]["name"] == "sim2real"
+
+
+def test_pipeline_yaml_resolves_relative_to_repo_root(tmp_path):
+    """pipeline.yaml from manifest is resolved relative to REPO_ROOT."""
+    custom_yaml = tmp_path / "custom" / "my-pipeline.yaml"
+    custom_yaml.parent.mkdir(parents=True)
+    custom_yaml.write_text("apiVersion: tekton.dev/v1\nkind: Pipeline\n")
+
+    manifest = {"pipeline": {"yaml": "custom/my-pipeline.yaml"}}
+    yaml_path = manifest.get("pipeline", {}).get("yaml", "pipeline/pipeline.yaml")
+    resolved = tmp_path / yaml_path
+    assert resolved.exists()
+    assert resolved == custom_yaml

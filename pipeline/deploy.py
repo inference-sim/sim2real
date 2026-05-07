@@ -717,9 +717,10 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
     store.save(progress)
 
     # Apply static Pipeline definition to all namespace slots
-    pipeline_yaml = REPO_ROOT / "pipeline" / "pipeline.yaml"
+    pipeline_yaml_rel = manifest.get("pipeline", {}).get("yaml", "pipeline/pipeline.yaml")
+    pipeline_yaml = REPO_ROOT / pipeline_yaml_rel
     if not pipeline_yaml.exists():
-        err(f"Static pipeline not found: {pipeline_yaml.relative_to(REPO_ROOT)}")
+        err(f"Static pipeline not found: {pipeline_yaml_rel}")
         sys.exit(1)
     failed_ns = set()
     for _ns in namespaces:
