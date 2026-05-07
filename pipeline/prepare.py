@@ -343,24 +343,25 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     # what build-epp.sh pushes. Read from run_metadata.json (written by setup.py).
     meta_path = run_dir / "run_metadata.json"
     if not meta_path.exists():
-        warn("run_metadata.json absent — EPP image injection skipped (re-run setup.py)")
+        err("run_metadata.json absent — cannot inject EPP image. Re-run setup.py.")
+        sys.exit(1)
+    try:
+        meta = json.loads(meta_path.read_text())
+    except json.JSONDecodeError as e:
+        err(f"run_metadata.json is not valid JSON: {e}. Re-run setup.py.")
+        sys.exit(1)
+    registry = meta.get("registry", "")
+    repo_name = meta.get("repo_name", "llm-d-inference-scheduler")
+    run_name_tag = run_dir.name
+    if not registry:
+        err("run_metadata.json has no registry — cannot determine EPP image. Re-run setup.py.")
+        sys.exit(1)
+    injected = inject_epp_image(treatment_resolved, registry, repo_name, run_name_tag)
+    if injected:
+        ok(f"EPP image injected: {registry}/{repo_name}:{run_name_tag}")
     else:
-        try:
-            meta = json.loads(meta_path.read_text())
-        except json.JSONDecodeError as e:
-            err(f"run_metadata.json is not valid JSON: {e}. Re-run setup.py.")
-            sys.exit(1)
-        registry = meta.get("registry", "")
-        repo_name = meta.get("repo_name", "llm-d-inference-scheduler")
-        run_name_tag = run_dir.name
-        if not registry:
-            warn("run_metadata.json has no registry — EPP image injection skipped")
-        else:
-            injected = inject_epp_image(treatment_resolved, registry, repo_name, run_name_tag)
-            if injected:
-                ok(f"EPP image injected: {registry}/{repo_name}:{run_name_tag}")
-            else:
-                warn("treatment has no 'scenario' entries — EPP image not injected")
+        err("treatment has no 'scenario' entries — EPP image cannot be injected.")
+        sys.exit(1)
 
     # 4c: Write resolved scenarios
     cluster_dir = run_dir / "cluster"

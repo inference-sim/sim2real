@@ -40,21 +40,22 @@ class TestInjectEppImage:
             assert entry["images"]["inferenceScheduler"]["repository"] == "reg.io/epp"
             assert entry["images"]["inferenceScheduler"]["tag"] == "v1"
 
-    def test_baseline_not_modified(self):
-        """BC-2: Baseline scenarios are never passed to inject_epp_image.
+    def test_overwrites_existing_inference_scheduler(self):
+        """BC-1: Pre-existing inferenceScheduler image is replaced, not preserved.
 
-        This test verifies the function's contract: if you don't call it
-        on baseline, baseline stays untouched. The integration test (Task 3)
-        verifies the pipeline only calls it on treatment.
+        Guards against regression to setdefault("inferenceScheduler", epp_img)
+        which would silently produce an A/A experiment.
         """
-        baseline = {
+        scenario = {
             "scenario": [
-                {"name": "baseline", "images": {"inferenceScheduler": {"repository": "orig", "tag": "v0"}}},
+                {"name": "s", "images": {"inferenceScheduler": {"repository": "old/repo", "tag": "old-tag", "pullPolicy": "IfNotPresent"}}},
             ]
         }
-        original_img = baseline["scenario"][0]["images"]["inferenceScheduler"].copy()
-        # Not calling inject_epp_image on baseline — verifying it's unchanged
-        assert baseline["scenario"][0]["images"]["inferenceScheduler"] == original_img
+        inject_epp_image(scenario, "ghcr.io/new", "epp", "run-99")
+        img = scenario["scenario"][0]["images"]["inferenceScheduler"]
+        assert img["repository"] == "ghcr.io/new/epp"
+        assert img["tag"] == "run-99"
+        assert img["pullPolicy"] == "Always"
 
     def test_empty_registry_skips(self):
         """BC-3: Empty registry string skips injection entirely."""
