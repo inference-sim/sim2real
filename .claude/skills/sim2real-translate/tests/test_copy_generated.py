@@ -54,7 +54,7 @@ def run_dir(tmp_path):
 
 
 def test_modified_tracked_file(git_repo, run_dir):
-    """BC-1: Modified tracked files appear in files_modified."""
+    """Modified tracked files appear in files_modified."""
     (git_repo / "existing.go").write_text("package main\n// changed")
     created, modified = cg.copy_generated(str(git_repo), str(run_dir))
     assert modified == ["existing.go"]
@@ -62,7 +62,7 @@ def test_modified_tracked_file(git_repo, run_dir):
 
 
 def test_new_untracked_file(git_repo, run_dir):
-    """BC-1: New untracked files appear in files_created."""
+    """New untracked files appear in files_created."""
     (git_repo / "pkg" / "plugins").mkdir(parents=True)
     (git_repo / "pkg" / "plugins" / "new_plugin.go").write_text("package plugins")
     created, modified = cg.copy_generated(str(git_repo), str(run_dir))
@@ -71,7 +71,7 @@ def test_new_untracked_file(git_repo, run_dir):
 
 
 def test_files_copied_to_generated(git_repo, run_dir):
-    """BC-2: All listed files exist in generated/ after copy."""
+    """All listed files exist in generated/ after copy."""
     (git_repo / "existing.go").write_text("package main\n// changed")
     (git_repo / "new_file.go").write_text("package main\n// new")
     cg.copy_generated(str(git_repo), str(run_dir))
@@ -81,7 +81,7 @@ def test_files_copied_to_generated(git_repo, run_dir):
 
 
 def test_translation_output_updated(git_repo, run_dir):
-    """BC-4: translation_output.json lists are overwritten with git state."""
+    """translation_output.json lists are overwritten with git state."""
     o = json.loads((run_dir / "translation_output.json").read_text())
     o["files_created"] = ["stale.go"]
     o["files_modified"] = ["also_stale.go"]
@@ -97,7 +97,7 @@ def test_translation_output_updated(git_repo, run_dir):
 
 
 def test_empty_diff_empty_lists(git_repo, run_dir):
-    """BC-3: No changes -> empty lists, no files in generated/."""
+    """No changes -> empty lists, no files in generated/."""
     created, modified = cg.copy_generated(str(git_repo), str(run_dir))
     assert created == []
     assert modified == []
@@ -107,12 +107,28 @@ def test_empty_diff_empty_lists(git_repo, run_dir):
 
 
 def test_nested_path_uses_basename(git_repo, run_dir):
-    """BC-2: Files in subdirectories use basename in generated/."""
+    """Files in subdirectories use basename in generated/."""
     (git_repo / "pkg" / "deep").mkdir(parents=True)
     (git_repo / "pkg" / "deep" / "nested.go").write_text("package deep")
     cg.copy_generated(str(git_repo), str(run_dir))
     gen = run_dir / "generated"
     assert (gen / "nested.go").exists()
+
+
+def test_mixed_created_and_modified(git_repo, run_dir):
+    """Both created and modified files are correctly classified in one call."""
+    (git_repo / "existing.go").write_text("package main\n// changed")
+    (git_repo / "pkg").mkdir()
+    (git_repo / "pkg" / "new_plugin.go").write_text("package pkg")
+    created, modified = cg.copy_generated(str(git_repo), str(run_dir))
+    assert modified == ["existing.go"]
+    assert "pkg/new_plugin.go" in created
+    result = json.loads((run_dir / "translation_output.json").read_text())
+    assert result["files_modified"] == ["existing.go"]
+    assert "pkg/new_plugin.go" in result["files_created"]
+    gen = run_dir / "generated"
+    assert (gen / "existing.go").exists()
+    assert (gen / "new_plugin.go").exists()
 
 
 def test_preserves_other_json_fields(git_repo, run_dir):

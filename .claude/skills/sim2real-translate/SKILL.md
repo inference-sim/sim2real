@@ -572,7 +572,7 @@ print(len(list((Path('$RUN_DIR/review')).glob('round_*.json'))))
 " 2>/dev/null || echo 0)
 ```
 
-Derive file lists from git state and copy to `$RUN_DIR/generated/`:
+Derive file lists from git state, overwrite `translation_output.json`, and copy to `$RUN_DIR/generated/`:
 
 ```bash
 python3 -c "

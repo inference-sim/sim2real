@@ -1,8 +1,9 @@
 """Derive file lists from git state and copy to generated/.
 
 Replaces blind trust of translation_output.json lists with git-based
-discovery. Semantics: files_created/files_modified = "files required to
-reproduce this run's submodule state", not "files changed this session."
+discovery. Uses uncommitted working-tree state (git diff HEAD + untracked)
+as the source of truth — valid because the skill never commits to the
+submodule during translation.
 """
 import json
 import shutil
@@ -23,7 +24,9 @@ def copy_generated(target_repo: str, run_dir: str) -> tuple[list[str], list[str]
     target = Path(target_repo)
     rd = Path(run_dir)
     gen = rd / "generated"
-    gen.mkdir(parents=True, exist_ok=True)
+    if gen.exists():
+        shutil.rmtree(gen)
+    gen.mkdir(parents=True)
 
     diff = subprocess.run(
         ["git", "diff", "HEAD", "--name-only"],
@@ -53,6 +56,6 @@ def copy_generated(target_repo: str, run_dir: str) -> tuple[list[str], list[str]
     if count:
         print(f"Generated artifacts ready ({len(files_created)} created, {len(files_modified)} modified).")
     else:
-        print("No files differ from HEAD — generated/ left empty (correct for merged-upstream case).")
+        print("No files differ from HEAD — generated/ left empty.")
 
     return files_created, files_modified
