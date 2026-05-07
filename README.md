@@ -59,25 +59,4 @@ python -m pytest pipeline/ -v
 
 See `CLAUDE.md` for artifact contracts and exit code semantics.
 
-> For help when things go wrong, see [Troubleshooting](docs/contributing/troubleshooting.md).
 
-## Prerequisites
-
-### EPP image registry (`pipeline/deploy.py`)
-
-**Configure your registry hub** in `config/env_defaults.yaml`:
-```yaml
-stack:
-  gaie:
-    epp_image:
-      build:
-        hub: ghcr.io/<your-org>   # e.g. ghcr.io/kalantar
-```
-
-**Log in to the registry** (requires a GitHub PAT with `write:packages`):
-```bash
-echo $GITHUB_PAT | podman login ghcr.io -u <your-github-username> --password-stdin
-# or: docker login ghcr.io
-```
-
-`podman` or `docker` must be on `PATH`.

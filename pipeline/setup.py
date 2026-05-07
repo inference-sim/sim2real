@@ -619,7 +619,7 @@ def step_tekton(cfg: SetupConfig) -> None:
 # ── Step 8: Config Output ────────────────────────────────────────────
 
 def step_config_output(cfg: SetupConfig, run_dir: Path, container_rt: str) -> None:
-    """Step 8: Write setup_config.json, run_metadata.json, update env_defaults."""
+    """Step 8: Write setup_config.json and run_metadata.json."""
     step(8, 8, "Config")
 
     workspace = EXPERIMENT_ROOT / "workspace"
@@ -678,47 +678,6 @@ def step_config_output(cfg: SetupConfig, run_dir: Path, container_rt: str) -> No
     meta_path.write_text(json.dumps(metadata, indent=2))
     ok(f"Run metadata → {meta_path}")
 
-    # Update env_defaults.yaml
-    _update_env_defaults(cfg.registry, cfg.repo_name, cfg.run_name)
-
-
-def _update_env_defaults(registry: str, repo_name: str, run_name: str) -> None:
-    """Update config/env_defaults.yaml with registry build values."""
-    _env = EXPERIMENT_ROOT / "env_defaults.yaml"
-    cfg_path = _env if _env.exists() else EXPERIMENT_ROOT / "config" / "env_defaults.yaml"
-    if not cfg_path.exists():
-        warn("config/env_defaults.yaml not found — skipping"); return
-    if not registry:
-        warn("No registry — config/env_defaults.yaml not updated. "
-             "Update common.stack.gaie.epp_image.build.hub manually."); return
-
-    try:
-        import yaml
-    except ImportError:
-        warn("PyYAML not available — skipping config update. Run: pip install PyYAML"); return
-
-    try:
-        with cfg_path.open() as f:
-            data = yaml.safe_load(f)
-
-        build = (data.setdefault("common", {})
-                     .setdefault("stack", {})
-                     .setdefault("gaie", {})
-                     .setdefault("epp_image", {})
-                     .setdefault("build", {}))
-        build["hub"]  = registry
-        build["name"] = repo_name
-        build["tag"]  = run_name
-
-        with cfg_path.open("w") as f:
-            yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
-
-        ok("config/env_defaults.yaml updated with registry info")
-        warn("Note: PyYAML reformatted the file — inline comments were removed. "
-             "Review the diff before committing.")
-    except PermissionError:
-        warn("config/env_defaults.yaml is read-only — skipping update. "
-             "Manually set common.stack.gaie.epp_image.build.hub to: " + registry)
 
 # ── main ─────────────────────────────────────────────────────────────
 

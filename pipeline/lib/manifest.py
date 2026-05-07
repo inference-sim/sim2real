@@ -31,10 +31,8 @@ def load_manifest(path: "Path | str") -> dict:
         raise ManifestError("Missing required field: version")
     if version == 1:
         raise ManifestError(
-            "This is a v1 manifest. v2 is required.\n"
-            "Migration: rename algorithm.policy \u2192 algorithm.config, "
-            "add scenario field, move target/config to env_defaults.yaml.\n"
-            "See docs/transfer/migration-v1-to-v2.md for details."
+            "v1 manifests are no longer supported. "
+            "Use version 2 or 3 (see pipeline/README.md for field reference)."
         )
     if version not in (2, 3):
         raise ManifestError(f"Unsupported manifest version: {version}")
@@ -100,7 +98,7 @@ def load_manifest(path: "Path | str") -> dict:
         hints_files.append({"path": str(fp), "content": fp.read_text()})
     data["hints"] = {"text": hints_text, "files": hints_files}
 
-    # ── v3 fields (migrated from env_defaults.yaml) ────────────────────────────
+    # ── v3 fields ─────────────────────────────────────────────────────────────
     if version >= 3:
         _validate_v3_fields(data)
 
@@ -117,7 +115,7 @@ def load_manifest(path: "Path | str") -> dict:
 
 
 def _validate_v3_fields(data: dict) -> None:
-    """Validate and apply defaults for v3 fields migrated from env_defaults.yaml."""
+    """Validate and apply defaults for v3-specific fields."""
 
     # target (required)
     target = data.get("target")

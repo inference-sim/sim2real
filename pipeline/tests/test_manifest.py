@@ -34,7 +34,7 @@ def test_load_valid_v2(tmp_path):
 def test_v1_raises_migration_error(tmp_path):
     v1 = {"kind": "sim2real-transfer", "version": 1, "algorithm": {"experiment_dir": "x"}}
     path = _write_manifest(tmp_path, v1)
-    with pytest.raises(ManifestError, match="v1.*v2"):
+    with pytest.raises(ManifestError, match="v1 manifests are no longer supported"):
         load_manifest(path)
 
 
@@ -310,7 +310,7 @@ def test_v3_accepted_alongside_v2(tmp_path):
         assert m["version"] == ver
 
 
-# ── v3 fields (migrated from env_defaults.yaml) ─────────────────────────────
+# ── v3 fields ────────────────────────────────────────────────────────────────
 
 def test_v3_target_and_config_loaded(tmp_path):
     """v3 target and config fields are loaded and preserved."""

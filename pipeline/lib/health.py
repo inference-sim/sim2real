@@ -150,7 +150,7 @@ def triage_pod(
             suggestion=(
                 "Persistent OOM: reduce --gpu-memory-utilization (e.g. 0.85), "
                 "--max-model-len, or replica count in "
-                "env_defaults.yaml → stack.model.helmValues.decode.containers"
+                "scenario bundle → resources.limits.memory"
             ),
         )
 
@@ -165,8 +165,8 @@ def triage_pod(
             message=f"{pod.name}: {pod.reason}",
             suggestion=(
                 f"Image pull failed: {img_detail}\n"
-                "Check env_defaults.yaml → stack.model.vllm_image "
-                "or stack.gaie.epp_image.build.tag"
+                "Check run_metadata.json → epp_image or scenario bundle → "
+                "model.image"
             ),
         )
 
@@ -187,8 +187,8 @@ def triage_pod(
                     message=f"{pod.name}: Pending (no nodes match GPU affinity)",
                     suggestion=(
                         f"No schedulable nodes: {sched.message}\n"
-                        "Check nodeAffinity in env_defaults.yaml → "
-                        "stack.model.helmValues.decode.extraConfig.affinity"
+                        "Check nodeAffinity in scenario bundle → "
+                        "model.helmValues.decode.extraConfig.affinity"
                     ),
                 )
             # unrecognized scheduling message — falls through to None
@@ -207,7 +207,8 @@ def triage_pod(
                 suggestion=(
                     "Startup probe timing out before model finishes loading.\n"
                     "Increase failureThreshold in "
-                    "env_defaults.yaml → stack.model.helmValues.decode.containers"
+                    "scenario bundle → "
+                    "model.helmValues.decode.containers"
                     "[].extraConfig.startupProbe.failureThreshold"
                 ),
             )
