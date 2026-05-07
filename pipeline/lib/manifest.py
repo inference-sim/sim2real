@@ -1,4 +1,4 @@
-"""Manifest loader for sim2real pipeline (v2 schema)."""
+"""Manifest loader for sim2real pipeline (v2/v3 schema)."""
 import warnings
 import yaml
 from pathlib import Path
@@ -13,7 +13,7 @@ _REQUIRED_ALGORITHM = ["source"]
 
 
 def load_manifest(path: "Path | str") -> dict:
-    """Load and validate a v2 sim2real transfer manifest."""
+    """Load and validate a sim2real transfer manifest (v2 or v3)."""
     path = Path(path)
     if not path.exists():
         raise ManifestError(f"Manifest not found: {path}")
@@ -180,3 +180,22 @@ def _validate_v3_fields(data: dict) -> None:
             for f in ("hub", "name", "tag"):
                 if f not in build_img:
                     raise ManifestError(f"Missing required field: epp_image.build.{f}")
+
+    # pipeline (optional, defaults applied)
+    pipeline = data.get("pipeline")
+    if pipeline is None:
+        data["pipeline"] = {"name": "sim2real", "yaml": "pipeline/pipeline.yaml"}
+    elif not isinstance(pipeline, dict):
+        raise ManifestError("pipeline must be a mapping")
+    else:
+        pipeline.setdefault("name", "sim2real")
+        pipeline.setdefault("yaml", "pipeline/pipeline.yaml")
+    pipeline = data["pipeline"]
+    if not isinstance(pipeline["name"], str) or not pipeline["name"].strip():
+        raise ManifestError("pipeline.name must be a non-empty string")
+    if not isinstance(pipeline["yaml"], str) or not pipeline["yaml"].strip():
+        raise ManifestError("pipeline.yaml must be a non-empty string")
+    if Path(pipeline["yaml"]).is_absolute():
+        raise ManifestError(
+            f"pipeline.yaml must be a relative path, got: {pipeline['yaml']}"
+        )

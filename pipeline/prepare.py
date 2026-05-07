@@ -405,14 +405,12 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
         return
 
     # 4e: Pipeline resource
-    # The static pipeline.yaml (#23) provides the Pipeline that PipelineRuns reference.
-    # No compilation step needed — deploy.py applies the static pipeline directly.
     setup_config = _load_setup_config()
     if not setup_config:
         err("setup_config.json not found. Run setup.py first to bootstrap cluster resources.")
         sys.exit(1)
     run_name = run_dir.name
-    pipeline_name = "sim2real"
+    pipeline_name = manifest.get("pipeline", {}).get("name", "sim2real")
 
     # 4f: Generate PipelineRuns
     namespace = setup_config.get("namespace", "default")
