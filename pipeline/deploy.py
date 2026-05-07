@@ -520,15 +520,19 @@ def _cleanup_pair(key: str, entry: dict, discovered: dict, *, dry_run: bool = Fa
     return True
 
 
-def _force_reset(progress: dict, scope: set) -> int:
-    """Reset non-pending pairs in scope to pending. Returns count of pairs reset."""
+def _force_reset(progress: dict, scope: set, discovered: dict | None = None) -> int:
+    """Reset non-pending pairs in scope to pending. Cleans cluster resources
+    for pairs that have a namespace assigned. Returns count of pairs reset."""
     reset = 0
     for key in scope:
         entry = progress.get(key, {})
         if entry.get("status") not in (None, "pending"):
-            entry["status"] = "pending"
-            entry["namespace"] = None
-            entry["retries"] = 0
+            if entry.get("namespace") and discovered:
+                _cleanup_pair(key, entry, discovered)
+            else:
+                entry["status"] = "pending"
+                entry["namespace"] = None
+                entry["retries"] = 0
             reset += 1
     return reset
 
@@ -697,7 +701,7 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
         info(f"Scope: {len(_scope)}/{len(progress)} pairs")
 
     if getattr(args, "force", False):
-        n = _force_reset(progress, _scope)
+        n = _force_reset(progress, _scope, discovered)
         if n:
             info(f"--force: reset {n} non-pending pair(s) to pending")
         else:

@@ -190,3 +190,47 @@ def test_cmd_cleanup_saves_progress_on_success(tmp_path, monkeypatch, capsys):
     # done and pending unchanged
     assert saved["wl-smoke-baseline"]["status"] == "done"
     assert saved["wl-load-baseline"]["status"] == "pending"
+
+
+def test_force_reset_calls_cleanup_for_pairs_with_namespace(monkeypatch):
+    """_force_reset should clean cluster resources for pairs that had a namespace."""
+    import pipeline.deploy as mod
+
+    progress = {
+        "wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "failed",
+                          "namespace": "sim2real-0", "retries": 0},
+        "wl-a-treatment": {"workload": "wl-a", "package": "treatment", "status": "pending",
+                           "namespace": None, "retries": 0},
+        "wl-b-baseline": {"workload": "wl-b", "package": "baseline", "status": "timed-out",
+                          "namespace": "sim2real-1", "retries": 2},
+    }
+    discovered = {
+        "wl-a-baseline": {"pr_name": "baseline-a-run1", "workload": "wl-a", "package": "baseline"},
+        "wl-a-treatment": {"pr_name": "treatment-a-run1", "workload": "wl-a", "package": "treatment"},
+        "wl-b-baseline": {"pr_name": "baseline-b-run1", "workload": "wl-b", "package": "baseline"},
+    }
+
+    cleaned = []
+
+    def fake_cleanup(key, entry, disc, dry_run=False):
+        cleaned.append(key)
+        entry["status"] = "pending"
+        entry["namespace"] = None
+        entry["retries"] = 0
+        return True
+
+    monkeypatch.setattr(mod, "_cleanup_pair", fake_cleanup)
+
+    scope = set(progress.keys())
+    n = mod._force_reset(progress, scope, discovered)
+
+    # Only pairs with a namespace AND non-pending status should have been cleaned
+    assert "wl-a-baseline" in cleaned
+    assert "wl-b-baseline" in cleaned
+    assert "wl-a-treatment" not in cleaned
+    # Count should reflect pairs that were actually reset
+    assert n == 2
+    # All non-pending should now be pending
+    assert progress["wl-a-baseline"]["status"] == "pending"
+    assert progress["wl-b-baseline"]["status"] == "pending"
+    assert progress["wl-a-treatment"]["status"] == "pending"
