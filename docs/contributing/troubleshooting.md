@@ -51,18 +51,16 @@ podman login docker.io
 
 ### Hub placeholder not replaced
 
-**Symptom:** Stage 4.5 halts with `epp_image.build.hub not set` or the pushed image tag contains `REPLACE_ME`.
+**Symptom:** `deploy.py` halts with `epp_image.build.hub not set` or the pushed image tag contains `REPLACE_ME`.
 
-**Cause:** `config/env_defaults.yaml` still has the placeholder value for `stack.gaie.epp_image.build.hub`.
+**Cause:** `transfer.yaml` is missing the `target.registry` field, or `run_metadata.json` was not written by `setup.py`.
 
-**Fix:** Edit `config/env_defaults.yaml` and set your registry:
+**Fix:** Ensure `target.registry` is set in your experiment's `transfer.yaml`:
 
 ```yaml
-stack:
-  gaie:
-    epp_image:
-      build:
-        hub: ghcr.io/<your-org>   # e.g. ghcr.io/kalantar
+target:
+  repo: github.com/org/llm-d-inference-scheduler
+  registry: ghcr.io/<your-org>
 ```
 
 ---
@@ -132,22 +130,17 @@ kubectl get pvc data-pvc -n $NAMESPACE
 
 ## Config Gotchas
 
-### `fast_iteration: "false"` quoted string
+### YAML quoted booleans
 
-**Symptom:** Stage 5 halts immediately with:
-```
-ERROR: pipeline.fast_iteration must be a boolean, got str: 'false'
-```
-Exit code 2 (infrastructure error).
+**Symptom:** A pipeline stage halts with a type error about a boolean field receiving a string.
 
-**Cause:** `pipeline.fast_iteration: "false"` in `config/env_defaults.yaml` — the quoted string fails the boolean type guard and causes an immediate halt before any stage logic runs.
+**Cause:** YAML treats quoted values as strings. `"false"` is a string, `false` is a boolean.
 
-**Fix:** Use an unquoted YAML boolean:
+**Fix:** Use unquoted YAML booleans in `transfer.yaml` and scenario bundles:
 
 ```yaml
-pipeline:
-  fast_iteration: false   # correct — unquoted boolean
-  # fast_iteration: "false"  # wrong — this is a string
+some_flag: false   # correct — unquoted boolean
+# some_flag: "false"  # wrong — this is a string
 ```
 
 ---

@@ -619,7 +619,7 @@ def step_tekton(cfg: SetupConfig) -> None:
 # ── Step 8: Config Output ────────────────────────────────────────────
 
 def step_config_output(cfg: SetupConfig, run_dir: Path, container_rt: str) -> None:
-    """Step 8: Write setup_config.json, run_metadata.json, update env_defaults."""
+    """Step 8: Write setup_config.json and run_metadata.json."""
     step(8, 8, "Config")
 
     workspace = EXPERIMENT_ROOT / "workspace"

@@ -310,7 +310,7 @@ def test_v3_accepted_alongside_v2(tmp_path):
         assert m["version"] == ver
 
 
-# ── v3 fields (migrated from env_defaults.yaml) ─────────────────────────────
+# ── v3 fields ────────────────────────────────────────────────────────────────
 
 def test_v3_target_and_config_loaded(tmp_path):
     """v3 target and config fields are loaded and preserved."""
