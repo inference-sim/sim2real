@@ -332,8 +332,8 @@ def test_cmd_cleanup_saves_progress_on_success(tmp_path, monkeypatch, capsys):
     assert saved["wl-load-baseline"]["status"] == "pending"
 
 
-def test_force_reset_calls_cleanup_for_pairs_with_namespace(monkeypatch):
-    """_force_reset should clean cluster resources for pairs that had a namespace."""
+def test_force_reset_calls_cleanup_for_non_pending_non_done(monkeypatch):
+    """_force_reset cleans non-pending, non-done pairs via _cleanup_pair."""
     import pipeline.deploy as mod
 
     progress = {
@@ -343,16 +343,19 @@ def test_force_reset_calls_cleanup_for_pairs_with_namespace(monkeypatch):
                            "namespace": None, "retries": 0},
         "wl-b-baseline": {"workload": "wl-b", "package": "baseline", "status": "timed-out",
                           "namespace": "sim2real-1", "retries": 2},
+        "wl-c-baseline": {"workload": "wl-c", "package": "baseline", "status": "done",
+                          "namespace": None, "retries": 0},
     }
     discovered = {
         "wl-a-baseline": {"pr_name": "baseline-a-run1", "workload": "wl-a", "package": "baseline"},
         "wl-a-treatment": {"pr_name": "treatment-a-run1", "workload": "wl-a", "package": "treatment"},
         "wl-b-baseline": {"pr_name": "baseline-b-run1", "workload": "wl-b", "package": "baseline"},
+        "wl-c-baseline": {"pr_name": "baseline-c-run1", "workload": "wl-c", "package": "baseline"},
     }
 
     cleaned = []
 
-    def fake_cleanup(key, entry, disc, dry_run=False):
+    def fake_cleanup(key, entry, disc, dry_run=False, namespaces=None):
         cleaned.append(key)
         entry["status"] = "pending"
         entry["namespace"] = None
@@ -362,18 +365,17 @@ def test_force_reset_calls_cleanup_for_pairs_with_namespace(monkeypatch):
     monkeypatch.setattr(mod, "_cleanup_pair", fake_cleanup)
 
     scope = set(progress.keys())
-    n = mod._force_reset(progress, scope, discovered)
+    n = mod._force_reset(progress, scope, discovered,
+                         namespaces=["sim2real-0", "sim2real-1"])
 
-    # Only pairs with a namespace AND non-pending status should have been cleaned
+    # Pending and done should be skipped
+    assert "wl-a-treatment" not in cleaned
+    assert "wl-c-baseline" not in cleaned
+    # Failed and timed-out should be cleaned
     assert "wl-a-baseline" in cleaned
     assert "wl-b-baseline" in cleaned
-    assert "wl-a-treatment" not in cleaned
-    # Count should reflect pairs that were actually reset
     assert n == 2
-    # All non-pending should now be pending
-    assert progress["wl-a-baseline"]["status"] == "pending"
-    assert progress["wl-b-baseline"]["status"] == "pending"
-    assert progress["wl-a-treatment"]["status"] == "pending"
+    assert progress["wl-c-baseline"]["status"] == "done"
 
 
 def test_force_reset_skips_count_on_cleanup_failure(monkeypatch):
@@ -410,7 +412,7 @@ def test_force_reset_continues_on_exception(monkeypatch):
 
     call_count = []
 
-    def sometimes_fails(key, entry, disc, dry_run=False):
+    def sometimes_fails(key, entry, disc, dry_run=False, namespaces=None):
         call_count.append(key)
         if key == "wl-a-baseline":
             raise RuntimeError("network error")

@@ -289,17 +289,18 @@ def test_do_collect_interrupt_saves_collect_failed(tmp_path, monkeypatch):
 
 # ── _force_reset ──────────────────────────────────────────────────────────────
 
-def test_force_reset_resets_non_pending_pairs():
+def test_force_reset_resets_non_pending_non_done_pairs():
     from pipeline.deploy import _force_reset
     progress = dict(_PROGRESS)
     scope = set(progress.keys())
     n = _force_reset(progress, scope)
-    # All non-pending pairs reset (done, running, timed-out, failed)
-    assert n == 4
-    for key in ("wl-smoke-baseline", "wl-smoke-treatment", "wl-load-treatment", "wl-heavy-baseline"):
+    # running, timed-out, failed are reset; done and pending are skipped
+    assert n == 3
+    for key in ("wl-smoke-treatment", "wl-load-treatment", "wl-heavy-baseline"):
         assert progress[key]["status"] == "pending"
         assert progress[key]["namespace"] is None
         assert progress[key]["retries"] == 0
+    assert progress["wl-smoke-baseline"]["status"] == "done"
 
 
 def test_force_reset_leaves_pending_pairs_unchanged():
@@ -313,15 +314,15 @@ def test_force_reset_leaves_pending_pairs_unchanged():
 def test_force_reset_scoped_to_package():
     from pipeline.deploy import _force_reset
     progress = {
-        "wl-a-baseline":  {"workload": "wl-a", "package": "baseline",  "status": "done", "namespace": "ns-0", "retries": 2},
-        "wl-a-treatment": {"workload": "wl-a", "package": "treatment", "status": "done", "namespace": "ns-1", "retries": 1},
+        "wl-a-baseline":  {"workload": "wl-a", "package": "baseline",  "status": "failed", "namespace": "ns-0", "retries": 2},
+        "wl-a-treatment": {"workload": "wl-a", "package": "treatment", "status": "failed", "namespace": "ns-1", "retries": 1},
     }
     scope = {"wl-a-baseline"}
     n = _force_reset(progress, scope)
     assert n == 1
     assert progress["wl-a-baseline"]["status"] == "pending"
     assert progress["wl-a-baseline"]["retries"] == 0
-    assert progress["wl-a-treatment"]["status"] == "done"
+    assert progress["wl-a-treatment"]["status"] == "failed"
 
 
 def test_force_reset_returns_zero_when_nothing_to_reset():
@@ -337,7 +338,7 @@ def test_force_reset_returns_zero_when_nothing_to_reset():
 def test_force_reset_clears_retries():
     from pipeline.deploy import _force_reset
     progress = {
-        "wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "done", "namespace": "ns-0", "retries": 3},
+        "wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "timed-out", "namespace": "ns-0", "retries": 3},
     }
     _force_reset(progress, {"wl-a-baseline"})
     assert progress["wl-a-baseline"]["retries"] == 0

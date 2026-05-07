@@ -5,7 +5,7 @@ Subcommands:
   run      Build EPP image, apply Pipeline, submit PipelineRuns
   status   Show progress of all (workload, package) pairs
   collect  Pull results from cluster for completed phases
-  cleanup  Tear down cluster resources for failed/stalled pairs
+  cleanup  Tear down cluster resources for all non-pending pairs
 """
 
 import argparse
@@ -524,6 +524,8 @@ def _cleanup_pair(key: str, entry: dict, discovered: dict, *,
         for slot_ns in namespaces:
             run(["kubectl", "delete", "pipelinerun", pr_name, "-n", slot_ns,
                  "--ignore-not-found"], check=False, capture=True)
+    else:
+        warn(f"{key}: no namespace and no namespace slots — cannot delete pipelinerun {pr_name}")
 
     # For done pairs, Tekton finally task already tore down Helm releases
     if is_done:
@@ -555,24 +557,23 @@ def _cleanup_pair(key: str, entry: dict, discovered: dict, *,
     return True
 
 
-def _force_reset(progress: dict, scope: set, discovered: dict | None = None) -> int:
-    """Reset non-pending pairs in scope to pending. Cleans cluster resources
-    for pairs that have a namespace assigned. Returns count of pairs reset."""
+def _force_reset(progress: dict, scope: set, discovered: dict | None = None,
+                 namespaces: list[str] | None = None) -> int:
+    """Reset non-pending, non-done pairs in scope to pending.
+
+    Calls _cleanup_pair for cluster teardown when possible. Pairs where
+    cleanup fails are skipped (not counted, state preserved).
+    """
     reset = 0
     for key in scope:
         entry = progress.get(key, {})
-        if entry.get("status") not in (None, "pending"):
-            if entry.get("namespace") and discovered:
-                try:
-                    if _cleanup_pair(key, entry, discovered):
-                        reset += 1
-                except Exception as e:
-                    warn(f"{key}: cleanup failed during --force: {e}")
-            else:
-                entry["status"] = "pending"
-                entry["namespace"] = None
-                entry["retries"] = 0
-                reset += 1
+        if entry.get("status") not in (None, "pending", "done"):
+            try:
+                if _cleanup_pair(key, entry, discovered or {},
+                                 namespaces=namespaces):
+                    reset += 1
+            except Exception as e:
+                warn(f"{key}: cleanup failed during --force: {e}")
     return reset
 
 
@@ -740,7 +741,7 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
         info(f"Scope: {len(_scope)}/{len(progress)} pairs")
 
     if getattr(args, "force", False):
-        n = _force_reset(progress, _scope, discovered)
+        n = _force_reset(progress, _scope, discovered, namespaces=namespaces)
         if n:
             info(f"--force: reset {n} non-pending pair(s) to pending")
         else:
@@ -1040,7 +1041,7 @@ Examples:
     run_p.add_argument("--poll-interval", type=int, default=30, dest="poll_interval",
                        help="Seconds between status polls [30]")
 
-    cleanup_p = sub.add_parser("cleanup", help="Tear down cluster resources for failed/stalled pairs")
+    cleanup_p = sub.add_parser("cleanup", help="Tear down cluster resources for all non-pending pairs")
     cleanup_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key")
     cleanup_p.add_argument("--workload", metavar="NAME",  help="Scope to pairs matching this workload")
     cleanup_p.add_argument("--package",  metavar="NAME",  help="Scope to pairs matching this package")
@@ -1089,8 +1090,11 @@ def main():
         progress_path = run_dir / "progress.json"
         cluster_dir = run_dir / "cluster"
         discovered = _load_pairs(cluster_dir)
-        namespaces = setup_config.get("namespaces") or [setup_config.get("namespace", "")]
-        _cmd_cleanup(args, progress_path, discovered, namespaces=namespaces)
+        namespaces = [ns for ns in (setup_config.get("namespaces") or
+                      [setup_config.get("namespace", "")]) if ns]
+        if not namespaces:
+            warn("No namespaces in setup_config — PipelineRun deletion for done pairs may be incomplete")
+        _cmd_cleanup(args, progress_path, discovered, namespaces=namespaces or None)
     else:
         err("No subcommand specified. Use: deploy.py run | status | collect | cleanup")
         sys.exit(1)
