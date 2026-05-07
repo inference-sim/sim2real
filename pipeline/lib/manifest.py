@@ -180,3 +180,13 @@ def _validate_v3_fields(data: dict) -> None:
             for f in ("hub", "name", "tag"):
                 if f not in build_img:
                     raise ManifestError(f"Missing required field: epp_image.build.{f}")
+
+    # pipeline (optional, defaults applied)
+    pipeline = data.get("pipeline")
+    if pipeline is None:
+        data["pipeline"] = {"name": "sim2real", "yaml": "pipeline/pipeline.yaml"}
+    elif not isinstance(pipeline, dict):
+        raise ManifestError("pipeline must be a mapping")
+    else:
+        pipeline.setdefault("name", "sim2real")
+        pipeline.setdefault("yaml", "pipeline/pipeline.yaml")

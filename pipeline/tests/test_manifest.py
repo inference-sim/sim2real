@@ -461,3 +461,56 @@ def test_v3_target_missing_repo_raises(tmp_path):
     path = _write_manifest(tmp_path, data)
     with pytest.raises(ManifestError, match="target.repo"):
         load_manifest(path)
+
+
+# ── pipeline field (optional, v3 only) ─────────────────────────────────────
+
+def test_v3_pipeline_defaults_when_absent(tmp_path):
+    """v3 without pipeline section gets defaults: name='sim2real', yaml='pipeline/pipeline.yaml'."""
+    data = {k: v for k, v in MINIMAL_V3.items() if k != "pipeline"}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["pipeline"]["name"] == "sim2real"
+    assert m["pipeline"]["yaml"] == "pipeline/pipeline.yaml"
+
+
+def test_v3_pipeline_explicit_values(tmp_path):
+    """v3 with explicit pipeline.name and pipeline.yaml preserves values."""
+    data = {**MINIMAL_V3, "pipeline": {"name": "custom-pipe", "yaml": "custom/my-pipeline.yaml"}}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["pipeline"]["name"] == "custom-pipe"
+    assert m["pipeline"]["yaml"] == "custom/my-pipeline.yaml"
+
+
+def test_v3_pipeline_partial_name_only(tmp_path):
+    """v3 with only pipeline.name gets default yaml."""
+    data = {**MINIMAL_V3, "pipeline": {"name": "other"}}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["pipeline"]["name"] == "other"
+    assert m["pipeline"]["yaml"] == "pipeline/pipeline.yaml"
+
+
+def test_v3_pipeline_partial_yaml_only(tmp_path):
+    """v3 with only pipeline.yaml gets default name."""
+    data = {**MINIMAL_V3, "pipeline": {"yaml": "other/pipe.yaml"}}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["pipeline"]["name"] == "sim2real"
+    assert m["pipeline"]["yaml"] == "other/pipe.yaml"
+
+
+def test_v3_pipeline_not_mapping_raises(tmp_path):
+    """pipeline must be a mapping if present."""
+    data = {**MINIMAL_V3, "pipeline": "not-a-dict"}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="pipeline must be a mapping"):
+        load_manifest(path)
+
+
+def test_v2_does_not_get_pipeline_field(tmp_path):
+    """v2 manifests do not get the pipeline field injected."""
+    path = _write_manifest(tmp_path, MINIMAL_V2)
+    m = load_manifest(path)
+    assert "pipeline" not in m
