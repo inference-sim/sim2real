@@ -53,14 +53,13 @@ podman login docker.io
 
 **Symptom:** `deploy.py` halts with `epp_image.build.hub not set` or the pushed image tag contains `REPLACE_ME`.
 
-**Cause:** `transfer.yaml` is missing the `target.registry` field, or `run_metadata.json` was not written by `setup.py`.
+**Cause:** The `epp_image` field in `transfer.yaml` is missing or still has a placeholder value.
 
-**Fix:** Ensure `target.registry` is set in your experiment's `transfer.yaml`:
+**Fix:** Ensure `epp_image` is set in your experiment's `transfer.yaml`:
 
 ```yaml
-target:
-  repo: github.com/org/llm-d-inference-scheduler
-  registry: ghcr.io/<your-org>
+epp_image:
+  hub: ghcr.io/<your-org>
 ```
 
 ---
