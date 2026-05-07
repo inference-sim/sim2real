@@ -953,6 +953,8 @@ Examples:
   python pipeline/deploy.py status                     # Show progress snapshot
   python pipeline/deploy.py collect                    # Pull results for completed phases
   python pipeline/deploy.py collect --skip-logs        # Collect traces only (skip large logs)
+  python pipeline/deploy.py cleanup                    # Tear down stalled/failed pairs
+  python pipeline/deploy.py cleanup --dry-run          # Preview what would be cleaned
 """,
     )
     p.add_argument("--run", metavar="NAME",

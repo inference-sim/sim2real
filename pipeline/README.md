@@ -112,7 +112,7 @@ Phase state is tracked per-run in `workspace/runs/<run>/.state.json`. Delete it 
 Builds the EPP image, applies Tekton resources, and orchestrates PipelineRun execution across namespace slots.
 
 ```bash
-python pipeline/deploy.py {run|status|collect} [flags]
+python pipeline/deploy.py {run|status|collect|cleanup} [flags]
 ```
 
 Common flags (all subcommands):
@@ -135,6 +135,7 @@ Common flags (all subcommands):
 python pipeline/deploy.py run     [flags]   # orchestrate parallel pool execution across namespace slots
 python pipeline/deploy.py status            # show progress snapshot of all (workload, package) pairs
 python pipeline/deploy.py collect [--package NAME…]
+python pipeline/deploy.py cleanup [flags]   # tear down cluster resources for failed/stalled pairs
 ```
 
 **`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, collects results inline, and retries pairs that time out. Reads `progress.json` to resume interrupted runs.
@@ -145,7 +146,7 @@ python pipeline/deploy.py collect [--package NAME…]
 | `--workload NAME` | — | Scope execution to pairs matching this workload |
 | `--package NAME` | — | Scope execution to pairs matching this package |
 | `--status STATE` | — | Scope execution to pairs with this status (e.g. `failed`, `timed-out`) |
-| `--force` | — | Reset all non-pending pairs in scope back to `pending` (clears retries) |
+| `--force` | — | Reset non-pending pairs to `pending`, cleaning cluster resources (PipelineRuns + Helm) for pairs with assigned namespaces |
 | `--max-retries N` | 2 | Max retries for timed-out pairs |
 | `--poll-interval N` | 30 | Seconds between status polls |
 
@@ -157,6 +158,18 @@ python pipeline/deploy.py collect [--package NAME…]
 | `--package NAME` | Filter by package name |
 
 **`deploy.py collect`** — extracts results from the cluster PVC and writes to `workspace/runs/<run>/results/{phase}/<workload>/`.
+
+**`deploy.py cleanup`** — deletes PipelineRuns and uninstalls Helm releases for pairs that are not `done` or `pending`. Resets cleaned pairs to `pending` so they can be re-run.
+
+| Flag | Description |
+|------|-------------|
+| `--only PAIR` | Scope cleanup to one specific pair key |
+| `--workload NAME` | Scope cleanup to pairs matching this workload |
+| `--package NAME` | Scope cleanup to pairs matching this package |
+| `--status STATE` | Scope cleanup to pairs with this status |
+| `--dry-run` | Print what would be cleaned up without acting |
+
+**Safety:** Cleanup never touches `done` or `pending` pairs. Results in `workspace/runs/<run>/results/` are preserved — only cluster resources are removed.
 
 ---
 
