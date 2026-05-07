@@ -113,6 +113,58 @@ def test_load_pairs_discovers_all_pairs(tmp_path):
     assert len(pairs) == 3
 
 
+def test_load_pairs_skips_corrupt_yaml(tmp_path, capsys):
+    """Corrupt YAML files are skipped with a warning; valid ones still loaded."""
+    import yaml as _yaml
+    from pipeline.deploy import _load_pairs
+
+    pr = {
+        "metadata": {"name": "baseline-smoke-run1", "namespace": "ns"},
+        "spec": {"params": [
+            {"name": "workloadName", "value": "wl-smoke"},
+            {"name": "phase", "value": "baseline"},
+        ]},
+    }
+    (tmp_path / "pipelinerun-smoke-baseline.yaml").write_text(_yaml.dump(pr))
+    (tmp_path / "pipelinerun-bad.yaml").write_text("{{invalid yaml: [")
+
+    pairs = _load_pairs(tmp_path)
+
+    assert len(pairs) == 1
+    assert "wl-smoke-baseline" in pairs
+    assert "pipelinerun-bad.yaml" in capsys.readouterr().out
+
+
+def test_load_pairs_skips_malformed_params(tmp_path, capsys):
+    """Missing 'value' key in a param entry skips the file with a warning."""
+    import yaml as _yaml
+    from pipeline.deploy import _load_pairs
+
+    pr = {
+        "metadata": {"name": "run1", "namespace": "ns"},
+        "spec": {"params": [
+            {"name": "workloadName"},
+            {"name": "phase", "value": "baseline"},
+        ]},
+    }
+    (tmp_path / "pipelinerun-test.yaml").write_text(_yaml.dump(pr))
+    pairs = _load_pairs(tmp_path)
+    assert len(pairs) == 0
+    assert "pipelinerun-test.yaml" in capsys.readouterr().out
+
+
+def test_load_pairs_warns_on_skip(tmp_path, capsys):
+    """Warning is emitted with filename when a file is skipped."""
+    from pipeline.deploy import _load_pairs
+
+    (tmp_path / "pipelinerun-broken.yaml").write_text("not: valid: yaml: [[[")
+    _load_pairs(tmp_path)
+
+    out = capsys.readouterr().out
+    assert "[WARN]" in out
+    assert "pipelinerun-broken.yaml" in out
+
+
 def test_apply_run_filters_by_status():
     from pipeline.deploy import _apply_run_filters
 

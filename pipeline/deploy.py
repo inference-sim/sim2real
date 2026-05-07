@@ -456,7 +456,7 @@ def _cmd_collect(args, manifest: dict, run_dir: Path, setup_config: dict):
 def _load_pairs(cluster_dir: Path) -> dict:
     """Discover all (workload, package) pairs from pipelinerun-*.yaml at cluster/ root.
 
-    Returns dict keyed by pair name ("wl-{workload}-{package}") with metadata.
+    Returns dict keyed by "wl-" + filename stem (minus "pipelinerun-" prefix).
     """
     pairs = {}
     if not cluster_dir.exists():
@@ -464,20 +464,21 @@ def _load_pairs(cluster_dir: Path) -> dict:
     for pr_path in sorted(cluster_dir.glob("pipelinerun-*.yaml")):
         try:
             pr_data = yaml.safe_load(pr_path.read_text())
-        except Exception:
+            pr_name = pr_data.get("metadata", {}).get("name", pr_path.stem)
+            params = {p["name"]: p["value"] for p in pr_data.get("spec", {}).get("params", [])}
+            workload = params.get("workloadName", "")
+            package = params.get("phase", "")
+            key = "wl-" + pr_path.stem.removeprefix("pipelinerun-")
+            pairs[key] = {
+                "workload": workload,
+                "package": package,
+                "pr_name": pr_name,
+                "pr_path": str(pr_path),
+                "namespace": pr_data.get("metadata", {}).get("namespace", ""),
+            }
+        except Exception as e:
+            warn(f"Skipping {pr_path.name}: {e}")
             continue
-        pr_name = pr_data.get("metadata", {}).get("name", pr_path.stem)
-        params = {p["name"]: p["value"] for p in pr_data.get("spec", {}).get("params", [])}
-        workload = params.get("workloadName", "")
-        package = params.get("phase", "")
-        key = "wl-" + pr_path.stem.removeprefix("pipelinerun-")
-        pairs[key] = {
-            "workload": workload,
-            "package": package,
-            "pr_name": pr_name,
-            "pr_path": str(pr_path),
-            "namespace": pr_data.get("metadata", {}).get("namespace", ""),
-        }
     return pairs
 
 
