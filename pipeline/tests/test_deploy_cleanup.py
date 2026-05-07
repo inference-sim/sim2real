@@ -116,6 +116,27 @@ def test_cleanup_pair_helm_list_failure_does_not_reset(monkeypatch):
     assert entry["namespace"] == "sim2real-0"
 
 
+def test_cleanup_pair_helm_uninstall_failure_does_not_reset(monkeypatch):
+    """When helm uninstall fails, state is NOT reset."""
+    import pipeline.deploy as mod
+
+    entry = {"workload": "wl-heavy", "package": "baseline", "status": "failed",
+             "namespace": "sim2real-0", "retries": 0}
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 1 if cmd[:2] == ["helm", "uninstall"] else 0
+            stdout = "stuck-release\n" if cmd[:2] == ["helm", "list"] else ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    result = mod._cleanup_pair("wl-heavy-baseline", entry, _DISCOVERED)
+    assert result is False
+    assert entry["status"] == "failed"
+    assert entry["namespace"] == "sim2real-0"
+
+
 def test_cleanup_pair_missing_pr_name_warns(monkeypatch, capsys):
     """When pr_name is not in discovered, a warning is emitted."""
     import pipeline.deploy as mod
@@ -353,3 +374,56 @@ def test_force_reset_calls_cleanup_for_pairs_with_namespace(monkeypatch):
     assert progress["wl-a-baseline"]["status"] == "pending"
     assert progress["wl-b-baseline"]["status"] == "pending"
     assert progress["wl-a-treatment"]["status"] == "pending"
+
+
+def test_force_reset_skips_count_on_cleanup_failure(monkeypatch):
+    """_force_reset does not count pairs where _cleanup_pair returned False."""
+    import pipeline.deploy as mod
+
+    progress = {
+        "wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "failed",
+                          "namespace": "sim2real-0", "retries": 0},
+    }
+    discovered = {"wl-a-baseline": {"pr_name": "pr1", "workload": "wl-a", "package": "baseline"}}
+
+    monkeypatch.setattr(mod, "_cleanup_pair", lambda *a, **kw: False)
+
+    n = mod._force_reset(progress, {"wl-a-baseline"}, discovered)
+    assert n == 0
+    assert progress["wl-a-baseline"]["status"] == "failed"
+
+
+def test_force_reset_continues_on_exception(monkeypatch):
+    """_force_reset handles exceptions without aborting remaining pairs."""
+    import pipeline.deploy as mod
+
+    progress = {
+        "wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "failed",
+                          "namespace": "sim2real-0", "retries": 0},
+        "wl-b-baseline": {"workload": "wl-b", "package": "baseline", "status": "failed",
+                          "namespace": "sim2real-1", "retries": 0},
+    }
+    discovered = {
+        "wl-a-baseline": {"pr_name": "pr1", "workload": "wl-a", "package": "baseline"},
+        "wl-b-baseline": {"pr_name": "pr2", "workload": "wl-b", "package": "baseline"},
+    }
+
+    call_count = []
+
+    def sometimes_fails(key, entry, disc, dry_run=False):
+        call_count.append(key)
+        if key == "wl-a-baseline":
+            raise RuntimeError("network error")
+        entry["status"] = "pending"
+        entry["namespace"] = None
+        entry["retries"] = 0
+        return True
+
+    monkeypatch.setattr(mod, "_cleanup_pair", sometimes_fails)
+
+    n = mod._force_reset(progress, set(progress.keys()), discovered)
+
+    assert len(call_count) == 2
+    assert n == 1  # only wl-b succeeded
+    assert progress["wl-a-baseline"]["status"] == "failed"  # unchanged
+    assert progress["wl-b-baseline"]["status"] == "pending"

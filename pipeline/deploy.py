@@ -536,12 +536,17 @@ def _cleanup_pair(key: str, entry: dict, discovered: dict, *,
             warn(f"{key}: helm list failed in {ns} — skipping cleanup (manual intervention needed)")
             return False
         if result.stdout.strip():
+            helm_failed = False
             for release in result.stdout.strip().splitlines():
                 ur = run(["helm", "uninstall", release, "-n", ns], check=False, capture=True)
                 if ur.returncode == 0:
                     ok(f"Uninstalled: {release} (ns: {ns})")
                 else:
                     warn(f"Failed to uninstall {release} in {ns}")
+                    helm_failed = True
+            if helm_failed:
+                warn(f"{key}: some releases failed to uninstall — state NOT reset")
+                return False
 
     # Reset state
     entry["status"] = "pending"
@@ -558,12 +563,16 @@ def _force_reset(progress: dict, scope: set, discovered: dict | None = None) -> 
         entry = progress.get(key, {})
         if entry.get("status") not in (None, "pending"):
             if entry.get("namespace") and discovered:
-                _cleanup_pair(key, entry, discovered)
+                try:
+                    if _cleanup_pair(key, entry, discovered):
+                        reset += 1
+                except Exception as e:
+                    warn(f"{key}: cleanup failed during --force: {e}")
             else:
                 entry["status"] = "pending"
                 entry["namespace"] = None
                 entry["retries"] = 0
-            reset += 1
+                reset += 1
     return reset
 
 
