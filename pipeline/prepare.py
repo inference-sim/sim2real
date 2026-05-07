@@ -249,7 +249,7 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
         "run_dir": _display_path(run_dir),
         "scenario": manifest["scenario"],
         "context_path": _display_path(context_path),
-        "manifest_path": str(getattr(args, "manifest", None) or "config/transfer.yaml"),
+        "manifest_path": str(getattr(args, "manifest", None) or "transfer.yaml"),
         "algorithm_source": manifest["algorithm"]["source"],
         "algorithm_config": manifest["algorithm"].get("config"),
         "baseline_sim_config": manifest["baseline"]["sim"].get("config"),
@@ -751,7 +751,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rebuild-context", action="store_true", dest="rebuild_context",
                    help="Force context cache rebuild")
     p.add_argument("--manifest", metavar="PATH",
-                   help="Path to transfer.yaml (default: config/transfer.yaml)")
+                   help="Path to transfer.yaml (default: transfer.yaml)")
     p.add_argument("--run", metavar="NAME",
                    help="Override run name")
     p.add_argument("--experiment-root", metavar="PATH", dest="experiment_root",

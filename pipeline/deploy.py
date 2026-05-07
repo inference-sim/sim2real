@@ -1026,7 +1026,7 @@ Examples:
     p.add_argument("--run", metavar="NAME",
                    help="Run name (overrides current_run in setup_config.json)")
     p.add_argument("--manifest", metavar="PATH",
-                   help="Path to transfer.yaml (default: config/transfer.yaml)")
+                   help="Path to transfer.yaml (default: transfer.yaml)")
     p.add_argument("--experiment-root", metavar="PATH", dest="experiment_root",
                    help="Root of the experiment repo (default: framework directory)")
 

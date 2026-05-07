@@ -740,8 +740,8 @@ def main() -> int:
     print(f"Run directory: {run_dir}")
     print()
     print("Next steps:")
-    print("  1. Edit config/transfer.yaml (algorithm source, workloads, context hints)")
-    print("  2. Run: python pipeline/prepare.py")
+    print("  1. Edit transfer.yaml (algorithm source, workloads, context hints)")
+    print("  2. Run: python <repo-root>/pipeline/prepare.py")
     return 0
 
 if __name__ == "__main__":

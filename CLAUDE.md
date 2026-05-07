@@ -7,11 +7,9 @@ inference-sim to production llm-d-inference-scheduler scorer plugins.
 
 ## Repository Structure
 
-- `config/` — Version-controlled configuration. `transfer.yaml` defines the experiment manifest. Experiment repos carry their own `transfer.yaml` at their root.
-- `docs/transfer/` — Mapping artifacts, scorer template, calibration log
-- `docs/plans/` — Design docs and implementation plans
 - `pipeline/` — Pipeline entry points and shared library (see [`pipeline/README.md`](pipeline/README.md))
 - `pipeline/pipeline.yaml` — Static Tekton Pipeline definition (applied by `deploy.py run`)
+- `prompts/` — Agent prompt templates used by the sim2real-translate skill
 - `workspace/` — Inter-stage artifacts (gitignored, not committed)
 
 ## Submodules
@@ -47,7 +45,7 @@ python pipeline/run.py     --experiment-root ../admission-control switch <run-na
 
 | Phase | Name | Description |
 |-------|------|-------------|
-| 1 | Init | Load `config/transfer.yaml`, validate file prerequisites |
+| 1 | Init | Load `transfer.yaml` from experiment repo, validate file prerequisites |
 | 2 | Context | Assemble context document, cache by SHA-256 hash |
 | 3 | Translate checkpoint | Write `skill_input.json`; exit and wait for `/sim2real-translate` skill |
 | 4 | Assembly | Assemble resolved scenarios from bundles + overlays, generate PipelineRuns |
@@ -64,7 +62,7 @@ python pipeline/run.py     --experiment-root ../admission-control switch <run-na
 
 | Module | Purpose |
 |--------|---------|
-| `manifest.py` | Loads and validates `config/transfer.yaml` (v2/v3 schema) |
+| `manifest.py` | Loads and validates `transfer.yaml` (v2/v3 schema) |
 | `state_machine.py` | Phase tracking with atomic JSON persistence (`.state.json`) |
 | `context_builder.py` | Assembles context document, caches by SHA-256 hash |
 | `values.py` | Deep-merge utility (`deep_merge`) used by `assemble.py` |
