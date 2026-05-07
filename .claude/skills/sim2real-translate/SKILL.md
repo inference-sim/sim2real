@@ -580,7 +580,7 @@ import sys
 sys.path.insert(0, '$REPO_ROOT/.claude/skills/sim2real-translate/scripts')
 from copy_generated import copy_generated
 copy_generated('$TARGET_REPO', '$RUN_DIR')
-"
+" || exit 1
 ```
 
 Update `.state.json`:

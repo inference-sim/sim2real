@@ -40,12 +40,6 @@ def copy_generated(target_repo: str, run_dir: str) -> tuple[list[str], list[str]
     )
     files_created = [f for f in untracked.stdout.strip().splitlines() if f]
 
-    to_path = rd / "translation_output.json"
-    o = json.loads(to_path.read_text())
-    o["files_created"] = files_created
-    o["files_modified"] = files_modified
-    to_path.write_text(json.dumps(o, indent=2))
-
     seen: dict[str, str] = {}
     for f in files_created + files_modified:
         base = Path(f).name
@@ -60,6 +54,12 @@ def copy_generated(target_repo: str, run_dir: str) -> tuple[list[str], list[str]
         dst = gen / Path(f).name
         shutil.copy2(src, dst)
         print(f"  {Path(f).name} → generated/")
+
+    to_path = rd / "translation_output.json"
+    o = json.loads(to_path.read_text())
+    o["files_created"] = files_created
+    o["files_modified"] = files_modified
+    to_path.write_text(json.dumps(o, indent=2))
 
     count = len(files_created) + len(files_modified)
     if count:
