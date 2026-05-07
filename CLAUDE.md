@@ -7,7 +7,7 @@ inference-sim to production llm-d-inference-scheduler scorer plugins.
 
 ## Repository Structure
 
-- `config/` — Version-controlled configuration. `transfer.yaml` defines the experiment manifest; `env_defaults.yaml` provides deploy-time infrastructure defaults (image registry, fast-iteration flag). Experiment repos carry their own `transfer.yaml` at their root.
+- `config/` — Version-controlled configuration. `transfer.yaml` defines the experiment manifest. Experiment repos carry their own `transfer.yaml` at their root.
 - `docs/transfer/` — Mapping artifacts, scorer template, calibration log
 - `docs/plans/` — Design docs and implementation plans
 - `pipeline/` — Pipeline entry points and shared library (see [`pipeline/README.md`](pipeline/README.md))
@@ -166,9 +166,5 @@ If a fix only exists in `workspace/`, it will be silently lost the next time tha
 - `treatment_resolved = deep_merge(deep_merge(baseline_resolved, treatment_diffs), treatment_overlay)`
 - EPP image injected into treatment scenarios from `run_metadata.json`
 - PipelineRuns generated per workload × {baseline, treatment}
-
-**Deploy-time config** — `config/env_defaults.yaml` (version-controlled):
-- `epp_image.build.{hub, name, platform}` — EPP image build settings
-- `pipeline.fast_iteration` (boolean, default `true`): when `true`, skips noise gate and mechanism check
 
 **Manifest config** — `observe.request_multiplier` (number, default `1`): multiplies each workload's `num_requests` for real-cluster benchmarks. Set in `transfer.yaml` under `observe:`.
