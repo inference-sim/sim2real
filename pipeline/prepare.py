@@ -30,6 +30,7 @@ from pipeline.lib.state_machine import StateMachine
 from pipeline.lib.context_builder import build_context
 from pipeline.lib.tekton import make_pipelinerun_scenario
 from pipeline.lib.assemble import assemble_scenarios, AssemblyError
+from pipeline.lib.epp import inject_epp_image
 
 # ── Repo layout ──────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -355,18 +356,11 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
         if not registry:
             warn("run_metadata.json has no registry — EPP image injection skipped")
         else:
-            epp_img = {
-                "repository": f"{registry}/{repo_name}",
-                "tag": run_name_tag,
-                "pullPolicy": "Always",
-            }
-            scenario_list = treatment_resolved.get("scenario", [])
-            if not scenario_list:
-                warn("treatment has no 'scenario' entries — EPP image not injected")
-            else:
-                for entry in scenario_list:
-                    entry.setdefault("images", {})["inferenceScheduler"] = epp_img
+            injected = inject_epp_image(treatment_resolved, registry, repo_name, run_name_tag)
+            if injected:
                 ok(f"EPP image injected: {registry}/{repo_name}:{run_name_tag}")
+            else:
+                warn("treatment has no 'scenario' entries — EPP image not injected")
 
     # 4c: Write resolved scenarios
     cluster_dir = run_dir / "cluster"
