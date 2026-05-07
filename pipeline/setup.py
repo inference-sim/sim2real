@@ -741,7 +741,7 @@ def main() -> int:
     print()
     print("Next steps:")
     print("  1. Edit transfer.yaml (algorithm source, workloads, context hints)")
-    print("  2. Run: python REPO_ROOT/pipeline/prepare.py")
+    print("  2. Run: python <repo-root>/pipeline/prepare.py")
     return 0
 
 if __name__ == "__main__":
