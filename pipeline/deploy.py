@@ -5,6 +5,7 @@ Subcommands:
   run      Build EPP image, apply Pipeline, submit PipelineRuns
   status   Show progress of all (workload, package) pairs
   collect  Pull results from cluster for completed phases
+  cleanup  Tear down cluster resources for all non-pending pairs
 """
 
 import argparse
@@ -482,16 +483,111 @@ def _load_pairs(cluster_dir: Path) -> dict:
     return pairs
 
 
-def _force_reset(progress: dict, scope: set) -> int:
-    """Reset non-pending pairs in scope to pending. Returns count of pairs reset."""
+def _cleanup_pair(key: str, entry: dict, discovered: dict, *,
+                  dry_run: bool = False, namespaces: list[str] | None = None) -> bool:
+    """Delete PipelineRun and Helm releases for a pair.
+
+    For non-done pairs: also resets state to pending.
+    For done pairs: deletes PipelineRun only (Helm already torn down by Tekton).
+
+    Returns True if cleanup was performed, False if it failed and state was NOT reset.
+    """
+    ns = entry.get("namespace")
+    pr_name = discovered.get(key, {}).get("pr_name", "")
+    is_done = entry.get("status") == "done"
+
+    # No namespace and no pr_name — just reset state (e.g. collect-failed)
+    if not ns and not pr_name:
+        if not dry_run and not is_done:
+            entry["status"] = "pending"
+            entry["retries"] = 0
+        return True
+
+    if dry_run:
+        target = ns or "all namespace slots"
+        info(f"[DRY-RUN] {key}: would delete pipelinerun {pr_name or '(unknown)'} in {target}")
+        if not is_done:
+            info(f"[DRY-RUN] {key}: would uninstall all helm releases in {target}")
+        return True
+
+    # Delete PipelineRun
+    pr_deleted = False
+    if not pr_name:
+        warn(f"{key}: no PipelineRun name found — skipping PR deletion (manual check needed)")
+    elif ns:
+        if entry.get("status") == "running":
+            _cancel_and_delete_pipelinerun(pr_name, ns)
+            pr_deleted = True
+        else:
+            result = run(["kubectl", "delete", "pipelinerun", pr_name, "-n", ns,
+                         "--ignore-not-found"], check=False, capture=True)
+            if result.returncode == 0:
+                pr_deleted = True
+            else:
+                warn(f"{key}: kubectl delete pipelinerun failed in {ns}")
+    elif namespaces:
+        # Namespace already freed (done/collect-failed) — search all slots
+        for slot_ns in namespaces:
+            result = run(["kubectl", "delete", "pipelinerun", pr_name, "-n", slot_ns,
+                         "--ignore-not-found"], check=False, capture=True)
+            if result.returncode == 0:
+                pr_deleted = True
+        if not pr_deleted:
+            warn(f"{key}: kubectl delete pipelinerun failed across all namespace slots")
+    else:
+        warn(f"{key}: no namespace and no namespace slots — cannot delete pipelinerun {pr_name}")
+
+    # For done pairs, Tekton finally task already tore down Helm releases
+    if is_done:
+        return True
+
+    if ns and not pr_deleted and pr_name:
+        warn(f"{key}: PipelineRun not deleted — state NOT reset")
+        return False
+
+    # Discover and uninstall all Helm releases in the namespace
+    if ns:
+        result = run(["helm", "list", "-n", ns, "-q"], check=False, capture=True)
+        if result.returncode != 0:
+            warn(f"{key}: helm list failed in {ns} — skipping cleanup (manual intervention needed)")
+            return False
+        if result.stdout.strip():
+            helm_failed = False
+            for release in result.stdout.strip().splitlines():
+                ur = run(["helm", "uninstall", release, "-n", ns], check=False, capture=True)
+                if ur.returncode == 0:
+                    ok(f"Uninstalled: {release} (ns: {ns})")
+                else:
+                    warn(f"Failed to uninstall {release} in {ns}")
+                    helm_failed = True
+            if helm_failed:
+                warn(f"{key}: some releases failed to uninstall — state NOT reset")
+                return False
+
+    # Reset state
+    entry["status"] = "pending"
+    entry["namespace"] = None
+    entry["retries"] = 0
+    return True
+
+
+def _force_reset(progress: dict, scope: set, discovered: dict | None = None,
+                 namespaces: list[str] | None = None) -> int:
+    """Reset non-pending, non-done pairs in scope to pending.
+
+    Calls _cleanup_pair for cluster teardown when possible. Pairs where
+    cleanup fails are skipped (not counted, state preserved).
+    """
     reset = 0
     for key in scope:
         entry = progress.get(key, {})
-        if entry.get("status") not in (None, "pending"):
-            entry["status"] = "pending"
-            entry["namespace"] = None
-            entry["retries"] = 0
-            reset += 1
+        if entry.get("status") not in (None, "pending", "done"):
+            try:
+                if _cleanup_pair(key, entry, discovered or {},
+                                 namespaces=namespaces):
+                    reset += 1
+            except Exception as e:
+                warn(f"{key}: cleanup failed during --force: {e}")
     return reset
 
 
@@ -659,7 +755,7 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
         info(f"Scope: {len(_scope)}/{len(progress)} pairs")
 
     if getattr(args, "force", False):
-        n = _force_reset(progress, _scope)
+        n = _force_reset(progress, _scope, discovered, namespaces=namespaces)
         if n:
             info(f"--force: reset {n} non-pending pair(s) to pending")
         else:
@@ -859,6 +955,56 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
     print()
 
 
+def _cmd_cleanup(args, progress_path: Path, discovered: dict,
+                 namespaces: list[str] | None = None) -> None:
+    """Tear down cluster resources for all non-pending pairs."""
+    from pipeline.lib.progress import LocalProgressStore
+    store = LocalProgressStore(progress_path)
+    progress = store.load()
+
+    if not progress:
+        info("No progress data found — nothing to clean up")
+        return
+
+    # Determine scope
+    _filtered = _apply_run_filters(progress, args)
+    _scope = _filtered or set(progress.keys())
+
+    # Exclude pending (nothing to clean)
+    actionable = {k for k in _scope
+                  if progress[k].get("status") not in (None, "pending")}
+
+    if not actionable:
+        info("No pairs need cleanup (all pending)")
+        return
+
+    dry_run = getattr(args, "dry_run", False)
+    info(f"Scope: {len(actionable)}/{len(progress)} pairs"
+         + (" [DRY-RUN]" if dry_run else ""))
+
+    cleaned = 0
+    errors = 0
+    for key in sorted(actionable):
+        entry = progress[key]
+        try:
+            if _cleanup_pair(key, entry, discovered, dry_run=dry_run,
+                             namespaces=namespaces):
+                cleaned += 1
+            else:
+                errors += 1
+        except Exception as e:
+            err(f"{key}: cleanup failed — {e}")
+            errors += 1
+
+    if not dry_run:
+        store.save(progress)
+
+    msg = f"{cleaned} pair(s) cleaned up"
+    if errors:
+        msg += f" ({errors} failed — manual intervention needed)"
+    ok(msg)
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -873,6 +1019,8 @@ Examples:
   python pipeline/deploy.py status                     # Show progress snapshot
   python pipeline/deploy.py collect                    # Pull results for completed phases
   python pipeline/deploy.py collect --skip-logs        # Collect traces only (skip large logs)
+  python pipeline/deploy.py cleanup                    # Tear down stalled/failed pairs
+  python pipeline/deploy.py cleanup --dry-run          # Preview what would be cleaned
 """,
     )
     p.add_argument("--run", metavar="NAME",
@@ -901,11 +1049,19 @@ Examples:
     run_p.add_argument("--package",      metavar="NAME",  help="Scope execution to pairs matching this package")
     run_p.add_argument("--status",       metavar="STATE", help="Scope execution to pairs with this status (e.g. failed, timed-out)")
     run_p.add_argument("--force",        action="store_true",
-                       help="Reset non-pending pairs in scope to pending (clears retries)")
+                       help="Reset non-pending pairs to pending, cleaning cluster resources for pairs with assigned namespaces")
     run_p.add_argument("--max-retries",  type=int, default=2, dest="max_retries",
                        help="Max retries for timed-out pairs [2]")
     run_p.add_argument("--poll-interval", type=int, default=30, dest="poll_interval",
                        help="Seconds between status polls [30]")
+
+    cleanup_p = sub.add_parser("cleanup", help="Tear down cluster resources for all non-pending pairs")
+    cleanup_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key")
+    cleanup_p.add_argument("--workload", metavar="NAME",  help="Scope to pairs matching this workload")
+    cleanup_p.add_argument("--package",  metavar="NAME",  help="Scope to pairs matching this package")
+    cleanup_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status")
+    cleanup_p.add_argument("--dry-run",  action="store_true", dest="dry_run",
+                           help="Print what would be cleaned up without doing it")
 
     return p
 
@@ -944,8 +1100,17 @@ def main():
         _cmd_status(args, progress_path)
     elif cmd == "collect":
         _cmd_collect(args, manifest, run_dir, setup_config)
+    elif cmd == "cleanup":
+        progress_path = run_dir / "progress.json"
+        cluster_dir = run_dir / "cluster"
+        discovered = _load_pairs(cluster_dir)
+        namespaces = [ns for ns in (setup_config.get("namespaces") or
+                      [setup_config.get("namespace", "")]) if ns]
+        if not namespaces:
+            warn("No namespaces in setup_config — PipelineRun deletion for done pairs may be incomplete")
+        _cmd_cleanup(args, progress_path, discovered, namespaces=namespaces or None)
     else:
-        err("No subcommand specified. Use: deploy.py run | status | collect")
+        err("No subcommand specified. Use: deploy.py run | status | collect | cleanup")
         sys.exit(1)
 
 
