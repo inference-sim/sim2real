@@ -5,6 +5,7 @@ Subcommands:
   run      Build EPP image, apply Pipeline, submit PipelineRuns
   status   Show progress of all (workload, package) pairs
   collect  Pull results from cluster for completed phases
+  cleanup  Tear down cluster resources for failed/stalled pairs
 """
 
 import argparse
@@ -896,6 +897,44 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
     print()
 
 
+def _cmd_cleanup(args, progress_path: Path, discovered: dict) -> None:
+    """Tear down cluster resources for non-terminal pairs and reset to pending."""
+    from pipeline.lib.progress import LocalProgressStore
+    store = LocalProgressStore(progress_path)
+    progress = store.load()
+
+    if not progress:
+        info("No progress data found — nothing to clean up")
+        return
+
+    # Determine scope
+    _filtered = _apply_run_filters(progress, args)
+    _scope = _filtered or set(progress.keys())
+
+    # Exclude done and pending
+    actionable = {k for k in _scope
+                  if progress[k].get("status") not in ("done", "pending")}
+
+    if not actionable:
+        info("No pairs need cleanup (all are done or pending)")
+        return
+
+    dry_run = getattr(args, "dry_run", False)
+    info(f"Scope: {len(actionable)}/{len(progress)} pairs"
+         + (" [DRY-RUN]" if dry_run else ""))
+
+    cleaned = 0
+    for key in sorted(actionable):
+        entry = progress[key]
+        if _cleanup_pair(key, entry, discovered, dry_run=dry_run):
+            cleaned += 1
+
+    if not dry_run:
+        store.save(progress)
+
+    ok(f"{cleaned} pair(s) cleaned up" + (" and reset to pending" if not dry_run else ""))
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -944,6 +983,14 @@ Examples:
     run_p.add_argument("--poll-interval", type=int, default=30, dest="poll_interval",
                        help="Seconds between status polls [30]")
 
+    cleanup_p = sub.add_parser("cleanup", help="Tear down cluster resources for failed/stalled pairs")
+    cleanup_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key")
+    cleanup_p.add_argument("--workload", metavar="NAME",  help="Scope to pairs matching this workload")
+    cleanup_p.add_argument("--package",  metavar="NAME",  help="Scope to pairs matching this package")
+    cleanup_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status")
+    cleanup_p.add_argument("--dry-run",  action="store_true", dest="dry_run",
+                           help="Print what would be cleaned up without doing it")
+
     return p
 
 
@@ -981,8 +1028,13 @@ def main():
         _cmd_status(args, progress_path)
     elif cmd == "collect":
         _cmd_collect(args, manifest, run_dir, setup_config)
+    elif cmd == "cleanup":
+        progress_path = run_dir / "progress.json"
+        cluster_dir = run_dir / "cluster"
+        discovered = _load_pairs(cluster_dir)
+        _cmd_cleanup(args, progress_path, discovered)
     else:
-        err("No subcommand specified. Use: deploy.py run | status | collect")
+        err("No subcommand specified. Use: deploy.py run | status | collect | cleanup")
         sys.exit(1)
 
 

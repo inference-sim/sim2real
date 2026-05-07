@@ -1,5 +1,7 @@
 """Tests for deploy.py cleanup subcommand and _cleanup_pair helper."""
 
+import json
+
 
 _PROGRESS = {
     "wl-smoke-baseline":   {"workload": "wl-smoke",  "package": "baseline",  "status": "done",      "namespace": "sim2real-0", "retries": 0},
@@ -90,3 +92,101 @@ def test_cleanup_pair_skips_none_namespace(monkeypatch):
     result = mod._cleanup_pair("wl-load-baseline", entry, _DISCOVERED)
     assert result is False
     assert entry["status"] == "pending"
+
+
+def test_cmd_cleanup_skips_done_and_pending(tmp_path, monkeypatch, capsys):
+    """cleanup only acts on non-done, non-pending pairs."""
+    import pipeline.deploy as mod
+
+    progress_path = tmp_path / "progress.json"
+    progress_path.write_text(json.dumps(_PROGRESS))
+
+    cleaned = []
+    monkeypatch.setattr(mod, "_cleanup_pair",
+                        lambda k, e, d, dry_run=False: cleaned.append(k) or True)
+
+    class _Args:
+        only = None; workload = None; package = None; status = None; dry_run = False
+
+    mod._cmd_cleanup(_Args(), progress_path, _DISCOVERED)
+
+    # done (wl-smoke-baseline) and pending (wl-load-baseline) should be skipped
+    assert "wl-smoke-baseline" not in cleaned
+    assert "wl-load-baseline" not in cleaned
+    # running, timed-out, failed should be cleaned
+    assert "wl-smoke-treatment" in cleaned
+    assert "wl-load-treatment" in cleaned
+    assert "wl-heavy-baseline" in cleaned
+
+
+def test_cmd_cleanup_respects_only_filter(tmp_path, monkeypatch, capsys):
+    """--only scopes cleanup to a single pair."""
+    import pipeline.deploy as mod
+
+    progress_path = tmp_path / "progress.json"
+    progress_path.write_text(json.dumps(_PROGRESS))
+
+    cleaned = []
+    monkeypatch.setattr(mod, "_cleanup_pair",
+                        lambda k, e, d, dry_run=False: cleaned.append(k) or True)
+
+    class _Args:
+        only = "wl-heavy-baseline"; workload = None; package = None; status = None; dry_run = False
+
+    mod._cmd_cleanup(_Args(), progress_path, _DISCOVERED)
+
+    assert cleaned == ["wl-heavy-baseline"]
+
+
+def test_cmd_cleanup_dry_run_does_not_save(tmp_path, monkeypatch, capsys):
+    """--dry-run does not mutate progress.json."""
+    import pipeline.deploy as mod
+
+    progress_path = tmp_path / "progress.json"
+    progress_path.write_text(json.dumps(_PROGRESS))
+
+    monkeypatch.setattr(mod, "_cleanup_pair",
+                        lambda k, e, d, dry_run=False: True)
+
+    class _Args:
+        only = None; workload = None; package = None; status = None; dry_run = True
+
+    mod._cmd_cleanup(_Args(), progress_path, _DISCOVERED)
+
+    # Progress should not be modified
+    saved = json.loads(progress_path.read_text())
+    assert saved == _PROGRESS
+
+
+def test_cmd_cleanup_saves_progress_on_success(tmp_path, monkeypatch, capsys):
+    """After cleanup, progress.json is updated with reset entries."""
+    import pipeline.deploy as mod
+
+    progress_path = tmp_path / "progress.json"
+    progress_path.write_text(json.dumps(_PROGRESS))
+
+    # Use real _cleanup_pair logic but mock subprocess calls
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = ""
+        return _R()
+
+    def fake_cancel(pr_name, ns):
+        pass
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    monkeypatch.setattr(mod, "_cancel_and_delete_pipelinerun", fake_cancel)
+
+    class _Args:
+        only = None; workload = None; package = None; status = None; dry_run = False
+
+    mod._cmd_cleanup(_Args(), progress_path, _DISCOVERED)
+
+    saved = json.loads(progress_path.read_text())
+    assert saved["wl-smoke-treatment"]["status"] == "pending"
+    assert saved["wl-load-treatment"]["status"] == "pending"
+    assert saved["wl-heavy-baseline"]["status"] == "pending"
+    # done and pending unchanged
+    assert saved["wl-smoke-baseline"]["status"] == "done"
+    assert saved["wl-load-baseline"]["status"] == "pending"
