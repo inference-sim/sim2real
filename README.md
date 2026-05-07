@@ -59,5 +59,4 @@ python -m pytest pipeline/ -v
 
 See `CLAUDE.md` for artifact contracts and exit code semantics.
 
-> For help when things go wrong, see [Troubleshooting](docs/contributing/troubleshooting.md).
 

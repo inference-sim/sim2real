@@ -31,9 +31,8 @@ def load_manifest(path: "Path | str") -> dict:
         raise ManifestError("Missing required field: version")
     if version == 1:
         raise ManifestError(
-            "This is a v1 manifest. v2 is required.\n"
-            "Migration: v1 manifests are no longer supported. "
-            "Use transfer.yaml v3 schema (see config/transfer.yaml for example)."
+            "v1 manifests are no longer supported. "
+            "Use version 2 or 3 (see pipeline/README.md for field reference)."
         )
     if version not in (2, 3):
         raise ManifestError(f"Unsupported manifest version: {version}")
