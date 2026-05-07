@@ -30,6 +30,7 @@ from pipeline.lib.state_machine import StateMachine
 from pipeline.lib.context_builder import build_context
 from pipeline.lib.tekton import make_pipelinerun_scenario
 from pipeline.lib.assemble import assemble_scenarios, AssemblyError
+from pipeline.lib.epp import inject_epp_image
 
 # ── Repo layout ──────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -342,31 +343,25 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     # what build-epp.sh pushes. Read from run_metadata.json (written by setup.py).
     meta_path = run_dir / "run_metadata.json"
     if not meta_path.exists():
-        warn("run_metadata.json absent — EPP image injection skipped (re-run setup.py)")
+        err("run_metadata.json absent — cannot inject EPP image. Re-run setup.py.")
+        sys.exit(1)
+    try:
+        meta = json.loads(meta_path.read_text())
+    except json.JSONDecodeError as e:
+        err(f"run_metadata.json is not valid JSON: {e}. Re-run setup.py.")
+        sys.exit(1)
+    registry = meta.get("registry", "")
+    repo_name = meta.get("repo_name", "llm-d-inference-scheduler")
+    run_name_tag = run_dir.name
+    if not registry:
+        err("run_metadata.json has no registry — cannot determine EPP image. Re-run setup.py.")
+        sys.exit(1)
+    injected = inject_epp_image(treatment_resolved, registry, repo_name, run_name_tag)
+    if injected:
+        ok(f"EPP image injected: {registry}/{repo_name}:{run_name_tag}")
     else:
-        try:
-            meta = json.loads(meta_path.read_text())
-        except json.JSONDecodeError as e:
-            err(f"run_metadata.json is not valid JSON: {e}. Re-run setup.py.")
-            sys.exit(1)
-        registry = meta.get("registry", "")
-        repo_name = meta.get("repo_name", "llm-d-inference-scheduler")
-        run_name_tag = run_dir.name
-        if not registry:
-            warn("run_metadata.json has no registry — EPP image injection skipped")
-        else:
-            epp_img = {
-                "repository": f"{registry}/{repo_name}",
-                "tag": run_name_tag,
-                "pullPolicy": "Always",
-            }
-            scenario_list = treatment_resolved.get("scenario", [])
-            if not scenario_list:
-                warn("treatment has no 'scenario' entries — EPP image not injected")
-            else:
-                for entry in scenario_list:
-                    entry.setdefault("images", {})["inferenceScheduler"] = epp_img
-                ok(f"EPP image injected: {registry}/{repo_name}:{run_name_tag}")
+        err("treatment has no 'scenario' entries — EPP image cannot be injected.")
+        sys.exit(1)
 
     # 4c: Write resolved scenarios
     cluster_dir = run_dir / "cluster"
