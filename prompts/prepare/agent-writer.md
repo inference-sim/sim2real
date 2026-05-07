@@ -19,7 +19,7 @@ Main session name: {MAIN_SESSION_NAME}
 
 Verify before each major step:
 ```bash
-test -f "$RUN_DIR/skill_input.json" || { echo "ERROR: RUN_DIR not set or skill_input.json missing"; exit 1; }
+test -f pipeline/pipeline.yaml || { echo "ERROR: not in sim2real root"; exit 1; }
 ```
 
 ## Inputs — Read These Now
