@@ -95,6 +95,27 @@ def test_cleanup_pair_none_namespace_resets_state(monkeypatch):
     assert entry["retries"] == 0
 
 
+def test_cleanup_pair_kubectl_delete_failure_does_not_reset(monkeypatch):
+    """When kubectl delete pipelinerun fails, state is NOT reset."""
+    import pipeline.deploy as mod
+
+    entry = {"workload": "wl-heavy", "package": "baseline", "status": "failed",
+             "namespace": "sim2real-0", "retries": 0}
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 1 if "pipelinerun" in cmd else 0
+            stdout = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    result = mod._cleanup_pair("wl-heavy-baseline", entry, _DISCOVERED)
+    assert result is False
+    assert entry["status"] == "failed"
+    assert entry["namespace"] == "sim2real-0"
+
+
 def test_cleanup_pair_helm_list_failure_does_not_reset(monkeypatch):
     """When helm list fails, state is NOT reset — operator needs manual intervention."""
     import pipeline.deploy as mod

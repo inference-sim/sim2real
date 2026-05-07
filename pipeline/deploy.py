@@ -511,25 +511,39 @@ def _cleanup_pair(key: str, entry: dict, discovered: dict, *,
         return True
 
     # Delete PipelineRun
+    pr_deleted = False
     if not pr_name:
         warn(f"{key}: no PipelineRun name found — skipping PR deletion (manual check needed)")
     elif ns:
         if entry.get("status") == "running":
             _cancel_and_delete_pipelinerun(pr_name, ns)
+            pr_deleted = True
         else:
-            run(["kubectl", "delete", "pipelinerun", pr_name, "-n", ns,
-                 "--ignore-not-found"], check=False, capture=True)
+            result = run(["kubectl", "delete", "pipelinerun", pr_name, "-n", ns,
+                         "--ignore-not-found"], check=False, capture=True)
+            if result.returncode == 0:
+                pr_deleted = True
+            else:
+                warn(f"{key}: kubectl delete pipelinerun failed in {ns}")
     elif namespaces:
         # Namespace already freed (done/collect-failed) — search all slots
         for slot_ns in namespaces:
-            run(["kubectl", "delete", "pipelinerun", pr_name, "-n", slot_ns,
-                 "--ignore-not-found"], check=False, capture=True)
+            result = run(["kubectl", "delete", "pipelinerun", pr_name, "-n", slot_ns,
+                         "--ignore-not-found"], check=False, capture=True)
+            if result.returncode == 0:
+                pr_deleted = True
+        if not pr_deleted:
+            warn(f"{key}: kubectl delete pipelinerun failed across all namespace slots")
     else:
         warn(f"{key}: no namespace and no namespace slots — cannot delete pipelinerun {pr_name}")
 
     # For done pairs, Tekton finally task already tore down Helm releases
     if is_done:
         return True
+
+    if ns and not pr_deleted and pr_name:
+        warn(f"{key}: PipelineRun not deleted — state NOT reset")
+        return False
 
     # Discover and uninstall all Helm releases in the namespace
     if ns:
