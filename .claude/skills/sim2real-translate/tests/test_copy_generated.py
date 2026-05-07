@@ -131,6 +131,24 @@ def test_mixed_created_and_modified(git_repo, run_dir):
     assert (gen / "new_plugin.go").exists()
 
 
+def test_basename_collision_raises(git_repo, run_dir):
+    """Basename collision between different paths raises ValueError."""
+    (git_repo / "pkg" / "scorer").mkdir(parents=True)
+    (git_repo / "pkg" / "admission").mkdir(parents=True)
+    (git_repo / "pkg" / "scorer" / "config.go").write_text("package scorer")
+    (git_repo / "pkg" / "admission" / "config.go").write_text("package admission")
+    with pytest.raises(ValueError, match="Basename collision.*config.go"):
+        cg.copy_generated(str(git_repo), str(run_dir))
+
+
+def test_deleted_file_excluded(git_repo, run_dir):
+    """Deleted tracked files do not appear in files_modified."""
+    (git_repo / "existing.go").unlink()
+    created, modified = cg.copy_generated(str(git_repo), str(run_dir))
+    assert "existing.go" not in modified
+    assert created == []
+
+
 def test_preserves_other_json_fields(git_repo, run_dir):
     """Other fields in translation_output.json are not disturbed."""
     (git_repo / "existing.go").write_text("package main\n// changed")

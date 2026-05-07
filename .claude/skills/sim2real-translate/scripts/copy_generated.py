@@ -29,7 +29,7 @@ def copy_generated(target_repo: str, run_dir: str) -> tuple[list[str], list[str]
     gen.mkdir(parents=True)
 
     diff = subprocess.run(
-        ["git", "diff", "HEAD", "--name-only"],
+        ["git", "diff", "HEAD", "--name-only", "--diff-filter=d"],
         cwd=target, capture_output=True, text=True, check=True,
     )
     files_modified = [f for f in diff.stdout.strip().splitlines() if f]
@@ -45,6 +45,15 @@ def copy_generated(target_repo: str, run_dir: str) -> tuple[list[str], list[str]
     o["files_created"] = files_created
     o["files_modified"] = files_modified
     to_path.write_text(json.dumps(o, indent=2))
+
+    seen: dict[str, str] = {}
+    for f in files_created + files_modified:
+        base = Path(f).name
+        if base in seen:
+            raise ValueError(
+                f"Basename collision: '{base}' from both '{seen[base]}' and '{f}'"
+            )
+        seen[base] = f
 
     for f in files_created + files_modified:
         src = target / f
