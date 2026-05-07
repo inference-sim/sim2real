@@ -131,6 +131,19 @@ def test_mixed_created_and_modified(git_repo, run_dir):
     assert (gen / "new_plugin.go").exists()
 
 
+def test_stale_files_removed_on_rerun(git_repo, run_dir):
+    """Stale files from a prior run are removed before copying."""
+    gen = run_dir / "generated"
+    gen.mkdir()
+    (gen / "old_stale_plugin.go").write_text("stale content")
+
+    (git_repo / "existing.go").write_text("package main\n// changed")
+    cg.copy_generated(str(git_repo), str(run_dir))
+
+    assert not (gen / "old_stale_plugin.go").exists()
+    assert (gen / "existing.go").exists()
+
+
 def test_basename_collision_raises(git_repo, run_dir):
     """Basename collision between different paths raises ValueError."""
     (git_repo / "pkg" / "scorer").mkdir(parents=True)

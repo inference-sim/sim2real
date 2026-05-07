@@ -2,8 +2,10 @@
 
 Replaces blind trust of translation_output.json lists with git-based
 discovery. Uses uncommitted working-tree state (git diff HEAD + untracked)
-as the source of truth — valid because the skill never commits to the
-submodule during translation.
+as the source of truth.
+
+Precondition: the target repo must not have committed changes beyond its
+pinned HEAD during this translation run.
 """
 import json
 import shutil
@@ -15,7 +17,7 @@ def copy_generated(target_repo: str, run_dir: str) -> tuple[list[str], list[str]
     """Discover changed/new files via git, update translation_output.json, copy to generated/.
 
     Args:
-        target_repo: Path to the target submodule (e.g., llm-d-inference-scheduler).
+        target_repo: Path to the target repo (e.g., llm-d-inference-scheduler directory).
         run_dir: Path to the run directory containing translation_output.json.
 
     Returns:
@@ -30,13 +32,13 @@ def copy_generated(target_repo: str, run_dir: str) -> tuple[list[str], list[str]
 
     diff = subprocess.run(
         ["git", "diff", "HEAD", "--name-only", "--diff-filter=d"],
-        cwd=target, capture_output=True, text=True, check=True,
+        cwd=target, stdout=subprocess.PIPE, text=True, check=True,
     )
     files_modified = [f for f in diff.stdout.strip().splitlines() if f]
 
     untracked = subprocess.run(
         ["git", "ls-files", "--others", "--exclude-standard"],
-        cwd=target, capture_output=True, text=True, check=True,
+        cwd=target, stdout=subprocess.PIPE, text=True, check=True,
     )
     files_created = [f for f in untracked.stdout.strip().splitlines() if f]
 
