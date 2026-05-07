@@ -718,7 +718,10 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
 
     # Apply static Pipeline definition to all namespace slots
     pipeline_yaml_rel = manifest.get("pipeline", {}).get("yaml", "pipeline/pipeline.yaml")
-    pipeline_yaml = REPO_ROOT / pipeline_yaml_rel
+    pipeline_yaml = (REPO_ROOT / pipeline_yaml_rel).resolve()
+    if not pipeline_yaml.is_relative_to(REPO_ROOT.resolve()):
+        err(f"pipeline.yaml resolves outside repo root: {pipeline_yaml_rel}")
+        sys.exit(1)
     if not pipeline_yaml.exists():
         err(f"Static pipeline not found: {pipeline_yaml_rel}")
         sys.exit(1)

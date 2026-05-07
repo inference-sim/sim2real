@@ -28,14 +28,31 @@ def test_pipelinerun_uses_default_pipeline_name():
     assert pr["spec"]["pipelineRef"]["name"] == "sim2real"
 
 
-def test_pipeline_yaml_resolves_relative_to_repo_root(tmp_path):
-    """pipeline.yaml from manifest is resolved relative to REPO_ROOT."""
-    custom_yaml = tmp_path / "custom" / "my-pipeline.yaml"
-    custom_yaml.parent.mkdir(parents=True)
-    custom_yaml.write_text("apiVersion: tekton.dev/v1\nkind: Pipeline\n")
+def test_manifest_rejects_absolute_pipeline_yaml(tmp_path):
+    """Absolute pipeline.yaml path is rejected at manifest load time."""
+    import pytest
+    import yaml
+    from pipeline.lib.manifest import load_manifest, ManifestError
 
-    manifest = {"pipeline": {"yaml": "custom/my-pipeline.yaml"}}
-    yaml_path = manifest.get("pipeline", {}).get("yaml", "pipeline/pipeline.yaml")
-    resolved = tmp_path / yaml_path
-    assert resolved.exists()
-    assert resolved == custom_yaml
+    from pipeline.tests.test_manifest import MINIMAL_V3
+
+    data = {**MINIMAL_V3, "pipeline": {"yaml": "/etc/passwd"}}
+    p = tmp_path / "transfer.yaml"
+    p.write_text(yaml.dump(data))
+    with pytest.raises(ManifestError, match="relative path"):
+        load_manifest(p)
+
+
+def test_manifest_rejects_empty_pipeline_name(tmp_path):
+    """Empty pipeline.name is rejected."""
+    import pytest
+    import yaml
+    from pipeline.lib.manifest import load_manifest, ManifestError
+
+    from pipeline.tests.test_manifest import MINIMAL_V3
+
+    data = {**MINIMAL_V3, "pipeline": {"name": "", "yaml": "pipeline/pipeline.yaml"}}
+    p = tmp_path / "transfer.yaml"
+    p.write_text(yaml.dump(data))
+    with pytest.raises(ManifestError, match="pipeline.name.*non-empty"):
+        load_manifest(p)

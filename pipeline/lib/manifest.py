@@ -1,4 +1,4 @@
-"""Manifest loader for sim2real pipeline (v2 schema)."""
+"""Manifest loader for sim2real pipeline (v2/v3 schema)."""
 import warnings
 import yaml
 from pathlib import Path
@@ -190,3 +190,12 @@ def _validate_v3_fields(data: dict) -> None:
     else:
         pipeline.setdefault("name", "sim2real")
         pipeline.setdefault("yaml", "pipeline/pipeline.yaml")
+    pipeline = data["pipeline"]
+    if not pipeline["name"] or not pipeline["name"].strip():
+        raise ManifestError("pipeline.name must be a non-empty string")
+    if not pipeline["yaml"] or not pipeline["yaml"].strip():
+        raise ManifestError("pipeline.yaml must be a non-empty string")
+    if Path(pipeline["yaml"]).is_absolute():
+        raise ManifestError(
+            f"pipeline.yaml must be a relative path, got: {pipeline['yaml']}"
+        )
