@@ -153,7 +153,7 @@ def test_cmd_cleanup_continues_on_exception(tmp_path, monkeypatch, capsys):
 
     call_count = []
 
-    def exploding_cleanup(key, entry, disc, dry_run=False):
+    def exploding_cleanup(key, entry, disc, dry_run=False, namespaces=None):
         call_count.append(key)
         if key == "wl-a-baseline":
             raise RuntimeError("kubectl not found")
@@ -177,8 +177,41 @@ def test_cmd_cleanup_continues_on_exception(tmp_path, monkeypatch, capsys):
     assert saved["wl-b-baseline"]["status"] == "pending"
 
 
-def test_cmd_cleanup_skips_done_and_pending(tmp_path, monkeypatch, capsys):
-    """cleanup only acts on non-done, non-pending pairs."""
+def test_cleanup_pair_done_deletes_pr_without_state_reset(monkeypatch):
+    """Done pairs get PipelineRun deleted but stay in done state."""
+    import pipeline.deploy as mod
+
+    entry = {"workload": "wl-smoke", "package": "baseline", "status": "done",
+             "namespace": None, "retries": 0}
+    calls = []
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        calls.append(cmd)
+        class _R:
+            returncode = 0
+            stdout = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    result = mod._cleanup_pair("wl-smoke-baseline", entry, _DISCOVERED,
+                               namespaces=["sim2real-0", "sim2real-1"])
+
+    assert result is True
+    # State stays done
+    assert entry["status"] == "done"
+    # PipelineRun deleted across all namespace slots
+    kubectl_deletes = [c for c in calls if "delete" in c and "pipelinerun" in c]
+    assert len(kubectl_deletes) == 2
+    assert "sim2real-0" in kubectl_deletes[0]
+    assert "sim2real-1" in kubectl_deletes[1]
+    # No helm operations for done pairs
+    helm_calls = [c for c in calls if c[0] == "helm"]
+    assert helm_calls == []
+
+
+def test_cmd_cleanup_skips_pending_only(tmp_path, monkeypatch, capsys):
+    """cleanup acts on all non-pending pairs, including done."""
     import pipeline.deploy as mod
 
     progress_path = tmp_path / "progress.json"
@@ -186,17 +219,17 @@ def test_cmd_cleanup_skips_done_and_pending(tmp_path, monkeypatch, capsys):
 
     cleaned = []
     monkeypatch.setattr(mod, "_cleanup_pair",
-                        lambda k, e, d, dry_run=False: cleaned.append(k) or True)
+                        lambda k, e, d, dry_run=False, namespaces=None: cleaned.append(k) or True)
 
     class _Args:
         only = None; workload = None; package = None; status = None; dry_run = False
 
     mod._cmd_cleanup(_Args(), progress_path, _DISCOVERED)
 
-    # done (wl-smoke-baseline) and pending (wl-load-baseline) should be skipped
-    assert "wl-smoke-baseline" not in cleaned
+    # pending (wl-load-baseline) should be skipped
     assert "wl-load-baseline" not in cleaned
-    # running, timed-out, failed should be cleaned
+    # done, running, timed-out, failed should all be cleaned
+    assert "wl-smoke-baseline" in cleaned
     assert "wl-smoke-treatment" in cleaned
     assert "wl-load-treatment" in cleaned
     assert "wl-heavy-baseline" in cleaned
@@ -211,7 +244,7 @@ def test_cmd_cleanup_respects_only_filter(tmp_path, monkeypatch, capsys):
 
     cleaned = []
     monkeypatch.setattr(mod, "_cleanup_pair",
-                        lambda k, e, d, dry_run=False: cleaned.append(k) or True)
+                        lambda k, e, d, dry_run=False, namespaces=None: cleaned.append(k) or True)
 
     class _Args:
         only = "wl-heavy-baseline"; workload = None; package = None; status = None; dry_run = False
@@ -229,7 +262,7 @@ def test_cmd_cleanup_dry_run_does_not_save(tmp_path, monkeypatch, capsys):
     progress_path.write_text(json.dumps(_PROGRESS))
 
     monkeypatch.setattr(mod, "_cleanup_pair",
-                        lambda k, e, d, dry_run=False: True)
+                        lambda k, e, d, dry_run=False, namespaces=None: True)
 
     class _Args:
         only = None; workload = None; package = None; status = None; dry_run = True
@@ -264,14 +297,17 @@ def test_cmd_cleanup_saves_progress_on_success(tmp_path, monkeypatch, capsys):
     class _Args:
         only = None; workload = None; package = None; status = None; dry_run = False
 
-    mod._cmd_cleanup(_Args(), progress_path, _DISCOVERED)
+    mod._cmd_cleanup(_Args(), progress_path, _DISCOVERED,
+                     namespaces=["sim2real-0", "sim2real-1", "sim2real-2"])
 
     saved = json.loads(progress_path.read_text())
+    # Non-done pairs reset to pending
     assert saved["wl-smoke-treatment"]["status"] == "pending"
     assert saved["wl-load-treatment"]["status"] == "pending"
     assert saved["wl-heavy-baseline"]["status"] == "pending"
-    # done and pending unchanged
+    # Done pair stays done (PipelineRun deleted but state preserved)
     assert saved["wl-smoke-baseline"]["status"] == "done"
+    # Pending pair unchanged
     assert saved["wl-load-baseline"]["status"] == "pending"
 
 

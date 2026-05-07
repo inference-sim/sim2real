@@ -159,7 +159,7 @@ python pipeline/deploy.py cleanup [flags]   # tear down cluster resources for fa
 
 **`deploy.py collect`** — extracts results from the cluster PVC and writes to `workspace/runs/<run>/results/{phase}/<workload>/`.
 
-**`deploy.py cleanup`** — deletes PipelineRuns and uninstalls Helm releases for pairs that are not `done` or `pending`. Resets cleaned pairs to `pending` so they can be re-run.
+**`deploy.py cleanup`** — removes cluster resources (PipelineRuns, Helm releases) for all non-pending pairs. Failed/running/timed-out pairs are reset to `pending` so they can be re-dispatched. Done pairs stay `done` — only their PipelineRun is deleted to free cluster resources.
 
 | Flag | Description |
 |------|-------------|
@@ -169,7 +169,7 @@ python pipeline/deploy.py cleanup [flags]   # tear down cluster resources for fa
 | `--status STATE` | Scope cleanup to pairs with this status |
 | `--dry-run` | Print what would be cleaned up without acting |
 
-**Safety:** Cleanup never touches `done` or `pending` pairs. Results in `workspace/runs/<run>/results/` are preserved — only cluster resources are removed.
+**Safety:** Results in `workspace/runs/<run>/results/` are preserved — only cluster resources are removed. For `done` pairs, only the PipelineRun is deleted (Tekton already tore down Helm releases).
 
 ---
 

@@ -483,49 +483,65 @@ def _load_pairs(cluster_dir: Path) -> dict:
     return pairs
 
 
-def _cleanup_pair(key: str, entry: dict, discovered: dict, *, dry_run: bool = False) -> bool:
-    """Delete PipelineRun and Helm releases for a pair, reset to pending.
+def _cleanup_pair(key: str, entry: dict, discovered: dict, *,
+                  dry_run: bool = False, namespaces: list[str] | None = None) -> bool:
+    """Delete PipelineRun and Helm releases for a pair.
 
-    Returns True if cleanup was performed (or no cluster teardown needed),
-    False if cluster teardown failed and state was NOT reset.
+    For non-done pairs: also resets state to pending.
+    For done pairs: deletes PipelineRun only (Helm already torn down by Tekton).
+
+    Returns True if cleanup was performed, False if it failed and state was NOT reset.
     """
     ns = entry.get("namespace")
-    if not ns:
-        # No namespace — no cluster resources to clean (e.g. collect-failed).
-        # Still reset state so the pair can be re-dispatched.
-        if not dry_run:
+    pr_name = discovered.get(key, {}).get("pr_name", "")
+    is_done = entry.get("status") == "done"
+
+    # No namespace and no pr_name — just reset state (e.g. collect-failed)
+    if not ns and not pr_name:
+        if not dry_run and not is_done:
             entry["status"] = "pending"
             entry["retries"] = 0
         return True
 
-    pr_name = discovered.get(key, {}).get("pr_name", "")
-
     if dry_run:
-        info(f"[DRY-RUN] {key}: would delete pipelinerun {pr_name or '(unknown)'} in {ns}")
-        info(f"[DRY-RUN] {key}: would uninstall all helm releases in {ns}")
+        target = ns or "all namespace slots"
+        info(f"[DRY-RUN] {key}: would delete pipelinerun {pr_name or '(unknown)'} in {target}")
+        if not is_done:
+            info(f"[DRY-RUN] {key}: would uninstall all helm releases in {target}")
         return True
 
-    # Cancel running PipelineRuns; delete non-running ones directly
-    if entry.get("status") == "running" and pr_name:
-        _cancel_and_delete_pipelinerun(pr_name, ns)
-    elif pr_name:
-        run(["kubectl", "delete", "pipelinerun", pr_name, "-n", ns,
-             "--ignore-not-found"], check=False, capture=True)
-    else:
+    # Delete PipelineRun
+    if not pr_name:
         warn(f"{key}: no PipelineRun name found — skipping PR deletion (manual check needed)")
+    elif ns:
+        if entry.get("status") == "running":
+            _cancel_and_delete_pipelinerun(pr_name, ns)
+        else:
+            run(["kubectl", "delete", "pipelinerun", pr_name, "-n", ns,
+                 "--ignore-not-found"], check=False, capture=True)
+    elif namespaces:
+        # Namespace already freed (done/collect-failed) — search all slots
+        for slot_ns in namespaces:
+            run(["kubectl", "delete", "pipelinerun", pr_name, "-n", slot_ns,
+                 "--ignore-not-found"], check=False, capture=True)
+
+    # For done pairs, Tekton finally task already tore down Helm releases
+    if is_done:
+        return True
 
     # Discover and uninstall all Helm releases in the namespace
-    result = run(["helm", "list", "-n", ns, "-q"], check=False, capture=True)
-    if result.returncode != 0:
-        warn(f"{key}: helm list failed in {ns} — skipping cleanup (manual intervention needed)")
-        return False
-    if result.stdout.strip():
-        for release in result.stdout.strip().splitlines():
-            ur = run(["helm", "uninstall", release, "-n", ns], check=False, capture=True)
-            if ur.returncode == 0:
-                ok(f"Uninstalled: {release} (ns: {ns})")
-            else:
-                warn(f"Failed to uninstall {release} in {ns}")
+    if ns:
+        result = run(["helm", "list", "-n", ns, "-q"], check=False, capture=True)
+        if result.returncode != 0:
+            warn(f"{key}: helm list failed in {ns} — skipping cleanup (manual intervention needed)")
+            return False
+        if result.stdout.strip():
+            for release in result.stdout.strip().splitlines():
+                ur = run(["helm", "uninstall", release, "-n", ns], check=False, capture=True)
+                if ur.returncode == 0:
+                    ok(f"Uninstalled: {release} (ns: {ns})")
+                else:
+                    warn(f"Failed to uninstall {release} in {ns}")
 
     # Reset state
     entry["status"] = "pending"
@@ -915,8 +931,9 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
     print()
 
 
-def _cmd_cleanup(args, progress_path: Path, discovered: dict) -> None:
-    """Tear down cluster resources for non-terminal pairs and reset to pending."""
+def _cmd_cleanup(args, progress_path: Path, discovered: dict,
+                 namespaces: list[str] | None = None) -> None:
+    """Tear down cluster resources for all non-pending pairs."""
     from pipeline.lib.progress import LocalProgressStore
     store = LocalProgressStore(progress_path)
     progress = store.load()
@@ -929,12 +946,12 @@ def _cmd_cleanup(args, progress_path: Path, discovered: dict) -> None:
     _filtered = _apply_run_filters(progress, args)
     _scope = _filtered or set(progress.keys())
 
-    # Exclude done and pending
+    # Exclude pending (nothing to clean)
     actionable = {k for k in _scope
-                  if progress[k].get("status") not in ("done", "pending")}
+                  if progress[k].get("status") not in (None, "pending")}
 
     if not actionable:
-        info("No pairs need cleanup (all are done or pending)")
+        info("No pairs need cleanup (all pending)")
         return
 
     dry_run = getattr(args, "dry_run", False)
@@ -946,7 +963,8 @@ def _cmd_cleanup(args, progress_path: Path, discovered: dict) -> None:
     for key in sorted(actionable):
         entry = progress[key]
         try:
-            if _cleanup_pair(key, entry, discovered, dry_run=dry_run):
+            if _cleanup_pair(key, entry, discovered, dry_run=dry_run,
+                             namespaces=namespaces):
                 cleaned += 1
             else:
                 errors += 1
@@ -957,7 +975,7 @@ def _cmd_cleanup(args, progress_path: Path, discovered: dict) -> None:
     if not dry_run:
         store.save(progress)
 
-    msg = f"{cleaned} pair(s) cleaned up" + (" and reset to pending" if not dry_run else "")
+    msg = f"{cleaned} pair(s) cleaned up"
     if errors:
         msg += f" ({errors} failed — manual intervention needed)"
     ok(msg)
@@ -1062,7 +1080,8 @@ def main():
         progress_path = run_dir / "progress.json"
         cluster_dir = run_dir / "cluster"
         discovered = _load_pairs(cluster_dir)
-        _cmd_cleanup(args, progress_path, discovered)
+        namespaces = setup_config.get("namespaces") or [setup_config.get("namespace", "")]
+        _cmd_cleanup(args, progress_path, discovered, namespaces=namespaces)
     else:
         err("No subcommand specified. Use: deploy.py run | status | collect | cleanup")
         sys.exit(1)
