@@ -30,8 +30,6 @@ The experiment repo must contain:
 
 `pipeline/pipeline.yaml` is the static Tekton Pipeline definition (applied by `deploy.py run`; Phase 4 generates PipelineRuns that reference it).
 
-Omitting `--experiment-root` defaults to the framework directory — backward compatible with the existing `config/transfer.yaml` layout.
-
 ---
 
 ## setup.py
