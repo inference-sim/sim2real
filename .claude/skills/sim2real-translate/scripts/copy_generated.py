@@ -26,9 +26,7 @@ def copy_generated(target_repo: str, run_dir: str) -> tuple[list[str], list[str]
     target = Path(target_repo)
     rd = Path(run_dir)
     gen = rd / "generated"
-    if gen.exists():
-        shutil.rmtree(gen)
-    gen.mkdir(parents=True)
+    gen.mkdir(parents=True, exist_ok=True)
 
     diff = subprocess.run(
         ["git", "diff", "HEAD", "--name-only", "--diff-filter=d"],

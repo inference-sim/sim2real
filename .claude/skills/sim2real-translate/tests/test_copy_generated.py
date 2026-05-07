@@ -131,16 +131,18 @@ def test_mixed_created_and_modified(git_repo, run_dir):
     assert (gen / "new_plugin.go").exists()
 
 
-def test_stale_files_removed_on_rerun(git_repo, run_dir):
-    """Stale files from a prior run are removed before copying."""
+def test_config_yamls_preserved(git_repo, run_dir):
+    """Config yamls placed by writer agent survive the copy step."""
     gen = run_dir / "generated"
     gen.mkdir()
-    (gen / "old_stale_plugin.go").write_text("stale content")
+    (gen / "baseline_config.yaml").write_text("baseline: true")
+    (gen / "treatment_config.yaml").write_text("treatment: true")
 
     (git_repo / "existing.go").write_text("package main\n// changed")
     cg.copy_generated(str(git_repo), str(run_dir))
 
-    assert not (gen / "old_stale_plugin.go").exists()
+    assert (gen / "baseline_config.yaml").read_text() == "baseline: true"
+    assert (gen / "treatment_config.yaml").read_text() == "treatment: true"
     assert (gen / "existing.go").exists()
 
 
