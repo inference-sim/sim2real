@@ -1,0 +1,124 @@
+"""Tests for copy_generated.py — git-based file discovery and copy."""
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
+import copy_generated as cg
+
+
+@pytest.fixture
+def git_repo(tmp_path):
+    """Create a minimal git repo with an initial commit."""
+    repo = tmp_path / "target"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    (repo / "existing.go").write_text("package main")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    return repo
+
+
+@pytest.fixture
+def run_dir(tmp_path):
+    """Create a run directory with a minimal translation_output.json."""
+    rd = tmp_path / "run"
+    rd.mkdir()
+    (rd / "translation_output.json").write_text(json.dumps({
+        "plugin_type": "scorer",
+        "files_created": [],
+        "files_modified": [],
+        "package": "pkg",
+        "register_file": "register.go",
+        "test_commands": ["go test ./..."],
+        "config_kind": "ScorerConfig",
+        "helm_path": "epp.scorerConfig",
+        "treatment_config_generated": True,
+        "description": "test plugin",
+    }))
+    return rd
+
+
+def test_modified_tracked_file(git_repo, run_dir):
+    """BC-1: Modified tracked files appear in files_modified."""
+    (git_repo / "existing.go").write_text("package main\n// changed")
+    created, modified = cg.copy_generated(str(git_repo), str(run_dir))
+    assert modified == ["existing.go"]
+    assert created == []
+
+
+def test_new_untracked_file(git_repo, run_dir):
+    """BC-1: New untracked files appear in files_created."""
+    (git_repo / "pkg" / "plugins").mkdir(parents=True)
+    (git_repo / "pkg" / "plugins" / "new_plugin.go").write_text("package plugins")
+    created, modified = cg.copy_generated(str(git_repo), str(run_dir))
+    assert "pkg/plugins/new_plugin.go" in created
+    assert modified == []
+
+
+def test_files_copied_to_generated(git_repo, run_dir):
+    """BC-2: All listed files exist in generated/ after copy."""
+    (git_repo / "existing.go").write_text("package main\n// changed")
+    (git_repo / "new_file.go").write_text("package main\n// new")
+    cg.copy_generated(str(git_repo), str(run_dir))
+    gen = run_dir / "generated"
+    assert (gen / "existing.go").exists()
+    assert (gen / "new_file.go").exists()
+
+
+def test_translation_output_updated(git_repo, run_dir):
+    """BC-4: translation_output.json lists are overwritten with git state."""
+    o = json.loads((run_dir / "translation_output.json").read_text())
+    o["files_created"] = ["stale.go"]
+    o["files_modified"] = ["also_stale.go"]
+    (run_dir / "translation_output.json").write_text(json.dumps(o))
+
+    (git_repo / "existing.go").write_text("package main\n// changed")
+    cg.copy_generated(str(git_repo), str(run_dir))
+
+    result = json.loads((run_dir / "translation_output.json").read_text())
+    assert result["files_modified"] == ["existing.go"]
+    assert result["files_created"] == []
+    assert "stale.go" not in result["files_created"]
+
+
+def test_empty_diff_empty_lists(git_repo, run_dir):
+    """BC-3: No changes -> empty lists, no files in generated/."""
+    created, modified = cg.copy_generated(str(git_repo), str(run_dir))
+    assert created == []
+    assert modified == []
+    gen = run_dir / "generated"
+    if gen.exists():
+        assert list(gen.iterdir()) == []
+
+
+def test_nested_path_uses_basename(git_repo, run_dir):
+    """BC-2: Files in subdirectories use basename in generated/."""
+    (git_repo / "pkg" / "deep").mkdir(parents=True)
+    (git_repo / "pkg" / "deep" / "nested.go").write_text("package deep")
+    cg.copy_generated(str(git_repo), str(run_dir))
+    gen = run_dir / "generated"
+    assert (gen / "nested.go").exists()
+
+
+def test_preserves_other_json_fields(git_repo, run_dir):
+    """Other fields in translation_output.json are not disturbed."""
+    (git_repo / "existing.go").write_text("package main\n// changed")
+    cg.copy_generated(str(git_repo), str(run_dir))
+    result = json.loads((run_dir / "translation_output.json").read_text())
+    assert result["plugin_type"] == "scorer"
+    assert result["description"] == "test plugin"

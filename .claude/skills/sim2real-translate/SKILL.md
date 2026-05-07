@@ -572,22 +572,14 @@ print(len(list((Path('$RUN_DIR/review')).glob('round_*.json'))))
 " 2>/dev/null || echo 0)
 ```
 
-Copy all created/modified files + treatment_config.yaml into `$RUN_DIR/generated/`:
+Derive file lists from git state and copy to `$RUN_DIR/generated/`:
 
 ```bash
 python3 -c "
-import json, shutil
-from pathlib import Path
-o = json.load(open('$RUN_DIR/translation_output.json'))
-gen = Path('$RUN_DIR/generated')
-gen.mkdir(parents=True, exist_ok=True)
-target = Path('$TARGET_REPO')
-for f in o['files_created'] + o.get('files_modified', []):
-    src = target / f
-    dst = gen / Path(f).name
-    shutil.copy2(src, dst)
-    print(f'  {Path(f).name} → generated/')
-print('Generated artifacts ready.')
+import sys
+sys.path.insert(0, '$REPO_ROOT/.claude/skills/sim2real-translate/scripts')
+from copy_generated import copy_generated
+copy_generated('$TARGET_REPO', '$RUN_DIR')
 "
 ```
 
