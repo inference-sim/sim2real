@@ -214,7 +214,7 @@ def test_triage_image_pull_backoff():
     result = triage_pod(pod, [], RemediationTracker())
     assert result.tier == 2
     assert result.action == "suggest"
-    assert "env_defaults.yaml" in result.suggestion
+    assert "run_metadata.json" in result.suggestion
 
 
 def test_triage_failed_scheduling_gpu():
