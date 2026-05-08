@@ -25,6 +25,7 @@ class SetupConfig:
     storage_class: str
     is_openshift: bool
     no_cluster: bool
+    pipeline_yaml: str | None = None
 
 # ── Repo layout ──────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -80,6 +81,9 @@ Examples:
                    help="Root of the experiment repo (default: framework directory)")
     p.add_argument("--no-cluster",      action="store_true",
                                        help="Skip all kubectl/tkn steps (config + JSON output only)")
+    p.add_argument("--pipeline-yaml",  metavar="PATH",
+                                       help="Path to Tekton Pipeline YAML to apply "
+                                            "(default: <repo-root>/pipeline/pipeline.yaml)")
     p.add_argument("--redeploy-tasks", action="store_true",
                                        help="Re-apply Tekton step/task YAMLs only (requires --namespace)")
     p.add_argument("--test-push",      action="store_true",
@@ -313,6 +317,7 @@ def collect_config(args: argparse.Namespace) -> tuple[SetupConfig, Path, str]:
         registry_user=reg_user, registry_token=reg_token,
         storage_class=storage_class, is_openshift=is_openshift,
         no_cluster=args.no_cluster,
+        pipeline_yaml=args.pipeline_yaml,
     )
     ns_display = ",".join(namespaces) if len(namespaces) > 1 else namespace
     ok(f"Configuration complete (namespace={ns_display}, registry={registry or '(none)'})")
@@ -593,7 +598,7 @@ def step_pvcs(cfg: SetupConfig) -> None:
 # ── Step 7: Tekton ───────────────────────────────────────────────────
 
 def step_tekton(cfg: SetupConfig) -> None:
-    """Step 7: Verify Tekton operator and deploy steps/tasks."""
+    """Step 7: Verify Tekton operator and deploy steps/tasks + Pipeline."""
     step(7, 8, "Tekton")
     if cfg.no_cluster:
         ok("Tekton (skipped — --no-cluster)"); return
@@ -615,6 +620,14 @@ def step_tekton(cfg: SetupConfig) -> None:
         for yaml_file in sorted(tekton_dir.glob("*.yaml")):
             run(["kubectl", "apply", "-f", str(yaml_file), f"-n={cfg.namespace}"])
     ok("Tekton steps and tasks deployed")
+
+    # Deploy Pipeline YAML
+    pipeline_path = Path(cfg.pipeline_yaml) if cfg.pipeline_yaml else REPO_ROOT / "pipeline" / "pipeline.yaml"
+    if pipeline_path.exists():
+        run(["kubectl", "apply", "-f", str(pipeline_path), f"-n={cfg.namespace}"])
+        ok(f"Pipeline applied from {pipeline_path}")
+    else:
+        warn(f"Pipeline YAML not found at {pipeline_path} — skipping")
 
 # ── Step 8: Config Output ────────────────────────────────────────────
 
@@ -641,6 +654,7 @@ def step_config_output(cfg: SetupConfig, run_dir: Path, container_rt: str) -> No
         "is_openshift": cfg.is_openshift,
         "tektonc_dir": str(TEKTONC_DIR),
         "sim2real_root": str(REPO_ROOT),
+        "pipeline_yaml": cfg.pipeline_yaml,
         "container_runtime": container_rt,
         "current_run": cfg.run_name,
         "setup_timestamp": now_iso,
@@ -700,6 +714,13 @@ def main() -> int:
             for yaml_file in sorted(tekton_dir.glob("*.yaml")):
                 run(["kubectl", "apply", "-f", str(yaml_file), f"-n={args.namespace}"])
         ok("Tekton steps and tasks redeployed")
+        # Also redeploy Pipeline YAML
+        pipeline_path = Path(args.pipeline_yaml) if args.pipeline_yaml else REPO_ROOT / "pipeline" / "pipeline.yaml"
+        if pipeline_path.exists():
+            run(["kubectl", "apply", "-f", str(pipeline_path), f"-n={args.namespace}"])
+            ok(f"Pipeline redeployed from {pipeline_path}")
+        else:
+            warn(f"Pipeline YAML not found at {pipeline_path} — skipping")
         return 0
 
     # 8-step flow
@@ -720,6 +741,7 @@ def main() -> int:
             storage_class=cfg.storage_class,
             is_openshift=cfg.is_openshift,
             no_cluster=cfg.no_cluster,
+            pipeline_yaml=cfg.pipeline_yaml,
         )
         if len(cfg.namespaces) > 1:
             print(_c("36", f"\n  ── Provisioning namespace: {ns} ──"))
