@@ -23,7 +23,7 @@ def test_collect_default_phases(tmp_path):
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), {"workloads": []}, run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
 
     assert collected_phases == ["baseline", "treatment"]
 
@@ -46,7 +46,7 @@ def test_collect_single_package(tmp_path):
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), {"workloads": []}, run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
 
     assert collected_phases == ["treatment"]
 
@@ -69,7 +69,7 @@ def test_collect_experiment_expands(tmp_path):
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), {"workloads": []}, run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
 
     assert collected_phases == ["baseline", "treatment"]
 
@@ -86,4 +86,4 @@ def test_collect_unknown_package_exits(tmp_path):
         skip_logs = False
 
     with pytest.raises(SystemExit):
-        deploy._cmd_collect(Args(), {"workloads": []}, run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
