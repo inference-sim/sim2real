@@ -704,7 +704,7 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
     import tempfile as _tmp
     from pipeline.lib.progress import LocalProgressStore
     from pipeline.lib.capacity import (
-        probe_free_gpus, gpu_cost_per_pair, derive_gpu_resource_type, load_defaults,
+        probe_free_gpus, gpu_cost_per_pair, derive_gpu_resource_type, load_defaults
     )
 
     namespaces = setup_config.get("namespaces") or [setup_config.get("namespace", "")]
@@ -730,13 +730,25 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
     defaults = load_defaults(REPO_ROOT)
     baseline_scenario_path = cluster_dir / "baseline.yaml"
     if defaults and baseline_scenario_path.exists():
-        resolved = yaml.safe_load(baseline_scenario_path.read_text()) or {}
-        gpu_resource_type = derive_gpu_resource_type(resolved, defaults)
-        pair_gpu_cost = gpu_cost_per_pair(resolved, defaults)
+        try:
+            resolved = yaml.safe_load(baseline_scenario_path.read_text()) or {}
+        except yaml.YAMLError as e:
+            warn(f"Could not parse {baseline_scenario_path.name}: {e}")
+            resolved = None
+        if resolved:
+            gpu_resource_type = derive_gpu_resource_type(resolved, defaults)
+            derived_cost = gpu_cost_per_pair(resolved, defaults)
+            if derived_cost is not None:
+                pair_gpu_cost = derived_cost
+            else:
+                warn(f"Could not derive GPU cost from scenario — using fallback ({pair_gpu_cost})")
+    else:
+        warn(f"Defaults or baseline.yaml unavailable — using CLI defaults "
+             f"(resource={gpu_resource_type}, cost={pair_gpu_cost})")
     if gpu_resource_type != "nvidia.com/gpu":
         info(f"GPU resource type: {gpu_resource_type}")
     info(f"GPU cost per pair: {pair_gpu_cost}")
-    _probe_warn_emitted = False
+    _probe_fail_count = 0
 
     # Load or initialize progress
     progress = store.load()
@@ -960,15 +972,14 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
 
         # ── Capacity probe ───────────────────────────────────────────────
         capacity = probe_free_gpus(gpu_resource_type=gpu_resource_type)
-        if capacity is not None:
+        if isinstance(capacity, tuple):
             free, allocatable, requested = capacity
             info(f"Capacity: {free} free GPUs ({allocatable} allocatable − {requested} requested)")
-            _probe_warn_emitted = False
-        elif not _probe_warn_emitted:
-            from pipeline.lib.capacity import probe_stderr
-            stderr_msg = probe_stderr(gpu_resource_type=gpu_resource_type) or "unknown error"
-            warn(f"Capacity probe failed: {stderr_msg}")
-            _probe_warn_emitted = True
+            _probe_fail_count = 0
+        else:
+            _probe_fail_count += 1
+            if _probe_fail_count == 1 or _probe_fail_count % 10 == 0:
+                warn(f"Capacity probe failed: {capacity}")
 
         if _work_remaining() or slots_busy:
             time.sleep(poll_interval)

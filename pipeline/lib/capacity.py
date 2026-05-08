@@ -3,15 +3,20 @@
 import json
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
+
+import yaml
 
 from pipeline.lib.values import deep_merge
 
 
+# ── Cluster probe ──────────────────────────────────────────────────────────────
+
+
 def probe_free_gpus(
     gpu_resource_type: str = "nvidia.com/gpu",
-) -> Optional[tuple[int, int, int]]:
-    """Return (free_gpus, total_allocatable, total_requested) or None on failure.
+) -> Union[tuple[int, int, int], str]:
+    """Return (free_gpus, total_allocatable, total_requested) or error string.
 
     Queries kubectl for node allocatable resources and pod requests,
     computes the delta clamped to zero.
@@ -29,7 +34,7 @@ def probe_free_gpus(
             check=False, text=True, capture_output=True,
         )
         if nodes_result.returncode != 0:
-            return None
+            return nodes_result.stderr.strip() or "kubectl get nodes failed"
 
         pods_result = subprocess.run(
             ["kubectl", "get", "pods", "--all-namespaces",
@@ -38,54 +43,40 @@ def probe_free_gpus(
             check=False, text=True, capture_output=True,
         )
         if pods_result.returncode != 0:
-            return None
+            return pods_result.stderr.strip() or "kubectl get pods failed"
 
+    except OSError as e:
+        return str(e)
+
+    try:
         nodes = json.loads(nodes_result.stdout)
         pods = json.loads(pods_result.stdout)
+    except json.JSONDecodeError as e:
+        return f"JSON parse error: {e}"
 
-        total_allocatable = 0
-        for node in nodes.get("items", []):
-            alloc = node.get("status", {}).get("allocatable", {})
-            count = alloc.get(gpu_resource_type)
-            if count is not None:
+    total_allocatable = 0
+    for node in nodes.get("items", []):
+        alloc = node.get("status", {}).get("allocatable", {})
+        count = alloc.get(gpu_resource_type)
+        if count is not None:
+            try:
                 total_allocatable += int(count)
+            except ValueError:
+                return f"non-integer allocatable value {count!r} on node {node.get('metadata', {}).get('name', '?')}"
 
-        total_requested = 0
-        for pod in pods.get("items", []):
-            for container in pod.get("spec", {}).get("containers", []):
-                requests = container.get("resources", {}).get("requests", {})
-                count = requests.get(gpu_resource_type)
-                if count is not None:
+    total_requested = 0
+    for pod in pods.get("items", []):
+        for container in pod.get("spec", {}).get("containers", []):
+            requests = container.get("resources", {}).get("requests", {})
+            count = requests.get(gpu_resource_type)
+            if count is not None:
+                try:
                     total_requested += int(count)
-
-    except (json.JSONDecodeError, OSError, ValueError):
-        return None
+                except ValueError:
+                    return f"non-integer request value {count!r} in pod {pod.get('metadata', {}).get('name', '?')}"
 
     free = max(0, total_allocatable - total_requested)
     return (free, total_allocatable, total_requested)
-
-
-def probe_stderr(gpu_resource_type: str = "nvidia.com/gpu") -> Optional[str]:
-    """Run the same kubectl calls as probe_free_gpus but return stderr on failure."""
-    try:
-        nodes_result = subprocess.run(
-            ["kubectl", "get", "nodes", "-o", "json"],
-            check=False, text=True, capture_output=True,
-        )
-        if nodes_result.returncode != 0:
-            return nodes_result.stderr.strip()
-
-        pods_result = subprocess.run(
-            ["kubectl", "get", "pods", "--all-namespaces",
-             "--field-selector=status.phase!=Succeeded,status.phase!=Failed",
-             "-o", "json"],
-            check=False, text=True, capture_output=True,
-        )
-        if pods_result.returncode != 0:
-            return pods_result.stderr.strip()
-    except OSError as e:
-        return str(e)
-    return None
 
 
 # ── GPU cost derivation ────────────────────────────────────────────────────────
@@ -106,7 +97,7 @@ def derive_gpu_resource_type(resolved_scenario: dict, defaults: dict) -> str:
     return merged.get("accelerator", {}).get("resource", "nvidia.com/gpu")
 
 
-def gpu_cost_per_pair(resolved_scenario: dict, defaults: dict) -> int:
+def gpu_cost_per_pair(resolved_scenario: dict, defaults: dict) -> Optional[int]:
     """Compute total GPU cost for one baseline/treatment pair.
 
     Merges the first scenario entry over defaults, then sums GPU cost
@@ -117,12 +108,7 @@ def gpu_cost_per_pair(resolved_scenario: dict, defaults: dict) -> int:
     Jinja template's 2-level logic — kept intentionally so that top-level
     accelerator.count propagates to roles that don't override it.
 
-    Args:
-        resolved_scenario: The resolved scenario dict (has "scenario" list).
-        defaults: The full defaults.yaml dict from llm-d-benchmark.
-
-    Returns:
-        Total GPU count needed for one pair (one arm of baseline or treatment).
+    Returns None if cost cannot be computed (e.g., non-numeric values).
     """
     scenario_entry = {}
     scenarios = resolved_scenario.get("scenario", [])
@@ -132,8 +118,11 @@ def gpu_cost_per_pair(resolved_scenario: dict, defaults: dict) -> int:
     merged = deep_merge(defaults, scenario_entry)
 
     top_accel = merged.get("accelerator", {})
-    if top_accel.get("count") is not None and int(top_accel["count"]) == 0:
-        return 0
+    try:
+        if top_accel.get("count") is not None and int(top_accel["count"]) == 0:
+            return 0
+    except (ValueError, TypeError):
+        return None
 
     gpu_cost = 0
     for role_name, default_enabled, default_replicas in [
@@ -148,12 +137,15 @@ def gpu_cost_per_pair(resolved_scenario: dict, defaults: dict) -> int:
         parallelism = role_cfg.get("parallelism", {})
 
         role_accel = role_cfg.get("accelerator", {})
-        if "count" in role_accel:
-            gpus_per_pod = int(role_accel["count"])
-        elif "count" in top_accel:
-            gpus_per_pod = int(top_accel["count"])
-        else:
-            gpus_per_pod = parallelism.get("tensor", 1) * parallelism.get("dataLocal", 1)
+        try:
+            if "count" in role_accel:
+                gpus_per_pod = int(role_accel["count"])
+            elif "count" in top_accel:
+                gpus_per_pod = int(top_accel["count"])
+            else:
+                gpus_per_pod = parallelism.get("tensor", 1) * parallelism.get("dataLocal", 1)
+        except (ValueError, TypeError):
+            return None
 
         gpu_cost += replicas * gpus_per_pod
 
@@ -166,7 +158,6 @@ def load_defaults(repo_root: Path) -> Optional[dict]:
     if not defaults_path.exists():
         return None
     try:
-        import yaml
         return yaml.safe_load(defaults_path.read_text()) or {}
-    except Exception:
+    except (yaml.YAMLError, OSError):
         return None

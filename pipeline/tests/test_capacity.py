@@ -3,7 +3,7 @@
 import json
 from unittest.mock import patch, MagicMock
 
-from pipeline.lib.capacity import probe_free_gpus, derive_gpu_resource_type
+from pipeline.lib.capacity import probe_free_gpus, derive_gpu_resource_type, gpu_cost_per_pair
 
 
 class TestProbeFreeGpus:
@@ -37,7 +37,6 @@ class TestProbeFreeGpus:
 
     @patch("pipeline.lib.capacity.subprocess.run")
     def test_basic_computation(self, mock_run):
-        # 14 nodes × 8 GPUs = 112 allocatable, 108 requested → 4 free
         nodes_json = self._mock_nodes([8] * 14)
         pods_json = self._mock_pods([1] * 108)
 
@@ -76,15 +75,15 @@ class TestProbeFreeGpus:
         assert result == (6, 8, 2)
 
     @patch("pipeline.lib.capacity.subprocess.run")
-    def test_kubectl_failure_returns_none(self, mock_run):
+    def test_kubectl_failure_returns_error_string(self, mock_run):
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="connection refused")
 
         result = probe_free_gpus()
-        assert result is None
+        assert isinstance(result, str)
+        assert "connection refused" in result
 
     @patch("pipeline.lib.capacity.subprocess.run")
     def test_nodes_without_gpu_resource_ignored(self, mock_run):
-        # Mix of GPU and non-GPU nodes
         nodes = {
             "items": [
                 {"metadata": {"name": "gpu-0"}, "status": {"allocatable": {"nvidia.com/gpu": "8", "cpu": "64"}}},
@@ -101,9 +100,9 @@ class TestProbeFreeGpus:
         assert result == (8, 8, 0)
 
     @patch("pipeline.lib.capacity.subprocess.run")
-    def test_malformed_gpu_value_returns_none(self, mock_run):
+    def test_malformed_gpu_value_returns_error(self, mock_run):
         nodes = {"items": [
-            {"metadata": {"name": "n0"}, "status": {"allocatable": {"nvidia.com/gpu": "not-a-number"}}}
+            {"metadata": {"name": "n0"}, "status": {"allocatable": {"nvidia.com/gpu": "8000m"}}}
         ]}
         pods = {"items": []}
         mock_run.side_effect = [
@@ -111,7 +110,18 @@ class TestProbeFreeGpus:
             MagicMock(returncode=0, stdout=json.dumps(pods)),
         ]
         result = probe_free_gpus()
-        assert result is None
+        assert isinstance(result, str)
+        assert "8000m" in result
+
+    @patch("pipeline.lib.capacity.subprocess.run")
+    def test_malformed_json_returns_error(self, mock_run):
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="not json"),
+            MagicMock(returncode=0, stdout="{}"),
+        ]
+        result = probe_free_gpus()
+        assert isinstance(result, str)
+        assert "JSON parse error" in result
 
 
 # ── derive_gpu_resource_type tests ─────────────────────────────────────────────
@@ -136,12 +146,9 @@ class TestDeriveGpuResourceType:
 
 # ── gpu_cost_per_pair tests ────────────────────────────────────────────────────
 
-from pipeline.lib.capacity import gpu_cost_per_pair
-
 
 class TestGpuCostPerPair:
     def test_default_single_decode_replica(self):
-        # Minimal overlay: only decode.replicas=4, merge with defaults
         defaults = {
             "accelerator": {"resource": "nvidia.com/gpu"},
             "decode": {
@@ -155,7 +162,7 @@ class TestGpuCostPerPair:
             "scenario": [{"name": "test", "decode": {"replicas": 4}}]
         }
         cost = gpu_cost_per_pair(scenario, defaults)
-        assert cost == 4  # 4 replicas × 1 GPU per pod
+        assert cost == 4
 
     def test_tensor_parallel_derivation(self):
         defaults = {
@@ -168,7 +175,7 @@ class TestGpuCostPerPair:
         }
         scenario = {"scenario": [{"name": "test", "decode": {"replicas": 2}}]}
         cost = gpu_cost_per_pair(scenario, defaults)
-        assert cost == 8  # 2 replicas × 4 GPUs per pod
+        assert cost == 8
 
     def test_role_accelerator_count_overrides_parallelism(self):
         defaults = {
@@ -183,7 +190,7 @@ class TestGpuCostPerPair:
             "scenario": [{"name": "test", "decode": {"replicas": 2, "accelerator": {"count": 2}}}]
         }
         cost = gpu_cost_per_pair(scenario, defaults)
-        assert cost == 4  # 2 replicas × 2 (role override)
+        assert cost == 4
 
     def test_top_level_accelerator_count_zero_means_cpu_only(self):
         defaults = {
@@ -212,7 +219,7 @@ class TestGpuCostPerPair:
             "scenario": [{"name": "test", "prefill": {"enabled": True, "replicas": 1}}]
         }
         cost = gpu_cost_per_pair(scenario, defaults)
-        assert cost == 3  # decode: 2×1 + prefill: 1×1
+        assert cost == 3
 
     def test_top_level_accelerator_count_as_fallback(self):
         defaults = {
@@ -222,7 +229,6 @@ class TestGpuCostPerPair:
         }
         scenario = {"scenario": [{"name": "test"}]}
         cost = gpu_cost_per_pair(scenario, defaults)
-        # accelerator.count (8) takes precedence over tensor*dataLocal (4)
         assert cost == 8
 
     def test_empty_scenario_returns_defaults_cost(self):
@@ -233,3 +239,12 @@ class TestGpuCostPerPair:
         scenario = {"scenario": [{"name": "test"}]}
         cost = gpu_cost_per_pair(scenario, defaults)
         assert cost == 1
+
+    def test_non_numeric_accelerator_count_returns_none(self):
+        defaults = {
+            "decode": {"enabled": True, "replicas": 1, "parallelism": {"tensor": 1, "dataLocal": 1}},
+            "prefill": {"enabled": False, "replicas": 0},
+        }
+        scenario = {"scenario": [{"name": "test", "accelerator": {"count": "auto"}}]}
+        cost = gpu_cost_per_pair(scenario, defaults)
+        assert cost is None
