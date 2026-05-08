@@ -3,8 +3,6 @@
 import json
 from unittest.mock import patch
 
-import pytest
-
 
 def test_build_parser_no_manifest_flag():
     """build_parser() does NOT expose a --manifest argument."""
