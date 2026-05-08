@@ -3,7 +3,7 @@
 import json
 from unittest.mock import patch, MagicMock
 
-from pipeline.lib.capacity import probe_free_gpus
+from pipeline.lib.capacity import probe_free_gpus, derive_gpu_resource_type
 
 
 class TestProbeFreeGpus:
@@ -99,6 +99,39 @@ class TestProbeFreeGpus:
 
         result = probe_free_gpus()
         assert result == (8, 8, 0)
+
+    @patch("pipeline.lib.capacity.subprocess.run")
+    def test_malformed_gpu_value_returns_none(self, mock_run):
+        nodes = {"items": [
+            {"metadata": {"name": "n0"}, "status": {"allocatable": {"nvidia.com/gpu": "not-a-number"}}}
+        ]}
+        pods = {"items": []}
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=json.dumps(nodes)),
+            MagicMock(returncode=0, stdout=json.dumps(pods)),
+        ]
+        result = probe_free_gpus()
+        assert result is None
+
+
+# ── derive_gpu_resource_type tests ─────────────────────────────────────────────
+
+
+class TestDeriveGpuResourceType:
+    def test_derives_from_defaults(self):
+        defaults = {"accelerator": {"resource": "nvidia.com/gpu"}}
+        scenario = {"scenario": [{"name": "test"}]}
+        assert derive_gpu_resource_type(scenario, defaults) == "nvidia.com/gpu"
+
+    def test_scenario_overrides_defaults(self):
+        defaults = {"accelerator": {"resource": "nvidia.com/gpu"}}
+        scenario = {"scenario": [{"name": "test", "accelerator": {"resource": "habana.ai/gaudi"}}]}
+        assert derive_gpu_resource_type(scenario, defaults) == "habana.ai/gaudi"
+
+    def test_missing_accelerator_falls_back(self):
+        defaults = {}
+        scenario = {"scenario": [{"name": "test"}]}
+        assert derive_gpu_resource_type(scenario, defaults) == "nvidia.com/gpu"
 
 
 # ── gpu_cost_per_pair tests ────────────────────────────────────────────────────

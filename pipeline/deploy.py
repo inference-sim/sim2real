@@ -703,7 +703,9 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
     import datetime as _dt
     import tempfile as _tmp
     from pipeline.lib.progress import LocalProgressStore
-    from pipeline.lib.capacity import probe_free_gpus
+    from pipeline.lib.capacity import (
+        probe_free_gpus, gpu_cost_per_pair, derive_gpu_resource_type, load_defaults,
+    )
 
     namespaces = setup_config.get("namespaces") or [setup_config.get("namespace", "")]
     if not namespaces or not namespaces[0]:
@@ -721,6 +723,20 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
     cluster_dir = run_dir / "cluster"
     progress_path = run_dir / "progress.json"
     store = LocalProgressStore(progress_path)
+
+    # Derive GPU resource type and cost from scenario + defaults
+    gpu_resource_type = args.gpu_resource_type
+    pair_gpu_cost = args.default_gpu_cost
+    defaults = load_defaults(REPO_ROOT)
+    baseline_scenario_path = cluster_dir / "baseline.yaml"
+    if defaults and baseline_scenario_path.exists():
+        resolved = yaml.safe_load(baseline_scenario_path.read_text()) or {}
+        gpu_resource_type = derive_gpu_resource_type(resolved, defaults)
+        pair_gpu_cost = gpu_cost_per_pair(resolved, defaults)
+    if gpu_resource_type != "nvidia.com/gpu":
+        info(f"GPU resource type: {gpu_resource_type}")
+    info(f"GPU cost per pair: {pair_gpu_cost}")
+    _probe_warn_emitted = False
 
     # Load or initialize progress
     progress = store.load()
@@ -943,13 +959,16 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
             ok(f"[{pair_key}] → {ns} ({pr_name})")
 
         # ── Capacity probe ───────────────────────────────────────────────
-        gpu_resource_type = getattr(args, "gpu_resource_type", "nvidia.com/gpu")
         capacity = probe_free_gpus(gpu_resource_type=gpu_resource_type)
         if capacity is not None:
             free, allocatable, requested = capacity
             info(f"Capacity: {free} free GPUs ({allocatable} allocatable − {requested} requested)")
-        else:
-            warn("Capacity probe failed — kubectl unavailable or returned error")
+            _probe_warn_emitted = False
+        elif not _probe_warn_emitted:
+            from pipeline.lib.capacity import probe_stderr
+            stderr_msg = probe_stderr(gpu_resource_type=gpu_resource_type) or "unknown error"
+            warn(f"Capacity probe failed: {stderr_msg}")
+            _probe_warn_emitted = True
 
         if _work_remaining() or slots_busy:
             time.sleep(poll_interval)
