@@ -147,6 +147,8 @@ python pipeline/deploy.py cleanup [flags]   # tear down cluster resources for fa
 | `--force` | — | Reset non-pending pairs to `pending`, cleaning cluster resources (PipelineRuns + Helm) for pairs with assigned namespaces |
 | `--max-retries N` | 2 | Max retries for timed-out pairs |
 | `--poll-interval N` | 30 | Seconds between status polls |
+| `--gpu-resource-type` | auto-derived | Override GPU resource name (derived from scenario's `accelerator.resource`, else `nvidia.com/gpu`) |
+| `--default-gpu-cost N` | 1 | Fallback GPU cost per pair when not derivable from scenario |
 
 **`deploy.py status`** — prints the current state of all pairs from `workspace/runs/<run>/progress.json`.
 

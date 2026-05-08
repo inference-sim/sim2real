@@ -703,6 +703,9 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
     import datetime as _dt
     import tempfile as _tmp
     from pipeline.lib.progress import LocalProgressStore
+    from pipeline.lib.capacity import (
+        probe_free_gpus, gpu_cost_per_pair, derive_gpu_resource_type, load_defaults
+    )
 
     namespaces = setup_config.get("namespaces") or [setup_config.get("namespace", "")]
     if not namespaces or not namespaces[0]:
@@ -720,6 +723,39 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
     cluster_dir = run_dir / "cluster"
     progress_path = run_dir / "progress.json"
     store = LocalProgressStore(progress_path)
+
+    # Derive GPU resource type and cost from scenario + defaults
+    # CLI --gpu-resource-type overrides auto-derivation when explicitly set
+    gpu_resource_type = args.gpu_resource_type  # None means auto-derive
+    pair_gpu_cost = args.default_gpu_cost
+    defaults_result = load_defaults(REPO_ROOT)
+    if isinstance(defaults_result, str):
+        warn(defaults_result)
+        defaults_result = None
+    baseline_scenario_path = cluster_dir / "baseline.yaml"
+    if defaults_result and baseline_scenario_path.exists():
+        try:
+            resolved = yaml.safe_load(baseline_scenario_path.read_text()) or {}
+        except yaml.YAMLError as e:
+            warn(f"Could not parse {baseline_scenario_path.name}: {e}")
+            resolved = None
+        if resolved:
+            if gpu_resource_type is None:
+                gpu_resource_type = derive_gpu_resource_type(resolved, defaults_result)
+            derived_cost = gpu_cost_per_pair(resolved, defaults_result)
+            if isinstance(derived_cost, int):
+                pair_gpu_cost = derived_cost
+            else:
+                warn(f"GPU cost derivation failed: {derived_cost} — using fallback ({pair_gpu_cost})")
+    elif defaults_result is None and not baseline_scenario_path.exists():
+        info("Defaults or baseline.yaml not found — using CLI defaults")
+    if gpu_resource_type is None:
+        gpu_resource_type = "nvidia.com/gpu"
+    if gpu_resource_type != "nvidia.com/gpu":
+        info(f"GPU resource type: {gpu_resource_type}")
+    info(f"GPU cost per pair: {pair_gpu_cost}")
+    _probe_fail_count = 0
+    _last_probe_error = ""
 
     # Load or initialize progress
     progress = store.load()
@@ -941,6 +977,21 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
             store.save(progress)
             ok(f"[{pair_key}] → {ns} ({pr_name})")
 
+        # ── Capacity probe ───────────────────────────────────────────────
+        capacity = probe_free_gpus(gpu_resource_type=gpu_resource_type)
+        if isinstance(capacity, tuple):
+            free, allocatable, requested = capacity
+            info(f"Capacity: {free} free GPUs ({allocatable} allocatable − {requested} requested)")
+            if _probe_fail_count > 0:
+                info(f"Capacity probe recovered after {_probe_fail_count} failure(s)")
+            _probe_fail_count = 0
+            _last_probe_error = ""
+        else:
+            _probe_fail_count += 1
+            if capacity != _last_probe_error or _probe_fail_count % 10 == 0:
+                warn(f"Capacity probe failed: {capacity}")
+            _last_probe_error = capacity
+
         if _work_remaining() or slots_busy:
             time.sleep(poll_interval)
 
@@ -1054,6 +1105,10 @@ Examples:
                        help="Max retries for timed-out pairs [2]")
     run_p.add_argument("--poll-interval", type=int, default=30, dest="poll_interval",
                        help="Seconds between status polls [30]")
+    run_p.add_argument("--gpu-resource-type", default=None, dest="gpu_resource_type",
+                       help="Override GPU resource name (default: derived from scenario, else nvidia.com/gpu)")
+    run_p.add_argument("--default-gpu-cost", type=int, default=1, dest="default_gpu_cost",
+                       help="Fallback GPU cost per pair when not derivable from scenario [1]")
 
     cleanup_p = sub.add_parser("cleanup", help="Tear down cluster resources for all non-pending pairs")
     cleanup_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key")
