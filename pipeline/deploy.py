@@ -703,6 +703,7 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
     import datetime as _dt
     import tempfile as _tmp
     from pipeline.lib.progress import LocalProgressStore
+    from pipeline.lib.capacity import probe_free_gpus
 
     namespaces = setup_config.get("namespaces") or [setup_config.get("namespace", "")]
     if not namespaces or not namespaces[0]:
@@ -941,6 +942,15 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
             store.save(progress)
             ok(f"[{pair_key}] → {ns} ({pr_name})")
 
+        # ── Capacity probe ───────────────────────────────────────────────
+        gpu_resource_type = getattr(args, "gpu_resource_type", "nvidia.com/gpu")
+        capacity = probe_free_gpus(gpu_resource_type=gpu_resource_type)
+        if capacity is not None:
+            free, allocatable, requested = capacity
+            info(f"Capacity: {free} free GPUs ({allocatable} allocatable − {requested} requested)")
+        else:
+            warn("Capacity probe failed — kubectl unavailable or returned error")
+
         if _work_remaining() or slots_busy:
             time.sleep(poll_interval)
 
@@ -1054,6 +1064,10 @@ Examples:
                        help="Max retries for timed-out pairs [2]")
     run_p.add_argument("--poll-interval", type=int, default=30, dest="poll_interval",
                        help="Seconds between status polls [30]")
+    run_p.add_argument("--gpu-resource-type", default="nvidia.com/gpu", dest="gpu_resource_type",
+                       help="Kubernetes resource name for GPU counting [nvidia.com/gpu]")
+    run_p.add_argument("--default-gpu-cost", type=int, default=1, dest="default_gpu_cost",
+                       help="Fallback GPU cost per pair when not derivable from scenario [1]")
 
     cleanup_p = sub.add_parser("cleanup", help="Tear down cluster resources for all non-pending pairs")
     cleanup_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key")
