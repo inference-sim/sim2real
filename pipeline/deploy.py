@@ -392,8 +392,26 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
 
     run_name = run_dir.name
 
+    # Derive known phases from progress.json, fall back to DATA_PHASES
+    progress_path = run_dir / "progress.json"
+    if progress_path.exists():
+        try:
+            progress = json.loads(progress_path.read_text())
+            known_phases = sorted({
+                entry.get("package", "")
+                for entry in progress.values()
+            } - {""})
+        except (json.JSONDecodeError, AttributeError):
+            known_phases = []
+    else:
+        known_phases = []
+
+    if not known_phases:
+        warn("No progress.json found; falling back to default phases.")
+        known_phases = list(DATA_PHASES)
+
     if args.package:
-        valid = set(DATA_PHASES) | {"experiment"}
+        valid = set(known_phases) | {"experiment"}
         unknown = set(args.package) - valid
         if unknown:
             err(f"Unknown packages: {sorted(unknown)}. Valid: {sorted(valid)}")
@@ -401,14 +419,14 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
         phases_to_collect: list[str] = []
         for p in args.package:
             if p == "experiment":
-                phases_to_collect.extend(DATA_PHASES)
+                phases_to_collect.extend(known_phases)
             else:
                 phases_to_collect.append(p)
         seen: set[str] = set()
         phases_to_collect = [p for p in phases_to_collect
                              if not (p in seen or seen.add(p))]  # type: ignore[func-returns-value]
     else:
-        phases_to_collect = list(DATA_PHASES)
+        phases_to_collect = list(known_phases)
 
     step(1, "Collecting Results")
 
