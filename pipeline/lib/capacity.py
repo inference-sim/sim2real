@@ -3,7 +3,7 @@
 import json
 import subprocess
 from pathlib import Path
-from typing import Optional, Union
+from typing import Union
 
 import yaml
 
@@ -97,7 +97,7 @@ def derive_gpu_resource_type(resolved_scenario: dict, defaults: dict) -> str:
     return merged.get("accelerator", {}).get("resource", "nvidia.com/gpu")
 
 
-def gpu_cost_per_pair(resolved_scenario: dict, defaults: dict) -> Optional[int]:
+def gpu_cost_per_pair(resolved_scenario: dict, defaults: dict) -> Union[int, str]:
     """Compute total GPU cost for one baseline/treatment pair.
 
     Merges the first scenario entry over defaults, then sums GPU cost
@@ -108,7 +108,7 @@ def gpu_cost_per_pair(resolved_scenario: dict, defaults: dict) -> Optional[int]:
     Jinja template's 2-level logic — kept intentionally so that top-level
     accelerator.count propagates to roles that don't override it.
 
-    Returns None if cost cannot be computed (e.g., non-numeric values).
+    Returns int on success, or error string describing the problematic field.
     """
     scenario_entry = {}
     scenarios = resolved_scenario.get("scenario", [])
@@ -118,11 +118,13 @@ def gpu_cost_per_pair(resolved_scenario: dict, defaults: dict) -> Optional[int]:
     merged = deep_merge(defaults, scenario_entry)
 
     top_accel = merged.get("accelerator", {})
-    try:
-        if top_accel.get("count") is not None and int(top_accel["count"]) == 0:
-            return 0
-    except (ValueError, TypeError):
-        return None
+    top_count_raw = top_accel.get("count")
+    if top_count_raw is not None:
+        try:
+            if int(top_count_raw) == 0:
+                return 0
+        except (ValueError, TypeError):
+            return f"accelerator.count={top_count_raw!r} is not a valid integer"
 
     gpu_cost = 0
     for role_name, default_enabled, default_replicas in [
@@ -140,24 +142,34 @@ def gpu_cost_per_pair(resolved_scenario: dict, defaults: dict) -> Optional[int]:
         try:
             if "count" in role_accel:
                 gpus_per_pod = int(role_accel["count"])
-            elif "count" in top_accel:
-                gpus_per_pod = int(top_accel["count"])
+            elif top_count_raw is not None:
+                gpus_per_pod = int(top_count_raw)
             else:
                 gpus_per_pod = parallelism.get("tensor", 1) * parallelism.get("dataLocal", 1)
         except (ValueError, TypeError):
-            return None
+            field = f"{role_name}.accelerator.count" if "count" in role_accel else "accelerator.count"
+            val = role_accel.get("count") if "count" in role_accel else top_count_raw
+            return f"{field}={val!r} is not a valid integer"
 
         gpu_cost += replicas * gpus_per_pod
 
     return gpu_cost
 
 
-def load_defaults(repo_root: Path) -> Optional[dict]:
-    """Load llm-d-benchmark defaults.yaml, or None if unavailable."""
+def load_defaults(repo_root: Path) -> Union[dict, str, None]:
+    """Load llm-d-benchmark defaults.yaml.
+
+    Returns:
+        dict: parsed defaults on success.
+        None: file not found (expected when submodule not initialized).
+        str: error message when file exists but can't be parsed.
+    """
     defaults_path = repo_root / "llm-d-benchmark" / "config" / "templates" / "values" / "defaults.yaml"
     if not defaults_path.exists():
         return None
     try:
         return yaml.safe_load(defaults_path.read_text()) or {}
-    except (yaml.YAMLError, OSError):
-        return None
+    except yaml.YAMLError as e:
+        return f"defaults.yaml parse error: {e}"
+    except OSError as e:
+        return f"defaults.yaml read error: {e}"

@@ -240,11 +240,24 @@ class TestGpuCostPerPair:
         cost = gpu_cost_per_pair(scenario, defaults)
         assert cost == 1
 
-    def test_non_numeric_accelerator_count_returns_none(self):
+    def test_non_numeric_accelerator_count_returns_error(self):
         defaults = {
             "decode": {"enabled": True, "replicas": 1, "parallelism": {"tensor": 1, "dataLocal": 1}},
             "prefill": {"enabled": False, "replicas": 0},
         }
         scenario = {"scenario": [{"name": "test", "accelerator": {"count": "auto"}}]}
         cost = gpu_cost_per_pair(scenario, defaults)
-        assert cost is None
+        assert isinstance(cost, str)
+        assert "auto" in cost
+        assert "accelerator.count" in cost
+
+    def test_non_numeric_role_accelerator_count_returns_error(self):
+        defaults = {
+            "decode": {"enabled": True, "replicas": 1, "parallelism": {"tensor": 1, "dataLocal": 1}},
+            "prefill": {"enabled": False, "replicas": 0},
+        }
+        scenario = {"scenario": [{"name": "test", "decode": {"accelerator": {"count": "bad"}}}]}
+        cost = gpu_cost_per_pair(scenario, defaults)
+        assert isinstance(cost, str)
+        assert "bad" in cost
+        assert "decode.accelerator.count" in cost

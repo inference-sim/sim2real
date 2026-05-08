@@ -725,30 +725,37 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
     store = LocalProgressStore(progress_path)
 
     # Derive GPU resource type and cost from scenario + defaults
-    gpu_resource_type = args.gpu_resource_type
+    # CLI --gpu-resource-type overrides auto-derivation when explicitly set
+    gpu_resource_type = args.gpu_resource_type  # None means auto-derive
     pair_gpu_cost = args.default_gpu_cost
-    defaults = load_defaults(REPO_ROOT)
+    defaults_result = load_defaults(REPO_ROOT)
+    if isinstance(defaults_result, str):
+        warn(defaults_result)
+        defaults_result = None
     baseline_scenario_path = cluster_dir / "baseline.yaml"
-    if defaults and baseline_scenario_path.exists():
+    if defaults_result and baseline_scenario_path.exists():
         try:
             resolved = yaml.safe_load(baseline_scenario_path.read_text()) or {}
         except yaml.YAMLError as e:
             warn(f"Could not parse {baseline_scenario_path.name}: {e}")
             resolved = None
         if resolved:
-            gpu_resource_type = derive_gpu_resource_type(resolved, defaults)
-            derived_cost = gpu_cost_per_pair(resolved, defaults)
-            if derived_cost is not None:
+            if gpu_resource_type is None:
+                gpu_resource_type = derive_gpu_resource_type(resolved, defaults_result)
+            derived_cost = gpu_cost_per_pair(resolved, defaults_result)
+            if isinstance(derived_cost, int):
                 pair_gpu_cost = derived_cost
             else:
-                warn(f"Could not derive GPU cost from scenario — using fallback ({pair_gpu_cost})")
-    else:
-        warn(f"Defaults or baseline.yaml unavailable — using CLI defaults "
-             f"(resource={gpu_resource_type}, cost={pair_gpu_cost})")
+                warn(f"GPU cost derivation failed: {derived_cost} — using fallback ({pair_gpu_cost})")
+    elif defaults_result is None and not baseline_scenario_path.exists():
+        info("Defaults or baseline.yaml not found — using CLI defaults")
+    if gpu_resource_type is None:
+        gpu_resource_type = "nvidia.com/gpu"
     if gpu_resource_type != "nvidia.com/gpu":
         info(f"GPU resource type: {gpu_resource_type}")
     info(f"GPU cost per pair: {pair_gpu_cost}")
     _probe_fail_count = 0
+    _last_probe_error = ""
 
     # Load or initialize progress
     progress = store.load()
@@ -975,11 +982,15 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
         if isinstance(capacity, tuple):
             free, allocatable, requested = capacity
             info(f"Capacity: {free} free GPUs ({allocatable} allocatable − {requested} requested)")
+            if _probe_fail_count > 0:
+                info(f"Capacity probe recovered after {_probe_fail_count} failure(s)")
             _probe_fail_count = 0
+            _last_probe_error = ""
         else:
             _probe_fail_count += 1
-            if _probe_fail_count == 1 or _probe_fail_count % 10 == 0:
+            if capacity != _last_probe_error or _probe_fail_count % 10 == 0:
                 warn(f"Capacity probe failed: {capacity}")
+            _last_probe_error = capacity
 
         if _work_remaining() or slots_busy:
             time.sleep(poll_interval)
@@ -1094,8 +1105,8 @@ Examples:
                        help="Max retries for timed-out pairs [2]")
     run_p.add_argument("--poll-interval", type=int, default=30, dest="poll_interval",
                        help="Seconds between status polls [30]")
-    run_p.add_argument("--gpu-resource-type", default="nvidia.com/gpu", dest="gpu_resource_type",
-                       help="Kubernetes resource name for GPU counting [nvidia.com/gpu]")
+    run_p.add_argument("--gpu-resource-type", default=None, dest="gpu_resource_type",
+                       help="Override GPU resource name (default: derived from scenario, else nvidia.com/gpu)")
     run_p.add_argument("--default-gpu-cost", type=int, default=1, dest="default_gpu_cost",
                        help="Fallback GPU cost per pair when not derivable from scenario [1]")
 
