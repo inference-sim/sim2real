@@ -99,3 +99,104 @@ class TestProbeFreeGpus:
 
         result = probe_free_gpus()
         assert result == (8, 8, 0)
+
+
+# ── gpu_cost_per_pair tests ────────────────────────────────────────────────────
+
+from pipeline.lib.capacity import gpu_cost_per_pair
+
+
+class TestGpuCostPerPair:
+    def test_default_single_decode_replica(self):
+        # Minimal overlay: only decode.replicas=4, merge with defaults
+        defaults = {
+            "accelerator": {"resource": "nvidia.com/gpu"},
+            "decode": {
+                "enabled": True,
+                "replicas": 1,
+                "parallelism": {"tensor": 1, "dataLocal": 1},
+            },
+            "prefill": {"enabled": False, "replicas": 0},
+        }
+        scenario = {
+            "scenario": [{"name": "test", "decode": {"replicas": 4}}]
+        }
+        cost = gpu_cost_per_pair(scenario, defaults)
+        assert cost == 4  # 4 replicas × 1 GPU per pod
+
+    def test_tensor_parallel_derivation(self):
+        defaults = {
+            "decode": {
+                "enabled": True,
+                "replicas": 1,
+                "parallelism": {"tensor": 4, "dataLocal": 1},
+            },
+            "prefill": {"enabled": False, "replicas": 0},
+        }
+        scenario = {"scenario": [{"name": "test", "decode": {"replicas": 2}}]}
+        cost = gpu_cost_per_pair(scenario, defaults)
+        assert cost == 8  # 2 replicas × 4 GPUs per pod
+
+    def test_role_accelerator_count_overrides_parallelism(self):
+        defaults = {
+            "decode": {
+                "enabled": True,
+                "replicas": 1,
+                "parallelism": {"tensor": 4, "dataLocal": 1},
+            },
+            "prefill": {"enabled": False, "replicas": 0},
+        }
+        scenario = {
+            "scenario": [{"name": "test", "decode": {"replicas": 2, "accelerator": {"count": 2}}}]
+        }
+        cost = gpu_cost_per_pair(scenario, defaults)
+        assert cost == 4  # 2 replicas × 2 (role override)
+
+    def test_top_level_accelerator_count_zero_means_cpu_only(self):
+        defaults = {
+            "accelerator": {"count": 0},
+            "decode": {"enabled": True, "replicas": 4, "parallelism": {"tensor": 4, "dataLocal": 1}},
+            "prefill": {"enabled": False, "replicas": 0},
+        }
+        scenario = {"scenario": [{"name": "test"}]}
+        cost = gpu_cost_per_pair(scenario, defaults)
+        assert cost == 0
+
+    def test_prefill_enabled_adds_cost(self):
+        defaults = {
+            "decode": {
+                "enabled": True,
+                "replicas": 2,
+                "parallelism": {"tensor": 1, "dataLocal": 1},
+            },
+            "prefill": {
+                "enabled": False,
+                "replicas": 0,
+                "parallelism": {"tensor": 1, "dataLocal": 1},
+            },
+        }
+        scenario = {
+            "scenario": [{"name": "test", "prefill": {"enabled": True, "replicas": 1}}]
+        }
+        cost = gpu_cost_per_pair(scenario, defaults)
+        assert cost == 3  # decode: 2×1 + prefill: 1×1
+
+    def test_top_level_accelerator_count_as_fallback(self):
+        defaults = {
+            "accelerator": {"count": 8},
+            "decode": {"enabled": True, "replicas": 1, "parallelism": {"tensor": 2, "dataLocal": 2}},
+            "prefill": {"enabled": False, "replicas": 0},
+        }
+        scenario = {"scenario": [{"name": "test"}]}
+        cost = gpu_cost_per_pair(scenario, defaults)
+        # accelerator.count (8) takes precedence over tensor*dataLocal (4)
+        assert cost == 8
+
+    def test_empty_scenario_returns_defaults_cost(self):
+        defaults = {
+            "decode": {"enabled": True, "replicas": 1, "parallelism": {"tensor": 1, "dataLocal": 1}},
+            "prefill": {"enabled": False, "replicas": 0},
+        }
+        scenario = {"scenario": [{"name": "test"}]}
+        cost = gpu_cost_per_pair(scenario, defaults)
+        assert cost == 1

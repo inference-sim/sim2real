@@ -52,3 +52,58 @@ def probe_free_gpus(
 
     free = max(0, total_allocatable - total_requested)
     return (free, total_allocatable, total_requested)
+
+
+# ── GPU cost derivation ────────────────────────────────────────────────────────
+
+from pipeline.lib.values import deep_merge
+
+
+def gpu_cost_per_pair(resolved_scenario: dict, defaults: dict) -> int:
+    """Compute total GPU cost for one baseline/treatment pair.
+
+    Merges the first scenario entry over defaults, then sums GPU cost
+    across enabled roles using the 3-level precedence:
+      role.accelerator.count > accelerator.count > tensor * dataLocal
+
+    Args:
+        resolved_scenario: The resolved scenario dict (has "scenario" list).
+        defaults: The full defaults.yaml dict from llm-d-benchmark.
+
+    Returns:
+        Total GPU count needed for one pair (one arm of baseline or treatment).
+    """
+    scenario_entry = {}
+    scenarios = resolved_scenario.get("scenario", [])
+    if scenarios:
+        scenario_entry = scenarios[0]
+
+    merged = deep_merge(defaults, scenario_entry)
+
+    top_accel = merged.get("accelerator", {})
+    if top_accel.get("count") is not None and int(top_accel["count"]) == 0:
+        return 0
+
+    gpu_cost = 0
+    for role_name, default_enabled, default_replicas in [
+        ("decode", True, 1),
+        ("prefill", False, 0),
+    ]:
+        role_cfg = merged.get(role_name, {})
+        if not role_cfg.get("enabled", default_enabled):
+            continue
+
+        replicas = role_cfg.get("replicas", default_replicas)
+        parallelism = role_cfg.get("parallelism", {})
+
+        role_accel = role_cfg.get("accelerator", {})
+        if "count" in role_accel:
+            gpus_per_pod = int(role_accel["count"])
+        elif "count" in top_accel:
+            gpus_per_pod = int(top_accel["count"])
+        else:
+            gpus_per_pod = parallelism.get("tensor", 1) * parallelism.get("dataLocal", 1)
+
+        gpu_cost += replicas * gpus_per_pod
+
+    return gpu_cost
