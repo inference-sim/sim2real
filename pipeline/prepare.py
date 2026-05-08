@@ -675,7 +675,7 @@ def _cmd_run(args, manifest, run_dir):
     _phase_assembly(args, state, manifest, run_dir, resolved)
     _phase_summary(state, manifest, run_dir, resolved)
     _phase_gate(state, run_dir)
-    ok("Pipeline complete. Deploy with: python pipeline/deploy.py")
+    ok("Pipeline complete. Deploy with: python <repo-root>/pipeline/deploy.py")
 
 
 def _cmd_context(args, manifest, run_dir):
