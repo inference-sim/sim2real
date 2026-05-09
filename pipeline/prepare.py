@@ -339,6 +339,8 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
         sys.exit(1)
 
     # 4b.5: Inject EPP image into treatment (only when translation occurred)
+    # The image tag is deterministic: {registry}/{repo_name}:{run_name} — same as
+    # what build-epp.sh pushes. Read from run_metadata.json (written by setup.py).
     translation_happened = translation_output_path.exists()
 
     if translation_happened:
@@ -429,16 +431,16 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
         try:
             result = run(["git", "remote", "get-url", "origin"], capture=True, cwd=benchmark_sub)
             benchmark_repo_url = result.stdout.strip()
-        except subprocess.CalledProcessError:
-            pass
+        except subprocess.CalledProcessError as e:
+            warn(f"git remote get-url origin failed in {benchmark_sub}: {e}")
     blis_sub = REPO_ROOT / "inference-sim"
     blis_repo_url = ""
     if blis_sub.exists() and (blis_sub / ".git").exists():
         try:
             result = run(["git", "remote", "get-url", "origin"], capture=True, cwd=blis_sub)
             blis_repo_url = result.stdout.strip()
-        except subprocess.CalledProcessError:
-            pass
+        except subprocess.CalledProcessError as e:
+            warn(f"git remote get-url origin failed in {blis_sub}: {e}")
 
     missing_params = []
     if not benchmark_repo_url:
@@ -452,7 +454,8 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
             sys.exit(1)
         else:
             warn(f"Submodule params not available: {', '.join(missing_params)}. "
-                 "Baseline-only mode — continuing with empty values.")
+                 "Generated PipelineRuns will FAIL on cluster until submodules are initialized: "
+                 "git submodule update --init")
     scenarios = baseline_resolved.get("scenario", [])
     model_name = scenarios[0].get("model", {}).get("name", "") if scenarios else ""
 
@@ -725,7 +728,7 @@ def _cmd_context(args, manifest, run_dir):
 
 
 def _cmd_assemble(args, manifest, run_dir):
-    """Re-run assembly from existing translation output."""
+    """Re-run assembly (baseline-only if no translation output exists)."""
     try:
         state = StateMachine.load(run_dir)
     except FileNotFoundError:
@@ -734,6 +737,12 @@ def _cmd_assemble(args, manifest, run_dir):
 
     baseline_only = not (run_dir / "translation_output.json").exists()
     if baseline_only:
+        translate_phase = state.get_phase("translate")
+        if translate_phase.get("checkpoint_hits"):
+            err("Translation was attempted but translation_output.json is missing. "
+                "Re-run /sim2real-translate or remove the translate phase from state "
+                "to proceed in baseline-only mode.")
+            sys.exit(1)
         warn("No translation output — producing baseline-only PipelineRuns")
 
     resolved = _load_resolved_config(manifest)

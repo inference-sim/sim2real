@@ -1174,9 +1174,30 @@ class TestBaselineOnlyAssembly:
         class Args:
             force = False
 
-        # _cmd_assemble currently requires translate to be done; in baseline-only
-        # mode it should proceed without translation.
-        # Patch input() to avoid interactive gate prompt
-        import unittest.mock as mock
-        with mock.patch("builtins.input", side_effect=["q"]):
+        # _cmd_assemble proceeds in baseline-only mode without translation.
+        mod._cmd_assemble(Args(), manifest, run_dir)
+
+        # Verify baseline-only output
+        cluster_dir = run_dir / "cluster"
+        prs = list(cluster_dir.glob("pipelinerun-*.yaml"))
+        assert all("-baseline.yaml" in f.name for f in prs)
+
+    def test_cmd_assemble_errors_when_translation_attempted_but_missing(self, repo):
+        """_cmd_assemble should sys.exit(1) when translate phase was attempted
+        (checkpoint_hits > 0) but translation_output.json is absent.
+        """
+        mod = _import_prepare_with_root(repo)
+        run_dir = self._setup_baseline_only_repo(repo)
+
+        manifest = dict(MINIMAL_MANIFEST)
+
+        # State with translate checkpoint_hits (translation was attempted)
+        state = StateMachine("test-run", "routing", run_dir)
+        state.mark_done("init")
+        state.increment("translate", "checkpoint_hits")
+
+        class Args:
+            force = False
+
+        with pytest.raises(SystemExit):
             mod._cmd_assemble(Args(), manifest, run_dir)
