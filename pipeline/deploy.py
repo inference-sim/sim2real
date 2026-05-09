@@ -1028,6 +1028,7 @@ def _cmd_cleanup(args, progress_path: Path, discovered: dict,
         getattr(args, "only", None),
         getattr(args, "workload", None),
         getattr(args, "package", None),
+        getattr(args, "status", None),
     ])
     _filtered = _apply_run_filters(progress, args)
     if filters_given and not _filtered:

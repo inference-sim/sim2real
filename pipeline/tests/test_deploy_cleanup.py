@@ -452,7 +452,7 @@ def test_force_reset_continues_on_exception(monkeypatch):
     assert progress["wl-b-baseline"]["status"] == "pending"
 
 
-def test_cmd_cleanup_aborts_on_filter_mismatch(tmp_path, monkeypatch, capsys):
+def test_cmd_cleanup_aborts_on_filter_mismatch(tmp_path, capsys):
     """cleanup exits with error when --only doesn't match any pair."""
     import pipeline.deploy as mod
 

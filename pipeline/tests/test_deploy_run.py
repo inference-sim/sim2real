@@ -228,6 +228,17 @@ def test_apply_run_filters_only_no_match():
     assert result == set()
 
 
+def test_apply_run_filters_only_no_double_prefix():
+    """--only wl-nonexistent does not try wl-wl-nonexistent."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = "wl-nonexistent"; workload = None; package = None; status = None
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    assert result == set()
+
+
 # ── _reconcile_collecting (bugs 1+2) ─────────────────────────────────────────
 
 def test_reconcile_collecting_trace_present_marks_done(tmp_path):
