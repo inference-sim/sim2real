@@ -112,9 +112,8 @@ class TestStepTektonPipelineApply:
                 step_tekton(cfg)
 
     @patch("pipeline.setup.run")
-    def test_kubectl_apply_failure_exits(self, mock_run, tmp_path):
-        """step_tekton exits if kubectl apply for Pipeline fails."""
-        import pytest
+    def test_kubectl_apply_failure_warns_and_continues(self, mock_run, tmp_path, capsys):
+        """step_tekton warns (not exits) if kubectl apply for Pipeline fails."""
         from pipeline.setup import step_tekton, REPO_ROOT
 
         cfg = _make_config()
@@ -125,7 +124,6 @@ class TestStepTektonPipelineApply:
                 stdout = "pod Running"
                 stderr = ""
             r = R()
-            # Fail the Pipeline apply
             if "pipeline.yaml" in str(cmd):
                 r.returncode = 1
                 r.stderr = "error: RBAC denied"
@@ -133,11 +131,11 @@ class TestStepTektonPipelineApply:
 
         mock_run.side_effect = side_effect
 
-        # Only if the pipeline file exists
         pipeline_path = REPO_ROOT / "pipeline" / "pipeline.yaml"
         if pipeline_path.exists():
-            with pytest.raises(SystemExit):
-                step_tekton(cfg)
+            step_tekton(cfg)
+            captured = capsys.readouterr()
+            assert "Failed to apply Pipeline" in captured.out
 
 
 class TestSetupConfigJson:

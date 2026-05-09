@@ -635,8 +635,7 @@ def step_tekton(cfg: SetupConfig) -> None:
         if r.returncode == 0:
             ok(f"Pipeline applied from {pipeline_path}")
         else:
-            err(f"Failed to apply Pipeline to {cfg.namespace}: {r.stderr.strip()}")
-            sys.exit(1)
+            warn(f"Failed to apply Pipeline to {cfg.namespace}: {r.stderr.strip()}")
 
 # ── Step 8: Config Output ────────────────────────────────────────────
 
