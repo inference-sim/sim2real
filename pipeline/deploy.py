@@ -626,7 +626,12 @@ def _apply_run_filters(progress: dict, args) -> set:
     status_filter = getattr(args, "status", None)
 
     if only:
-        return {only} if only in progress else set()
+        if only in progress:
+            return {only}
+        prefixed = "wl-" + only
+        if prefixed in progress:
+            return {prefixed}
+        return set()
 
     if not any([workload, package, status_filter]):
         return set()

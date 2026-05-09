@@ -205,6 +205,28 @@ def test_apply_run_filters_no_flags_returns_empty():
     assert result == set()
 
 
+def test_apply_run_filters_only_without_prefix():
+    """--only accepts values without the wl- prefix."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = "smoke-baseline"; workload = None; package = None; status = None
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    assert result == {"wl-smoke-baseline"}
+
+
+def test_apply_run_filters_only_no_match():
+    """--only returns empty set when neither exact nor prefixed form matches."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = "nonexistent"; workload = None; package = None; status = None
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    assert result == set()
+
+
 # ── _reconcile_collecting (bugs 1+2) ─────────────────────────────────────────
 
 def test_reconcile_collecting_trace_present_marks_done(tmp_path):
