@@ -149,18 +149,18 @@ def _phase_init(args, manifest: dict, run_dir: Path) -> StateMachine:
     resolved = _load_resolved_config(manifest)
 
     # Validate prerequisites
-    if not (EXPERIMENT_ROOT / manifest["algorithm"]["source"]).exists():
-        err(f"algorithm.source not found: {manifest['algorithm']['source']}")
-        sys.exit(1)
+    if "algorithm" in manifest:
+        if not (EXPERIMENT_ROOT / manifest["algorithm"]["source"]).exists():
+            err(f"algorithm.source not found: {manifest['algorithm']['source']}")
+            sys.exit(1)
+        algo_config = manifest["algorithm"].get("config")
+        if algo_config and not (EXPERIMENT_ROOT / algo_config).exists():
+            err(f"algorithm.config not found: {algo_config}")
+            sys.exit(1)
 
     baseline_sim_config = manifest["baseline"]["sim"]["config"]
     if baseline_sim_config and not (EXPERIMENT_ROOT / baseline_sim_config).exists():
         err(f"baseline.sim.config not found: {baseline_sim_config}")
-        sys.exit(1)
-
-    algo_config = manifest["algorithm"].get("config")
-    if algo_config and not (EXPERIMENT_ROOT / algo_config).exists():
-        err(f"algorithm.config not found: {algo_config}")
         sys.exit(1)
 
     # Validate baseline.real.config if present
@@ -234,6 +234,11 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
 
     if state.is_done("translate") and not args.force:
         info("[skip] Translation already complete")
+        return
+
+    if "algorithm" not in manifest:
+        info("[skip] No algorithm in manifest — baseline-only mode")
+        state.mark_done("translate")
         return
 
     target = resolved.get("target", {})

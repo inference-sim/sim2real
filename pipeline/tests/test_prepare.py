@@ -1201,3 +1201,84 @@ class TestBaselineOnlyAssembly:
 
         with pytest.raises(SystemExit):
             mod._cmd_assemble(Args(), manifest, run_dir)
+
+
+# ── Baseline-only (no algorithm in manifest) ──────────────────────────────
+
+class TestBaselineOnlyNoAlgorithm:
+    """Tests for full prepare flow when manifest has no algorithm field."""
+
+    def _no_algo_manifest(self):
+        """Manifest without algorithm section."""
+        m = {k: v for k, v in MINIMAL_MANIFEST.items() if k != "algorithm"}
+        return m
+
+    def test_phase_init_no_algorithm(self, repo):
+        """_phase_init succeeds when manifest has no algorithm field."""
+        mod = _import_prepare_with_root(repo)
+        manifest = self._no_algo_manifest()
+        run_dir = repo / "workspace" / "runs" / "test-run"
+
+        class Args:
+            force = True
+            run = "test-run"
+            manifest = None
+            rebuild_context = False
+
+        state = mod._phase_init(Args(), manifest, run_dir)
+        assert state.is_done("init")
+
+    def test_phase_translate_skips_no_algorithm(self, repo):
+        """_phase_translate marks done immediately when no algorithm in manifest."""
+        mod = _import_prepare_with_root(repo)
+        manifest = self._no_algo_manifest()
+        run_dir = repo / "workspace" / "runs" / "test-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        resolved = mod._load_resolved_config(manifest)
+        state = StateMachine("test-run", "routing", run_dir)
+        state.mark_done("init")
+
+        context_path = run_dir / "context.md"
+        context_path.write_text("# Context")
+
+        class Args:
+            force = False
+            manifest = None
+
+        mod._phase_translate(Args(), state, manifest, run_dir, resolved, context_path)
+        assert state.is_done("translate")
+        assert not (run_dir / "skill_input.json").exists()
+
+    def test_cmd_run_baseline_only_no_algorithm(self, repo):
+        """Full _cmd_run succeeds with no algorithm — baseline-only flow."""
+        mod = _import_prepare_with_root(repo)
+        manifest = self._no_algo_manifest()
+        # Empty workloads to skip PipelineRun generation (avoids setup_config dep)
+        manifest["workloads"] = []
+
+        # baseline.yaml must exist for assembly
+        (repo / "baseline.yaml").write_text(yaml.dump({"model": {"name": "test"}}))
+
+        run_dir = repo / "workspace" / "runs" / "test-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        class Args:
+            force = False
+            run = "test-run"
+            manifest = None
+            rebuild_context = False
+
+        # Mock _phase_gate to avoid interactive input
+        original_gate = mod._phase_gate
+        mod._phase_gate = lambda *a, **kw: None
+        try:
+            mod._cmd_run(Args(), manifest, run_dir)
+        finally:
+            mod._phase_gate = original_gate
+
+        # Verify: translate was skipped, summary was written
+        assert (run_dir / "run_summary.md").exists()
+        assert not (run_dir / "skill_input.json").exists()
+        summary = (run_dir / "run_summary.md").read_text()
+        assert "Baseline-only" in summary

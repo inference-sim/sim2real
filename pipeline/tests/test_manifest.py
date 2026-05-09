@@ -46,11 +46,19 @@ def test_missing_version_raises(tmp_path):
 
 
 def test_missing_required_field(tmp_path):
-    for field in ["scenario", "algorithm", "baseline"]:
+    for field in ["scenario", "baseline"]:
         data = {k: v for k, v in MINIMAL_V2.items() if k != field}
         path = _write_manifest(tmp_path, data)
         with pytest.raises(ManifestError, match=field):
             load_manifest(path)
+
+
+def test_algorithm_section_entirely_optional(tmp_path):
+    """Manifest without algorithm field is valid (baseline-only mode)."""
+    data = {k: v for k, v in MINIMAL_V2.items() if k != "algorithm"}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert "algorithm" not in m
 
 
 def test_missing_algorithm_source(tmp_path):
