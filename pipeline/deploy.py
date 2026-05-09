@@ -755,7 +755,7 @@ def _capacity_limited_pairs(
 ) -> list[str]:
     """Select pending pairs that fit within available GPU capacity.
 
-    Sorts by gpu_cost ascending to maximize dispatch count (greedy bin-packing).
+    Sorts by gpu_cost ascending to maximize dispatch count.
     """
     sorted_pending = sorted(
         pending,
@@ -967,7 +967,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                     except ValueError:
                         pass
 
-        # ── Capacity probe (before dispatch) ─────────────────────────────
+        # ── Capacity probe ───────────────────────────────────────────────
         capacity = probe_free_gpus(gpu_resource_type=gpu_resource_type)
         if isinstance(capacity, tuple):
             free_gpus, allocatable, requested = capacity
@@ -991,7 +991,10 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 pending, progress,
                 free_gpus=free_gpus, default_gpu_cost=pair_gpu_cost,
             )
-            if len(dispatchable) < len(pending):
+            if len(dispatchable) == 0 and pending:
+                smallest = min(progress[k].get("gpu_cost", pair_gpu_cost) for k in pending)
+                warn(f"Dispatching 0/{len(pending)} pending pairs — smallest cost ({smallest}) exceeds free GPUs ({free_gpus})")
+            elif len(dispatchable) < len(pending):
                 info(f"Dispatching {len(dispatchable)}/{len(pending)} pending pairs (capacity-limited: {free_gpus} free GPUs)")
             elif len(free_slots) < len(dispatchable):
                 info(f"Dispatching {len(free_slots)}/{len(pending)} pending pairs (slot-limited)")

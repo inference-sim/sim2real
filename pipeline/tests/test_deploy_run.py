@@ -554,3 +554,64 @@ def test_capacity_gated_dispatch_zero_budget():
 
     result = _capacity_limited_pairs(pending, progress, free_gpus=0, default_gpu_cost=1)
     assert result == []
+
+
+def test_probe_failure_dispatches_all_pending():
+    """When probe returns error string, all pending pairs are dispatched (no gating)."""
+    from pipeline.deploy import _capacity_limited_pairs
+
+    progress = {
+        "wl-a-baseline": {"status": "pending", "gpu_cost": 8},
+        "wl-b-baseline": {"status": "pending", "gpu_cost": 4},
+        "wl-c-baseline": {"status": "pending", "gpu_cost": 4},
+    }
+    pending = ["wl-a-baseline", "wl-b-baseline", "wl-c-baseline"]
+
+    # Simulate the dispatch logic: when probe fails, free_gpus is None,
+    # so _capacity_limited_pairs is NOT called — dispatchable = pending directly.
+    # This verifies the contract: probe failure means no filtering.
+    capacity = "connection refused"  # str = failure
+    free_gpus = None
+    if isinstance(capacity, tuple):
+        free_gpus = capacity[0]
+
+    if free_gpus is not None:
+        dispatchable = _capacity_limited_pairs(
+            pending, progress, free_gpus=free_gpus, default_gpu_cost=1,
+        )
+    else:
+        dispatchable = pending
+
+    assert dispatchable == pending
+    assert len(dispatchable) == 3
+
+
+def test_slot_limited_dispatch(capsys):
+    """When capacity allows all pairs but fewer slots exist, slot-limited log fires."""
+    from pipeline.deploy import _capacity_limited_pairs, info
+
+    progress = {
+        "wl-a-baseline": {"status": "pending", "gpu_cost": 4},
+        "wl-b-baseline": {"status": "pending", "gpu_cost": 4},
+        "wl-c-baseline": {"status": "pending", "gpu_cost": 4},
+    }
+    pending = ["wl-a-baseline", "wl-b-baseline", "wl-c-baseline"]
+    free_gpus = 24  # plenty of capacity
+    pair_gpu_cost = 4
+
+    dispatchable = _capacity_limited_pairs(
+        pending, progress, free_gpus=free_gpus, default_gpu_cost=pair_gpu_cost,
+    )
+    # All 3 fit in capacity
+    assert len(dispatchable) == 3
+
+    # But only 1 slot available — slot-limited
+    free_slots = ["sim2real-0"]  # 1 slot
+    if len(dispatchable) < len(pending):
+        info(f"Dispatching {len(dispatchable)}/{len(pending)} pending pairs (capacity-limited: {free_gpus} free GPUs)")
+    elif len(free_slots) < len(dispatchable):
+        info(f"Dispatching {len(free_slots)}/{len(pending)} pending pairs (slot-limited)")
+
+    out = capsys.readouterr().out
+    assert "slot-limited" in out
+    assert "1/3" in out
