@@ -809,3 +809,275 @@ def test_run_parser_pending_flag_defaults():
     args = parser.parse_args(["run"])
     assert args.pending_threshold == 600
     assert args.max_pending_stalls == 10
+
+
+def test_early_reclaim_recoverable_threshold_exceeded(monkeypatch):
+    """Recoverable pending pod past threshold: cancel PR, free slot, return to pending."""
+    import datetime as _dt
+    import json
+    import pipeline.deploy as mod
+
+    pods_json_recoverable = {
+        "items": [{
+            "status": {
+                "phase": "Pending",
+                "conditions": [{
+                    "type": "PodScheduled",
+                    "status": "False",
+                    "reason": "Unschedulable",
+                    "message": "0/8 nodes are available: 8 Insufficient nvidia.com/gpu.",
+                }],
+            },
+        }],
+    }
+
+    entry = {
+        "workload": "wl-smoke", "package": "baseline", "status": "running",
+        "namespace": "sim2real-0", "retries": 0, "gpu_cost": 1,
+        "pending_stalls": 0,
+        "pending_since": (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=700)).isoformat(),
+    }
+
+    cancelled = []
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = json.dumps(pods_json_recoverable)
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    monkeypatch.setattr(mod, "_cancel_and_delete_pipelinerun",
+                        lambda pr, ns: cancelled.append((pr, ns)))
+
+    reclaimed = mod._handle_pending_pods(
+        pr_name="baseline-smoke-run1",
+        namespace="sim2real-0",
+        entry=entry,
+        pending_threshold=600,
+        max_pending_stalls=10,
+    )
+
+    assert reclaimed is True
+    assert entry["status"] == "pending"
+    assert entry["namespace"] is None
+    assert entry["pending_stalls"] == 1
+    assert entry["pending_since"] is None
+    assert cancelled == [("baseline-smoke-run1", "sim2real-0")]
+
+
+def test_early_reclaim_recoverable_under_threshold(monkeypatch):
+    """Recoverable pending pod under threshold: set pending_since, do NOT reclaim."""
+    import json
+    import pipeline.deploy as mod
+
+    pods_json_recoverable = {
+        "items": [{
+            "status": {
+                "phase": "Pending",
+                "conditions": [{
+                    "type": "PodScheduled",
+                    "status": "False",
+                    "reason": "Unschedulable",
+                    "message": "0/8 nodes are available: 8 Insufficient nvidia.com/gpu.",
+                }],
+            },
+        }],
+    }
+
+    entry = {
+        "workload": "wl-smoke", "package": "baseline", "status": "running",
+        "namespace": "sim2real-0", "retries": 0, "gpu_cost": 1,
+        "pending_stalls": 0, "pending_since": None,
+    }
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = json.dumps(pods_json_recoverable)
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    reclaimed = mod._handle_pending_pods(
+        pr_name="baseline-smoke-run1",
+        namespace="sim2real-0",
+        entry=entry,
+        pending_threshold=600,
+        max_pending_stalls=10,
+    )
+
+    assert reclaimed is False
+    assert entry["status"] == "running"
+    assert entry["pending_since"] is not None
+
+
+def test_early_reclaim_non_recoverable_fails_immediately(monkeypatch):
+    """Non-recoverable pending: fail immediately, no waiting."""
+    import json
+    import pipeline.deploy as mod
+
+    pods_json_non_recoverable = {
+        "items": [{
+            "status": {
+                "phase": "Pending",
+                "conditions": [{
+                    "type": "PodScheduled",
+                    "status": "False",
+                    "reason": "Unschedulable",
+                    "message": "0/8 nodes are available: 8 node(s) didn't match Pod's node affinity/selector.",
+                }],
+            },
+        }],
+    }
+
+    entry = {
+        "workload": "wl-smoke", "package": "baseline", "status": "running",
+        "namespace": "sim2real-0", "retries": 0, "gpu_cost": 1,
+        "pending_stalls": 0, "pending_since": None,
+    }
+
+    cancelled = []
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = json.dumps(pods_json_non_recoverable)
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    monkeypatch.setattr(mod, "_cancel_and_delete_pipelinerun",
+                        lambda pr, ns: cancelled.append((pr, ns)))
+
+    reclaimed = mod._handle_pending_pods(
+        pr_name="baseline-smoke-run1",
+        namespace="sim2real-0",
+        entry=entry,
+        pending_threshold=600,
+        max_pending_stalls=10,
+    )
+
+    assert reclaimed is True
+    assert entry["status"] == "failed"
+    assert entry["namespace"] is None
+    assert cancelled == [("baseline-smoke-run1", "sim2real-0")]
+
+
+def test_early_reclaim_stalled_at_max_pending_stalls(monkeypatch):
+    """When pending_stalls reaches max, pair transitions to stalled."""
+    import datetime as _dt
+    import json
+    import pipeline.deploy as mod
+
+    pods_json_recoverable = {
+        "items": [{
+            "status": {
+                "phase": "Pending",
+                "conditions": [{
+                    "type": "PodScheduled",
+                    "status": "False",
+                    "reason": "Unschedulable",
+                    "message": "0/8 nodes are available: 8 Insufficient nvidia.com/gpu.",
+                }],
+            },
+        }],
+    }
+
+    entry = {
+        "workload": "wl-smoke", "package": "baseline", "status": "running",
+        "namespace": "sim2real-0", "retries": 0, "gpu_cost": 1,
+        "pending_stalls": 9,
+        "pending_since": (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=700)).isoformat(),
+    }
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = json.dumps(pods_json_recoverable)
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    monkeypatch.setattr(mod, "_cancel_and_delete_pipelinerun", lambda pr, ns: None)
+
+    reclaimed = mod._handle_pending_pods(
+        pr_name="baseline-smoke-run1",
+        namespace="sim2real-0",
+        entry=entry,
+        pending_threshold=600,
+        max_pending_stalls=10,
+    )
+
+    assert reclaimed is True
+    assert entry["status"] == "stalled"
+    assert entry["pending_stalls"] == 10
+
+
+def test_early_reclaim_kubectl_failure_returns_false(monkeypatch):
+    """kubectl get pods failure: don't reclaim, let timeout handle it."""
+    import pipeline.deploy as mod
+
+    entry = {
+        "workload": "wl-smoke", "package": "baseline", "status": "running",
+        "namespace": "sim2real-0", "retries": 0, "gpu_cost": 1,
+        "pending_stalls": 0, "pending_since": None,
+    }
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 1
+            stdout = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    reclaimed = mod._handle_pending_pods(
+        pr_name="baseline-smoke-run1",
+        namespace="sim2real-0",
+        entry=entry,
+        pending_threshold=600,
+        max_pending_stalls=10,
+    )
+
+    assert reclaimed is False
+    assert entry["status"] == "running"
+
+
+def test_early_reclaim_pods_running_clears_pending_since(monkeypatch):
+    """When pods transition from Pending to Running, clear pending_since."""
+    import json
+    import pipeline.deploy as mod
+
+    pods_json_running = {
+        "items": [{
+            "status": {
+                "phase": "Running",
+                "conditions": [{"type": "Ready", "status": "True"}],
+            },
+        }],
+    }
+
+    entry = {
+        "workload": "wl-smoke", "package": "baseline", "status": "running",
+        "namespace": "sim2real-0", "retries": 0, "gpu_cost": 1,
+        "pending_stalls": 0,
+        "pending_since": "2026-05-09T12:00:00+00:00",
+    }
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = json.dumps(pods_json_running)
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    reclaimed = mod._handle_pending_pods(
+        pr_name="baseline-smoke-run1",
+        namespace="sim2real-0",
+        entry=entry,
+        pending_threshold=600,
+        max_pending_stalls=10,
+    )
+
+    assert reclaimed is False
+    assert entry["pending_since"] is None

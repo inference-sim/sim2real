@@ -210,6 +210,71 @@ def _check_pipelinerun_status(pr_name: str, namespace: str) -> str:
 
 
 
+def _handle_pending_pods(*, pr_name: str, namespace: str, entry: dict,
+                         pending_threshold: int, max_pending_stalls: int) -> bool:
+    """Check for pods stuck in Pending and take action.
+
+    Returns True if the slot was reclaimed (caller should free slot).
+    Returns False if no action taken (caller should proceed to timeout check).
+    """
+    import datetime as _dt
+    import json as _json
+    from pipeline.lib.pod_pending import parse_pod_conditions
+
+    result = run(
+        ["kubectl", "get", "pods", f"-n={namespace}",
+         "-l", f"tekton.dev/pipelineRun={pr_name}",
+         "-o", "json"],
+        check=False, capture=True,
+    )
+    if result.returncode != 0:
+        return False
+
+    try:
+        pods_json = _json.loads(result.stdout)
+    except _json.JSONDecodeError:
+        return False
+
+    category, detail = parse_pod_conditions(pods_json)
+
+    if category is None:
+        if entry.get("pending_since") is not None:
+            entry["pending_since"] = None
+        return False
+
+    if category == "non_recoverable":
+        warn(f"[{entry.get('workload', '?')}] non-recoverable pending: {detail}")
+        _cancel_and_delete_pipelinerun(pr_name, namespace)
+        entry["status"] = "failed"
+        entry["namespace"] = None
+        return True
+
+    # category == "recoverable"
+    now = _dt.datetime.now(_dt.timezone.utc)
+    if entry.get("pending_since") is None:
+        entry["pending_since"] = now.isoformat()
+        info(f"[{entry.get('workload', '?')}] pending (recoverable): {detail}")
+        return False
+
+    pending_since = _dt.datetime.fromisoformat(entry["pending_since"])
+    elapsed = (now - pending_since).total_seconds()
+    if elapsed <= pending_threshold:
+        return False
+
+    warn(f"[{entry.get('workload', '?')}] pending {int(elapsed)}s > {pending_threshold}s threshold → reclaim")
+    _cancel_and_delete_pipelinerun(pr_name, namespace)
+    stalls = entry.get("pending_stalls", 0) + 1
+    entry["pending_stalls"] = stalls
+    entry["pending_since"] = None
+    entry["namespace"] = None
+    if stalls >= max_pending_stalls:
+        entry["status"] = "stalled"
+        warn(f"[{entry.get('workload', '?')}] reached max pending stalls ({max_pending_stalls}) → stalled")
+    else:
+        entry["status"] = "pending"
+    return True
+
+
 def _probe_phase_sizes(pod_name: str, run_name: str, phases: list[str],
                        namespace: str) -> dict[str, int]:
     """Return byte sizes for each phase directory on the PVC."""
@@ -830,6 +895,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
 
     max_retries = getattr(args, "max_retries", 2)
     poll_interval = getattr(args, "poll_interval", 30)
+    pending_threshold = getattr(args, "pending_threshold", 600)
+    max_pending_stalls = getattr(args, "max_pending_stalls", 10)
 
     cluster_dir = run_dir / "cluster"
     progress_path = run_dir / "progress.json"
@@ -909,16 +976,20 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 actual = _check_pipelinerun_status(pr_name, ns)
                 if actual == "Succeeded":
                     entry["status"] = "collecting"
+                    entry["pending_since"] = None
                 elif actual in ("Failed", "PipelineRunCancelled"):
                     entry["status"] = "failed"
+                    entry["pending_since"] = None
                 elif actual == "Unknown":
                     warn(f"[{key}] PipelineRun not found on cluster → resetting to pending")
                     entry["status"] = "pending"
                     entry["namespace"] = None
+                    entry["pending_since"] = None
                 # If still "Running"/"Started", leave as "running" — will be monitored
             else:
                 entry["status"] = "pending"
                 entry["namespace"] = None
+                entry["pending_since"] = None
         elif entry["status"] == "collecting":
             _reconcile_collecting(key, entry, run_dir)
     store.save(progress)
@@ -979,6 +1050,16 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 del slots_busy[ns]
 
             elif status in ("Running", "Started"):
+                # Check for pending pods (before timeout)
+                if _handle_pending_pods(
+                    pr_name=pr_name, namespace=ns, entry=entry,
+                    pending_threshold=pending_threshold,
+                    max_pending_stalls=max_pending_stalls,
+                ):
+                    del slots_busy[ns]
+                    store.save(progress)
+                    continue
+
                 # Check for timeout
                 ts_result = run(
                     ["kubectl", "get", "pipelinerun", pr_name, f"-n={ns}",
