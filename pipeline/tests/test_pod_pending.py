@@ -199,3 +199,37 @@ def test_parse_pending_scheduled_true_returns_none():
     }
     category, detail = parse_pod_conditions(pods_json)
     assert category is None
+
+
+def test_parse_multi_pod_worst_severity_wins():
+    """Non-recoverable on a later pod overrides recoverable on earlier pod."""
+    from pipeline.lib.pod_pending import parse_pod_conditions
+    pods_json = {
+        "items": [
+            {
+                "status": {
+                    "phase": "Pending",
+                    "conditions": [{
+                        "type": "PodScheduled",
+                        "status": "False",
+                        "reason": "Unschedulable",
+                        "message": "0/8 nodes are available: 8 Insufficient nvidia.com/gpu.",
+                    }],
+                },
+            },
+            {
+                "status": {
+                    "phase": "Pending",
+                    "conditions": [{
+                        "type": "PodScheduled",
+                        "status": "False",
+                        "reason": "Unschedulable",
+                        "message": "0/8 nodes are available: 8 node(s) didn't match Pod's node affinity/selector.",
+                    }],
+                },
+            },
+        ],
+    }
+    category, detail = parse_pod_conditions(pods_json)
+    assert category == "non_recoverable"
+    assert "node affinity" in detail

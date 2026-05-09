@@ -1084,3 +1084,76 @@ def test_early_reclaim_pods_running_clears_pending_since(monkeypatch):
 
     assert reclaimed is False
     assert entry["pending_since"] is None
+
+
+def test_early_reclaim_malformed_pending_since_resets_timer(monkeypatch, capsys):
+    """Malformed pending_since resets timer instead of crashing."""
+    import json
+    import pipeline.deploy as mod
+
+    pods_json_recoverable = {
+        "items": [{
+            "status": {
+                "phase": "Pending",
+                "conditions": [{
+                    "type": "PodScheduled",
+                    "status": "False",
+                    "reason": "Unschedulable",
+                    "message": "0/8 nodes are available: 8 Insufficient nvidia.com/gpu.",
+                }],
+            },
+        }],
+    }
+
+    entry = {
+        "workload": "wl-smoke", "package": "baseline", "status": "running",
+        "namespace": "sim2real-0", "retries": 0, "gpu_cost": 1,
+        "pending_stalls": 0,
+        "pending_since": "not-a-valid-timestamp",
+    }
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = json.dumps(pods_json_recoverable)
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    reclaimed = mod._handle_pending_pods(
+        pr_name="baseline-smoke-run1",
+        namespace="sim2real-0",
+        entry=entry,
+        pending_threshold=600,
+        max_pending_stalls=10,
+    )
+
+    assert reclaimed is False
+    assert entry["pending_since"] != "not-a-valid-timestamp"
+    out = capsys.readouterr().out
+    assert "malformed pending_since" in out
+
+
+def test_force_reset_clears_pending_stalls(monkeypatch):
+    """--force resets pending_stalls along with retries."""
+    from pipeline.deploy import _force_reset
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = ""
+        return _R()
+
+    import pipeline.deploy as mod
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    progress = {
+        "wl-a-baseline": {
+            "workload": "wl-a", "package": "baseline", "status": "stalled",
+            "namespace": None, "retries": 2, "pending_stalls": 10,
+            "pending_since": "2026-05-09T12:00:00+00:00",
+        },
+    }
+    _force_reset(progress, {"wl-a-baseline"})
+    assert progress["wl-a-baseline"]["pending_stalls"] == 0
+    assert progress["wl-a-baseline"]["pending_since"] is None

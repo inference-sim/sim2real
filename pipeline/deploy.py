@@ -258,7 +258,12 @@ def _handle_pending_pods(*, pr_name: str, namespace: str, entry: dict,
         info(f"[{entry.get('workload', '?')}] pending (recoverable): {detail}")
         return False
 
-    pending_since = _dt.datetime.fromisoformat(entry["pending_since"])
+    try:
+        pending_since = _dt.datetime.fromisoformat(entry["pending_since"])
+    except (ValueError, TypeError):
+        warn(f"[{entry.get('workload', '?')}] malformed pending_since — resetting timer")
+        entry["pending_since"] = now.isoformat()
+        return False
     elapsed = (now - pending_since).total_seconds()
     if elapsed <= pending_threshold:
         return False
@@ -595,6 +600,8 @@ def _cleanup_pair(key: str, entry: dict, discovered: dict, *,
         if not dry_run and not is_done:
             entry["status"] = "pending"
             entry["retries"] = 0
+            entry["pending_stalls"] = 0
+            entry["pending_since"] = None
         return True
 
     if dry_run:
@@ -662,6 +669,8 @@ def _cleanup_pair(key: str, entry: dict, discovered: dict, *,
     entry["status"] = "pending"
     entry["namespace"] = None
     entry["retries"] = 0
+    entry["pending_stalls"] = 0
+    entry["pending_since"] = None
     return True
 
 
@@ -954,6 +963,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 "retries":  0,
                 "gpu_cost": pair_gpu_cost,
                 "pending_stalls": 0,
+                "pending_since": None,
             }
 
     _scope = _resolve_scope(progress, args)

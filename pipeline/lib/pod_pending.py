@@ -19,8 +19,9 @@ def classify_pending_reason(message: str) -> str:
     """Classify a pod scheduling failure message.
 
     Returns "recoverable" (resource scarcity) or "non_recoverable" (config error).
-    Unrecognized messages default to "recoverable" — a 10-min wait is cheaper
-    than irreversible cancellation of hours of GPU work.
+    Empty messages → non_recoverable (missing data = config problem).
+    Unrecognized non-empty messages → recoverable (10-min wait is cheaper
+    than irreversible cancellation of hours of GPU work).
     """
     if not message:
         return "non_recoverable"
@@ -39,9 +40,12 @@ def classify_pending_reason(message: str) -> str:
 def parse_pod_conditions(pods_json: dict) -> tuple[str | None, str]:
     """Parse kubectl get pods JSON output for pending scheduling failures.
 
-    Returns (category, detail) where category is "recoverable",
-    "non_recoverable", or None if no pods are stuck pending.
+    Scans all pods and returns the worst severity found
+    (non_recoverable > recoverable). Returns (None, "") if no pods are
+    stuck pending with Unschedulable condition.
     """
+    worst_category: str | None = None
+    worst_detail = ""
     for item in pods_json.get("items", []):
         status = item.get("status", {})
         if status.get("phase") != "Pending":
@@ -52,5 +56,9 @@ def parse_pod_conditions(pods_json: dict) -> tuple[str | None, str]:
                     and cond.get("reason") == "Unschedulable"):
                 message = cond.get("message", "")
                 category = classify_pending_reason(message)
-                return category, message
-    return None, ""
+                if category == "non_recoverable":
+                    return category, message
+                if worst_category is None:
+                    worst_category = category
+                    worst_detail = message
+    return worst_category, worst_detail
