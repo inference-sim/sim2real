@@ -993,3 +993,190 @@ class TestExperimentRootSeparation:
         # State file should exist in experiment root, not framework root
         assert (exp / "workspace" / "runs" / "test-run" / ".state.json").exists()
         assert not (fw / "workspace").exists()
+
+
+# ── Baseline-only assembly ─────────────────────────────────────────────────
+
+class TestBaselineOnlyAssembly:
+    """Tests for baseline-only mode: no translation_output.json present.
+
+    These tests document the expected behavior when prepare.py assemble is
+    invoked without a prior translation step — producing only baseline
+    PipelineRuns and skipping treatment-specific logic.
+    """
+
+    def _setup_baseline_only_repo(self, repo):
+        """Set up repo with everything needed for assembly EXCEPT translation_output.json."""
+        run_dir = repo / "workspace" / "runs" / "test-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        # setup_config.json (written by setup.py)
+        setup_config = {"namespace": "sim2real-test", "workspaces": {}}
+        (repo / "workspace" / "setup_config.json").write_text(json.dumps(setup_config))
+
+        # baseline.yaml bundle (experiment root)
+        baseline_bundle = {
+            "scenario": [{"name": "baseline-scenario", "model": {"name": "test-model"}}]
+        }
+        _write_yaml(repo / "baseline.yaml", baseline_bundle)
+
+        # llm-d-benchmark submodule (git repo — needed for SHA detection)
+        benchmark = repo / "llm-d-benchmark"
+        benchmark.mkdir(parents=True, exist_ok=True)
+        _init_git_repo(benchmark)
+
+        return run_dir
+
+    def test_assembly_baseline_only_produces_only_baseline_pipelineruns(self, repo):
+        """When no translation_output.json exists, _phase_assembly should produce
+        only pipelinerun-*-baseline.yaml files, no cluster/treatment.yaml, and
+        mark_done('assembly', packages=['baseline']).
+        """
+        mod = _import_prepare_with_root(repo)
+        run_dir = self._setup_baseline_only_repo(repo)
+
+        manifest = dict(MINIMAL_MANIFEST)
+        resolved = mod._load_resolved_config(manifest)
+        state = StateMachine("test-run", "routing", run_dir)
+        state.mark_done("init")
+
+        class Args:
+            force = False
+
+        mod._phase_assembly(Args(), state, manifest, run_dir, resolved)
+
+        # Should mark done with baseline-only packages
+        assert state.is_done("assembly")
+        assert state.get_phase("assembly")["packages"] == ["baseline"]
+
+        # Should produce only baseline PipelineRuns
+        cluster_dir = run_dir / "cluster"
+        pr_files = list(cluster_dir.glob("pipelinerun-*.yaml"))
+        assert all("-baseline.yaml" in f.name for f in pr_files)
+        assert not any("-treatment.yaml" in f.name for f in pr_files)
+
+        # Should NOT produce cluster/treatment.yaml
+        assert not (cluster_dir / "treatment.yaml").exists()
+
+    def test_assembly_baseline_only_skips_epp_validation(self, repo):
+        """When run_metadata.json has NO registry key but no translation_output.json
+        exists, _phase_assembly should still succeed (EPP validation skipped).
+        """
+        mod = _import_prepare_with_root(repo)
+        run_dir = self._setup_baseline_only_repo(repo)
+
+        # Write run_metadata.json WITHOUT registry (would fail in full mode)
+        meta = {"repo_name": "llm-d-inference-scheduler"}
+        (run_dir / "run_metadata.json").write_text(json.dumps(meta))
+
+        manifest = dict(MINIMAL_MANIFEST)
+        resolved = mod._load_resolved_config(manifest)
+        state = StateMachine("test-run", "routing", run_dir)
+        state.mark_done("init")
+
+        class Args:
+            force = False
+
+        # Should succeed — EPP injection should be skipped in baseline-only mode
+        mod._phase_assembly(Args(), state, manifest, run_dir, resolved)
+        assert state.is_done("assembly")
+
+    def test_summary_baseline_only_does_not_crash(self, repo):
+        """_phase_summary should produce a reduced summary with 'Baseline-only'
+        and 'Translation skipped' text when translation_output.json is absent.
+        """
+        mod = _import_prepare_with_root(repo)
+        run_dir = self._setup_baseline_only_repo(repo)
+
+        manifest = dict(MINIMAL_MANIFEST)
+        resolved = mod._load_resolved_config(manifest)
+        state = StateMachine("test-run", "routing", run_dir)
+        state.mark_done("init")
+        state.mark_done("assembly", packages=["baseline"])
+
+        # Do NOT create translation_output.json
+
+        # Should NOT crash with FileNotFoundError
+        mod._phase_summary(state, manifest, run_dir, resolved)
+
+        assert state.is_done("summary")
+        summary_path = run_dir / "run_summary.md"
+        assert summary_path.exists()
+        content = summary_path.read_text()
+        assert "Baseline-only" in content or "baseline-only" in content.lower()
+        assert "Translation skipped" in content or "translation skipped" in content.lower()
+
+    def test_summary_full_mode_unchanged(self, repo):
+        """_phase_summary still works normally when translation_output.json IS present."""
+        mod = _import_prepare_with_root(repo)
+        run_dir = self._setup_baseline_only_repo(repo)
+
+        manifest = dict(MINIMAL_MANIFEST)
+        resolved = mod._load_resolved_config(manifest)
+        state = StateMachine("test-run", "routing", run_dir)
+        state.mark_done("init")
+        state.mark_done("translate", plugin_type="test-scorer", files_created=[])
+        state.mark_done("assembly", packages=["baseline", "treatment"])
+
+        # Write translation_output.json (full mode)
+        output = {
+            "plugin_type": "test-scorer",
+            "files_created": ["pkg/plugins/scorer/test.go"],
+            "files_modified": ["pkg/plugins/register.go"],
+            "package": "scorer",
+            "test_commands": [["go", "test", "./..."]],
+            "config_kind": "EndpointPickerConfig",
+            "helm_path": "gaie.treatment.helmValues.config",
+            "treatment_config_generated": True,
+            "description": "Test scorer plugin",
+            "register_file": "pkg/plugins/register.go",
+        }
+        (run_dir / "translation_output.json").write_text(json.dumps(output))
+
+        # Should work normally
+        mod._phase_summary(state, manifest, run_dir, resolved)
+
+        assert state.is_done("summary")
+        summary_path = run_dir / "run_summary.md"
+        assert summary_path.exists()
+        content = summary_path.read_text()
+        assert "test-scorer" in content
+        assert "Test scorer plugin" in content
+
+    def test_validate_assembly_baseline_only_exits_cleanly(self, repo):
+        """_validate_assembly should return cleanly (not raise/exit) when
+        translation_output.json is absent.
+        """
+        mod = _import_prepare_with_root(repo)
+        run_dir = repo / "workspace" / "runs" / "test-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        resolved = {"target": {"repo": "llm-d-inference-scheduler"}, "config": {"kind": "EndpointPickerConfig"}}
+
+        # Do NOT create translation_output.json
+        # Should return without raising or sys.exit
+        mod._validate_assembly(run_dir, resolved)
+
+    def test_cmd_assemble_no_translation_proceeds(self, repo):
+        """_cmd_assemble should NOT sys.exit(1) when translation_output.json is
+        missing; should proceed and produce baseline-only output.
+        """
+        mod = _import_prepare_with_root(repo)
+        run_dir = self._setup_baseline_only_repo(repo)
+
+        manifest = dict(MINIMAL_MANIFEST)
+
+        # Create state with init done (cmd_assemble loads from disk)
+        state = StateMachine("test-run", "routing", run_dir)
+        state.mark_done("init")
+        # Do NOT mark translate as done — that's the point of this test
+
+        class Args:
+            force = False
+
+        # _cmd_assemble currently requires translate to be done; in baseline-only
+        # mode it should proceed without translation.
+        # Patch input() to avoid interactive gate prompt
+        import unittest.mock as mock
+        with mock.patch("builtins.input", side_effect=["q"]):
+            mod._cmd_assemble(Args(), manifest, run_dir)
