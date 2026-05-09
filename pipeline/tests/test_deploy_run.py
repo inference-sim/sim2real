@@ -185,7 +185,8 @@ def test_apply_run_filters_compose():
     assert result == {"wl-load-treatment"}
 
 
-def test_apply_run_filters_only_flag():
+def test_apply_run_filters_only_flag(capsys):
+    """Exact match does not emit the 'resolved' diagnostic."""
     from pipeline.deploy import _apply_run_filters
 
     class _Args:
@@ -193,6 +194,8 @@ def test_apply_run_filters_only_flag():
 
     result = _apply_run_filters(dict(_PROGRESS), _Args())
     assert result == {"wl-smoke-baseline"}
+    captured = capsys.readouterr()
+    assert "resolved" not in captured.err
 
 
 def test_apply_run_filters_no_flags_returns_empty():
@@ -214,7 +217,7 @@ def test_apply_run_filters_only_without_prefix(capsys):
 
     result = _apply_run_filters(dict(_PROGRESS), _Args())
     assert result == {"wl-smoke-baseline"}
-    assert "resolved" in capsys.readouterr().out
+    assert "resolved" in capsys.readouterr().err
 
 
 def test_apply_run_filters_only_no_match():
@@ -234,6 +237,17 @@ def test_apply_run_filters_only_no_double_prefix():
 
     class _Args:
         only = "wl-nonexistent"; workload = None; package = None; status = None
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    assert result == set()
+
+
+def test_apply_run_filters_only_empty_string():
+    """--only '' (from unset shell var) returns empty set, not all pairs."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = ""; workload = None; package = None; status = None
 
     result = _apply_run_filters(dict(_PROGRESS), _Args())
     assert result == set()

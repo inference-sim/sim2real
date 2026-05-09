@@ -626,11 +626,12 @@ def _apply_run_filters(progress: dict, args) -> set:
     status_filter = getattr(args, "status", None)
 
     if only:
+        only = only.strip()
         if only in progress:
             return {only}
         prefixed = "wl-" + only
         if prefixed in progress:
-            info(f"--only: resolved '{only}' → '{prefixed}'")
+            print(f"--only: resolved '{only}' → '{prefixed}'", file=sys.stderr)
             return {prefixed}
         return set()
 
@@ -806,10 +807,10 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     # Compute scope: pairs this invocation is allowed to dispatch.
     # No flags → all pairs in scope. Flags narrow scope without resetting state.
     filters_given = any([
-        getattr(args, "only", None),
-        getattr(args, "workload", None),
-        getattr(args, "package", None),
-        getattr(args, "status", None),
+        getattr(args, "only", None) is not None,
+        getattr(args, "workload", None) is not None,
+        getattr(args, "package", None) is not None,
+        getattr(args, "status", None) is not None,
     ])
     _filtered = _apply_run_filters(progress, args)
     if filters_given and not _filtered:
@@ -1025,10 +1026,10 @@ def _cmd_cleanup(args, progress_path: Path, discovered: dict,
 
     # Determine scope
     filters_given = any([
-        getattr(args, "only", None),
-        getattr(args, "workload", None),
-        getattr(args, "package", None),
-        getattr(args, "status", None),
+        getattr(args, "only", None) is not None,
+        getattr(args, "workload", None) is not None,
+        getattr(args, "package", None) is not None,
+        getattr(args, "status", None) is not None,
     ])
     _filtered = _apply_run_filters(progress, args)
     if filters_given and not _filtered:
