@@ -17,8 +17,10 @@ def test_status_output_contains_all_pairs(tmp_path, capsys):
     progress_path.write_text(json.dumps(_PROGRESS))
 
     class _Args:
+        only = None
         workload = None
         package = None
+        status = None
         live = False
 
     _cmd_status(_Args(), progress_path)
@@ -33,8 +35,10 @@ def test_status_filter_by_workload(tmp_path, capsys):
     progress_path.write_text(json.dumps(_PROGRESS))
 
     class _Args:
+        only = None
         workload = "wl-smoke"
         package = None
+        status = None
         live = False
 
     _cmd_status(_Args(), progress_path)
@@ -50,8 +54,10 @@ def test_status_filter_by_package(tmp_path, capsys):
     progress_path.write_text(json.dumps(_PROGRESS))
 
     class _Args:
+        only = None
         workload = None
         package = "treatment"
+        status = None
         live = False
 
     _cmd_status(_Args(), progress_path)
@@ -67,8 +73,10 @@ def test_status_summary_line(tmp_path, capsys):
     progress_path.write_text(json.dumps(_PROGRESS))
 
     class _Args:
+        only = None
         workload = None
         package = None
+        status = None
         live = False
 
     _cmd_status(_Args(), progress_path)
@@ -83,13 +91,78 @@ def test_status_missing_progress_file(tmp_path, capsys):
     from pipeline.deploy import _cmd_status
 
     class _Args:
+        only = None
         workload = None
         package = None
+        status = None
         live = False
 
     _cmd_status(_Args(), tmp_path / "missing.json")
     out = capsys.readouterr().out
     assert "0 pairs" in out
+
+
+def test_status_filter_by_only(tmp_path, capsys):
+    """status subcommand supports --only filter."""
+    from pipeline.deploy import _cmd_status
+    progress_path = tmp_path / "progress.json"
+    progress_path.write_text(json.dumps(_PROGRESS))
+
+    class _Args:
+        only = "wl-smoke-baseline"; workload = None; package = None; status = None; live = False
+
+    _cmd_status(_Args(), progress_path)
+    out = capsys.readouterr().out
+    assert "wl-smoke-baseline" in out
+    assert "wl-load-baseline" not in out
+
+
+def test_status_filter_by_status(tmp_path, capsys):
+    """status subcommand supports --status filter."""
+    from pipeline.deploy import _cmd_status
+    progress_path = tmp_path / "progress.json"
+    progress_path.write_text(json.dumps(_PROGRESS))
+
+    class _Args:
+        only = None; workload = None; package = None; status = "running"; live = False
+
+    _cmd_status(_Args(), progress_path)
+    out = capsys.readouterr().out
+    assert "wl-smoke-treatment" in out
+    assert "wl-load-baseline" not in out
+
+
+def test_status_mismatch_shows_valid_values(tmp_path, capsys):
+    """status subcommand shows valid values on filter mismatch."""
+    import pytest
+    from pipeline.deploy import _cmd_status
+    progress_path = tmp_path / "progress.json"
+    progress_path.write_text(json.dumps(_PROGRESS))
+
+    class _Args:
+        only = None; workload = "nonexistent"; package = None; status = None; live = False
+
+    with pytest.raises(SystemExit) as exc_info:
+        _cmd_status(_Args(), progress_path)
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr().err
+    assert "No pairs matched" in captured
+    assert "wl-smoke" in captured
+
+
+def test_status_empty_progress_with_filters(tmp_path, capsys):
+    """status with empty progress and active filters warns filters are ignored."""
+    from pipeline.deploy import _cmd_status
+    progress_path = tmp_path / "progress.json"
+    progress_path.write_text("{}")
+
+    class _Args:
+        only = None; workload = "foo"; package = None; status = None; live = False
+
+    _cmd_status(_Args(), progress_path)
+    out = capsys.readouterr().out
+    assert "0 pairs" in out
+    assert "filters ignored" in out
 
 
 def test_load_pairs_discovers_all_pairs(tmp_path):
@@ -250,6 +323,94 @@ def test_apply_run_filters_only_empty_string():
 
     result = _apply_run_filters(dict(_PROGRESS), _Args())
     assert result == set()
+
+
+def test_resolve_scope_shows_valid_keys_on_only_mismatch(capsys):
+    """--only mismatch prints valid pair keys before aborting with exit code 1."""
+    import pytest
+    from pipeline.deploy import _resolve_scope
+
+    class _Args:
+        only = "nonexistent"; workload = None; package = None; status = None
+
+    with pytest.raises(SystemExit) as exc_info:
+        _resolve_scope(dict(_PROGRESS), _Args())
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr().err
+    assert "No pairs matched" in captured
+    assert "wl-smoke-baseline" in captured
+    assert "wl-load-treatment" in captured
+
+
+def test_resolve_scope_shows_valid_workloads_on_mismatch(capsys):
+    """--workload mismatch prints valid workload values."""
+    import pytest
+    from pipeline.deploy import _resolve_scope
+
+    class _Args:
+        only = None; workload = "nonexistent"; package = None; status = None
+
+    with pytest.raises(SystemExit) as exc_info:
+        _resolve_scope(dict(_PROGRESS), _Args())
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr().err
+    assert "No pairs matched" in captured
+    assert "wl-smoke" in captured
+    assert "wl-load" in captured
+    assert "wl-heavy" in captured
+
+
+def test_resolve_scope_shows_valid_packages_on_mismatch(capsys):
+    """--package mismatch prints valid package values."""
+    import pytest
+    from pipeline.deploy import _resolve_scope
+
+    class _Args:
+        only = None; workload = None; package = "nonexistent"; status = None
+
+    with pytest.raises(SystemExit) as exc_info:
+        _resolve_scope(dict(_PROGRESS), _Args())
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr().err
+    assert "No pairs matched" in captured
+    assert "baseline" in captured
+    assert "treatment" in captured
+
+
+def test_resolve_scope_shows_valid_statuses_on_mismatch(capsys):
+    """--status mismatch prints valid status values."""
+    import pytest
+    from pipeline.deploy import _resolve_scope
+
+    class _Args:
+        only = None; workload = None; package = None; status = "nonexistent"
+
+    with pytest.raises(SystemExit) as exc_info:
+        _resolve_scope(dict(_PROGRESS), _Args())
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr().err
+    assert "No pairs matched" in captured
+    assert "done" in captured
+    assert "running" in captured
+    assert "pending" in captured
+    assert "failed" in captured
+    assert "timed-out" in captured
+
+
+def test_resolve_scope_combined_filter_mismatch(capsys):
+    """Combined filters where each value is valid but intersection is empty."""
+    import pytest
+    from pipeline.deploy import _resolve_scope
+
+    class _Args:
+        only = None; workload = "wl-smoke"; package = None; status = "timed-out"
+
+    with pytest.raises(SystemExit) as exc_info:
+        _resolve_scope(dict(_PROGRESS), _Args())
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr().err
+    assert "--workload 'wl-smoke'" in captured
+    assert "--status 'timed-out'" in captured
 
 
 # ── _reconcile_collecting (bugs 1+2) ─────────────────────────────────────────

@@ -156,16 +156,20 @@ def _cmd_status(args, progress_path: Path) -> None:
     store = LocalProgressStore(progress_path)
     progress = store.load()
 
-    # Apply filters
-    pairs = dict(progress)
-    if getattr(args, "workload", None):
-        pairs = {k: v for k, v in pairs.items() if v.get("workload") == args.workload}
-    if getattr(args, "package", None):
-        pairs = {k: v for k, v in pairs.items() if v.get("package") == args.package}
-
-    if not pairs:
-        print("  0 pairs" + (" (no progress file)" if not progress_path.exists() else ""))
+    if not progress:
+        suffix = " (no progress file)" if not progress_path.exists() else ""
+        filters_given = any([
+            getattr(args, "only", None) is not None,
+            getattr(args, "workload", None) is not None,
+            getattr(args, "package", None) is not None,
+            getattr(args, "status", None) is not None,
+        ])
+        if filters_given:
+            suffix += " — filters ignored"
+        print(f"  0 pairs{suffix}")
         return
+
+    pairs = {k: progress[k] for k in _resolve_scope(progress, args)}
 
     pair_w = max(len(k) for k in pairs) + 2
     col_status = 12
@@ -651,7 +655,8 @@ def _apply_run_filters(progress: dict, args) -> set:
 def _resolve_scope(progress: dict, args) -> set:
     """Apply filter args and return the set of pair keys in scope.
 
-    No flags → all pairs. Flags + match → narrowed set. Flags + no match → abort.
+    No flags → all pairs. Flags + match → narrowed set. Flags + no match → abort
+    with valid values printed.
     """
     filters_given = any([
         getattr(args, "only", None) is not None,
@@ -661,9 +666,42 @@ def _resolve_scope(progress: dict, args) -> set:
     ])
     filtered = _apply_run_filters(progress, args)
     if filters_given and not filtered:
-        err("No pairs matched the specified filter — aborting")
+        _report_filter_mismatch(progress, args)
         sys.exit(1)
     return filtered or set(progress.keys())
+
+
+def _report_filter_mismatch(progress: dict, args) -> None:
+    """Print all valid filter values to help the user correct their filter flags."""
+    only = getattr(args, "only", None)
+    workload = getattr(args, "workload", None)
+    package = getattr(args, "package", None)
+    status_filter = getattr(args, "status", None)
+
+    parts = []
+    if only is not None:
+        parts.append(f"--only '{only}'")
+    if workload is not None:
+        parts.append(f"--workload '{workload}'")
+    if package is not None:
+        parts.append(f"--package '{package}'")
+    if status_filter is not None:
+        parts.append(f"--status '{status_filter}'")
+
+    err(f"No pairs matched {', '.join(parts)}.\n")
+
+    keys = sorted(progress.keys())
+    print(f"  Valid pair keys ({len(keys)}):", file=sys.stderr)
+    for k in keys:
+        print(f"    {k}", file=sys.stderr)
+
+    valid_workloads = sorted({v.get("workload", "") for v in progress.values()} - {""})
+    valid_packages = sorted({v.get("package", "") for v in progress.values()} - {""})
+    valid_statuses = sorted({v.get("status", "") for v in progress.values()} - {""})
+
+    print(f"\n  Valid --workload values: {', '.join(valid_workloads)}", file=sys.stderr)
+    print(f"  Valid --package values:  {', '.join(valid_packages)}", file=sys.stderr)
+    print(f"  Valid --status values:   {', '.join(valid_statuses)}", file=sys.stderr)
 
 
 def _check_slot_ready(namespace: str) -> tuple[bool, list[str]]:
@@ -1141,8 +1179,10 @@ Examples:
                            help="Skip vLLM and EPP log files, collect only traces")
 
     status_p = sub.add_parser("status", help="Show progress of all (workload, package) pairs")
-    status_p.add_argument("--workload", metavar="NAME", help="Filter by workload name")
-    status_p.add_argument("--package",  metavar="NAME", help="Filter by package name")
+    status_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key (wl- prefix optional)")
+    status_p.add_argument("--workload", metavar="NAME",  help="Scope to pairs matching this workload")
+    status_p.add_argument("--package",  metavar="NAME",  help="Scope to pairs matching this package")
+    status_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status (e.g. running, done, failed)")
 
     run_p = sub.add_parser("run", help="Orchestrate parallel pool execution")
     run_p.add_argument("--skip-build-epp", action="store_true", dest="skip_build_epp",
