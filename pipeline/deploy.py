@@ -157,7 +157,16 @@ def _cmd_status(args, progress_path: Path) -> None:
     progress = store.load()
 
     if not progress:
-        print("  0 pairs" + (" (no progress file)" if not progress_path.exists() else ""))
+        suffix = " (no progress file)" if not progress_path.exists() else ""
+        filters_given = any([
+            getattr(args, "only", None) is not None,
+            getattr(args, "workload", None) is not None,
+            getattr(args, "package", None) is not None,
+            getattr(args, "status", None) is not None,
+        ])
+        if filters_given:
+            suffix += " — filters ignored"
+        print(f"  0 pairs{suffix}")
         return
 
     pairs = {k: progress[k] for k in _resolve_scope(progress, args)}
@@ -663,36 +672,36 @@ def _resolve_scope(progress: dict, args) -> set:
 
 
 def _report_filter_mismatch(progress: dict, args) -> None:
-    """Print valid values for each active filter flag."""
+    """Print all valid filter values to help the user correct their filter flags."""
     only = getattr(args, "only", None)
     workload = getattr(args, "workload", None)
     package = getattr(args, "package", None)
     status_filter = getattr(args, "status", None)
 
     parts = []
-    if only:
+    if only is not None:
         parts.append(f"--only '{only}'")
-    if workload:
+    if workload is not None:
         parts.append(f"--workload '{workload}'")
-    if package:
+    if package is not None:
         parts.append(f"--package '{package}'")
-    if status_filter:
+    if status_filter is not None:
         parts.append(f"--status '{status_filter}'")
 
-    print(f"No pairs matched {', '.join(parts)}.\n")
+    err(f"No pairs matched {', '.join(parts)}.\n")
 
     keys = sorted(progress.keys())
-    print(f"  Valid pair keys ({len(keys)}):")
+    print(f"  Valid pair keys ({len(keys)}):", file=sys.stderr)
     for k in keys:
-        print(f"    {k}")
+        print(f"    {k}", file=sys.stderr)
 
     valid_workloads = sorted({v.get("workload", "") for v in progress.values()} - {""})
     valid_packages = sorted({v.get("package", "") for v in progress.values()} - {""})
     valid_statuses = sorted({v.get("status", "") for v in progress.values()} - {""})
 
-    print(f"\n  Valid --workload values: {', '.join(valid_workloads)}")
-    print(f"  Valid --package values:  {', '.join(valid_packages)}")
-    print(f"  Valid --status values:   {', '.join(valid_statuses)}")
+    print(f"\n  Valid --workload values: {', '.join(valid_workloads)}", file=sys.stderr)
+    print(f"  Valid --package values:  {', '.join(valid_packages)}", file=sys.stderr)
+    print(f"  Valid --status values:   {', '.join(valid_statuses)}", file=sys.stderr)
 
 
 def _check_slot_ready(namespace: str) -> tuple[bool, list[str]]:
@@ -1128,9 +1137,9 @@ Examples:
 
     status_p = sub.add_parser("status", help="Show progress of all (workload, package) pairs")
     status_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key (wl- prefix optional)")
-    status_p.add_argument("--workload", metavar="NAME",  help="Filter by workload name")
-    status_p.add_argument("--package",  metavar="NAME",  help="Filter by package name")
-    status_p.add_argument("--status",   metavar="STATE", help="Filter by status (e.g. running, done, failed)")
+    status_p.add_argument("--workload", metavar="NAME",  help="Scope to pairs matching this workload")
+    status_p.add_argument("--package",  metavar="NAME",  help="Scope to pairs matching this package")
+    status_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status (e.g. running, done, failed)")
 
     run_p = sub.add_parser("run", help="Orchestrate parallel pool execution")
     run_p.add_argument("--skip-build-epp", action="store_true", dest="skip_build_epp",
