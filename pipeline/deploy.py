@@ -648,6 +648,24 @@ def _apply_run_filters(progress: dict, args) -> set:
     return candidates
 
 
+def _resolve_scope(progress: dict, args) -> set:
+    """Apply filter args and return the set of pair keys in scope.
+
+    No flags → all pairs. Flags + match → narrowed set. Flags + no match → abort.
+    """
+    filters_given = any([
+        getattr(args, "only", None) is not None,
+        getattr(args, "workload", None) is not None,
+        getattr(args, "package", None) is not None,
+        getattr(args, "status", None) is not None,
+    ])
+    filtered = _apply_run_filters(progress, args)
+    if filters_given and not filtered:
+        err("No pairs matched the specified filter — aborting")
+        sys.exit(1)
+    return filtered or set(progress.keys())
+
+
 def _check_slot_ready(namespace: str) -> tuple[bool, list[str]]:
     """Check that a namespace slot is ready to accept a new PipelineRun.
 
@@ -804,18 +822,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 "retries":  0,
             }
 
-    # Compute scope: no flags → all pairs; flags + match → narrowed; flags + no match → abort.
-    filters_given = any([
-        getattr(args, "only", None) is not None,
-        getattr(args, "workload", None) is not None,
-        getattr(args, "package", None) is not None,
-        getattr(args, "status", None) is not None,
-    ])
-    _filtered = _apply_run_filters(progress, args)
-    if filters_given and not _filtered:
-        err("No pairs matched the specified filter — aborting")
-        sys.exit(1)
-    _scope = _filtered or set(progress.keys())
+    _scope = _resolve_scope(progress, args)
     if len(_scope) < len(progress):
         info(f"Scope: {len(_scope)}/{len(progress)} pairs")
 
@@ -1023,18 +1030,7 @@ def _cmd_cleanup(args, progress_path: Path, discovered: dict,
         info("No progress data found — nothing to clean up")
         return
 
-    # Determine scope
-    filters_given = any([
-        getattr(args, "only", None) is not None,
-        getattr(args, "workload", None) is not None,
-        getattr(args, "package", None) is not None,
-        getattr(args, "status", None) is not None,
-    ])
-    _filtered = _apply_run_filters(progress, args)
-    if filters_given and not _filtered:
-        err("No pairs matched the specified filter — aborting")
-        sys.exit(1)
-    _scope = _filtered or set(progress.keys())
+    _scope = _resolve_scope(progress, args)
 
     # Exclude pending (nothing to clean)
     actionable = {k for k in _scope
