@@ -450,3 +450,20 @@ def test_force_reset_continues_on_exception(monkeypatch):
     assert n == 1  # only wl-b succeeded
     assert progress["wl-a-baseline"]["status"] == "failed"  # unchanged
     assert progress["wl-b-baseline"]["status"] == "pending"
+
+
+def test_cmd_cleanup_aborts_on_filter_mismatch(tmp_path, monkeypatch, capsys):
+    """cleanup exits with error when --only doesn't match any pair."""
+    import pipeline.deploy as mod
+
+    progress_path = tmp_path / "progress.json"
+    progress_path.write_text(json.dumps(_PROGRESS))
+
+    class _Args:
+        only = "nonexistent"; workload = None; package = None; status = None; dry_run = False
+
+    with __import__("pytest").raises(SystemExit) as exc_info:
+        mod._cmd_cleanup(_Args(), progress_path, _DISCOVERED)
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "No pairs matched" in captured.out + captured.err

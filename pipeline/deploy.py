@@ -630,6 +630,7 @@ def _apply_run_filters(progress: dict, args) -> set:
             return {only}
         prefixed = "wl-" + only
         if prefixed in progress:
+            info(f"--only: resolved '{only}' → '{prefixed}'")
             return {prefixed}
         return set()
 
@@ -1023,7 +1024,15 @@ def _cmd_cleanup(args, progress_path: Path, discovered: dict,
         return
 
     # Determine scope
+    filters_given = any([
+        getattr(args, "only", None),
+        getattr(args, "workload", None),
+        getattr(args, "package", None),
+    ])
     _filtered = _apply_run_filters(progress, args)
+    if filters_given and not _filtered:
+        err("No pairs matched the specified filter — aborting")
+        sys.exit(1)
     _scope = _filtered or set(progress.keys())
 
     # Exclude pending (nothing to clean)
@@ -1098,7 +1107,7 @@ Examples:
     run_p = sub.add_parser("run", help="Orchestrate parallel pool execution")
     run_p.add_argument("--skip-build-epp", action="store_true", dest="skip_build_epp",
                        help="Skip EPP image build")
-    run_p.add_argument("--only",         metavar="PAIR",  help="Scope execution to one specific pair key")
+    run_p.add_argument("--only",         metavar="PAIR",  help="Scope execution to one specific pair key (wl- prefix optional)")
     run_p.add_argument("--workload",     metavar="NAME",  help="Scope execution to pairs matching this workload")
     run_p.add_argument("--package",      metavar="NAME",  help="Scope execution to pairs matching this package")
     run_p.add_argument("--status",       metavar="STATE", help="Scope execution to pairs with this status (e.g. failed, timed-out)")
@@ -1114,7 +1123,7 @@ Examples:
                        help="Fallback GPU cost per pair when not derivable from scenario [1]")
 
     cleanup_p = sub.add_parser("cleanup", help="Tear down cluster resources for all non-pending pairs")
-    cleanup_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key")
+    cleanup_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key (wl- prefix optional)")
     cleanup_p.add_argument("--workload", metavar="NAME",  help="Scope to pairs matching this workload")
     cleanup_p.add_argument("--package",  metavar="NAME",  help="Scope to pairs matching this package")
     cleanup_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status")

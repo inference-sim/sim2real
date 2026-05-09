@@ -143,7 +143,7 @@ python pipeline/deploy.py cleanup [flags]   # tear down cluster resources for fa
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--only PAIR` | — | Scope execution to one specific pair key |
+| `--only PAIR` | — | Scope execution to one specific pair key (`wl-` prefix optional) |
 | `--workload NAME` | — | Scope execution to pairs matching this workload |
 | `--package NAME` | — | Scope execution to pairs matching this package |
 | `--status STATE` | — | Scope execution to pairs with this status (e.g. `failed`, `timed-out`) |
@@ -166,7 +166,7 @@ python pipeline/deploy.py cleanup [flags]   # tear down cluster resources for fa
 
 | Flag | Description |
 |------|-------------|
-| `--only PAIR` | Scope cleanup to one specific pair key |
+| `--only PAIR` | Scope cleanup to one specific pair key (`wl-` prefix optional) |
 | `--workload NAME` | Scope cleanup to pairs matching this workload |
 | `--package NAME` | Scope cleanup to pairs matching this package |
 | `--status STATE` | Scope cleanup to pairs with this status |
