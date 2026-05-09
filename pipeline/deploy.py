@@ -746,6 +746,31 @@ def _do_collect(pair_key: str, entry: dict, run_dir: Path, store, progress: dict
     return ok
 
 
+def _capacity_limited_pairs(
+    pending: list[str],
+    progress: dict,
+    *,
+    free_gpus: int,
+    default_gpu_cost: int,
+) -> list[str]:
+    """Select pending pairs that fit within available GPU capacity.
+
+    Sorts by gpu_cost ascending to maximize dispatch count.
+    """
+    sorted_pending = sorted(
+        pending,
+        key=lambda k: progress[k].get("gpu_cost", default_gpu_cost),
+    )
+    result = []
+    budget = free_gpus
+    for pair in sorted_pending:
+        cost = progress[pair].get("gpu_cost", default_gpu_cost)
+        if budget >= cost:
+            budget -= cost
+            result.append(pair)
+    return result
+
+
 def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     """Orchestrate parallel pool execution across namespace slots."""
     import datetime as _dt
@@ -820,6 +845,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 "status":   "pending",
                 "namespace": None,
                 "retries":  0,
+                "gpu_cost": pair_gpu_cost,
             }
 
     _scope = _resolve_scope(progress, args)
@@ -941,9 +967,41 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                     except ValueError:
                         pass
 
+        # ── Capacity probe ───────────────────────────────────────────────
+        capacity = probe_free_gpus(gpu_resource_type=gpu_resource_type)
+        if isinstance(capacity, tuple):
+            free_gpus, allocatable, requested = capacity
+            info(f"Capacity: {free_gpus} free GPUs ({allocatable} allocatable − {requested} requested)")
+            if _probe_fail_count > 0:
+                info(f"Capacity probe recovered after {_probe_fail_count} failure(s)")
+            _probe_fail_count = 0
+            _last_probe_error = ""
+        else:
+            free_gpus = None
+            _probe_fail_count += 1
+            if capacity != _last_probe_error or _probe_fail_count % 10 == 0:
+                warn(f"Capacity probe failed: {capacity} — dispatching without GPU gating")
+            _last_probe_error = capacity
+
         # ── Assign pending work to free slots ────────────────────────────
         free_slots = [ns for ns in namespaces if ns not in slots_busy]
-        for ns, pair_key in zip(free_slots, _pending_pairs()):
+        pending = _pending_pairs()
+        if free_gpus is not None and pending:
+            dispatchable = _capacity_limited_pairs(
+                pending, progress,
+                free_gpus=free_gpus, default_gpu_cost=pair_gpu_cost,
+            )
+            if len(dispatchable) == 0 and pending:
+                smallest = min(progress[k].get("gpu_cost", pair_gpu_cost) for k in pending)
+                warn(f"Dispatching 0/{len(pending)} pending pairs — smallest cost ({smallest}) exceeds free GPUs ({free_gpus})")
+            elif len(dispatchable) < len(pending):
+                info(f"Dispatching {len(dispatchable)}/{len(pending)} pending pairs (capacity-limited: {free_gpus} free GPUs)")
+            elif len(free_slots) < len(dispatchable):
+                info(f"Dispatching {len(free_slots)}/{len(pending)} pending pairs (slot-limited)")
+        else:
+            dispatchable = pending
+
+        for ns, pair_key in zip(free_slots, dispatchable):
             ready, reasons = _check_slot_ready(ns)
             if not ready:
                 warn(f"Slot {ns} not ready: {'; '.join(reasons)}")
@@ -989,21 +1047,6 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             slots_busy[ns] = pair_key
             store.save(progress)
             ok(f"[{pair_key}] → {ns} ({pr_name})")
-
-        # ── Capacity probe ───────────────────────────────────────────────
-        capacity = probe_free_gpus(gpu_resource_type=gpu_resource_type)
-        if isinstance(capacity, tuple):
-            free, allocatable, requested = capacity
-            info(f"Capacity: {free} free GPUs ({allocatable} allocatable − {requested} requested)")
-            if _probe_fail_count > 0:
-                info(f"Capacity probe recovered after {_probe_fail_count} failure(s)")
-            _probe_fail_count = 0
-            _last_probe_error = ""
-        else:
-            _probe_fail_count += 1
-            if capacity != _last_probe_error or _probe_fail_count % 10 == 0:
-                warn(f"Capacity probe failed: {capacity}")
-            _last_probe_error = capacity
 
         if _work_remaining() or slots_busy:
             time.sleep(poll_interval)
