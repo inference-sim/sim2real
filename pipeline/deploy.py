@@ -820,6 +820,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 "status":   "pending",
                 "namespace": None,
                 "retries":  0,
+                "gpu_cost": pair_gpu_cost,
             }
 
     _scope = _resolve_scope(progress, args)

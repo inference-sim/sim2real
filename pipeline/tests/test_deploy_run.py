@@ -406,3 +406,74 @@ def test_force_reset_clears_retries(monkeypatch):
     }
     _force_reset(progress, {"wl-a-baseline"})
     assert progress["wl-a-baseline"]["retries"] == 0
+
+
+# ── Capacity-gated dispatch (issue #64) ──────────────────────────────────────
+
+
+def test_init_progress_stores_gpu_cost(tmp_path):
+    """New progress entries include gpu_cost field."""
+    import yaml as _yaml
+    from pipeline.deploy import _load_pairs
+
+    cluster_dir = tmp_path / "cluster"
+    cluster_dir.mkdir()
+
+    pr = {
+        "metadata": {"name": "baseline-smoke-run1", "namespace": "ns"},
+        "spec": {"params": [
+            {"name": "workloadName", "value": "wl-smoke"},
+            {"name": "phase", "value": "baseline"},
+        ]},
+    }
+    (cluster_dir / "pipelinerun-smoke-baseline.yaml").write_text(_yaml.dump(pr))
+
+    discovered = _load_pairs(cluster_dir)
+    # Simulate progress initialization with gpu_cost
+    pair_gpu_cost = 8
+    progress = {}
+    for key, meta in discovered.items():
+        if key not in progress:
+            progress[key] = {
+                "workload": meta["workload"],
+                "package":  meta["package"],
+                "status":   "pending",
+                "namespace": None,
+                "retries":  0,
+                "gpu_cost": pair_gpu_cost,
+            }
+    assert "gpu_cost" in progress["wl-smoke-baseline"]
+    assert progress["wl-smoke-baseline"]["gpu_cost"] == 8
+
+
+def test_init_progress_gpu_cost_uses_fallback(tmp_path):
+    """When using default cost, gpu_cost stores that value."""
+    import yaml as _yaml
+    from pipeline.deploy import _load_pairs
+
+    cluster_dir = tmp_path / "cluster"
+    cluster_dir.mkdir()
+
+    pr = {
+        "metadata": {"name": "baseline-smoke-run1", "namespace": "ns"},
+        "spec": {"params": [
+            {"name": "workloadName", "value": "wl-smoke"},
+            {"name": "phase", "value": "baseline"},
+        ]},
+    }
+    (cluster_dir / "pipelinerun-smoke-baseline.yaml").write_text(_yaml.dump(pr))
+
+    discovered = _load_pairs(cluster_dir)
+    default_cost = 1  # --default-gpu-cost fallback
+    progress = {}
+    for key, meta in discovered.items():
+        if key not in progress:
+            progress[key] = {
+                "workload": meta["workload"],
+                "package":  meta["package"],
+                "status":   "pending",
+                "namespace": None,
+                "retries":  0,
+                "gpu_cost": default_cost,
+            }
+    assert progress["wl-smoke-baseline"]["gpu_cost"] == 1
