@@ -623,11 +623,20 @@ def step_tekton(cfg: SetupConfig) -> None:
 
     # Deploy Pipeline YAML
     pipeline_path = Path(cfg.pipeline_yaml) if cfg.pipeline_yaml else REPO_ROOT / "pipeline" / "pipeline.yaml"
-    if pipeline_path.exists():
-        run(["kubectl", "apply", "-f", str(pipeline_path), f"-n={cfg.namespace}"])
-        ok(f"Pipeline applied from {pipeline_path}")
+    if not pipeline_path.exists():
+        if cfg.pipeline_yaml:
+            warn(f"Custom pipeline YAML not found at {pipeline_path} — skipping")
+        else:
+            err(f"Pipeline YAML not found at {pipeline_path}")
+            sys.exit(1)
     else:
-        warn(f"Pipeline YAML not found at {pipeline_path} — skipping")
+        r = run(["kubectl", "apply", "-f", str(pipeline_path), f"-n={cfg.namespace}"],
+                check=False, capture=True)
+        if r.returncode == 0:
+            ok(f"Pipeline applied from {pipeline_path}")
+        else:
+            err(f"Failed to apply Pipeline to {cfg.namespace}: {r.stderr.strip()}")
+            sys.exit(1)
 
 # ── Step 8: Config Output ────────────────────────────────────────────
 
@@ -716,11 +725,20 @@ def main() -> int:
         ok("Tekton steps and tasks redeployed")
         # Also redeploy Pipeline YAML
         pipeline_path = Path(args.pipeline_yaml) if args.pipeline_yaml else REPO_ROOT / "pipeline" / "pipeline.yaml"
-        if pipeline_path.exists():
-            run(["kubectl", "apply", "-f", str(pipeline_path), f"-n={args.namespace}"])
-            ok(f"Pipeline redeployed from {pipeline_path}")
+        if not pipeline_path.exists():
+            if args.pipeline_yaml:
+                warn(f"Custom pipeline YAML not found at {pipeline_path} — skipping")
+            else:
+                err(f"Pipeline YAML not found at {pipeline_path}")
+                return 1
         else:
-            warn(f"Pipeline YAML not found at {pipeline_path} — skipping")
+            r = run(["kubectl", "apply", "-f", str(pipeline_path), f"-n={args.namespace}"],
+                    check=False, capture=True)
+            if r.returncode == 0:
+                ok(f"Pipeline redeployed from {pipeline_path}")
+            else:
+                err(f"Failed to apply Pipeline: {r.stderr.strip()}")
+                return 1
         return 0
 
     # 8-step flow

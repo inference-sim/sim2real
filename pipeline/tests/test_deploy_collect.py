@@ -166,3 +166,86 @@ def test_collect_custom_package_in_progress(tmp_path):
         deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
 
     assert collected_phases == ["canary"]
+
+
+def test_collect_corrupt_progress_warns_and_falls_back(tmp_path):
+    """Corrupt progress.json warns with correct message and falls back."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "progress.json").write_text("{invalid json")
+
+    class Args:
+        package = None
+        skip_logs = False
+
+    collected_phases = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        collected_phases.extend(phases)
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
+         patch.object(deploy, "warn") as mock_warn:
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert collected_phases == ["baseline", "treatment"]
+    warnings = [str(c) for c in mock_warn.call_args_list]
+    assert any("Corrupt" in w for w in warnings)
+
+
+def test_collect_only_done_collecting_phases(tmp_path):
+    """Only phases with status done or collecting are included."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    _write_progress(run_dir, {
+        "wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "done"},
+        "wl-a-treatment": {"workload": "wl-a", "package": "treatment", "status": "pending"},
+        "wl-a-canary": {"workload": "wl-a", "package": "canary", "status": "collecting"},
+    })
+
+    class Args:
+        package = None
+        skip_logs = False
+
+    collected_phases = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        collected_phases.extend(phases)
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    # treatment is pending — excluded; baseline (done) and canary (collecting) included
+    assert sorted(collected_phases) == ["baseline", "canary"]
+
+
+def test_collect_missing_package_key_skipped(tmp_path):
+    """Progress entries without a 'package' key are gracefully skipped."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    _write_progress(run_dir, {
+        "wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "done"},
+        "wl-b-broken": {"workload": "wl-b", "status": "done"},
+    })
+
+    class Args:
+        package = None
+        skip_logs = False
+
+    collected_phases = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        collected_phases.extend(phases)
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert collected_phases == ["baseline"]

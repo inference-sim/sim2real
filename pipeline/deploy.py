@@ -397,17 +397,30 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
     if progress_path.exists():
         try:
             progress = json.loads(progress_path.read_text())
-            known_phases = sorted({
-                entry.get("package", "")
-                for entry in progress.values()
-            } - {""})
-        except (json.JSONDecodeError, AttributeError):
-            known_phases = []
+        except json.JSONDecodeError:
+            warn(f"Corrupt progress.json at {progress_path} — falling back to default phases")
+            progress = None
+        else:
+            if not isinstance(progress, dict):
+                warn("progress.json is not a JSON object — falling back to default phases")
+                progress = None
+    else:
+        progress = None
+
+    if progress:
+        known_phases = sorted({
+            entry.get("package", "")
+            for entry in progress.values()
+            if isinstance(entry, dict) and entry.get("status") in ("done", "collecting")
+        } - {""})
     else:
         known_phases = []
 
     if not known_phases:
-        warn("No progress.json found; falling back to default phases.")
+        if progress is None and not progress_path.exists():
+            warn("No progress.json found — falling back to default phases [baseline, treatment]")
+        elif progress is not None:
+            warn("No done/collecting phases in progress — falling back to default phases [baseline, treatment]")
         known_phases = list(DATA_PHASES)
 
     if args.package:

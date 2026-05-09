@@ -28,7 +28,7 @@ The experiment repo must contain:
 - `algorithm/` and `workloads/` directories as referenced in `transfer.yaml`
 - `workspace/` in `.gitignore`
 
-`pipeline/pipeline.yaml` is the static Tekton Pipeline definition (applied by `deploy.py run`; Phase 4 generates PipelineRuns that reference it).
+`pipeline/pipeline.yaml` is the static Tekton Pipeline definition (applied by `setup.py`; Phase 4 generates PipelineRuns that reference it).
 
 ---
 
@@ -51,13 +51,16 @@ python pipeline/setup.py [flags]
 | `--registry-token TOKEN` | `REGISTRY_TOKEN` | interactive |
 | `--run NAME` | — | `sim2real-YYYY-MM-DD` |
 | `--no-cluster` | — | false |
+| `--pipeline-yaml PATH` | — | `pipeline/pipeline.yaml` |
 | `--redeploy-tasks` | — | false |
 
 **`--namespaces NS1,NS2,...`** — provision multiple namespace slots for parallel pool execution. Each slot is bootstrapped identically to a single `--namespace`.
 
 **`--no-cluster`** — generates `setup_config.json` without touching the cluster; useful when cluster access comes later.
 
-**`--redeploy-tasks`** — fast path to re-apply Tekton step/task YAMLs only (requires `--namespace`).
+**`--pipeline-yaml PATH`** — override the default Pipeline YAML definition (`pipeline/pipeline.yaml`). Stored in `setup_config.json`.
+
+**`--redeploy-tasks`** — fast path to re-apply Tekton step/task YAMLs and Pipeline definition (requires `--namespace`).
 
 Writes `workspace/setup_config.json` and `workspace/runs/<run>/run_metadata.json`. Subsequent scripts read namespace, registry, and run name from `setup_config.json`.
 
@@ -107,7 +110,7 @@ Phase state is tracked per-run in `workspace/runs/<run>/.state.json`. Delete it 
 
 ## deploy.py
 
-Builds the EPP image, applies Tekton resources, and orchestrates PipelineRun execution across namespace slots.
+Builds the EPP image and orchestrates PipelineRun execution across namespace slots. Operates independently of `transfer.yaml` — driven by workspace files and `setup_config.json`.
 
 ```bash
 python pipeline/deploy.py {run|status|collect|cleanup} [flags]
@@ -123,7 +126,7 @@ Common flags (all subcommands):
 
 **Pair discovery** — `deploy.py run` discovers `pipelinerun-*.yaml` files at the `cluster/` root. Each file's pair key is derived as `wl-` + filename stem minus the `pipelinerun-` prefix.
 
-**Collection phases** — `deploy.py collect` operates on fixed phases (`baseline`, `treatment`). Use `--package` to filter: `--package baseline`, `--package treatment`, or `--package experiment` (both).
+**Collection phases** — `deploy.py collect` derives valid phases dynamically from `progress.json` (packages with status `done` or `collecting`). Falls back to `[baseline, treatment]` when no progress exists. Use `--package` to filter, or `--package experiment` to collect all known phases.
 
 **`--skip-build-epp`** — skips the image build; use when resubmitting after a failed PipelineRun without changing the scorer.
 

@@ -1,6 +1,6 @@
 """Tests for setup.py Pipeline YAML application in step_tekton."""
 import json
-from unittest.mock import patch, call
+from unittest.mock import patch
 
 
 def _make_config(**overrides):
@@ -34,18 +34,17 @@ class TestStepTektonPipelineApply:
         from pipeline.setup import step_tekton, REPO_ROOT
 
         cfg = _make_config()
-        # Mock the kubectl pods check to succeed
         mock_run.return_value.returncode = 0
         mock_run.return_value.stdout = "pod Running"
+        mock_run.return_value.stderr = ""
 
         step_tekton(cfg)
 
-        # Find the call that applies the pipeline YAML
+        # Find the call that applies the pipeline YAML (with check=False, capture=True)
         default_pipeline_path = REPO_ROOT / "pipeline" / "pipeline.yaml"
-        pipeline_apply_call = call(
-            ["kubectl", "apply", "-f", str(default_pipeline_path), "-n=test-ns"]
-        )
-        assert pipeline_apply_call in mock_run.call_args_list
+        pipeline_calls = [c for c in mock_run.call_args_list
+                          if str(default_pipeline_path) in str(c) and "apply" in str(c)]
+        assert len(pipeline_calls) == 1
 
     @patch("pipeline.setup.run")
     def test_applies_custom_pipeline_yaml(self, mock_run, tmp_path):
@@ -58,13 +57,13 @@ class TestStepTektonPipelineApply:
 
         mock_run.return_value.returncode = 0
         mock_run.return_value.stdout = "pod Running"
+        mock_run.return_value.stderr = ""
 
         step_tekton(cfg)
 
-        pipeline_apply_call = call(
-            ["kubectl", "apply", "-f", custom_path, "-n=test-ns"]
-        )
-        assert pipeline_apply_call in mock_run.call_args_list
+        pipeline_calls = [c for c in mock_run.call_args_list
+                          if custom_path in str(c) and "apply" in str(c)]
+        assert len(pipeline_calls) == 1
 
     @patch("pipeline.setup.run")
     def test_skipped_when_no_cluster(self, mock_run):
@@ -78,8 +77,8 @@ class TestStepTektonPipelineApply:
         mock_run.assert_not_called()
 
     @patch("pipeline.setup.run")
-    def test_warns_if_pipeline_yaml_missing(self, mock_run, tmp_path, capsys):
-        """step_tekton warns (not errors) if pipeline YAML doesn't exist on disk."""
+    def test_warns_if_custom_pipeline_yaml_missing(self, mock_run, tmp_path, capsys):
+        """step_tekton warns (not errors) if custom pipeline YAML doesn't exist."""
         from pipeline.setup import step_tekton
 
         nonexistent = str(tmp_path / "does-not-exist.yaml")
@@ -88,11 +87,57 @@ class TestStepTektonPipelineApply:
         mock_run.return_value.returncode = 0
         mock_run.return_value.stdout = "pod Running"
 
-        # Should not raise
+        # Should not raise — custom path warns
         step_tekton(cfg)
 
         captured = capsys.readouterr()
         assert "not found" in captured.out.lower() or "WARN" in captured.out
+
+    @patch("pipeline.setup.run")
+    @patch("pipeline.setup.REPO_ROOT")
+    def test_fatal_if_default_pipeline_yaml_missing(self, mock_root, mock_run, tmp_path):
+        """step_tekton exits fatally if default pipeline/pipeline.yaml is missing."""
+        from pipeline.setup import step_tekton
+
+        # Point REPO_ROOT to a dir without pipeline/pipeline.yaml
+        mock_root.__truediv__ = lambda self, other: tmp_path / other
+        cfg = _make_config(pipeline_yaml=None)
+
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = "pod Running"
+
+        import pytest
+        with patch("pipeline.setup.REPO_ROOT", tmp_path):
+            with pytest.raises(SystemExit):
+                step_tekton(cfg)
+
+    @patch("pipeline.setup.run")
+    def test_kubectl_apply_failure_exits(self, mock_run, tmp_path):
+        """step_tekton exits if kubectl apply for Pipeline fails."""
+        import pytest
+        from pipeline.setup import step_tekton, REPO_ROOT
+
+        cfg = _make_config()
+
+        def side_effect(cmd, *, check=True, capture=False, input=None):
+            class R:
+                returncode = 0
+                stdout = "pod Running"
+                stderr = ""
+            r = R()
+            # Fail the Pipeline apply
+            if "pipeline.yaml" in str(cmd):
+                r.returncode = 1
+                r.stderr = "error: RBAC denied"
+            return r
+
+        mock_run.side_effect = side_effect
+
+        # Only if the pipeline file exists
+        pipeline_path = REPO_ROOT / "pipeline" / "pipeline.yaml"
+        if pipeline_path.exists():
+            with pytest.raises(SystemExit):
+                step_tekton(cfg)
 
 
 class TestSetupConfigJson:
@@ -159,3 +204,62 @@ class TestBuildParser:
         parser = build_parser()
         args = parser.parse_args([])
         assert args.pipeline_yaml is None
+
+
+class TestRedeployTasksPipeline:
+    """--redeploy-tasks also applies Pipeline YAML."""
+
+    @patch("pipeline.setup.run")
+    def test_redeploy_applies_pipeline(self, mock_run, tmp_path):
+        """--redeploy-tasks applies Pipeline alongside steps/tasks."""
+        from pipeline.setup import main, REPO_ROOT
+
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = ""
+        mock_run.return_value.stderr = ""
+
+        pipeline_path = REPO_ROOT / "pipeline" / "pipeline.yaml"
+        if not pipeline_path.exists():
+            return  # skip if repo structure doesn't have the file
+
+        with patch("sys.argv", ["setup.py", "--redeploy-tasks", "--namespace", "test-ns"]):
+            result = main()
+
+        assert result == 0
+        pipeline_calls = [c for c in mock_run.call_args_list
+                          if "pipeline.yaml" in str(c)]
+        assert len(pipeline_calls) >= 1
+
+    @patch("pipeline.setup.run")
+    def test_redeploy_custom_pipeline_missing_warns(self, mock_run, tmp_path, capsys):
+        """--redeploy-tasks with missing custom --pipeline-yaml warns."""
+        from pipeline.setup import main
+
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = ""
+        mock_run.return_value.stderr = ""
+
+        nonexistent = str(tmp_path / "nope.yaml")
+        with patch("sys.argv", ["setup.py", "--redeploy-tasks", "--namespace", "ns",
+                                "--pipeline-yaml", nonexistent]):
+            result = main()
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "not found" in captured.out.lower() or "WARN" in captured.out
+
+    @patch("pipeline.setup.run")
+    def test_redeploy_default_pipeline_missing_errors(self, mock_run, tmp_path):
+        """--redeploy-tasks fails if default pipeline.yaml is missing."""
+        from pipeline.setup import main
+
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = ""
+        mock_run.return_value.stderr = ""
+
+        with patch("pipeline.setup.REPO_ROOT", tmp_path), \
+             patch("pipeline.setup.TEKTONC_DIR", tmp_path), \
+             patch("sys.argv", ["setup.py", "--redeploy-tasks", "--namespace", "ns"]):
+            result = main()
+
+        assert result == 1
