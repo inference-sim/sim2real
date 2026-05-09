@@ -252,6 +252,78 @@ def test_apply_run_filters_only_empty_string():
     assert result == set()
 
 
+def test_resolve_scope_shows_valid_keys_on_only_mismatch(capsys):
+    """--only mismatch prints valid pair keys before aborting."""
+    from pipeline.deploy import _resolve_scope
+
+    class _Args:
+        only = "nonexistent"; workload = None; package = None; status = None
+
+    try:
+        _resolve_scope(dict(_PROGRESS), _Args())
+    except SystemExit:
+        pass
+    out = capsys.readouterr().out
+    assert "No pairs matched" in out
+    assert "wl-smoke-baseline" in out
+    assert "wl-load-treatment" in out
+
+
+def test_resolve_scope_shows_valid_workloads_on_mismatch(capsys):
+    """--workload mismatch prints valid workload values."""
+    from pipeline.deploy import _resolve_scope
+
+    class _Args:
+        only = None; workload = "nonexistent"; package = None; status = None
+
+    try:
+        _resolve_scope(dict(_PROGRESS), _Args())
+    except SystemExit:
+        pass
+    out = capsys.readouterr().out
+    assert "No pairs matched" in out
+    assert "wl-smoke" in out
+    assert "wl-load" in out
+    assert "wl-heavy" in out
+
+
+def test_resolve_scope_shows_valid_packages_on_mismatch(capsys):
+    """--package mismatch prints valid package values."""
+    from pipeline.deploy import _resolve_scope
+
+    class _Args:
+        only = None; workload = None; package = "nonexistent"; status = None
+
+    try:
+        _resolve_scope(dict(_PROGRESS), _Args())
+    except SystemExit:
+        pass
+    out = capsys.readouterr().out
+    assert "No pairs matched" in out
+    assert "baseline" in out
+    assert "treatment" in out
+
+
+def test_resolve_scope_shows_valid_statuses_on_mismatch(capsys):
+    """--status mismatch prints valid status values."""
+    from pipeline.deploy import _resolve_scope
+
+    class _Args:
+        only = None; workload = None; package = None; status = "nonexistent"
+
+    try:
+        _resolve_scope(dict(_PROGRESS), _Args())
+    except SystemExit:
+        pass
+    out = capsys.readouterr().out
+    assert "No pairs matched" in out
+    assert "done" in out
+    assert "running" in out
+    assert "pending" in out
+    assert "failed" in out
+    assert "timed-out" in out
+
+
 # ── _reconcile_collecting (bugs 1+2) ─────────────────────────────────────────
 
 def test_reconcile_collecting_trace_present_marks_done(tmp_path):

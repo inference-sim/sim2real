@@ -651,7 +651,8 @@ def _apply_run_filters(progress: dict, args) -> set:
 def _resolve_scope(progress: dict, args) -> set:
     """Apply filter args and return the set of pair keys in scope.
 
-    No flags → all pairs. Flags + match → narrowed set. Flags + no match → abort.
+    No flags → all pairs. Flags + match → narrowed set. Flags + no match → abort
+    with valid values printed.
     """
     filters_given = any([
         getattr(args, "only", None) is not None,
@@ -661,9 +662,42 @@ def _resolve_scope(progress: dict, args) -> set:
     ])
     filtered = _apply_run_filters(progress, args)
     if filters_given and not filtered:
-        err("No pairs matched the specified filter — aborting")
+        _report_filter_mismatch(progress, args)
         sys.exit(1)
     return filtered or set(progress.keys())
+
+
+def _report_filter_mismatch(progress: dict, args) -> None:
+    """Print valid values for each active filter flag."""
+    only = getattr(args, "only", None)
+    workload = getattr(args, "workload", None)
+    package = getattr(args, "package", None)
+    status_filter = getattr(args, "status", None)
+
+    parts = []
+    if only:
+        parts.append(f"--only '{only}'")
+    if workload:
+        parts.append(f"--workload '{workload}'")
+    if package:
+        parts.append(f"--package '{package}'")
+    if status_filter:
+        parts.append(f"--status '{status_filter}'")
+
+    print(f"No pairs matched {', '.join(parts)}.\n")
+
+    keys = sorted(progress.keys())
+    print(f"  Valid pair keys ({len(keys)}):")
+    for k in keys:
+        print(f"    {k}")
+
+    valid_workloads = sorted({v.get("workload", "") for v in progress.values()} - {""})
+    valid_packages = sorted({v.get("package", "") for v in progress.values()} - {""})
+    valid_statuses = sorted({v.get("status", "") for v in progress.values()} - {""})
+
+    print(f"\n  Valid --workload values: {', '.join(valid_workloads)}")
+    print(f"  Valid --package values:  {', '.join(valid_packages)}")
+    print(f"  Valid --status values:   {', '.join(valid_statuses)}")
 
 
 def _check_slot_ready(namespace: str) -> tuple[bool, list[str]]:
