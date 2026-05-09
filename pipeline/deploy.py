@@ -228,11 +228,13 @@ def _handle_pending_pods(*, pr_name: str, namespace: str, entry: dict,
         check=False, capture=True,
     )
     if result.returncode != 0:
+        warn(f"[{entry.get('workload', '?')}] pod query failed: {(result.stdout or result.stderr or '')[:120]}")
         return False
 
     try:
         pods_json = _json.loads(result.stdout)
     except _json.JSONDecodeError:
+        warn(f"[{entry.get('workload', '?')}] pod query returned invalid JSON: {result.stdout[:120]}")
         return False
 
     category, detail = parse_pod_conditions(pods_json)

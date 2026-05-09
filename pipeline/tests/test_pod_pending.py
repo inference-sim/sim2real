@@ -67,6 +67,15 @@ def test_classify_empty_message():
     assert result == "non_recoverable"
 
 
+def test_classify_unknown_message_defaults_recoverable():
+    """Unrecognized messages default to recoverable (safer: wait vs cancel)."""
+    from pipeline.lib.pod_pending import classify_pending_reason
+    result = classify_pending_reason(
+        "0/3 nodes are available: 3 custom-scheduler-reason."
+    )
+    assert result == "recoverable"
+
+
 def test_parse_pending_pod_recoverable():
     from pipeline.lib.pod_pending import parse_pod_conditions
     pods_json = {

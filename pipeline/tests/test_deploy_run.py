@@ -1012,8 +1012,8 @@ def test_early_reclaim_stalled_at_max_pending_stalls(monkeypatch):
     assert entry["pending_stalls"] == 10
 
 
-def test_early_reclaim_kubectl_failure_returns_false(monkeypatch):
-    """kubectl get pods failure: don't reclaim, let timeout handle it."""
+def test_early_reclaim_kubectl_failure_returns_false(monkeypatch, capsys):
+    """kubectl get pods failure: warn and don't reclaim, let timeout handle it."""
     import pipeline.deploy as mod
 
     entry = {
@@ -1026,6 +1026,7 @@ def test_early_reclaim_kubectl_failure_returns_false(monkeypatch):
         class _R:
             returncode = 1
             stdout = ""
+            stderr = "connection refused"
         return _R()
 
     monkeypatch.setattr(mod, "run", fake_run)
@@ -1040,6 +1041,8 @@ def test_early_reclaim_kubectl_failure_returns_false(monkeypatch):
 
     assert reclaimed is False
     assert entry["status"] == "running"
+    out = capsys.readouterr().out
+    assert "pod query failed" in out
 
 
 def test_early_reclaim_pods_running_clears_pending_since(monkeypatch):

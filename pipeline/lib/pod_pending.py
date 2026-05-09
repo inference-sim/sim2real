@@ -19,6 +19,8 @@ def classify_pending_reason(message: str) -> str:
     """Classify a pod scheduling failure message.
 
     Returns "recoverable" (resource scarcity) or "non_recoverable" (config error).
+    Unrecognized messages default to "recoverable" — a 10-min wait is cheaper
+    than irreversible cancellation of hours of GPU work.
     """
     if not message:
         return "non_recoverable"
@@ -27,7 +29,11 @@ def classify_pending_reason(message: str) -> str:
         if pat.search(message):
             return "recoverable"
 
-    return "non_recoverable"
+    for pat in _NON_RECOVERABLE_PATTERNS:
+        if pat.search(message):
+            return "non_recoverable"
+
+    return "recoverable"
 
 
 def parse_pod_conditions(pods_json: dict) -> tuple[str | None, str]:
