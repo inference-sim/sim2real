@@ -631,7 +631,7 @@ def _apply_run_filters(progress: dict, args) -> set:
             return {only}
         prefixed = "wl-" + only
         if prefixed in progress:
-            print(f"--only: resolved '{only}' → '{prefixed}'", file=sys.stderr)
+            info(f"--only: resolved '{only}' → '{prefixed}'")
             return {prefixed}
         return set()
 
@@ -804,8 +804,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 "retries":  0,
             }
 
-    # Compute scope: pairs this invocation is allowed to dispatch.
-    # No flags → all pairs in scope. Flags narrow scope without resetting state.
+    # Compute scope: no flags → all pairs; flags + match → narrowed; flags + no match → abort.
     filters_given = any([
         getattr(args, "only", None) is not None,
         getattr(args, "workload", None) is not None,

@@ -194,8 +194,7 @@ def test_apply_run_filters_only_flag(capsys):
 
     result = _apply_run_filters(dict(_PROGRESS), _Args())
     assert result == {"wl-smoke-baseline"}
-    captured = capsys.readouterr()
-    assert "resolved" not in captured.err
+    assert "resolved" not in capsys.readouterr().out
 
 
 def test_apply_run_filters_no_flags_returns_empty():
@@ -217,7 +216,7 @@ def test_apply_run_filters_only_without_prefix(capsys):
 
     result = _apply_run_filters(dict(_PROGRESS), _Args())
     assert result == {"wl-smoke-baseline"}
-    assert "resolved" in capsys.readouterr().err
+    assert "resolved" in capsys.readouterr().out
 
 
 def test_apply_run_filters_only_no_match():
@@ -232,7 +231,7 @@ def test_apply_run_filters_only_no_match():
 
 
 def test_apply_run_filters_only_no_double_prefix():
-    """--only wl-nonexistent does not try wl-wl-nonexistent."""
+    """--only wl-nonexistent doesn't false-match via double-prefixing."""
     from pipeline.deploy import _apply_run_filters
 
     class _Args:
