@@ -776,3 +776,36 @@ def test_slot_limited_dispatch(capsys):
     out = capsys.readouterr().out
     assert "slot-limited" in out
     assert "1/3" in out
+
+
+def test_init_progress_includes_pending_stalls():
+    """New progress entries include pending_stalls field initialized to 0."""
+    progress_entry = {
+        "workload": "wl-smoke",
+        "package": "baseline",
+        "status": "pending",
+        "namespace": None,
+        "retries": 0,
+        "gpu_cost": 1,
+        "pending_stalls": 0,
+    }
+    assert "pending_stalls" in progress_entry
+    assert progress_entry["pending_stalls"] == 0
+
+
+def test_run_parser_has_pending_flags():
+    """run subcommand exposes --pending-threshold and --max-pending-stalls."""
+    from pipeline.deploy import build_parser
+    parser = build_parser()
+    args = parser.parse_args(["run", "--pending-threshold", "300", "--max-pending-stalls", "5"])
+    assert args.pending_threshold == 300
+    assert args.max_pending_stalls == 5
+
+
+def test_run_parser_pending_flag_defaults():
+    """--pending-threshold defaults to 600, --max-pending-stalls to 10."""
+    from pipeline.deploy import build_parser
+    parser = build_parser()
+    args = parser.parse_args(["run"])
+    assert args.pending_threshold == 600
+    assert args.max_pending_stalls == 10

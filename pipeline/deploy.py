@@ -884,6 +884,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 "namespace": None,
                 "retries":  0,
                 "gpu_cost": pair_gpu_cost,
+                "pending_stalls": 0,
             }
 
     _scope = _resolve_scope(progress, args)
@@ -1201,6 +1202,10 @@ Examples:
                        help="Override GPU resource name (default: derived from scenario, else nvidia.com/gpu)")
     run_p.add_argument("--default-gpu-cost", type=int, default=1, dest="default_gpu_cost",
                        help="Fallback GPU cost per pair when not derivable from scenario [1]")
+    run_p.add_argument("--pending-threshold", type=int, default=600, dest="pending_threshold",
+                       help="Seconds a pod may remain Pending (recoverable) before early reclaim [600]")
+    run_p.add_argument("--max-pending-stalls", type=int, default=10, dest="max_pending_stalls",
+                       help="Max early reclaims before marking pair stalled [10]")
 
     cleanup_p = sub.add_parser("cleanup", help="Tear down cluster resources for all non-pending pairs")
     cleanup_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key (wl- prefix optional)")
