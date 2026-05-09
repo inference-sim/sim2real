@@ -477,3 +477,80 @@ def test_init_progress_gpu_cost_uses_fallback(tmp_path):
                 "gpu_cost": default_cost,
             }
     assert progress["wl-smoke-baseline"]["gpu_cost"] == 1
+
+
+def test_capacity_gated_dispatch_limits_pairs():
+    """When free GPUs < total pending cost, only a subset is dispatched."""
+    from pipeline.deploy import _capacity_limited_pairs
+
+    progress = {
+        "wl-a-baseline":   {"status": "pending", "gpu_cost": 8},
+        "wl-b-baseline":   {"status": "pending", "gpu_cost": 4},
+        "wl-c-baseline":   {"status": "pending", "gpu_cost": 4},
+        "wl-d-baseline":   {"status": "pending", "gpu_cost": 8},
+    }
+    pending = ["wl-a-baseline", "wl-b-baseline", "wl-c-baseline", "wl-d-baseline"]
+
+    # sorted: b(4), c(4), a(8), d(8). budget=12: b→8, c→4, 4>=8? No. So only b and c fit.
+    result = _capacity_limited_pairs(pending, progress, free_gpus=12, default_gpu_cost=1)
+    assert result == ["wl-b-baseline", "wl-c-baseline"]
+
+
+def test_capacity_gated_dispatch_all_fit():
+    """When free GPUs >= total pending cost, all pairs are returned."""
+    from pipeline.deploy import _capacity_limited_pairs
+
+    progress = {
+        "wl-a-baseline":   {"status": "pending", "gpu_cost": 4},
+        "wl-b-baseline":   {"status": "pending", "gpu_cost": 4},
+    }
+    pending = ["wl-a-baseline", "wl-b-baseline"]
+
+    result = _capacity_limited_pairs(pending, progress, free_gpus=16, default_gpu_cost=1)
+    # sorted by cost (both 4), stable sort preserves order
+    assert set(result) == {"wl-a-baseline", "wl-b-baseline"}
+    assert len(result) == 2
+
+
+def test_capacity_gated_dispatch_sorts_ascending():
+    """Pairs are sorted by gpu_cost ascending to maximize dispatch count."""
+    from pipeline.deploy import _capacity_limited_pairs
+
+    progress = {
+        "wl-big-baseline":   {"status": "pending", "gpu_cost": 8},
+        "wl-small-baseline": {"status": "pending", "gpu_cost": 2},
+        "wl-mid-baseline":   {"status": "pending", "gpu_cost": 4},
+    }
+    pending = ["wl-big-baseline", "wl-small-baseline", "wl-mid-baseline"]
+
+    # Budget 10: sorted → small(2), mid(4), big(8). 2+4=6<=10, 6+8=14>10. So small+mid.
+    result = _capacity_limited_pairs(pending, progress, free_gpus=10, default_gpu_cost=1)
+    assert result == ["wl-small-baseline", "wl-mid-baseline"]
+
+
+def test_capacity_gated_dispatch_uses_default_cost_for_legacy_entries():
+    """Entries without gpu_cost field use the default_gpu_cost fallback."""
+    from pipeline.deploy import _capacity_limited_pairs
+
+    progress = {
+        "wl-old-baseline": {"status": "pending"},  # no gpu_cost field
+        "wl-new-baseline": {"status": "pending", "gpu_cost": 4},
+    }
+    pending = ["wl-old-baseline", "wl-new-baseline"]
+
+    # default_gpu_cost=2: sorted → old(2), new(4). budget=5: 2+4=6>5. Only old fits.
+    result = _capacity_limited_pairs(pending, progress, free_gpus=5, default_gpu_cost=2)
+    assert result == ["wl-old-baseline"]
+
+
+def test_capacity_gated_dispatch_zero_budget():
+    """Zero free GPUs means nothing is dispatched."""
+    from pipeline.deploy import _capacity_limited_pairs
+
+    progress = {
+        "wl-a-baseline": {"status": "pending", "gpu_cost": 4},
+    }
+    pending = ["wl-a-baseline"]
+
+    result = _capacity_limited_pairs(pending, progress, free_gpus=0, default_gpu_cost=1)
+    assert result == []

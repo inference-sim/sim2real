@@ -746,6 +746,31 @@ def _do_collect(pair_key: str, entry: dict, run_dir: Path, store, progress: dict
     return ok
 
 
+def _capacity_limited_pairs(
+    pending: list[str],
+    progress: dict,
+    *,
+    free_gpus: int,
+    default_gpu_cost: int,
+) -> list[str]:
+    """Select pending pairs that fit within available GPU capacity.
+
+    Sorts by gpu_cost ascending to maximize dispatch count (greedy bin-packing).
+    """
+    sorted_pending = sorted(
+        pending,
+        key=lambda k: progress[k].get("gpu_cost", default_gpu_cost),
+    )
+    result = []
+    budget = free_gpus
+    for pair in sorted_pending:
+        cost = progress[pair].get("gpu_cost", default_gpu_cost)
+        if budget >= cost:
+            budget -= cost
+            result.append(pair)
+    return result
+
+
 def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     """Orchestrate parallel pool execution across namespace slots."""
     import datetime as _dt
