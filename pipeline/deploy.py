@@ -2,7 +2,7 @@
 """sim2real deploy — Build EPP, orchestrate runs, collect results.
 
 Subcommands:
-  run      Build EPP image, apply Pipeline, submit PipelineRuns
+  run      Build EPP image, submit PipelineRuns
   status   Show progress of all (workload, package) pairs
   collect  Pull results from cluster for completed phases
   cleanup  Tear down cluster resources for all non-pending pairs
@@ -23,7 +23,6 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from pipeline.lib.manifest import load_manifest, ManifestError
 
 # ── Repo layout ──────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -31,13 +30,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # Overridden in main() when --experiment-root is specified.
 EXPERIMENT_ROOT = REPO_ROOT
 
-
-def _resolve_manifest_default_d(experiment_root: Path) -> Path:
-    """Resolve default manifest path: transfer.yaml first, then config/transfer.yaml."""
-    direct = experiment_root / "transfer.yaml"
-    if direct.exists():
-        return direct
-    return experiment_root / "config" / "transfer.yaml"
 
 # ── Color helpers ────────────────────────────────────────────────────────────
 _tty = sys.stdout.isatty()
@@ -391,7 +383,7 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
     return errors
 
 
-def _cmd_collect(args, manifest: dict, run_dir: Path, setup_config: dict):
+def _cmd_collect(args, run_dir: Path, setup_config: dict):
     """Pull results from cluster for completed phases."""
     namespace = os.environ.get("NAMESPACE", setup_config.get("namespace", ""))
     if not namespace:
@@ -400,8 +392,39 @@ def _cmd_collect(args, manifest: dict, run_dir: Path, setup_config: dict):
 
     run_name = run_dir.name
 
+    # Derive known phases from progress.json, fall back to DATA_PHASES
+    progress_path = run_dir / "progress.json"
+    if progress_path.exists():
+        try:
+            progress = json.loads(progress_path.read_text())
+        except json.JSONDecodeError:
+            warn(f"Corrupt progress.json at {progress_path} — falling back to default phases")
+            progress = None
+        else:
+            if not isinstance(progress, dict):
+                warn("progress.json is not a JSON object — falling back to default phases")
+                progress = None
+    else:
+        progress = None
+
+    if progress:
+        known_phases = sorted({
+            entry.get("package", "")
+            for entry in progress.values()
+            if isinstance(entry, dict) and entry.get("status") in ("done", "collecting")
+        } - {""})
+    else:
+        known_phases = []
+
+    if not known_phases:
+        if progress is None and not progress_path.exists():
+            warn("No progress.json found — falling back to default phases [baseline, treatment]")
+        elif progress is not None:
+            warn("No done/collecting phases in progress — falling back to default phases [baseline, treatment]")
+        known_phases = list(DATA_PHASES)
+
     if args.package:
-        valid = set(DATA_PHASES) | {"experiment"}
+        valid = set(known_phases) | {"experiment"}
         unknown = set(args.package) - valid
         if unknown:
             err(f"Unknown packages: {sorted(unknown)}. Valid: {sorted(valid)}")
@@ -409,14 +432,14 @@ def _cmd_collect(args, manifest: dict, run_dir: Path, setup_config: dict):
         phases_to_collect: list[str] = []
         for p in args.package:
             if p == "experiment":
-                phases_to_collect.extend(DATA_PHASES)
+                phases_to_collect.extend(known_phases)
             else:
                 phases_to_collect.append(p)
         seen: set[str] = set()
         phases_to_collect = [p for p in phases_to_collect
                              if not (p in seen or seen.add(p))]  # type: ignore[func-returns-value]
     else:
-        phases_to_collect = list(DATA_PHASES)
+        phases_to_collect = list(known_phases)
 
     step(1, "Collecting Results")
 
@@ -698,7 +721,7 @@ def _do_collect(pair_key: str, entry: dict, run_dir: Path, store, progress: dict
     return ok
 
 
-def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
+def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     """Orchestrate parallel pool execution across namespace slots."""
     import datetime as _dt
     import tempfile as _tmp
@@ -821,29 +844,6 @@ def _cmd_run(args, manifest: dict, run_dir: Path, setup_config: dict) -> None:
         elif entry["status"] == "collecting":
             _reconcile_collecting(key, entry, run_dir)
     store.save(progress)
-
-    # Apply static Pipeline definition to all namespace slots
-    pipeline_yaml_rel = manifest.get("pipeline", {}).get("yaml", "pipeline/pipeline.yaml")
-    pipeline_yaml = (REPO_ROOT / pipeline_yaml_rel).resolve()
-    if not pipeline_yaml.is_relative_to(REPO_ROOT.resolve()):
-        err(f"pipeline.yaml resolves outside repo root: {pipeline_yaml_rel}")
-        sys.exit(1)
-    if not pipeline_yaml.exists():
-        err(f"Static pipeline not found: {pipeline_yaml_rel}")
-        sys.exit(1)
-    failed_ns = set()
-    for _ns in namespaces:
-        r = run(["kubectl", "apply", "-f", str(pipeline_yaml), "-n", _ns],
-                check=False, capture=True)
-        if r.returncode == 0:
-            ok(f"Applied Pipeline to {_ns}")
-        else:
-            warn(f"Could not apply Pipeline to {_ns}: {r.stderr.strip()}")
-            failed_ns.add(_ns)
-    namespaces = [ns for ns in namespaces if ns not in failed_ns]
-    if not namespaces:
-        err("No namespaces available after Pipeline apply failures")
-        sys.exit(1)
 
     # Track which namespace is assigned to which pair
     slots_busy: dict[str, str] = {
@@ -1076,8 +1076,6 @@ Examples:
     )
     p.add_argument("--run", metavar="NAME",
                    help="Run name (overrides current_run in setup_config.json)")
-    p.add_argument("--manifest", metavar="PATH",
-                   help="Path to transfer.yaml (default: transfer.yaml)")
     p.add_argument("--experiment-root", metavar="PATH", dest="experiment_root",
                    help="Root of the experiment repo (default: framework directory)")
 
@@ -1129,13 +1127,6 @@ def main():
     global EXPERIMENT_ROOT
     EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if args.experiment_root else Path.cwd()
 
-    manifest_path = args.manifest or str(_resolve_manifest_default_d(EXPERIMENT_ROOT))
-    try:
-        manifest = load_manifest(manifest_path)
-    except ManifestError as e:
-        err(str(e))
-        sys.exit(1)
-
     setup_config = _load_setup_config()
     run_name = args.run or setup_config.get("current_run", "")
     if not run_name:
@@ -1149,12 +1140,12 @@ def main():
 
     cmd = args.command
     if cmd == "run":
-        _cmd_run(args, manifest, run_dir, setup_config)
+        _cmd_run(args, run_dir, setup_config)
     elif cmd == "status":
         progress_path = run_dir / "progress.json"
         _cmd_status(args, progress_path)
     elif cmd == "collect":
-        _cmd_collect(args, manifest, run_dir, setup_config)
+        _cmd_collect(args, run_dir, setup_config)
     elif cmd == "cleanup":
         progress_path = run_dir / "progress.json"
         cluster_dir = run_dir / "cluster"

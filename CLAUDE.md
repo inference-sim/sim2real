@@ -8,7 +8,7 @@ inference-sim to production llm-d-inference-scheduler scorer plugins.
 ## Repository Structure
 
 - `pipeline/` — Pipeline entry points and shared library (see [`pipeline/README.md`](pipeline/README.md))
-- `pipeline/pipeline.yaml` — Static Tekton Pipeline definition (applied by `deploy.py run`)
+- `pipeline/pipeline.yaml` — Static Tekton Pipeline definition (applied by `setup.py`)
 - `prompts/` — Agent prompt templates used by the sim2real-translate skill
 - `workspace/` — Inter-stage artifacts (gitignored, not committed)
 
@@ -39,7 +39,7 @@ python pipeline/run.py     --experiment-root ../admission-control switch <run-na
 
 **Backward compat:** Omitting `--experiment-root` defaults to the current working directory. Run all pipeline commands from the experiment repo root and the default will resolve correctly without the flag.
 
-**`pipeline/setup.py`** — One-time cluster bootstrap (namespace, RBAC, secrets, PVCs, Tekton tasks). Idempotent — safe to re-run.
+**`pipeline/setup.py`** — One-time cluster bootstrap (namespace, RBAC, secrets, PVCs, Tekton tasks, Pipeline definition). Idempotent — safe to re-run. Supports `--pipeline-yaml PATH` to override the default Pipeline definition.
 
 **`pipeline/prepare.py`** — 6-phase state machine. Re-running skips completed phases (tracked in `.state.json`):
 
@@ -54,7 +54,7 @@ python pipeline/run.py     --experiment-root ../admission-control switch <run-na
 
 **`/sim2real-translate`** — AI skill that reads `skill_input.json` and writes `translation_output.json`. Run this after prepare exits at Phase 3, then re-run prepare to continue.
 
-**`pipeline/deploy.py`** — Builds EPP image, applies the static Pipeline, and orchestrates PipelineRun execution across namespace slots (`deploy.py run`). Use `deploy.py collect` to pull results from the cluster PVC after runs complete.
+**`pipeline/deploy.py`** — Builds EPP image and orchestrates PipelineRun execution across namespace slots (`deploy.py run`). Use `deploy.py collect` to pull results from the cluster PVC after runs complete. Operates independently of `transfer.yaml` — driven by workspace files and `setup_config.json`.
 
 **`pipeline/run.py`** — Lists, inspects, and switches between runs. `switch` syncs generated scorer plugin files into the experiment repo's `llm-d-inference-scheduler/` directory. Pass `--experiment-root` to point at the experiment repo (default: current directory).
 
@@ -88,7 +88,7 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). When no `-
 | `runs/<run>/cluster/pipelinerun-*.yaml` | `prepare.py` Phase 4 | `deploy.py run` |
 | `runs/<run>/run_summary.md` | `prepare.py` Phase 5 | human review |
 | `runs/<run>/results/{phase}/` | `deploy.py collect` | `/sim2real-analyze` skill |
-| `runs/<run>/progress.json` | `deploy.py run` | `deploy.py status` |
+| `runs/<run>/progress.json` | `deploy.py run` | `deploy.py status`, `deploy.py collect` |
 | `runs/<run>/plans/<phase>/<workload>/` | `deploy.py run` | workload tasks |
 | `context/{scenario}/{hash}.md` | `prepare.py` Phase 2 | `prepare.py` Phase 2 (cache) |
 
