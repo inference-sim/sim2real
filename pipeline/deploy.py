@@ -156,16 +156,11 @@ def _cmd_status(args, progress_path: Path) -> None:
     store = LocalProgressStore(progress_path)
     progress = store.load()
 
-    # Apply filters
-    pairs = dict(progress)
-    if getattr(args, "workload", None):
-        pairs = {k: v for k, v in pairs.items() if v.get("workload") == args.workload}
-    if getattr(args, "package", None):
-        pairs = {k: v for k, v in pairs.items() if v.get("package") == args.package}
-
-    if not pairs:
+    if not progress:
         print("  0 pairs" + (" (no progress file)" if not progress_path.exists() else ""))
         return
+
+    pairs = {k: progress[k] for k in _resolve_scope(progress, args)}
 
     pair_w = max(len(k) for k in pairs) + 2
     col_status = 12
@@ -1132,8 +1127,10 @@ Examples:
                            help="Skip vLLM and EPP log files, collect only traces")
 
     status_p = sub.add_parser("status", help="Show progress of all (workload, package) pairs")
-    status_p.add_argument("--workload", metavar="NAME", help="Filter by workload name")
-    status_p.add_argument("--package",  metavar="NAME", help="Filter by package name")
+    status_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key (wl- prefix optional)")
+    status_p.add_argument("--workload", metavar="NAME",  help="Filter by workload name")
+    status_p.add_argument("--package",  metavar="NAME",  help="Filter by package name")
+    status_p.add_argument("--status",   metavar="STATE", help="Filter by status (e.g. running, done, failed)")
 
     run_p = sub.add_parser("run", help="Orchestrate parallel pool execution")
     run_p.add_argument("--skip-build-epp", action="store_true", dest="skip_build_epp",
