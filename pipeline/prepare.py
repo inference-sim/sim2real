@@ -338,39 +338,45 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
         err(str(e))
         sys.exit(1)
 
-    # 4b.5: Inject deterministic EPP image into treatment scenario
+    # 4b.5: Inject EPP image into treatment (only when translation occurred)
     # The image tag is deterministic: {registry}/{repo_name}:{run_name} — same as
     # what build-epp.sh pushes. Read from run_metadata.json (written by setup.py).
-    meta_path = run_dir / "run_metadata.json"
-    if not meta_path.exists():
-        err("run_metadata.json absent — cannot inject EPP image. Re-run setup.py.")
-        sys.exit(1)
-    try:
-        meta = json.loads(meta_path.read_text())
-    except json.JSONDecodeError as e:
-        err(f"run_metadata.json is not valid JSON: {e}. Re-run setup.py.")
-        sys.exit(1)
-    registry = meta.get("registry", "")
-    repo_name = meta.get("repo_name", "llm-d-inference-scheduler")
-    run_name_tag = run_dir.name
-    if not registry:
-        err("run_metadata.json has no registry — cannot determine EPP image. Re-run setup.py.")
-        sys.exit(1)
-    injected = inject_epp_image(treatment_resolved, registry, repo_name, run_name_tag)
-    if injected:
-        ok(f"EPP image injected: {registry}/{repo_name}:{run_name_tag}")
-    else:
-        err("treatment has no 'scenario' entries — EPP image cannot be injected.")
-        sys.exit(1)
+    translation_happened = translation_output_path.exists()
+
+    if translation_happened:
+        meta_path = run_dir / "run_metadata.json"
+        if not meta_path.exists():
+            err("run_metadata.json absent — cannot inject EPP image. Re-run setup.py.")
+            sys.exit(1)
+        try:
+            meta = json.loads(meta_path.read_text())
+        except json.JSONDecodeError as e:
+            err(f"run_metadata.json is not valid JSON: {e}. Re-run setup.py.")
+            sys.exit(1)
+        registry = meta.get("registry", "")
+        repo_name = meta.get("repo_name", "llm-d-inference-scheduler")
+        run_name_tag = run_dir.name
+        if not registry:
+            err("run_metadata.json has no registry — cannot determine EPP image. Re-run setup.py.")
+            sys.exit(1)
+        injected = inject_epp_image(treatment_resolved, registry, repo_name, run_name_tag)
+        if injected:
+            ok(f"EPP image injected: {registry}/{repo_name}:{run_name_tag}")
+        else:
+            err("treatment has no 'scenario' entries — EPP image cannot be injected.")
+            sys.exit(1)
 
     # 4c: Write resolved scenarios
     cluster_dir = run_dir / "cluster"
     cluster_dir.mkdir(parents=True, exist_ok=True)
 
     baseline_out = cluster_dir / "baseline.yaml"
-    treatment_out = cluster_dir / "treatment.yaml"
     baseline_out.write_text(yaml.dump(baseline_resolved, default_flow_style=False, allow_unicode=True))
-    treatment_out.write_text(yaml.dump(treatment_resolved, default_flow_style=False, allow_unicode=True))
+
+    if translation_happened:
+        treatment_out = cluster_dir / "treatment.yaml"
+        treatment_out.write_text(yaml.dump(treatment_resolved, default_flow_style=False, allow_unicode=True))
+
     ok(f"Resolved scenarios: {_display_path(cluster_dir)}")
 
     # 4d: Load and scale workloads
@@ -401,7 +407,8 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
 
     if not workloads:
         warn("No workloads defined — cannot generate PipelineRuns")
-        state.mark_done("assembly", packages=["baseline", "treatment"])
+        done_packages = ["baseline", "treatment"] if translation_happened else ["baseline"]
+        state.mark_done("assembly", packages=done_packages)
         return
 
     # 4e: Pipeline resource
@@ -421,13 +428,19 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     benchmark_sub = REPO_ROOT / "llm-d-benchmark"
     benchmark_repo_url = ""
     if benchmark_sub.exists() and (benchmark_sub / ".git").exists():
-        result = run(["git", "remote", "get-url", "origin"], capture=True, cwd=benchmark_sub)
-        benchmark_repo_url = result.stdout.strip()
+        try:
+            result = run(["git", "remote", "get-url", "origin"], capture=True, cwd=benchmark_sub)
+            benchmark_repo_url = result.stdout.strip()
+        except subprocess.CalledProcessError as e:
+            warn(f"git remote get-url origin failed in {benchmark_sub}: {e}")
     blis_sub = REPO_ROOT / "inference-sim"
     blis_repo_url = ""
     if blis_sub.exists() and (blis_sub / ".git").exists():
-        result = run(["git", "remote", "get-url", "origin"], capture=True, cwd=blis_sub)
-        blis_repo_url = result.stdout.strip()
+        try:
+            result = run(["git", "remote", "get-url", "origin"], capture=True, cwd=blis_sub)
+            blis_repo_url = result.stdout.strip()
+        except subprocess.CalledProcessError as e:
+            warn(f"git remote get-url origin failed in {blis_sub}: {e}")
 
     missing_params = []
     if not benchmark_repo_url:
@@ -435,13 +448,22 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     if not blis_repo_url:
         missing_params.append("blis_repo_url (inference-sim submodule)")
     if missing_params:
-        err(f"Critical PipelineRun params resolved to empty: {', '.join(missing_params)}. "
-            "Initialize submodules with: git submodule update --init")
-        sys.exit(1)
+        if translation_happened:
+            err(f"Critical PipelineRun params resolved to empty: {', '.join(missing_params)}. "
+                "Initialize submodules with: git submodule update --init")
+            sys.exit(1)
+        else:
+            warn(f"Submodule params not available: {', '.join(missing_params)}. "
+                 "Generated PipelineRuns will FAIL on cluster until submodules are initialized: "
+                 "git submodule update --init")
     scenarios = baseline_resolved.get("scenario", [])
     model_name = scenarios[0].get("model", {}).get("name", "") if scenarios else ""
 
-    for pkg, scenario in [("baseline", baseline_resolved), ("treatment", treatment_resolved)]:
+    packages = [("baseline", baseline_resolved)]
+    if translation_happened:
+        packages.append(("treatment", treatment_resolved))
+
+    for pkg, scenario in packages:
         scenario_content = yaml.dump(scenario, default_flow_style=False, allow_unicode=True)
         for wl in workloads:
             wl_name = wl.get("name", wl.get("workload_name", "unknown"))
@@ -464,15 +486,17 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
             pr_path = cluster_dir / f"pipelinerun-{safe_wl}-{pkg}.yaml"
             pr_path.write_text(yaml.dump(pr, default_flow_style=False, allow_unicode=True))
 
-    ok(f"PipelineRuns: {len(workloads) * 2} generated")
+    ok(f"PipelineRuns: {len(workloads) * len(packages)} generated")
 
-    # 4g: Verify generated dir
-    _verify_generated_dir(run_dir)
+    # 4g: Verify generated dir (only when translation produced files)
+    if translation_happened:
+        _verify_generated_dir(run_dir)
 
     # 4h: validate-assembly
     _validate_assembly(run_dir, resolved)
 
-    state.mark_done("assembly", packages=["baseline", "treatment"])
+    done_packages = ["baseline", "treatment"] if translation_happened else ["baseline"]
+    state.mark_done("assembly", packages=done_packages)
     ok("Assembly complete")
 
 
@@ -581,26 +605,36 @@ def _phase_summary(state: StateMachine, manifest: dict, run_dir: Path, resolved:
         info("[skip] Summary already complete")
         return
 
-    output = json.loads((run_dir / "translation_output.json").read_text())
-    translate_meta = state.get_phase("translate")
+    translation_output_path = run_dir / "translation_output.json"
 
-    lines = [
-        f"**Run Summary: `{state.run_name}`**",
-        f"Generated: {datetime.now(timezone.utc).isoformat()} | Scenario: {manifest['scenario']}",
-        "",
-        "**Algorithm**",
-        f"- Source: `{manifest['algorithm']['source']}`",
-        f"- Description: {output.get('description', 'N/A')}",
-        "",
-        "**Translation**",
-        f"- Plugin type: `{output['plugin_type']}`",
-        f"- Files created: {', '.join(f'`{f}`' for f in output.get('files_created', []))}",
-        f"- Files modified: {', '.join(f'`{f}`' for f in output.get('files_modified', []))}",
-    ]
+    if translation_output_path.exists():
+        output = json.loads(translation_output_path.read_text())
+        translate_meta = state.get_phase("translate")
 
-    if translate_meta.get("review_rounds"):
-        lines.append(f"- Review: {translate_meta.get('consensus', 'N/A')} "
-                     f"after {translate_meta['review_rounds']} rounds")
+        lines = [
+            f"**Run Summary: `{state.run_name}`**",
+            f"Generated: {datetime.now(timezone.utc).isoformat()} | Scenario: {manifest['scenario']}",
+            "",
+            "**Algorithm**",
+            f"- Source: `{manifest['algorithm']['source']}`",
+            f"- Description: {output.get('description', 'N/A')}",
+            "",
+            "**Translation**",
+            f"- Plugin type: `{output['plugin_type']}`",
+            f"- Files created: {', '.join(f'`{f}`' for f in output.get('files_created', []))}",
+            f"- Files modified: {', '.join(f'`{f}`' for f in output.get('files_modified', []))}",
+        ]
+
+        if translate_meta.get("review_rounds"):
+            lines.append(f"- Review: {translate_meta.get('consensus', 'N/A')} "
+                         f"after {translate_meta['review_rounds']} rounds")
+    else:
+        lines = [
+            f"**Run Summary: `{state.run_name}`**",
+            f"Generated: {datetime.now(timezone.utc).isoformat()} | Scenario: {manifest['scenario']}",
+            "",
+            "**Mode:** Baseline-only (no translation)",
+        ]
 
     # Baseline vs Treatment config comparison
     lines.extend(["", "**Packages**", ""])
@@ -617,13 +651,21 @@ def _phase_summary(state: StateMachine, manifest: dict, run_dir: Path, resolved:
         lines.append(f"- {wl_name} (x{multiplier})")
 
     # Checklist
-    lines.extend([
-        "", "**Checklist**",
-        "- [x] Translation complete",
-        "- [x] Assembly complete",
-        "- [x] validate-assembly passed",
-        "",
-    ])
+    if translation_output_path.exists():
+        lines.extend([
+            "", "**Checklist**",
+            "- [x] Translation complete",
+            "- [x] Assembly complete",
+            "- [x] validate-assembly passed",
+            "",
+        ])
+    else:
+        lines.extend([
+            "", "**Checklist**",
+            "- [-] Translation skipped (baseline-only)",
+            "- [x] Assembly complete",
+            "",
+        ])
 
     summary_path = run_dir / "run_summary.md"
     summary_path.write_text("\n".join(lines))
@@ -686,16 +728,22 @@ def _cmd_context(args, manifest, run_dir):
 
 
 def _cmd_assemble(args, manifest, run_dir):
-    """Re-run assembly from existing translation output."""
+    """Re-run assembly (baseline-only if no translation output exists)."""
     try:
         state = StateMachine.load(run_dir)
     except FileNotFoundError:
         err("No state file. Run prepare.py first.")
         sys.exit(1)
 
-    if not state.is_done("translate"):
-        err("Cannot assemble: translation not complete. Run /sim2real-translate first.")
-        sys.exit(1)
+    baseline_only = not (run_dir / "translation_output.json").exists()
+    if baseline_only:
+        translate_phase = state.get_phase("translate")
+        if translate_phase.get("checkpoint_hits"):
+            err("Translation was attempted but translation_output.json is missing. "
+                "Re-run /sim2real-translate or remove the translate phase from state "
+                "to proceed in baseline-only mode.")
+            sys.exit(1)
+        warn("No translation output — producing baseline-only PipelineRuns")
 
     resolved = _load_resolved_config(manifest)
     state.reset("assembly")
@@ -703,16 +751,15 @@ def _cmd_assemble(args, manifest, run_dir):
     state.reset("gate")
     _phase_assembly(args, state, manifest, run_dir, resolved)
     _phase_summary(state, manifest, run_dir, resolved)
-    _phase_gate(state, run_dir)
+    if not baseline_only:
+        _phase_gate(state, run_dir)
 
 
 def _cmd_validate_assembly(args, manifest, run_dir):
     """Run validate-assembly checks standalone."""
-    required = ["translation_output.json"]
-    for name in required:
-        if not (run_dir / name).exists():
-            err(f"Required file missing: {name}. Run translation skill first.")
-            sys.exit(1)
+    if not (run_dir / "translation_output.json").exists():
+        info("Baseline-only run — no treatment validation needed")
+        return
     resolved = _load_resolved_config(manifest)
     _validate_assembly(run_dir, resolved)
 
