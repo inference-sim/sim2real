@@ -113,7 +113,7 @@ Phase state is tracked per-run in `workspace/runs/<run>/.state.json`. Delete it 
 Builds the EPP image and orchestrates PipelineRun execution across namespace slots. Operates independently of `transfer.yaml` — driven by workspace files and `setup_config.json`.
 
 ```bash
-python pipeline/deploy.py {run|status|collect|cleanup} [flags]
+python pipeline/deploy.py {run|status|collect|cleanup|pairs} [flags]
 ```
 
 Common flags (all subcommands):
@@ -137,6 +137,7 @@ python pipeline/deploy.py run     [flags]   # orchestrate parallel pool executio
 python pipeline/deploy.py status            # show progress snapshot of all (workload, package) pairs
 python pipeline/deploy.py collect [--package NAME…]
 python pipeline/deploy.py cleanup [flags]   # tear down cluster resources for failed/stalled pairs
+python pipeline/deploy.py pairs   [flags]   # list available pair keys, workloads, and packages
 ```
 
 **`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, collects results inline, and retries pairs that time out. Reads `progress.json` to resume interrupted runs.
@@ -179,6 +180,16 @@ python pipeline/deploy.py cleanup [flags]   # tear down cluster resources for fa
 | `--dry-run` | Print what would be cleaned up without acting |
 
 **Safety:** Results in `workspace/runs/<run>/results/` are preserved — only cluster resources are removed. For `done` pairs, only the PipelineRun is deleted (Tekton already tore down Helm releases).
+
+**`deploy.py pairs`** — lists available pair keys, workloads, and packages by scanning `cluster/pipelinerun-*.yaml`. Works without `progress.json`.
+
+| Flag | Description |
+|------|-------------|
+| `--keys-only` | Print pair keys only (one per line, for scripting) |
+| `--workloads-only` | Print distinct workload names only (one per line) |
+| `--packages-only` | Print distinct package names only (one per line) |
+
+Flags are mutually exclusive. Default (no flag) prints a human-readable table with PAIR, WORKLOAD, and PACKAGE columns.
 
 ---
 

@@ -6,6 +6,7 @@ Subcommands:
   status   Show progress of all (workload, package) pairs
   collect  Pull results from cluster for completed phases
   cleanup  Tear down cluster resources for all non-pending pairs
+  pairs    List available pair keys, workloads, and packages
 """
 
 import argparse
@@ -193,6 +194,54 @@ def _cmd_status(args, progress_path: Path) -> None:
     summary_parts = [f"{v} {k}" for k, v in sorted(counts.items())]
     print(f"  {len(pairs)} pairs: " + "  ".join(summary_parts))
     print()
+
+
+# ── Pairs command ────────────────────────────────────────────────────────────
+
+def _cmd_pairs(cluster_dir: Path, *, keys_only: bool = False,
+               workloads_only: bool = False, packages_only: bool = False) -> None:
+    """List available pair keys, workloads, and packages from cluster/ YAML files."""
+    pairs = _load_pairs(cluster_dir)
+
+    if not pairs:
+        n = len(list(cluster_dir.glob("pipelinerun-*.yaml"))) if cluster_dir.exists() else 0
+        if n == 0:
+            print("  0 pairs (no pipelinerun-*.yaml files found)")
+        else:
+            print(f"  0 pairs ({n} files found but failed to parse — see warnings above)")
+        return
+
+    if keys_only:
+        for key in sorted(pairs):
+            print(key)
+        return
+
+    if workloads_only:
+        workloads = sorted({v["workload"] for v in pairs.values() if v["workload"]})
+        for w in workloads:
+            print(w)
+        return
+
+    if packages_only:
+        packages = sorted({v["package"] for v in pairs.values() if v["package"]})
+        for p in packages:
+            print(p)
+        return
+
+    # Default: human-readable table
+    pair_w = max(len(k) for k in pairs) + 2
+    col_wl = max(len(v["workload"]) for v in pairs.values()) + 2
+    col_wl = max(col_wl, 10)
+
+    header = f"{'PAIR':<{pair_w}} {'WORKLOAD':<{col_wl}} PACKAGE"
+    print()
+    print(header)
+    print("-" * len(header))
+    for key in sorted(pairs):
+        entry = pairs[key]
+        print(f"{key:<{pair_w}} {entry['workload']:<{col_wl}} {entry['package']}")
+    print()
+    print(f"  {len(pairs)} pairs")
 
 
 # ── Collect command ──────────────────────────────────────────────────────────
@@ -1282,6 +1331,8 @@ Examples:
   python pipeline/deploy.py collect --skip-logs        # Collect traces only (skip large logs)
   python pipeline/deploy.py cleanup                    # Tear down stalled/failed pairs
   python pipeline/deploy.py cleanup --dry-run          # Preview what would be cleaned
+  python pipeline/deploy.py pairs                       # List pairs with workloads and packages
+  python pipeline/deploy.py pairs --keys-only           # Machine-readable: keys only
 """,
     )
     p.add_argument("--run", metavar="NAME",
@@ -1332,6 +1383,15 @@ Examples:
     cleanup_p.add_argument("--dry-run",  action="store_true", dest="dry_run",
                            help="Print what would be cleaned up without doing it")
 
+    pairs_p = sub.add_parser("pairs", help="List available pair keys, workloads, and packages")
+    pairs_group = pairs_p.add_mutually_exclusive_group()
+    pairs_group.add_argument("--keys-only", action="store_true", dest="keys_only",
+                             help="Print pair keys only (one per line)")
+    pairs_group.add_argument("--workloads-only", action="store_true", dest="workloads_only",
+                             help="Print distinct workload names only (one per line)")
+    pairs_group.add_argument("--packages-only", action="store_true", dest="packages_only",
+                             help="Print distinct package names only (one per line)")
+
     return p
 
 
@@ -1371,8 +1431,13 @@ def main():
         if not namespaces:
             warn("No namespaces in setup_config — PipelineRun deletion for done pairs may be incomplete")
         _cmd_cleanup(args, progress_path, discovered, namespaces=namespaces or None)
+    elif cmd == "pairs":
+        cluster_dir = run_dir / "cluster"
+        _cmd_pairs(cluster_dir, keys_only=args.keys_only,
+                   workloads_only=args.workloads_only,
+                   packages_only=args.packages_only)
     else:
-        err("No subcommand specified. Use: deploy.py run | status | collect | cleanup")
+        err("No subcommand specified. Use: deploy.py run | status | collect | cleanup | pairs")
         sys.exit(1)
 
 
