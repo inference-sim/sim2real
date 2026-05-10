@@ -31,6 +31,7 @@ def test_pairs_table_lists_all(tmp_path, capsys):
     assert "PAIR" in out
     assert "WORKLOAD" in out
     assert "PACKAGE" in out
+    assert "3 pairs" in out
 
 
 def test_pairs_keys_only(tmp_path, capsys):
@@ -42,7 +43,7 @@ def test_pairs_keys_only(tmp_path, capsys):
     out = capsys.readouterr().out
 
     lines = out.strip().splitlines()
-    assert set(lines) == {"wl-smoke-baseline", "wl-load-treatment"}
+    assert lines == ["wl-load-treatment", "wl-smoke-baseline"]
     assert "PAIR" not in out
 
 
@@ -90,14 +91,37 @@ def test_pairs_missing_cluster(tmp_path, capsys):
     assert "0 pairs" in out
 
 
+def test_pairs_single_pair(tmp_path, capsys):
+    """Single pair works (boundary for column-width calculation)."""
+    from pipeline.deploy import _cmd_pairs
+    _make_cluster(tmp_path, [("a", "b")])
+
+    _cmd_pairs(tmp_path)
+    out = capsys.readouterr().out
+
+    assert "wl-a-b" in out
+    assert "1 pairs" in out
+
+
+def test_pairs_all_files_corrupt(tmp_path, capsys):
+    """When files exist but all fail to parse, message distinguishes from empty dir."""
+    from pipeline.deploy import _cmd_pairs
+    (tmp_path / "pipelinerun-bad1.yaml").write_text("{{invalid")
+    (tmp_path / "pipelinerun-bad2.yaml").write_text("[[broken")
+
+    _cmd_pairs(tmp_path)
+    out = capsys.readouterr().out
+
+    assert "0 pairs" in out
+    assert "failed to parse" in out
+
+
 def test_pairs_cli_mutually_exclusive_flags():
     """--keys-only, --workloads-only, --packages-only are mutually exclusive."""
-    import subprocess
-    result = subprocess.run(
-        [".venv/bin/python", "-m", "pipeline.deploy", "pairs",
-         "--keys-only", "--workloads-only"],
-        capture_output=True, text=True,
-        cwd="/Users/kalantar/projects/go.workspace/src/github.com/inference-sim/sim2real/.claude/worktrees/issue-59-pairs-subcommand",
-    )
-    assert result.returncode != 0
-    assert "not allowed with argument" in result.stderr
+    import pytest
+    from pipeline.deploy import build_parser
+
+    parser = build_parser()
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(["pairs", "--keys-only", "--workloads-only"])
+    assert exc_info.value.code != 0

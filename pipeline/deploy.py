@@ -6,6 +6,7 @@ Subcommands:
   status   Show progress of all (workload, package) pairs
   collect  Pull results from cluster for completed phases
   cleanup  Tear down cluster resources for all non-pending pairs
+  pairs    List available pair keys, workloads, and packages
 """
 
 import argparse
@@ -203,7 +204,11 @@ def _cmd_pairs(cluster_dir: Path, *, keys_only: bool = False,
     pairs = _load_pairs(cluster_dir)
 
     if not pairs:
-        print("  0 pairs (no pipelinerun-*.yaml files found)")
+        n = len(list(cluster_dir.glob("pipelinerun-*.yaml"))) if cluster_dir.exists() else 0
+        if n == 0:
+            print("  0 pairs (no pipelinerun-*.yaml files found)")
+        else:
+            print(f"  0 pairs ({n} files found but failed to parse — see warnings above)")
         return
 
     if keys_only:
@@ -1208,7 +1213,7 @@ Examples:
   python pipeline/deploy.py collect --skip-logs        # Collect traces only (skip large logs)
   python pipeline/deploy.py cleanup                    # Tear down stalled/failed pairs
   python pipeline/deploy.py cleanup --dry-run          # Preview what would be cleaned
-  python pipeline/deploy.py pairs                       # List all pair keys
+  python pipeline/deploy.py pairs                       # List pairs with workloads and packages
   python pipeline/deploy.py pairs --keys-only           # Machine-readable: keys only
 """,
     )
