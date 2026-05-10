@@ -90,3 +90,16 @@ def test_pairs_missing_cluster(tmp_path, capsys):
     out = capsys.readouterr().out
 
     assert "0 pairs" in out
+
+
+def test_pairs_cli_mutually_exclusive_flags():
+    """--keys-only, --workloads-only, --packages-only are mutually exclusive."""
+    import subprocess
+    result = subprocess.run(
+        [".venv/bin/python", "-m", "pipeline.deploy", "pairs",
+         "--keys-only", "--workloads-only"],
+        capture_output=True, text=True,
+        cwd="/Users/kalantar/projects/go.workspace/src/github.com/inference-sim/sim2real/.claude/worktrees/issue-59-pairs-subcommand",
+    )
+    assert result.returncode != 0
+    assert "not allowed with argument" in result.stderr
