@@ -80,12 +80,12 @@ python pipeline/prepare.py [--force] [--rebuild-context] [--manifest PATH] [--ru
 |-------|------|-----------|
 | 1 | Init — validate manifest + prerequisites | on re-run |
 | 2 | Context — assemble + cache context doc (SHA-256) | on cache hit |
-| 3 | **Translate checkpoint** — write `skill_input.json`, wait | resumes on re-run |
+| 3 | **Translate checkpoint** — write `skill_input.json`, wait (skipped if no algorithm) | resumes on re-run |
 | 4 | Assembly — resolved scenarios, cluster YAMLs, PipelineRuns | on re-run |
 | 5 | Summary — write `run_summary.md` | on re-run |
 | 6 | **Gate** — `[d]eploy / [e]dit / [q]uit` | on re-run |
 
-**Phase 3 checkpoint**: writes `skill_input.json` and exits cleanly (exit 0). Run `/sim2real-translate` in Claude Code, then re-run `prepare.py` to continue from Phase 4.
+**Phase 3 checkpoint**: writes `skill_input.json` and exits cleanly (exit 0). Run `/sim2real-translate` in Claude Code, then re-run `prepare.py` to continue from Phase 4. When no `algorithm` is present in the manifest, Phase 3 is skipped entirely (baseline-only mode).
 
 **Phase 4 assembly** reads `baseline.yaml` and `treatment.yaml` from the experiment root, merges them with skill-generated overlay files (`generated/baseline_config.yaml`, `generated/treatment_config.yaml`), and writes resolved scenario files to `cluster/`. PipelineRuns are generated with a `scenarioContent` param containing the fully resolved scenario YAML. Workloads are loaded from the manifest and scaled by `observe.request_multiplier`.
 
@@ -228,9 +228,9 @@ kind: sim2real-transfer
 version: 3
 scenario: <name>            # scenario name used in generated PipelineRun labels
 
-algorithm:
+algorithm:                    # optional — omit for baseline-only benchmarks
   source: <path>            # sim algorithm implementation
-  config: <path>            # sim algorithm config
+  config: <path>            # sim algorithm config (optional)
 
 baseline:
   sim:

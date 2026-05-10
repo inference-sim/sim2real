@@ -1282,3 +1282,31 @@ class TestBaselineOnlyNoAlgorithm:
         assert not (run_dir / "skill_input.json").exists()
         summary = (run_dir / "run_summary.md").read_text()
         assert "Baseline-only" in summary
+
+    def test_phase_summary_with_stale_translation_output(self, repo):
+        """_phase_summary doesn't crash when translation_output.json exists but algorithm is absent."""
+        mod = _import_prepare_with_root(repo)
+        manifest = self._no_algo_manifest()
+        run_dir = repo / "workspace" / "runs" / "test-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        # Simulate stale translation_output.json from a prior run
+        output = {
+            "plugin_type": "old-scorer",
+            "files_created": ["old.go"],
+            "files_modified": [],
+            "description": "Stale translation",
+        }
+        (run_dir / "translation_output.json").write_text(json.dumps(output))
+
+        state = StateMachine("test-run", "routing", run_dir)
+        state.mark_done("init")
+        state.mark_done("translate", mode="baseline-only")
+        state.mark_done("assembly", packages=["baseline"])
+
+        resolved = {"observe": {"request_multiplier": 1}}
+
+        # Should not crash even with stale translation_output.json
+        mod._phase_summary(state, manifest, run_dir, resolved)
+        summary = (run_dir / "run_summary.md").read_text()
+        assert "Source: `N/A`" in summary

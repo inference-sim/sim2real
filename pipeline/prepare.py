@@ -229,7 +229,7 @@ def _phase_context(args, state: StateMachine, manifest: dict, run_dir: Path) -> 
 
 def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
                      resolved: dict, context_path: Path):
-    """Phase 3: Write skill_input.json, check for translation_output.json."""
+    """Phase 3: Write skill_input.json (or skip if no algorithm in manifest)."""
     step(3, "Translation Checkpoint")
 
     if state.is_done("translate") and not args.force:
@@ -238,7 +238,7 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
 
     if "algorithm" not in manifest:
         info("[skip] No algorithm in manifest — baseline-only mode")
-        state.mark_done("translate")
+        state.mark_done("translate", mode="baseline-only")
         return
 
     target = resolved.get("target", {})
@@ -621,7 +621,7 @@ def _phase_summary(state: StateMachine, manifest: dict, run_dir: Path, resolved:
             f"Generated: {datetime.now(timezone.utc).isoformat()} | Scenario: {manifest['scenario']}",
             "",
             "**Algorithm**",
-            f"- Source: `{manifest['algorithm']['source']}`",
+            f"- Source: `{manifest.get('algorithm', {}).get('source', 'N/A')}`",
             f"- Description: {output.get('description', 'N/A')}",
             "",
             "**Translation**",

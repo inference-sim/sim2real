@@ -42,7 +42,9 @@ def load_manifest(path: "Path | str") -> dict:
             raise ManifestError(f"Missing required field: {field}")
 
     algo = data.get("algorithm")
-    if algo is not None:
+    if algo is None and "algorithm" in data:
+        del data["algorithm"]
+    elif algo is not None:
         if not isinstance(algo, dict):
             raise ManifestError("algorithm must be a mapping")
         for f in _REQUIRED_ALGORITHM:

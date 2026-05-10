@@ -61,6 +61,14 @@ def test_algorithm_section_entirely_optional(tmp_path):
     assert "algorithm" not in m
 
 
+def test_algorithm_null_normalized_to_absent(tmp_path):
+    """algorithm: null in YAML is normalized to key-absent (baseline-only)."""
+    data = {**MINIMAL_V2, "algorithm": None}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert "algorithm" not in m
+
+
 def test_missing_algorithm_source(tmp_path):
     data = {**MINIMAL_V2, "algorithm": {"config": "x.yaml"}}
     path = _write_manifest(tmp_path, data)
