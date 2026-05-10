@@ -9,6 +9,7 @@ _PROGRESS = {
     "wl-load-baseline":    {"workload": "wl-load",   "package": "baseline",   "status": "pending",   "namespace": None,         "retries": 0},
     "wl-load-treatment":   {"workload": "wl-load",   "package": "treatment",  "status": "timed-out", "namespace": "sim2real-2", "retries": 1},
     "wl-heavy-baseline":   {"workload": "wl-heavy",  "package": "baseline",   "status": "failed",    "namespace": "sim2real-0", "retries": 0},
+    "_orchestrator":       {"state": "normal", "backoff_level": 0, "last_probe_free_gpus": 8},
 }
 
 
@@ -27,7 +28,8 @@ def test_status_output_contains_all_pairs(tmp_path, capsys):
     _cmd_status(_Args(), progress_path)
     out = capsys.readouterr().out
     for key in _PROGRESS:
-        assert key in out
+        if not key.startswith("_"):
+            assert key in out
 
 
 def test_status_filter_by_workload(tmp_path, capsys):

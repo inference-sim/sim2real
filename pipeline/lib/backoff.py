@@ -47,8 +47,11 @@ class BackoffController:
     def signal_reclaim(self) -> None:
         now = _dt.datetime.now(_dt.timezone.utc)
         self._reclaim_times.append(now.isoformat())
-        cutoff = (now - _dt.timedelta(seconds=self._reclaim_window)).isoformat()
-        self._reclaim_times = [t for t in self._reclaim_times if t >= cutoff]
+        cutoff = now - _dt.timedelta(seconds=self._reclaim_window)
+        self._reclaim_times = [
+            t for t in self._reclaim_times
+            if _dt.datetime.fromisoformat(t.replace("Z", "+00:00")) >= cutoff
+        ]
         if len(self._reclaim_times) >= self._reclaim_threshold:
             self.state = "backing_off"
             max_level = self._level_for_max()
@@ -71,12 +74,20 @@ class BackoffController:
             "reclaim_times": self._reclaim_times,
         }
 
+    _VALID_STATES = ("normal", "backing_off")
+
     @classmethod
     def from_dict(cls, data: dict, *, base_interval: int, max_backoff: int,
                   reclaim_threshold: int = 3, reclaim_window: int = 600) -> BackoffController:
         bc = cls(base_interval=base_interval, max_backoff=max_backoff,
                  reclaim_threshold=reclaim_threshold, reclaim_window=reclaim_window)
-        bc.state = data.get("state", "normal")
+        state = data.get("state", "normal")
+        if state not in cls._VALID_STATES:
+            import sys
+            print(f"\033[33m[WARN]  Unknown backoff state {state!r} in progress — resetting to normal\033[0m",
+                  file=sys.stderr)
+            state = "normal"
+        bc.state = state
         bc.backoff_level = data.get("backoff_level", 0)
         bc.last_scarcity_time = data.get("last_scarcity_time")
         bc.last_probe_free_gpus = data.get("last_probe_free_gpus")

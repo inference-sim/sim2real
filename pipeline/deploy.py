@@ -199,8 +199,8 @@ def _cmd_status(args, progress_path: Path) -> None:
     print(f"  {len(pairs)} pairs: " + "  ".join(summary_parts))
 
     orch = progress.get("_orchestrator")
-    if orch and orch.get("state") != "normal":
-        print(f"  Orchestrator: {orch['state']} (level {orch.get('backoff_level', 0)}, "
+    if orch and orch.get("state") not in (None, "normal"):
+        print(f"  Orchestrator: {orch.get('state', '?')} (level {orch.get('backoff_level', 0)}, "
               f"last probe: {orch.get('last_probe_free_gpus', '?')} free GPUs)")
 
     print()
@@ -1299,7 +1299,8 @@ def _cmd_cleanup(args, progress_path: Path, discovered: dict,
         return
 
     dry_run = getattr(args, "dry_run", False)
-    info(f"Scope: {len(actionable)}/{len(progress)} pairs"
+    total_pairs = sum(1 for k in progress if _is_pair_key(k))
+    info(f"Scope: {len(actionable)}/{total_pairs} pairs"
          + (" [DRY-RUN]" if dry_run else ""))
 
     cleaned = 0
