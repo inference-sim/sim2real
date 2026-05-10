@@ -210,6 +210,93 @@ def _check_pipelinerun_status(pr_name: str, namespace: str) -> str:
 
 
 
+def _handle_pending_pods(*, pr_name: str, namespace: str, entry: dict,
+                         pending_threshold: int, max_pending_stalls: int) -> bool:
+    """Check for pods stuck in Pending and take action.
+
+    Returns True if the slot was reclaimed (caller should free slot).
+    Returns False if no action taken (caller should proceed to timeout check).
+
+    Side effects on *entry* (caller must persist):
+      On True (non-recoverable):
+        - status: "failed", namespace: None, pending_since: None
+      On True (recoverable threshold exceeded):
+        - status: "pending" or "stalled", namespace: None
+        - pending_stalls: incremented, pending_since: None
+      On False (no action):
+        - pending_since: set on first recoverable detection, cleared when
+          pods start running, reset on malformed timestamp
+    """
+    import datetime as _dt
+    import json as _json
+    from pipeline.lib.pod_pending import parse_pod_conditions
+
+    result = run(
+        ["kubectl", "get", "pods", f"-n={namespace}",
+         "-l", f"tekton.dev/pipelineRun={pr_name}",
+         "-o", "json"],
+        check=False, capture=True,
+    )
+    if result.returncode != 0:
+        warn(f"[{entry.get('workload', '?')}] pod query failed: {(result.stdout or result.stderr or '')[:120]}")
+        return False
+
+    try:
+        pods_json = _json.loads(result.stdout)
+    except _json.JSONDecodeError:
+        warn(f"[{entry.get('workload', '?')}] pod query returned invalid JSON: {result.stdout[:120]}")
+        return False
+
+    try:
+        category, detail = parse_pod_conditions(pods_json)
+    except (KeyError, TypeError, AttributeError) as exc:
+        warn(f"[{entry.get('workload', '?')}] unexpected pod JSON shape: {exc}")
+        return False
+
+    if category is None:
+        if entry.get("pending_since") is not None:
+            entry["pending_since"] = None
+        return False
+
+    if category == "non_recoverable":
+        warn(f"[{entry.get('workload', '?')}] non-recoverable pending: {detail}")
+        _cancel_and_delete_pipelinerun(pr_name, namespace)
+        entry["status"] = "failed"
+        entry["namespace"] = None
+        entry["pending_since"] = None
+        return True
+
+    # category == "recoverable"
+    now = _dt.datetime.now(_dt.timezone.utc)
+    if entry.get("pending_since") is None:
+        entry["pending_since"] = now.isoformat()
+        info(f"[{entry.get('workload', '?')}] pending (recoverable): {detail}")
+        return False
+
+    try:
+        pending_since = _dt.datetime.fromisoformat(entry["pending_since"])
+    except (ValueError, TypeError):
+        warn(f"[{entry.get('workload', '?')}] malformed pending_since — resetting timer")
+        entry["pending_since"] = now.isoformat()
+        return False
+    elapsed = (now - pending_since).total_seconds()
+    if elapsed <= pending_threshold:
+        return False
+
+    warn(f"[{entry.get('workload', '?')}] pending {int(elapsed)}s > {pending_threshold}s threshold → reclaim")
+    _cancel_and_delete_pipelinerun(pr_name, namespace)
+    stalls = entry.get("pending_stalls", 0) + 1
+    entry["pending_stalls"] = stalls
+    entry["pending_since"] = None
+    entry["namespace"] = None
+    if stalls >= max_pending_stalls:
+        entry["status"] = "stalled"
+        warn(f"[{entry.get('workload', '?')}] reached max pending stalls ({max_pending_stalls}) → stalled")
+    else:
+        entry["status"] = "pending"
+    return True
+
+
 def _probe_phase_sizes(pod_name: str, run_name: str, phases: list[str],
                        namespace: str) -> dict[str, int]:
     """Return byte sizes for each phase directory on the PVC."""
@@ -528,6 +615,8 @@ def _cleanup_pair(key: str, entry: dict, discovered: dict, *,
         if not dry_run and not is_done:
             entry["status"] = "pending"
             entry["retries"] = 0
+            entry["pending_stalls"] = 0
+            entry["pending_since"] = None
         return True
 
     if dry_run:
@@ -595,6 +684,8 @@ def _cleanup_pair(key: str, entry: dict, discovered: dict, *,
     entry["status"] = "pending"
     entry["namespace"] = None
     entry["retries"] = 0
+    entry["pending_stalls"] = 0
+    entry["pending_since"] = None
     return True
 
 
@@ -830,6 +921,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
 
     max_retries = getattr(args, "max_retries", 2)
     poll_interval = getattr(args, "poll_interval", 30)
+    pending_threshold = getattr(args, "pending_threshold", 600)
+    max_pending_stalls = getattr(args, "max_pending_stalls", 10)
 
     cluster_dir = run_dir / "cluster"
     progress_path = run_dir / "progress.json"
@@ -884,6 +977,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 "namespace": None,
                 "retries":  0,
                 "gpu_cost": pair_gpu_cost,
+                "pending_stalls": 0,
+                "pending_since": None,
             }
 
     _scope = _resolve_scope(progress, args)
@@ -908,16 +1003,20 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 actual = _check_pipelinerun_status(pr_name, ns)
                 if actual == "Succeeded":
                     entry["status"] = "collecting"
+                    entry["pending_since"] = None
                 elif actual in ("Failed", "PipelineRunCancelled"):
                     entry["status"] = "failed"
+                    entry["pending_since"] = None
                 elif actual == "Unknown":
                     warn(f"[{key}] PipelineRun not found on cluster → resetting to pending")
                     entry["status"] = "pending"
                     entry["namespace"] = None
+                    entry["pending_since"] = None
                 # If still "Running"/"Started", leave as "running" — will be monitored
             else:
                 entry["status"] = "pending"
                 entry["namespace"] = None
+                entry["pending_since"] = None
         elif entry["status"] == "collecting":
             _reconcile_collecting(key, entry, run_dir)
     store.save(progress)
@@ -978,6 +1077,23 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 del slots_busy[ns]
 
             elif status in ("Running", "Started"):
+                # Check for pending pods (before timeout)
+                try:
+                    reclaimed = _handle_pending_pods(
+                        pr_name=pr_name, namespace=ns, entry=entry,
+                        pending_threshold=pending_threshold,
+                        max_pending_stalls=max_pending_stalls,
+                    )
+                except Exception as exc:
+                    import traceback as _tb
+                    err(f"[{pair_key}] pending check failed: {exc}")
+                    _tb.print_exc(file=sys.stderr)
+                    reclaimed = False
+                if reclaimed:
+                    del slots_busy[ns]
+                    store.save(progress)
+                    continue
+
                 # Check for timeout
                 ts_result = run(
                     ["kubectl", "get", "pipelinerun", pr_name, f"-n={ns}",
@@ -1000,6 +1116,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                                 warn(f"[{pair_key}] timed out, max retries → timed-out")
                                 entry["status"] = "timed-out"
                             entry["namespace"] = None
+                            entry["pending_since"] = None
                             del slots_busy[ns]
                             store.save(progress)
                     except ValueError:
@@ -1082,6 +1199,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
 
             entry["status"] = "running"
             entry["namespace"] = ns
+            entry["pending_since"] = None
             slots_busy[ns] = pair_key
             store.save(progress)
             ok(f"[{pair_key}] → {ns} ({pr_name})")
@@ -1201,6 +1319,10 @@ Examples:
                        help="Override GPU resource name (default: derived from scenario, else nvidia.com/gpu)")
     run_p.add_argument("--default-gpu-cost", type=int, default=1, dest="default_gpu_cost",
                        help="Fallback GPU cost per pair when not derivable from scenario [1]")
+    run_p.add_argument("--pending-threshold", type=int, default=600, dest="pending_threshold",
+                       help="Seconds a pod may remain Pending (recoverable) before early reclaim [600]")
+    run_p.add_argument("--max-pending-stalls", type=int, default=10, dest="max_pending_stalls",
+                       help="Max early reclaims before marking pair stalled [10]")
 
     cleanup_p = sub.add_parser("cleanup", help="Tear down cluster resources for all non-pending pairs")
     cleanup_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key (wl- prefix optional)")
