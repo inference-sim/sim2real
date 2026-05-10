@@ -123,3 +123,45 @@ class TestBackoffController:
         bc.signal_scarcity(free_gpus=0, min_cost=4)
         assert bc.backoff_level == 0
         assert bc.effective_interval == 0
+
+    def test_from_dict_unknown_state_resets(self, capsys):
+        bc = BackoffController.from_dict(
+            {"state": "baking_off", "backoff_level": 2},
+            base_interval=30, max_backoff=600,
+        )
+        assert bc.state == "normal"
+        assert bc.backoff_level == 0  # reset with state
+
+    def test_from_dict_corrupt_backoff_level(self, capsys):
+        bc = BackoffController.from_dict(
+            {"state": "backing_off", "backoff_level": "high"},
+            base_interval=30, max_backoff=600,
+        )
+        assert bc.backoff_level == 0
+
+    def test_from_dict_negative_backoff_level(self, capsys):
+        bc = BackoffController.from_dict(
+            {"state": "backing_off", "backoff_level": -3},
+            base_interval=30, max_backoff=600,
+        )
+        assert bc.backoff_level == 0
+
+    def test_from_dict_empty_dict(self):
+        bc = BackoffController.from_dict({}, base_interval=30, max_backoff=600)
+        assert bc.state == "normal"
+        assert bc.backoff_level == 0
+        assert bc._reclaim_times == []
+
+    def test_from_dict_clamps_level_to_max(self):
+        bc = BackoffController.from_dict(
+            {"state": "backing_off", "backoff_level": 99},
+            base_interval=30, max_backoff=600,
+        )
+        assert bc.backoff_level == bc._level_for_max()
+
+    def test_from_dict_filters_non_string_reclaim_times(self):
+        bc = BackoffController.from_dict(
+            {"state": "normal", "reclaim_times": ["2026-05-08T14:00:00+00:00", 42, None]},
+            base_interval=30, max_backoff=600,
+        )
+        assert len(bc._reclaim_times) == 1

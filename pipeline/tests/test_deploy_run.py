@@ -1263,3 +1263,42 @@ def test_status_no_orchestrator_section_when_normal(tmp_path, capsys):
     _cmd_status(args, pf)
     out = capsys.readouterr().out
     assert "backing_off" not in out
+
+
+def test_resolve_scope_excludes_orchestrator_key(tmp_path):
+    """_resolve_scope should never include _orchestrator in the pair set."""
+    from pipeline.deploy import _resolve_scope
+    args = argparse.Namespace(only=None, workload=None, package=None, status=None)
+    scope = _resolve_scope(_PROGRESS, args)
+    assert "_orchestrator" not in scope
+    assert len(scope) == 5  # only the real pair keys
+
+
+def test_apply_run_filters_excludes_orchestrator_key():
+    """_apply_run_filters should not include _orchestrator even with status filter."""
+    from pipeline.deploy import _apply_run_filters
+    args = argparse.Namespace(only=None, workload=None, package=None, status="running")
+    result = _apply_run_filters(_PROGRESS, args)
+    assert "_orchestrator" not in result
+
+
+def test_report_filter_mismatch_excludes_orchestrator(tmp_path, capsys):
+    """_report_filter_mismatch valid-values lists should not include metadata keys."""
+    from pipeline.deploy import _report_filter_mismatch
+    _report_filter_mismatch(_PROGRESS, argparse.Namespace(only="nonexistent", workload=None, package=None, status=None))
+    err_out = capsys.readouterr().err
+    assert "_orchestrator" not in err_out
+
+
+def test_status_empty_pairs_only_orchestrator(tmp_path, capsys):
+    """deploy.py status should handle progress with only _orchestrator (no pairs)."""
+    progress = {
+        "_orchestrator": {"state": "backing_off", "backoff_level": 3, "last_probe_free_gpus": 0},
+    }
+    pf = tmp_path / "progress.json"
+    pf.write_text(json.dumps(progress))
+    from pipeline.deploy import _cmd_status
+    args = argparse.Namespace(only=None, workload=None, package=None, status=None)
+    _cmd_status(args, pf)
+    out = capsys.readouterr().out
+    assert "0 pairs" in out

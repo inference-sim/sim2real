@@ -176,6 +176,14 @@ def _cmd_status(args, progress_path: Path) -> None:
 
     pairs = {k: progress[k] for k in _resolve_scope(progress, args)}
 
+    if not pairs:
+        print("  0 pairs")
+        orch = progress.get("_orchestrator")
+        if isinstance(orch, dict) and orch.get("state") not in (None, "normal"):
+            print(f"  Orchestrator: {orch.get('state', '?')} (level {orch.get('backoff_level', 0)})")
+        print()
+        return
+
     pair_w = max(len(k) for k in pairs) + 2
     col_status = 12
     col_slot = 14
@@ -199,7 +207,7 @@ def _cmd_status(args, progress_path: Path) -> None:
     print(f"  {len(pairs)} pairs: " + "  ".join(summary_parts))
 
     orch = progress.get("_orchestrator")
-    if orch and orch.get("state") not in (None, "normal"):
+    if isinstance(orch, dict) and orch.get("state") not in (None, "normal"):
         print(f"  Orchestrator: {orch.get('state', '?')} (level {orch.get('backoff_level', 0)}, "
               f"last probe: {orch.get('last_probe_free_gpus', '?')} free GPUs)")
 
@@ -1116,10 +1124,14 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                     _tb.print_exc(file=sys.stderr)
                     reclaimed = False
                 if reclaimed:
-                    prev_state = backoff.state
-                    backoff.signal_reclaim()
-                    if prev_state == "normal" and backoff.state == "backing_off":
-                        warn(f"Consecutive reclaims triggered backoff (next poll: {backoff.effective_interval}s)")
+                    if entry.get("status") == "pending":
+                        try:
+                            prev_state = backoff.state
+                            backoff.signal_reclaim()
+                            if prev_state == "normal" and backoff.state == "backing_off":
+                                warn(f"Reclaims triggered backoff (next poll: {backoff.effective_interval}s)")
+                        except (ValueError, TypeError) as exc:
+                            warn(f"Backoff signal_reclaim failed: {exc} — ignoring")
                     del slots_busy[ns]
                     store.save(progress)
                     continue
@@ -1167,6 +1179,9 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             if capacity != _last_probe_error or _probe_fail_count % 10 == 0:
                 warn(f"Capacity probe failed: {capacity} — dispatching without GPU gating")
             _last_probe_error = capacity
+            if backoff.state != "normal":
+                info("Capacity probe unavailable — resetting backoff to avoid stale gating")
+                backoff.signal_scheduling_success()
 
         # ── Backoff signals ──────────────────────────────────────────────
         pending = _pending_pairs()

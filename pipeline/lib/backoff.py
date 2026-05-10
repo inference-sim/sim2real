@@ -82,16 +82,27 @@ class BackoffController:
         bc = cls(base_interval=base_interval, max_backoff=max_backoff,
                  reclaim_threshold=reclaim_threshold, reclaim_window=reclaim_window)
         state = data.get("state", "normal")
-        if state not in cls._VALID_STATES:
+        state_corrupted = state not in cls._VALID_STATES
+        if state_corrupted:
             import sys
             print(f"\033[33m[WARN]  Unknown backoff state {state!r} in progress — resetting to normal\033[0m",
                   file=sys.stderr)
             state = "normal"
         bc.state = state
-        bc.backoff_level = data.get("backoff_level", 0)
+        raw_level = 0 if state_corrupted else data.get("backoff_level", 0)
+        if not isinstance(raw_level, int) or raw_level < 0:
+            import sys
+            print(f"\033[33m[WARN]  Invalid backoff_level {raw_level!r} in progress — resetting to 0\033[0m",
+                  file=sys.stderr)
+            raw_level = 0
+        bc.backoff_level = min(raw_level, bc._level_for_max())
         bc.last_scarcity_time = data.get("last_scarcity_time")
         bc.last_probe_free_gpus = data.get("last_probe_free_gpus")
-        bc._reclaim_times = data.get("reclaim_times", [])
+        raw_times = data.get("reclaim_times", [])
+        if isinstance(raw_times, list):
+            bc._reclaim_times = [t for t in raw_times if isinstance(t, str)]
+        else:
+            bc._reclaim_times = []
         return bc
 
     def _reset(self) -> None:
