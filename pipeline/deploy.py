@@ -195,6 +195,50 @@ def _cmd_status(args, progress_path: Path) -> None:
     print()
 
 
+# ── Pairs command ────────────────────────────────────────────────────────────
+
+def _cmd_pairs(cluster_dir: Path, *, keys_only: bool = False,
+               workloads_only: bool = False, packages_only: bool = False) -> None:
+    """List available pair keys, workloads, and packages from cluster/ YAML files."""
+    pairs = _load_pairs(cluster_dir)
+
+    if not pairs:
+        print("  0 pairs (no pipelinerun-*.yaml files found)")
+        return
+
+    if keys_only:
+        for key in sorted(pairs):
+            print(key)
+        return
+
+    if workloads_only:
+        workloads = sorted({v["workload"] for v in pairs.values() if v["workload"]})
+        for w in workloads:
+            print(w)
+        return
+
+    if packages_only:
+        packages = sorted({v["package"] for v in pairs.values() if v["package"]})
+        for p in packages:
+            print(p)
+        return
+
+    # Default: human-readable table
+    pair_w = max(len(k) for k in pairs) + 2
+    col_wl = max(len(v["workload"]) for v in pairs.values()) + 2
+    col_wl = max(col_wl, 10)
+
+    header = f"{'PAIR':<{pair_w}} {'WORKLOAD':<{col_wl}} PACKAGE"
+    print()
+    print(header)
+    print("-" * len(header))
+    for key in sorted(pairs):
+        entry = pairs[key]
+        print(f"{key:<{pair_w}} {entry['workload']:<{col_wl}} {entry['package']}")
+    print()
+    print(f"  {len(pairs)} pairs")
+
+
 # ── Collect command ──────────────────────────────────────────────────────────
 
 def _check_pipelinerun_status(pr_name: str, namespace: str) -> str:
