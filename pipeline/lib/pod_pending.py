@@ -1,10 +1,8 @@
 """Pod pending detection and reason classification."""
 from __future__ import annotations
 
-import logging
 import re
-
-_log = logging.getLogger(__name__)
+import sys
 
 _RECOVERABLE_PATTERNS = [
     re.compile(r"Insufficient\s+\S+", re.IGNORECASE),
@@ -37,8 +35,8 @@ def classify_pending_reason(message: str) -> str:
         if pat.search(message):
             return "non_recoverable"
 
-    _log.warning("unrecognized scheduling message (defaulting to recoverable): %s",
-                 message[:200])
+    print(f"[WARN]  unrecognized scheduling message (defaulting to recoverable): "
+          f"{message[:200]}", file=sys.stderr)
     return "recoverable"
 
 

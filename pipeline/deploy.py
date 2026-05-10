@@ -218,11 +218,11 @@ def _handle_pending_pods(*, pr_name: str, namespace: str, entry: dict,
     Returns False if no action taken (caller should proceed to timeout check).
 
     Side effects on *entry* (caller must persist):
-      On True (slot reclaimed):
-        - status: "pending", "failed", or "stalled"
-        - namespace: None
-        - pending_stalls: incremented
-        - pending_since: None
+      On True (non-recoverable):
+        - status: "failed", namespace: None, pending_since: None
+      On True (recoverable threshold exceeded):
+        - status: "pending" or "stalled", namespace: None
+        - pending_stalls: incremented, pending_since: None
       On False (no action):
         - pending_since: set on first recoverable detection, cleared when
           pods start running, reset on malformed timestamp
@@ -263,6 +263,7 @@ def _handle_pending_pods(*, pr_name: str, namespace: str, entry: dict,
         _cancel_and_delete_pipelinerun(pr_name, namespace)
         entry["status"] = "failed"
         entry["namespace"] = None
+        entry["pending_since"] = None
         return True
 
     # category == "recoverable"
@@ -1084,7 +1085,9 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                         max_pending_stalls=max_pending_stalls,
                     )
                 except Exception as exc:
-                    warn(f"[{pair_key}] pending check failed: {exc}")
+                    import traceback as _tb
+                    err(f"[{pair_key}] pending check failed: {exc}")
+                    _tb.print_exc(file=sys.stderr)
                     reclaimed = False
                 if reclaimed:
                     del slots_busy[ns]
@@ -1113,6 +1116,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                                 warn(f"[{pair_key}] timed out, max retries → timed-out")
                                 entry["status"] = "timed-out"
                             entry["namespace"] = None
+                            entry["pending_since"] = None
                             del slots_busy[ns]
                             store.save(progress)
                     except ValueError:
@@ -1195,6 +1199,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
 
             entry["status"] = "running"
             entry["namespace"] = ns
+            entry["pending_since"] = None
             slots_busy[ns] = pair_key
             store.save(progress)
             ok(f"[{pair_key}] → {ns} ({pr_name})")

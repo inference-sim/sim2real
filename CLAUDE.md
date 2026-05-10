@@ -68,6 +68,7 @@ python pipeline/run.py     --experiment-root ../admission-control switch <run-na
 | `values.py` | Deep-merge utility (`deep_merge`) used by `assemble.py` |
 | `assemble.py` | Scenario assembly: deep-merges bundles + overlays into resolved scenarios |
 | `tekton.py` | Generates PipelineRun YAMLs for scenario-based benchmarks |
+| `pod_pending.py` | Classifies pod scheduling failures as recoverable or non-recoverable |
 | `run_manager.py` | `list_runs`, `inspect_run`, `switch_run` logic |
 
 ## Workspace Artifacts
