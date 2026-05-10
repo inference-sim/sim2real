@@ -30,10 +30,9 @@ class BackoffController:
         if free_gpus >= min_cost:
             return
         self.state = "backing_off"
-        self.backoff_level += 1
-        raw = self._base * (2 ** self.backoff_level)
-        if raw > self._max:
-            self.backoff_level = self._level_for_max()
+        max_level = self._level_for_max()
+        if self.backoff_level < max_level:
+            self.backoff_level += 1
         self.last_scarcity_time = _dt.datetime.now(_dt.timezone.utc).isoformat()
         self.last_probe_free_gpus = free_gpus
 
@@ -52,10 +51,9 @@ class BackoffController:
         self._reclaim_times = [t for t in self._reclaim_times if t >= cutoff]
         if len(self._reclaim_times) >= self._reclaim_threshold:
             self.state = "backing_off"
-            self.backoff_level += 1
-            raw = self._base * (2 ** self.backoff_level)
-            if raw > self._max:
-                self.backoff_level = self._level_for_max()
+            max_level = self._level_for_max()
+            if self.backoff_level < max_level:
+                self.backoff_level += 1
             self.last_scarcity_time = now.isoformat()
             self._reclaim_times = []
 
@@ -91,7 +89,9 @@ class BackoffController:
         self._reclaim_times = []
 
     def _level_for_max(self) -> int:
-        """Return the smallest level where effective_interval == max_backoff."""
+        """Return the smallest level where base * 2^level >= max_backoff."""
+        if self._base <= 0:
+            return 0
         level = 0
         while self._base * (2 ** level) < self._max:
             level += 1

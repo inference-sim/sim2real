@@ -117,3 +117,9 @@ class TestBackoffController:
         assert len(bc2._reclaim_times) == 2
         bc2.signal_reclaim()
         assert bc2.state == "backing_off"
+
+    def test_zero_base_interval_does_not_loop(self):
+        bc = BackoffController(base_interval=0, max_backoff=600)
+        bc.signal_scarcity(free_gpus=0, min_cost=4)
+        assert bc.backoff_level == 0
+        assert bc.effective_interval == 0

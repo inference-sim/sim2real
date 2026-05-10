@@ -744,7 +744,7 @@ def _apply_run_filters(progress: dict, args) -> set:
     if not any([workload, package, status_filter]):
         return set()
 
-    candidates = set(progress.keys())
+    candidates = {k for k in progress.keys() if _is_pair_key(k)}
     if workload:
         candidates = {k for k in candidates if progress[k].get("workload") == workload}
     if package:
@@ -797,9 +797,10 @@ def _report_filter_mismatch(progress: dict, args) -> None:
     for k in keys:
         print(f"    {k}", file=sys.stderr)
 
-    valid_workloads = sorted({v.get("workload", "") for v in progress.values()} - {""})
-    valid_packages = sorted({v.get("package", "") for v in progress.values()} - {""})
-    valid_statuses = sorted({v.get("status", "") for v in progress.values()} - {""})
+    pair_values = [v for k, v in progress.items() if _is_pair_key(k)]
+    valid_workloads = sorted({v.get("workload", "") for v in pair_values} - {""})
+    valid_packages = sorted({v.get("package", "") for v in pair_values} - {""})
+    valid_statuses = sorted({v.get("status", "") for v in pair_values} - {""})
 
     print(f"\n  Valid --workload values: {', '.join(valid_workloads)}", file=sys.stderr)
     print(f"  Valid --package values:  {', '.join(valid_packages)}", file=sys.stderr)
@@ -978,7 +979,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
 
     max_backoff = getattr(args, "max_backoff", 600)
     existing_orch = progress.get("_orchestrator")
-    if existing_orch:
+    if isinstance(existing_orch, dict):
         backoff = BackoffController.from_dict(existing_orch, base_interval=poll_interval, max_backoff=max_backoff)
         if backoff.state != "normal":
             info(f"Resuming in {backoff.state} state (level {backoff.backoff_level})")
@@ -1004,8 +1005,9 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             }
 
     _scope = _resolve_scope(progress, args)
-    if len(_scope) < len(progress):
-        info(f"Scope: {len(_scope)}/{len(progress)} pairs")
+    total_pairs = sum(1 for k in progress if _is_pair_key(k))
+    if len(_scope) < total_pairs:
+        info(f"Scope: {len(_scope)}/{total_pairs} pairs")
 
     if getattr(args, "force", False):
         n = _force_reset(progress, _scope, discovered, namespaces=namespaces)
@@ -1114,7 +1116,10 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                     _tb.print_exc(file=sys.stderr)
                     reclaimed = False
                 if reclaimed:
+                    prev_state = backoff.state
                     backoff.signal_reclaim()
+                    if prev_state == "normal" and backoff.state == "backing_off":
+                        warn(f"Consecutive reclaims triggered backoff (next poll: {backoff.effective_interval}s)")
                     del slots_busy[ns]
                     store.save(progress)
                     continue
