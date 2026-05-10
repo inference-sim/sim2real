@@ -8,7 +8,7 @@ class ManifestError(Exception):
     """Manifest validation error."""
 
 
-_REQUIRED_TOP = ["kind", "version", "scenario", "algorithm", "baseline"]
+_REQUIRED_TOP = ["kind", "version", "scenario", "baseline"]
 _REQUIRED_ALGORITHM = ["source"]
 
 
@@ -41,12 +41,15 @@ def load_manifest(path: "Path | str") -> dict:
         if field not in data:
             raise ManifestError(f"Missing required field: {field}")
 
-    algo = data["algorithm"]
-    if not isinstance(algo, dict):
-        raise ManifestError("algorithm must be a mapping")
-    for f in _REQUIRED_ALGORITHM:
-        if f not in algo:
-            raise ManifestError(f"Missing required field: algorithm.{f}")
+    algo = data.get("algorithm")
+    if algo is None and "algorithm" in data:
+        del data["algorithm"]
+    elif algo is not None:
+        if not isinstance(algo, dict):
+            raise ManifestError("algorithm must be a mapping")
+        for f in _REQUIRED_ALGORITHM:
+            if f not in algo:
+                raise ManifestError(f"Missing required field: algorithm.{f}")
 
     bl = data["baseline"]
     if not isinstance(bl, dict):
