@@ -218,10 +218,14 @@ def _handle_pending_pods(*, pr_name: str, namespace: str, entry: dict,
     Returns False if no action taken (caller should proceed to timeout check).
 
     Side effects on *entry* (caller must persist):
-      - pending_since: set/cleared as pending state changes
-      - pending_stalls: incremented on each reclaim
-      - status: set to "pending", "failed", or "stalled" on reclaim
-      - namespace: set to None on reclaim
+      On True (slot reclaimed):
+        - status: "pending", "failed", or "stalled"
+        - namespace: None
+        - pending_stalls: incremented
+        - pending_since: None
+      On False (no action):
+        - pending_since: set on first recoverable detection, cleared when
+          pods start running, reset on malformed timestamp
     """
     import datetime as _dt
     import json as _json
@@ -243,7 +247,11 @@ def _handle_pending_pods(*, pr_name: str, namespace: str, entry: dict,
         warn(f"[{entry.get('workload', '?')}] pod query returned invalid JSON: {result.stdout[:120]}")
         return False
 
-    category, detail = parse_pod_conditions(pods_json)
+    try:
+        category, detail = parse_pod_conditions(pods_json)
+    except (KeyError, TypeError, AttributeError) as exc:
+        warn(f"[{entry.get('workload', '?')}] unexpected pod JSON shape: {exc}")
+        return False
 
     if category is None:
         if entry.get("pending_since") is not None:
