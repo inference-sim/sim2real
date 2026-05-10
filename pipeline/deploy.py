@@ -910,6 +910,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     import datetime as _dt
     import tempfile as _tmp
     from pipeline.lib.progress import LocalProgressStore
+    from pipeline.lib.backoff import BackoffController
     from pipeline.lib.capacity import (
         probe_free_gpus, gpu_cost_per_pair, derive_gpu_resource_type, load_defaults
     )
@@ -968,6 +969,16 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
 
     # Load or initialize progress
     progress = store.load()
+
+    max_backoff = getattr(args, "max_backoff", 600)
+    existing_orch = progress.get("_orchestrator")
+    if existing_orch:
+        backoff = BackoffController.from_dict(existing_orch, base_interval=poll_interval, max_backoff=max_backoff)
+        if backoff.state != "normal":
+            info(f"Resuming in {backoff.state} state (level {backoff.backoff_level})")
+    else:
+        backoff = BackoffController(base_interval=poll_interval, max_backoff=max_backoff)
+
     discovered = _load_pairs(cluster_dir)
     if not discovered:
         err("No pairs found in cluster/. Run prepare.py first."); sys.exit(1)
@@ -1145,21 +1156,43 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 warn(f"Capacity probe failed: {capacity} — dispatching without GPU gating")
             _last_probe_error = capacity
 
+        # ── Backoff signals ──────────────────────────────────────────────
+        pending = _pending_pairs()
+        if free_gpus is not None and pending:
+            min_cost = min(progress[k].get("gpu_cost", pair_gpu_cost) for k in pending)
+            max_cost = max(progress[k].get("gpu_cost", pair_gpu_cost) for k in pending)
+            if free_gpus < min_cost:
+                prev_state = backoff.state
+                backoff.signal_scarcity(free_gpus=free_gpus, min_cost=min_cost)
+                if prev_state == "normal":
+                    warn(f"Scarcity detected: {free_gpus} free GPUs, entering backoff (next poll: {backoff.effective_interval}s)")
+                else:
+                    info(f"Backoff level {backoff.backoff_level} — next poll in {backoff.effective_interval}s")
+            elif free_gpus >= max_cost:
+                if backoff.state != "normal":
+                    info(f"Backoff probe: {free_gpus} free GPUs available → resuming normal dispatch")
+                backoff.signal_capacity(free_gpus=free_gpus, max_cost=max_cost)
+
         # ── Assign pending work to free slots ────────────────────────────
         free_slots = [ns for ns in namespaces if ns not in slots_busy]
         pending = _pending_pairs()
         if free_gpus is not None and pending:
-            dispatchable = _capacity_limited_pairs(
-                pending, progress,
-                free_gpus=free_gpus, default_gpu_cost=pair_gpu_cost,
-            )
-            if len(dispatchable) == 0 and pending:
-                smallest = min(progress[k].get("gpu_cost", pair_gpu_cost) for k in pending)
-                warn(f"Dispatching 0/{len(pending)} pending pairs — smallest cost ({smallest}) exceeds free GPUs ({free_gpus})")
-            elif len(dispatchable) < len(pending):
-                info(f"Dispatching {len(dispatchable)}/{len(pending)} pending pairs (capacity-limited: {free_gpus} free GPUs)")
-            elif len(free_slots) < len(dispatchable):
-                info(f"Dispatching {len(free_slots)}/{len(pending)} pending pairs (slot-limited)")
+            min_cost = min(progress[k].get("gpu_cost", pair_gpu_cost) for k in pending)
+            if not backoff.should_dispatch(free_gpus=free_gpus, min_cost=min_cost):
+                info(f"Backoff: skipping dispatch ({len(pending)} pending, {free_gpus} free GPUs)")
+                dispatchable = []
+            else:
+                dispatchable = _capacity_limited_pairs(
+                    pending, progress,
+                    free_gpus=free_gpus, default_gpu_cost=pair_gpu_cost,
+                )
+                if len(dispatchable) == 0 and pending:
+                    smallest = min(progress[k].get("gpu_cost", pair_gpu_cost) for k in pending)
+                    warn(f"Dispatching 0/{len(pending)} pending pairs — smallest cost ({smallest}) exceeds free GPUs ({free_gpus})")
+                elif len(dispatchable) < len(pending):
+                    info(f"Dispatching {len(dispatchable)}/{len(pending)} pending pairs (capacity-limited: {free_gpus} free GPUs)")
+                elif len(free_slots) < len(dispatchable):
+                    info(f"Dispatching {len(free_slots)}/{len(pending)} pending pairs (slot-limited)")
         else:
             dispatchable = pending
 
@@ -1210,9 +1243,16 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             slots_busy[ns] = pair_key
             store.save(progress)
             ok(f"[{pair_key}] → {ns} ({pr_name})")
+            if backoff.state != "normal":
+                backoff.signal_scheduling_success()
+                info("Scheduling success → backoff reset")
+
+        # Persist backoff state
+        progress["_orchestrator"] = backoff.to_dict()
+        store.save(progress)
 
         if _work_remaining() or slots_busy:
-            time.sleep(poll_interval)
+            time.sleep(backoff.effective_interval)
 
     # Final summary
     counts: dict[str, int] = {}
