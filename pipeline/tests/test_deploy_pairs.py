@@ -1,8 +1,6 @@
 """Tests for deploy.py pairs subcommand."""
 import yaml as _yaml
 
-import pytest
-
 
 def _make_cluster(tmp_path, pairs):
     """Write pipelinerun-*.yaml files into tmp_path for each (workload, package) tuple."""
