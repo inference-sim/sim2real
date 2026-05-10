@@ -1,7 +1,10 @@
 """Pod pending detection and reason classification."""
 from __future__ import annotations
 
+import logging
 import re
+
+_log = logging.getLogger(__name__)
 
 _RECOVERABLE_PATTERNS = [
     re.compile(r"Insufficient\s+\S+", re.IGNORECASE),
@@ -20,8 +23,8 @@ def classify_pending_reason(message: str) -> str:
 
     Returns "recoverable" (resource scarcity) or "non_recoverable" (config error).
     Empty messages → non_recoverable (missing data = config problem).
-    Unrecognized non-empty messages → recoverable (10-min wait is cheaper
-    than irreversible cancellation of hours of GPU work).
+    Unrecognized non-empty messages → recoverable (waiting up to the
+    configured threshold is cheaper than irreversible cancellation).
     """
     if not message:
         return "non_recoverable"
@@ -34,6 +37,8 @@ def classify_pending_reason(message: str) -> str:
         if pat.search(message):
             return "non_recoverable"
 
+    _log.warning("unrecognized scheduling message (defaulting to recoverable): %s",
+                 message[:200])
     return "recoverable"
 
 

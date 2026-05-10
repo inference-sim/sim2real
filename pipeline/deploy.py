@@ -216,6 +216,12 @@ def _handle_pending_pods(*, pr_name: str, namespace: str, entry: dict,
 
     Returns True if the slot was reclaimed (caller should free slot).
     Returns False if no action taken (caller should proceed to timeout check).
+
+    Side effects on *entry* (caller must persist):
+      - pending_since: set/cleared as pending state changes
+      - pending_stalls: incremented on each reclaim
+      - status: set to "pending", "failed", or "stalled" on reclaim
+      - namespace: set to None on reclaim
     """
     import datetime as _dt
     import json as _json
