@@ -1,5 +1,10 @@
 # Tab completion for sim2real deploy.py (bash)
-# Usage: source $SIM2REAL/pipeline/completions.bash
+#
+# Usage — add to your .bashrc:
+#   source /path/to/sim2real/pipeline/completions.bash
+#
+# Also registers completion for "python pipeline/deploy.py" via a wrapper.
+# For aliases, register manually:  complete -F _sim2real_deploy my-alias
 
 _sim2real_deploy() {
     local cur prev subcmd
@@ -8,13 +13,15 @@ _sim2real_deploy() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     local subcommands="run status collect cleanup pairs"
-    local status_values="pending running done failed timed-out"
+    local status_values="pending running done failed timed-out stalled collect-failed collecting"
 
-    # Find the subcommand (first positional argument)
     subcmd=""
     local i
     for ((i=1; i < COMP_CWORD; i++)); do
         case "${COMP_WORDS[i]}" in
+            # These flags take a value argument — skip it to avoid misidentifying
+            # the value as a subcommand (e.g. --experiment-root run)
+            --experiment-root|--run) ((i++)) ;;
             -*) ;;
             run|status|collect|cleanup|pairs)
                 subcmd="${COMP_WORDS[i]}"
@@ -23,7 +30,6 @@ _sim2real_deploy() {
         esac
     done
 
-    # If no subcommand yet, complete subcommands and global flags
     if [[ -z "$subcmd" ]]; then
         if [[ "$cur" == -* ]]; then
             COMPREPLY=($(compgen -W "--run --experiment-root" -- "$cur"))
@@ -33,7 +39,6 @@ _sim2real_deploy() {
         return
     fi
 
-    # Complete flag values based on prev
     case "$prev" in
         --only)
             local keys
@@ -59,7 +64,6 @@ _sim2real_deploy() {
             ;;
     esac
 
-    # Complete flags for the active subcommand
     if [[ "$cur" == -* ]]; then
         case "$subcmd" in
             run)
@@ -82,3 +86,18 @@ _sim2real_deploy() {
 }
 
 complete -F _sim2real_deploy deploy.py
+
+# Handle "python pipeline/deploy.py ..." — bash sees "python" as the command,
+# so we intercept and delegate when the first arg ends in deploy.py.
+_python_deploy_py() {
+    if [[ "${COMP_WORDS[1]}" == */deploy.py || "${COMP_WORDS[1]}" == deploy.py ]]; then
+        local orig_words=("${COMP_WORDS[@]}")
+        COMP_WORDS=("deploy.py" "${COMP_WORDS[@]:2}")
+        (( COMP_CWORD -= 1 ))
+        _sim2real_deploy
+        COMP_WORDS=("${orig_words[@]}")
+    fi
+}
+
+complete -F _python_deploy_py python
+complete -F _python_deploy_py python3

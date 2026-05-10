@@ -176,8 +176,8 @@ def test_cleanup_pair_missing_pr_name_warns(monkeypatch, capsys):
     result = mod._cleanup_pair("wl-unknown-baseline", entry, {})
     assert result is True
     assert entry["status"] == "pending"
-    out = capsys.readouterr().out
-    assert "no PipelineRun name found" in out
+    err = capsys.readouterr().err
+    assert "no PipelineRun name found" in err
 
 
 def test_cmd_cleanup_continues_on_exception(tmp_path, monkeypatch, capsys):

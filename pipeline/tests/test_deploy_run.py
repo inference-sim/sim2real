@@ -205,7 +205,7 @@ def test_load_pairs_skips_corrupt_yaml(tmp_path, capsys):
 
     assert len(pairs) == 1
     assert "wl-smoke-baseline" in pairs
-    assert "pipelinerun-bad.yaml" in capsys.readouterr().out
+    assert "pipelinerun-bad.yaml" in capsys.readouterr().err
 
 
 def test_load_pairs_skips_malformed_params(tmp_path, capsys):
@@ -223,7 +223,7 @@ def test_load_pairs_skips_malformed_params(tmp_path, capsys):
     (tmp_path / "pipelinerun-test.yaml").write_text(_yaml.dump(pr))
     pairs = _load_pairs(tmp_path)
     assert len(pairs) == 0
-    assert "pipelinerun-test.yaml" in capsys.readouterr().out
+    assert "pipelinerun-test.yaml" in capsys.readouterr().err
 
 
 def test_load_pairs_warns_on_skip(tmp_path, capsys):
@@ -233,9 +233,9 @@ def test_load_pairs_warns_on_skip(tmp_path, capsys):
     (tmp_path / "pipelinerun-broken.yaml").write_text("not: valid: yaml: [[[")
     _load_pairs(tmp_path)
 
-    out = capsys.readouterr().out
-    assert "[WARN]" in out
-    assert "pipelinerun-broken.yaml" in out
+    err = capsys.readouterr().err
+    assert "[WARN]" in err
+    assert "pipelinerun-broken.yaml" in err
 
 
 def test_apply_run_filters_by_status():
@@ -1042,8 +1042,8 @@ def test_early_reclaim_kubectl_failure_returns_false(monkeypatch, capsys):
 
     assert reclaimed is False
     assert entry["status"] == "running"
-    out = capsys.readouterr().out
-    assert "pod query failed" in out
+    err = capsys.readouterr().err
+    assert "pod query failed" in err
 
 
 def test_early_reclaim_pods_running_clears_pending_since(monkeypatch):
@@ -1131,8 +1131,8 @@ def test_early_reclaim_malformed_pending_since_resets_timer(monkeypatch, capsys)
 
     assert reclaimed is False
     assert entry["pending_since"] != "not-a-valid-timestamp"
-    out = capsys.readouterr().out
-    assert "malformed pending_since" in out
+    err = capsys.readouterr().err
+    assert "malformed pending_since" in err
 
 
 def test_force_reset_clears_pending_stalls(monkeypatch):
@@ -1189,5 +1189,5 @@ def test_early_reclaim_json_decode_error_warns(monkeypatch, capsys):
 
     assert reclaimed is False
     assert entry["status"] == "running"
-    out = capsys.readouterr().out
-    assert "invalid JSON" in out
+    err = capsys.readouterr().err
+    assert "invalid JSON" in err
