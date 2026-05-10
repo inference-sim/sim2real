@@ -1077,11 +1077,16 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
 
             elif status in ("Running", "Started"):
                 # Check for pending pods (before timeout)
-                if _handle_pending_pods(
-                    pr_name=pr_name, namespace=ns, entry=entry,
-                    pending_threshold=pending_threshold,
-                    max_pending_stalls=max_pending_stalls,
-                ):
+                try:
+                    reclaimed = _handle_pending_pods(
+                        pr_name=pr_name, namespace=ns, entry=entry,
+                        pending_threshold=pending_threshold,
+                        max_pending_stalls=max_pending_stalls,
+                    )
+                except Exception as exc:
+                    warn(f"[{pair_key}] pending check failed: {exc}")
+                    reclaimed = False
+                if reclaimed:
                     del slots_busy[ns]
                     store.save(progress)
                     continue
