@@ -1,0 +1,92 @@
+"""Tests for deploy.py pairs subcommand."""
+import yaml as _yaml
+
+import pytest
+
+
+def _make_cluster(tmp_path, pairs):
+    """Write pipelinerun-*.yaml files into tmp_path for each (workload, package) tuple."""
+    for wl, pkg in pairs:
+        pr = {
+            "apiVersion": "tekton.dev/v1",
+            "kind": "PipelineRun",
+            "metadata": {"name": f"{pkg}-{wl}-run1", "namespace": "sim2real-0"},
+            "spec": {"params": [
+                {"name": "workloadName", "value": f"wl-{wl}"},
+                {"name": "phase", "value": pkg},
+            ]},
+        }
+        (tmp_path / f"pipelinerun-{wl}-{pkg}.yaml").write_text(_yaml.dump(pr))
+
+
+def test_pairs_table_lists_all(tmp_path, capsys):
+    """Default mode prints a table with all pair keys, workloads, and packages."""
+    from pipeline.deploy import _cmd_pairs
+    _make_cluster(tmp_path, [("smoke", "baseline"), ("smoke", "treatment"), ("load", "baseline")])
+
+    _cmd_pairs(tmp_path)
+    out = capsys.readouterr().out
+
+    assert "wl-smoke-baseline" in out
+    assert "wl-smoke-treatment" in out
+    assert "wl-load-baseline" in out
+    assert "PAIR" in out
+    assert "WORKLOAD" in out
+    assert "PACKAGE" in out
+
+
+def test_pairs_keys_only(tmp_path, capsys):
+    """--keys-only prints one pair key per line, no header."""
+    from pipeline.deploy import _cmd_pairs
+    _make_cluster(tmp_path, [("smoke", "baseline"), ("load", "treatment")])
+
+    _cmd_pairs(tmp_path, keys_only=True)
+    out = capsys.readouterr().out
+
+    lines = out.strip().splitlines()
+    assert set(lines) == {"wl-smoke-baseline", "wl-load-treatment"}
+    assert "PAIR" not in out
+
+
+def test_pairs_workloads_only(tmp_path, capsys):
+    """--workloads-only prints distinct workload names, one per line."""
+    from pipeline.deploy import _cmd_pairs
+    _make_cluster(tmp_path, [("smoke", "baseline"), ("smoke", "treatment"), ("load", "baseline")])
+
+    _cmd_pairs(tmp_path, workloads_only=True)
+    out = capsys.readouterr().out
+
+    lines = out.strip().splitlines()
+    assert set(lines) == {"wl-smoke", "wl-load"}
+
+
+def test_pairs_packages_only(tmp_path, capsys):
+    """--packages-only prints distinct package names, one per line."""
+    from pipeline.deploy import _cmd_pairs
+    _make_cluster(tmp_path, [("smoke", "baseline"), ("smoke", "treatment"), ("load", "baseline")])
+
+    _cmd_pairs(tmp_path, packages_only=True)
+    out = capsys.readouterr().out
+
+    lines = out.strip().splitlines()
+    assert set(lines) == {"baseline", "treatment"}
+
+
+def test_pairs_empty_cluster(tmp_path, capsys):
+    """Empty cluster directory prints a zero-pairs message."""
+    from pipeline.deploy import _cmd_pairs
+
+    _cmd_pairs(tmp_path)
+    out = capsys.readouterr().out
+
+    assert "0 pairs" in out
+
+
+def test_pairs_missing_cluster(tmp_path, capsys):
+    """Non-existent cluster directory prints a zero-pairs message."""
+    from pipeline.deploy import _cmd_pairs
+
+    _cmd_pairs(tmp_path / "nonexistent")
+    out = capsys.readouterr().out
+
+    assert "0 pairs" in out
