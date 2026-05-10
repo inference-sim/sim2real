@@ -812,6 +812,22 @@ def test_run_parser_pending_flag_defaults():
     assert args.max_pending_stalls == 10
 
 
+def test_run_parser_has_max_backoff_flag():
+    """run subcommand should have --max-backoff flag with default 600."""
+    from pipeline.deploy import build_parser
+    parser = build_parser()
+    args = parser.parse_args(["run"])
+    assert args.max_backoff == 600
+
+
+def test_run_parser_max_backoff_custom():
+    """--max-backoff should accept custom values."""
+    from pipeline.deploy import build_parser
+    parser = build_parser()
+    args = parser.parse_args(["run", "--max-backoff", "300"])
+    assert args.max_backoff == 300
+
+
 def test_early_reclaim_recoverable_threshold_exceeded(monkeypatch):
     """Recoverable pending pod past threshold: cancel PR, free slot, return to pending."""
     import datetime as _dt

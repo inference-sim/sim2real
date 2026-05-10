@@ -1370,6 +1370,8 @@ Examples:
                        help="Seconds a pod may remain Pending (recoverable) before early reclaim [600]")
     run_p.add_argument("--max-pending-stalls", type=int, default=10, dest="max_pending_stalls",
                        help="Max early reclaims before marking pair stalled [10]")
+    run_p.add_argument("--max-backoff", type=int, default=600, dest="max_backoff",
+                       help="Maximum backoff interval in seconds during GPU scarcity [600]")
 
     cleanup_p = sub.add_parser("cleanup", help="Tear down cluster resources for all non-pending pairs")
     cleanup_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key (wl- prefix optional)")
