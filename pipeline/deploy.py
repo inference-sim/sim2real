@@ -42,7 +42,7 @@ def _c(code: str, text: str) -> str:
 
 def info(msg: str)  -> None: print(_c("34", "[INFO]  ") + msg)
 def ok(msg: str)    -> None: print(_c("32", "[OK]    ") + msg)
-def warn(msg: str)  -> None: print(_c("33", "[WARN]  ") + msg)
+def warn(msg: str)  -> None: print(_c("33", "[WARN]  ") + msg, file=sys.stderr)
 def err(msg: str)   -> None: print(_c("31", "[ERROR] ") + msg, file=sys.stderr)
 
 
@@ -204,6 +204,8 @@ def _cmd_pairs(cluster_dir: Path, *, keys_only: bool = False,
     pairs = _load_pairs(cluster_dir)
 
     if not pairs:
+        if keys_only or workloads_only or packages_only:
+            return
         n = len(list(cluster_dir.glob("pipelinerun-*.yaml"))) if cluster_dir.exists() else 0
         if n == 0:
             print("  0 pairs (no pipelinerun-*.yaml files found)")
@@ -1398,7 +1400,11 @@ Examples:
 def main():
     parser = build_parser()
     args = parser.parse_args()
-    print(_c("36", "\n━━━ sim2real-deploy ━━━\n"))
+    machine_readable = (args.command == "pairs" and
+                         any(getattr(args, f, False)
+                             for f in ("keys_only", "workloads_only", "packages_only")))
+    if not machine_readable:
+        print(_c("36", "\n━━━ sim2real-deploy ━━━\n"))
 
     global EXPERIMENT_ROOT
     EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if args.experiment_root else Path.cwd()
