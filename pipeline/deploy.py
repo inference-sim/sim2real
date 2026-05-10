@@ -197,6 +197,12 @@ def _cmd_status(args, progress_path: Path) -> None:
     print()
     summary_parts = [f"{v} {k}" for k, v in sorted(counts.items())]
     print(f"  {len(pairs)} pairs: " + "  ".join(summary_parts))
+
+    orch = progress.get("_orchestrator")
+    if orch and orch.get("state") != "normal":
+        print(f"  Orchestrator: {orch['state']} (level {orch.get('backoff_level', 0)}, "
+              f"last probe: {orch.get('last_probe_free_gpus', '?')} free GPUs)")
+
     print()
 
 
