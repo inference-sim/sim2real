@@ -90,3 +90,30 @@ class TestBackoffController:
         bc.signal_capacity(free_gpus=8, max_cost=16)
         assert bc.state == "backing_off"
         assert bc.backoff_level == 1
+
+    def test_reclaim_signal_triggers_backoff_after_threshold(self):
+        bc = BackoffController(base_interval=30, max_backoff=600, reclaim_threshold=3, reclaim_window=600)
+        bc.signal_reclaim()
+        assert bc.state == "normal"
+        bc.signal_reclaim()
+        assert bc.state == "normal"
+        bc.signal_reclaim()
+        assert bc.state == "backing_off"
+
+    def test_reclaim_signal_window_expiry(self):
+        import datetime as _dt
+        bc = BackoffController(base_interval=30, max_backoff=600, reclaim_threshold=3, reclaim_window=600)
+        old_time = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=700)).isoformat()
+        bc._reclaim_times = [old_time, old_time]
+        bc.signal_reclaim()
+        assert bc.state == "normal"  # old ones expired, only 1 recent
+
+    def test_reclaim_signal_roundtrip(self):
+        bc = BackoffController(base_interval=30, max_backoff=600, reclaim_threshold=3, reclaim_window=600)
+        bc.signal_reclaim()
+        bc.signal_reclaim()
+        data = bc.to_dict()
+        bc2 = BackoffController.from_dict(data, base_interval=30, max_backoff=600, reclaim_threshold=3, reclaim_window=600)
+        assert len(bc2._reclaim_times) == 2
+        bc2.signal_reclaim()
+        assert bc2.state == "backing_off"

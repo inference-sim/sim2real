@@ -7,13 +7,17 @@ import datetime as _dt
 class BackoffController:
     """Manages poll-interval backoff during sustained GPU scarcity."""
 
-    def __init__(self, base_interval: int, max_backoff: int) -> None:
+    def __init__(self, base_interval: int, max_backoff: int, *,
+                 reclaim_threshold: int = 3, reclaim_window: int = 600) -> None:
         self._base = base_interval
         self._max = max_backoff
+        self._reclaim_threshold = reclaim_threshold
+        self._reclaim_window = reclaim_window
         self.state: str = "normal"
         self.backoff_level: int = 0
         self.last_scarcity_time: str | None = None
         self.last_probe_free_gpus: int | None = None
+        self._reclaim_times: list[str] = []
 
     @property
     def effective_interval(self) -> int:
@@ -41,6 +45,20 @@ class BackoffController:
     def signal_scheduling_success(self) -> None:
         self._reset()
 
+    def signal_reclaim(self) -> None:
+        now = _dt.datetime.now(_dt.timezone.utc)
+        self._reclaim_times.append(now.isoformat())
+        cutoff = (now - _dt.timedelta(seconds=self._reclaim_window)).isoformat()
+        self._reclaim_times = [t for t in self._reclaim_times if t >= cutoff]
+        if len(self._reclaim_times) >= self._reclaim_threshold:
+            self.state = "backing_off"
+            self.backoff_level += 1
+            raw = self._base * (2 ** self.backoff_level)
+            if raw > self._max:
+                self.backoff_level = self._level_for_max()
+            self.last_scarcity_time = now.isoformat()
+            self._reclaim_times = []
+
     def should_dispatch(self, *, free_gpus: int, min_cost: int) -> bool:
         if self.state == "normal":
             return True
@@ -52,20 +70,25 @@ class BackoffController:
             "backoff_level": self.backoff_level,
             "last_scarcity_time": self.last_scarcity_time,
             "last_probe_free_gpus": self.last_probe_free_gpus,
+            "reclaim_times": self._reclaim_times,
         }
 
     @classmethod
-    def from_dict(cls, data: dict, *, base_interval: int, max_backoff: int) -> BackoffController:
-        bc = cls(base_interval=base_interval, max_backoff=max_backoff)
+    def from_dict(cls, data: dict, *, base_interval: int, max_backoff: int,
+                  reclaim_threshold: int = 3, reclaim_window: int = 600) -> BackoffController:
+        bc = cls(base_interval=base_interval, max_backoff=max_backoff,
+                 reclaim_threshold=reclaim_threshold, reclaim_window=reclaim_window)
         bc.state = data.get("state", "normal")
         bc.backoff_level = data.get("backoff_level", 0)
         bc.last_scarcity_time = data.get("last_scarcity_time")
         bc.last_probe_free_gpus = data.get("last_probe_free_gpus")
+        bc._reclaim_times = data.get("reclaim_times", [])
         return bc
 
     def _reset(self) -> None:
         self.state = "normal"
         self.backoff_level = 0
+        self._reclaim_times = []
 
     def _level_for_max(self) -> int:
         """Return the smallest level where effective_interval == max_backoff."""

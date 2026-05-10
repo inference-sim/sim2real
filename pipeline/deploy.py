@@ -1114,6 +1114,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                     _tb.print_exc(file=sys.stderr)
                     reclaimed = False
                 if reclaimed:
+                    backoff.signal_reclaim()
                     del slots_busy[ns]
                     store.save(progress)
                     continue
