@@ -45,6 +45,11 @@ def warn(msg: str)  -> None: print(_c("33", "[WARN]  ") + msg)
 def err(msg: str)   -> None: print(_c("31", "[ERROR] ") + msg, file=sys.stderr)
 
 
+def _is_pair_key(key: str) -> bool:
+    """Return True if key is a real pair entry (not metadata)."""
+    return not key.startswith("_")
+
+
 def step(n, title: str) -> None:
     print("\n" + _c("36", f"━━━ Step {n}: {title} ━━━"))
 
@@ -759,7 +764,7 @@ def _resolve_scope(progress: dict, args) -> set:
     if filters_given and not filtered:
         _report_filter_mismatch(progress, args)
         sys.exit(1)
-    return filtered or set(progress.keys())
+    return filtered or {k for k in progress.keys() if _is_pair_key(k)}
 
 
 def _report_filter_mismatch(progress: dict, args) -> None:
@@ -781,7 +786,7 @@ def _report_filter_mismatch(progress: dict, args) -> None:
 
     err(f"No pairs matched {', '.join(parts)}.\n")
 
-    keys = sorted(progress.keys())
+    keys = sorted(k for k in progress.keys() if _is_pair_key(k))
     print(f"  Valid pair keys ({len(keys)}):", file=sys.stderr)
     for k in keys:
         print(f"    {k}", file=sys.stderr)
@@ -995,6 +1000,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
 
     # Reconcile 'running' entries against actual cluster state on resume
     for key, entry in progress.items():
+        if not _is_pair_key(key):
+            continue
         if entry["status"] == "running":
             pr_meta = discovered.get(key, {})
             pr_name = pr_meta.get("pr_name", "")
@@ -1025,16 +1032,16 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     slots_busy: dict[str, str] = {
         entry["namespace"]: key
         for key, entry in progress.items()
-        if entry["status"] == "running" and entry.get("namespace")
+        if _is_pair_key(key) and entry.get("status") == "running" and entry.get("namespace")
     }
 
     def _pending_pairs() -> list[str]:
         return [k for k, v in progress.items()
-                if v["status"] == "pending" and k in _scope]
+                if _is_pair_key(k) and v.get("status") == "pending" and k in _scope]
 
     def _work_remaining() -> bool:
-        return any(v["status"] in ("pending", "running", "collecting")
-                   for k, v in progress.items() if k in _scope)
+        return any(v.get("status") in ("pending", "running", "collecting")
+                   for k, v in progress.items() if _is_pair_key(k) and k in _scope)
 
     timeout_hours = 4
     info(f"Orchestrator: {len(_scope)} pairs in scope, {len(namespaces)} slot(s)")

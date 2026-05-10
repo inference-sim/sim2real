@@ -1,4 +1,5 @@
 """Tests for deploy.py run orchestrator and status subcommand."""
+import argparse
 import json
 
 
@@ -1191,3 +1192,20 @@ def test_early_reclaim_json_decode_error_warns(monkeypatch, capsys):
     assert entry["status"] == "running"
     out = capsys.readouterr().out
     assert "invalid JSON" in out
+
+
+def test_status_ignores_orchestrator_metadata(tmp_path, capsys):
+    """_orchestrator key in progress.json should not appear in status output."""
+    progress = {
+        "wl-foo-baseline": {"workload": "foo", "package": "baseline", "status": "running", "namespace": "ns-1", "retries": 0},
+        "_orchestrator": {"state": "backing_off", "backoff_level": 2, "last_probe_free_gpus": 0},
+    }
+    pf = tmp_path / "progress.json"
+    pf.write_text(json.dumps(progress))
+
+    from pipeline.deploy import _cmd_status
+    args = argparse.Namespace(only=None, workload=None, package=None, status=None)
+    _cmd_status(args, pf)
+    out = capsys.readouterr().out
+    assert "wl-foo-baseline" in out
+    assert "_orchestrator" not in out
