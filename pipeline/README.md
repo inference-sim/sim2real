@@ -155,12 +155,15 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 | `--default-gpu-cost N` | 1 | Fallback GPU cost per pair when not derivable from scenario |
 | `--pending-threshold N` | 600 | Seconds a pod may remain Pending (recoverable reason) before early reclaim |
 | `--max-pending-stalls N` | 10 | Max early reclaims before marking pair `stalled` |
+| `--max-backoff N` | 600 | Maximum backoff interval in seconds during GPU scarcity |
 
 **Early reclaim** — on each poll cycle, pods in `Running`/`Started` PipelineRuns are checked for scheduling failures. Recoverable reasons (e.g. `Insufficient nvidia.com/gpu`) trigger early reclaim after `--pending-threshold` seconds. Non-recoverable reasons (e.g. node affinity mismatch, PVC not found) fail the pair immediately. Each early reclaim increments `pending_stalls`; at `--max-pending-stalls` the pair transitions to `stalled` (terminal).
 
+**Backoff controller** — when the capacity probe shows `free_gpus < min(pending workload GPU costs)`, the orchestrator enters exponential backoff: poll interval doubles each cycle (capped at `--max-backoff`), and dispatch is skipped until capacity returns. Backoff is also triggered when 3 early reclaims (recoverable only) occur within 10 minutes. The controller resets to normal when a pod successfully schedules or the probe shows sufficient capacity for the largest pending workload. Already-running slots continue to be monitored during backoff. Orchestrator state is persisted in `progress.json` under the `_orchestrator` metadata key.
+
 **Pair statuses:** `pending` → `running` → `collecting` → `done` | `collect-failed`. Failure paths: `running` → `failed` (hard failure or non-recoverable pending), `running` → `timed-out` (4h timeout exceeded), `running` → `pending` (recoverable early reclaim, repeats up to `--max-pending-stalls` times) → `stalled`.
 
-**`deploy.py status`** — prints the current state of all pairs from `workspace/runs/<run>/progress.json`.
+**`deploy.py status`** — prints the current state of all pairs from `workspace/runs/<run>/progress.json`. When the orchestrator is in backoff, an additional line shows the current state and backoff level.
 
 | Flag | Description |
 |------|-------------|

@@ -1,4 +1,5 @@
 """Tests for deploy.py run orchestrator and status subcommand."""
+import argparse
 import json
 
 
@@ -8,6 +9,7 @@ _PROGRESS = {
     "wl-load-baseline":    {"workload": "wl-load",   "package": "baseline",   "status": "pending",   "namespace": None,         "retries": 0},
     "wl-load-treatment":   {"workload": "wl-load",   "package": "treatment",  "status": "timed-out", "namespace": "sim2real-2", "retries": 1},
     "wl-heavy-baseline":   {"workload": "wl-heavy",  "package": "baseline",   "status": "failed",    "namespace": "sim2real-0", "retries": 0},
+    "_orchestrator":       {"state": "normal", "backoff_level": 0, "last_probe_free_gpus": 8},
 }
 
 
@@ -26,7 +28,8 @@ def test_status_output_contains_all_pairs(tmp_path, capsys):
     _cmd_status(_Args(), progress_path)
     out = capsys.readouterr().out
     for key in _PROGRESS:
-        assert key in out
+        if not key.startswith("_"):
+            assert key in out
 
 
 def test_status_filter_by_workload(tmp_path, capsys):
@@ -811,6 +814,22 @@ def test_run_parser_pending_flag_defaults():
     assert args.max_pending_stalls == 10
 
 
+def test_run_parser_has_max_backoff_flag():
+    """run subcommand should have --max-backoff flag with default 600."""
+    from pipeline.deploy import build_parser
+    parser = build_parser()
+    args = parser.parse_args(["run"])
+    assert args.max_backoff == 600
+
+
+def test_run_parser_max_backoff_custom():
+    """--max-backoff should accept custom values."""
+    from pipeline.deploy import build_parser
+    parser = build_parser()
+    args = parser.parse_args(["run", "--max-backoff", "300"])
+    assert args.max_backoff == 300
+
+
 def test_early_reclaim_recoverable_threshold_exceeded(monkeypatch):
     """Recoverable pending pod past threshold: cancel PR, free slot, return to pending."""
     import datetime as _dt
@@ -1191,3 +1210,95 @@ def test_early_reclaim_json_decode_error_warns(monkeypatch, capsys):
     assert entry["status"] == "running"
     err = capsys.readouterr().err
     assert "invalid JSON" in err
+
+
+def test_status_ignores_orchestrator_metadata_as_pair(tmp_path, capsys):
+    """_orchestrator key should not appear as a pair row in status output."""
+    progress = {
+        "wl-foo-baseline": {"workload": "foo", "package": "baseline", "status": "running", "namespace": "ns-1", "retries": 0},
+        "_orchestrator": {"state": "backing_off", "backoff_level": 2, "last_probe_free_gpus": 0},
+    }
+    pf = tmp_path / "progress.json"
+    pf.write_text(json.dumps(progress))
+
+    from pipeline.deploy import _cmd_status
+    args = argparse.Namespace(only=None, workload=None, package=None, status=None)
+    _cmd_status(args, pf)
+    out = capsys.readouterr().out
+    assert "wl-foo-baseline" in out
+    lines = out.strip().split("\n")
+    pair_lines = [l for l in lines if l.strip().startswith("wl-") or l.strip().startswith("_")]
+    for line in pair_lines:
+        assert not line.strip().startswith("_orchestrator")
+
+
+def test_status_shows_orchestrator_state_backing_off(tmp_path, capsys):
+    """deploy.py status should show backoff state when _orchestrator is present."""
+    progress = {
+        "wl-foo-baseline": {"workload": "foo", "package": "baseline", "status": "running", "namespace": "ns-1", "retries": 0},
+        "_orchestrator": {"state": "backing_off", "backoff_level": 2, "last_probe_free_gpus": 0, "last_scarcity_time": "2026-05-08T14:32:00+00:00"},
+    }
+    pf = tmp_path / "progress.json"
+    pf.write_text(json.dumps(progress))
+
+    from pipeline.deploy import _cmd_status
+    args = argparse.Namespace(only=None, workload=None, package=None, status=None)
+    _cmd_status(args, pf)
+    out = capsys.readouterr().out
+    assert "backing_off" in out
+    assert "level 2" in out
+
+
+def test_status_no_orchestrator_section_when_normal(tmp_path, capsys):
+    """deploy.py status should not show orchestrator section when state is normal."""
+    progress = {
+        "wl-foo-baseline": {"workload": "foo", "package": "baseline", "status": "running", "namespace": "ns-1", "retries": 0},
+        "_orchestrator": {"state": "normal", "backoff_level": 0, "last_probe_free_gpus": 8},
+    }
+    pf = tmp_path / "progress.json"
+    pf.write_text(json.dumps(progress))
+
+    from pipeline.deploy import _cmd_status
+    args = argparse.Namespace(only=None, workload=None, package=None, status=None)
+    _cmd_status(args, pf)
+    out = capsys.readouterr().out
+    assert "backing_off" not in out
+
+
+def test_resolve_scope_excludes_orchestrator_key(tmp_path):
+    """_resolve_scope should never include _orchestrator in the pair set."""
+    from pipeline.deploy import _resolve_scope
+    args = argparse.Namespace(only=None, workload=None, package=None, status=None)
+    scope = _resolve_scope(_PROGRESS, args)
+    assert "_orchestrator" not in scope
+    assert len(scope) == 5  # only the real pair keys
+
+
+def test_apply_run_filters_excludes_orchestrator_key():
+    """_apply_run_filters should not include _orchestrator even with status filter."""
+    from pipeline.deploy import _apply_run_filters
+    args = argparse.Namespace(only=None, workload=None, package=None, status="running")
+    result = _apply_run_filters(_PROGRESS, args)
+    assert "_orchestrator" not in result
+
+
+def test_report_filter_mismatch_excludes_orchestrator(tmp_path, capsys):
+    """_report_filter_mismatch valid-values lists should not include metadata keys."""
+    from pipeline.deploy import _report_filter_mismatch
+    _report_filter_mismatch(_PROGRESS, argparse.Namespace(only="nonexistent", workload=None, package=None, status=None))
+    err_out = capsys.readouterr().err
+    assert "_orchestrator" not in err_out
+
+
+def test_status_empty_pairs_only_orchestrator(tmp_path, capsys):
+    """deploy.py status should handle progress with only _orchestrator (no pairs)."""
+    progress = {
+        "_orchestrator": {"state": "backing_off", "backoff_level": 3, "last_probe_free_gpus": 0},
+    }
+    pf = tmp_path / "progress.json"
+    pf.write_text(json.dumps(progress))
+    from pipeline.deploy import _cmd_status
+    args = argparse.Namespace(only=None, workload=None, package=None, status=None)
+    _cmd_status(args, pf)
+    out = capsys.readouterr().out
+    assert "0 pairs" in out

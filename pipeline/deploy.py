@@ -46,6 +46,11 @@ def warn(msg: str)  -> None: print(_c("33", "[WARN]  ") + msg, file=sys.stderr)
 def err(msg: str)   -> None: print(_c("31", "[ERROR] ") + msg, file=sys.stderr)
 
 
+def _is_pair_key(key: str) -> bool:
+    """Return True if key is a real pair entry (not metadata)."""
+    return not key.startswith("_")
+
+
 def step(n, title: str) -> None:
     print("\n" + _c("36", f"━━━ Step {n}: {title} ━━━"))
 
@@ -172,6 +177,14 @@ def _cmd_status(args, progress_path: Path) -> None:
 
     pairs = {k: progress[k] for k in _resolve_scope(progress, args)}
 
+    if not pairs:
+        print("  0 pairs")
+        orch = progress.get("_orchestrator")
+        if isinstance(orch, dict) and orch.get("state") not in (None, "normal"):
+            print(f"  Orchestrator: {orch.get('state', '?')} (level {orch.get('backoff_level', 0)})")
+        print()
+        return
+
     pair_w = max(len(k) for k in pairs) + 2
     col_status = 12
     col_slot = 14
@@ -193,6 +206,12 @@ def _cmd_status(args, progress_path: Path) -> None:
     print()
     summary_parts = [f"{v} {k}" for k, v in sorted(counts.items())]
     print(f"  {len(pairs)} pairs: " + "  ".join(summary_parts))
+
+    orch = progress.get("_orchestrator")
+    if isinstance(orch, dict) and orch.get("state") not in (None, "normal"):
+        print(f"  Orchestrator: {orch.get('state', '?')} (level {orch.get('backoff_level', 0)}, "
+              f"last probe: {orch.get('last_probe_free_gpus', '?')} free GPUs)")
+
     print()
 
 
@@ -773,7 +792,7 @@ def _apply_run_filters(progress: dict, args) -> set:
 
     if only:
         only = only.strip()
-        if only in progress:
+        if only in progress and _is_pair_key(only):
             return {only}
         prefixed = "wl-" + only
         if prefixed in progress:
@@ -784,7 +803,7 @@ def _apply_run_filters(progress: dict, args) -> set:
     if not any([workload, package, status_filter]):
         return set()
 
-    candidates = set(progress.keys())
+    candidates = {k for k in progress.keys() if _is_pair_key(k)}
     if workload:
         candidates = {k for k in candidates if progress[k].get("workload") == workload}
     if package:
@@ -810,7 +829,7 @@ def _resolve_scope(progress: dict, args) -> set:
     if filters_given and not filtered:
         _report_filter_mismatch(progress, args)
         sys.exit(1)
-    return filtered or set(progress.keys())
+    return filtered or {k for k in progress.keys() if _is_pair_key(k)}
 
 
 def _report_filter_mismatch(progress: dict, args) -> None:
@@ -832,14 +851,15 @@ def _report_filter_mismatch(progress: dict, args) -> None:
 
     err(f"No pairs matched {', '.join(parts)}.\n")
 
-    keys = sorted(progress.keys())
+    keys = sorted(k for k in progress.keys() if _is_pair_key(k))
     print(f"  Valid pair keys ({len(keys)}):", file=sys.stderr)
     for k in keys:
         print(f"    {k}", file=sys.stderr)
 
-    valid_workloads = sorted({v.get("workload", "") for v in progress.values()} - {""})
-    valid_packages = sorted({v.get("package", "") for v in progress.values()} - {""})
-    valid_statuses = sorted({v.get("status", "") for v in progress.values()} - {""})
+    pair_values = [v for k, v in progress.items() if _is_pair_key(k)]
+    valid_workloads = sorted({v.get("workload", "") for v in pair_values} - {""})
+    valid_packages = sorted({v.get("package", "") for v in pair_values} - {""})
+    valid_statuses = sorted({v.get("status", "") for v in pair_values} - {""})
 
     print(f"\n  Valid --workload values: {', '.join(valid_workloads)}", file=sys.stderr)
     print(f"  Valid --package values:  {', '.join(valid_packages)}", file=sys.stderr)
@@ -956,6 +976,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     import datetime as _dt
     import tempfile as _tmp
     from pipeline.lib.progress import LocalProgressStore
+    from pipeline.lib.backoff import BackoffController
     from pipeline.lib.capacity import (
         probe_free_gpus, gpu_cost_per_pair, derive_gpu_resource_type, load_defaults
     )
@@ -1014,6 +1035,16 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
 
     # Load or initialize progress
     progress = store.load()
+
+    max_backoff = getattr(args, "max_backoff", 600)
+    existing_orch = progress.get("_orchestrator")
+    if isinstance(existing_orch, dict):
+        backoff = BackoffController.from_dict(existing_orch, base_interval=poll_interval, max_backoff=max_backoff)
+        if backoff.state != "normal":
+            info(f"Resuming in {backoff.state} state (level {backoff.backoff_level})")
+    else:
+        backoff = BackoffController(base_interval=poll_interval, max_backoff=max_backoff)
+
     discovered = _load_pairs(cluster_dir)
     if not discovered:
         err("No pairs found in cluster/. Run prepare.py first."); sys.exit(1)
@@ -1033,8 +1064,9 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             }
 
     _scope = _resolve_scope(progress, args)
-    if len(_scope) < len(progress):
-        info(f"Scope: {len(_scope)}/{len(progress)} pairs")
+    total_pairs = sum(1 for k in progress if _is_pair_key(k))
+    if len(_scope) < total_pairs:
+        info(f"Scope: {len(_scope)}/{total_pairs} pairs")
 
     if getattr(args, "force", False):
         n = _force_reset(progress, _scope, discovered, namespaces=namespaces)
@@ -1046,6 +1078,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
 
     # Reconcile 'running' entries against actual cluster state on resume
     for key, entry in progress.items():
+        if not _is_pair_key(key):
+            continue
         if entry["status"] == "running":
             pr_meta = discovered.get(key, {})
             pr_name = pr_meta.get("pr_name", "")
@@ -1076,16 +1110,16 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     slots_busy: dict[str, str] = {
         entry["namespace"]: key
         for key, entry in progress.items()
-        if entry["status"] == "running" and entry.get("namespace")
+        if _is_pair_key(key) and entry.get("status") == "running" and entry.get("namespace")
     }
 
     def _pending_pairs() -> list[str]:
         return [k for k, v in progress.items()
-                if v["status"] == "pending" and k in _scope]
+                if _is_pair_key(k) and v.get("status") == "pending" and k in _scope]
 
     def _work_remaining() -> bool:
-        return any(v["status"] in ("pending", "running", "collecting")
-                   for k, v in progress.items() if k in _scope)
+        return any(v.get("status") in ("pending", "running", "collecting")
+                   for k, v in progress.items() if _is_pair_key(k) and k in _scope)
 
     timeout_hours = 4
     info(f"Orchestrator: {len(_scope)} pairs in scope, {len(namespaces)} slot(s)")
@@ -1141,7 +1175,16 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                     _tb.print_exc(file=sys.stderr)
                     reclaimed = False
                 if reclaimed:
+                    if entry.get("status") == "pending":
+                        try:
+                            prev_state = backoff.state
+                            backoff.signal_reclaim()
+                            if prev_state == "normal" and backoff.state == "backing_off":
+                                warn(f"Reclaims triggered backoff (next poll: {backoff.effective_interval}s)")
+                        except (ValueError, TypeError) as exc:
+                            warn(f"Backoff signal_reclaim failed: {exc} — ignoring")
                     del slots_busy[ns]
+                    progress["_orchestrator"] = backoff.to_dict()
                     store.save(progress)
                     continue
 
@@ -1189,21 +1232,45 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 warn(f"Capacity probe failed: {capacity} — dispatching without GPU gating")
             _last_probe_error = capacity
 
+        # ── Backoff signals ──────────────────────────────────────────────
+        if free_gpus is not None:
+            backoff.last_probe_free_gpus = free_gpus
+        pending = _pending_pairs()
+        if free_gpus is not None and pending:
+            min_cost = min(progress[k].get("gpu_cost", pair_gpu_cost) for k in pending)
+            max_cost = max(progress[k].get("gpu_cost", pair_gpu_cost) for k in pending)
+            if free_gpus < min_cost:
+                prev_state = backoff.state
+                backoff.signal_scarcity(free_gpus=free_gpus, min_cost=min_cost)
+                if prev_state == "normal":
+                    warn(f"Scarcity detected: {free_gpus} free GPUs, entering backoff (next poll: {backoff.effective_interval}s)")
+                else:
+                    info(f"Backoff level {backoff.backoff_level} — next poll in {backoff.effective_interval}s")
+            elif free_gpus >= max_cost:
+                if backoff.state != "normal":
+                    info(f"Backoff probe: {free_gpus} free GPUs available → resuming normal dispatch")
+                backoff.signal_capacity(free_gpus=free_gpus, max_cost=max_cost)
+
         # ── Assign pending work to free slots ────────────────────────────
         free_slots = [ns for ns in namespaces if ns not in slots_busy]
         pending = _pending_pairs()
         if free_gpus is not None and pending:
-            dispatchable = _capacity_limited_pairs(
-                pending, progress,
-                free_gpus=free_gpus, default_gpu_cost=pair_gpu_cost,
-            )
-            if len(dispatchable) == 0 and pending:
-                smallest = min(progress[k].get("gpu_cost", pair_gpu_cost) for k in pending)
-                warn(f"Dispatching 0/{len(pending)} pending pairs — smallest cost ({smallest}) exceeds free GPUs ({free_gpus})")
-            elif len(dispatchable) < len(pending):
-                info(f"Dispatching {len(dispatchable)}/{len(pending)} pending pairs (capacity-limited: {free_gpus} free GPUs)")
-            elif len(free_slots) < len(dispatchable):
-                info(f"Dispatching {len(free_slots)}/{len(pending)} pending pairs (slot-limited)")
+            min_cost = min(progress[k].get("gpu_cost", pair_gpu_cost) for k in pending)
+            if not backoff.should_dispatch(free_gpus=free_gpus, min_cost=min_cost):
+                info(f"Backoff: skipping dispatch ({len(pending)} pending, {free_gpus} free GPUs)")
+                dispatchable = []
+            else:
+                dispatchable = _capacity_limited_pairs(
+                    pending, progress,
+                    free_gpus=free_gpus, default_gpu_cost=pair_gpu_cost,
+                )
+                if len(dispatchable) == 0 and pending:
+                    smallest = min(progress[k].get("gpu_cost", pair_gpu_cost) for k in pending)
+                    warn(f"Dispatching 0/{len(pending)} pending pairs — smallest cost ({smallest}) exceeds free GPUs ({free_gpus})")
+                elif len(dispatchable) < len(pending):
+                    info(f"Dispatching {len(dispatchable)}/{len(pending)} pending pairs (capacity-limited: {free_gpus} free GPUs)")
+                elif len(free_slots) < len(dispatchable):
+                    info(f"Dispatching {len(free_slots)}/{len(pending)} pending pairs (slot-limited)")
         else:
             dispatchable = pending
 
@@ -1254,9 +1321,16 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             slots_busy[ns] = pair_key
             store.save(progress)
             ok(f"[{pair_key}] → {ns} ({pr_name})")
+            if backoff.state != "normal":
+                backoff.signal_scheduling_success()
+                info("Scheduling success → backoff reset")
+
+        # Persist backoff state
+        progress["_orchestrator"] = backoff.to_dict()
+        store.save(progress)
 
         if _work_remaining() or slots_busy:
-            time.sleep(poll_interval)
+            time.sleep(backoff.effective_interval)
 
     # Final summary
     counts: dict[str, int] = {}
@@ -1291,7 +1365,8 @@ def _cmd_cleanup(args, progress_path: Path, discovered: dict,
         return
 
     dry_run = getattr(args, "dry_run", False)
-    info(f"Scope: {len(actionable)}/{len(progress)} pairs"
+    total_pairs = sum(1 for k in progress if _is_pair_key(k))
+    info(f"Scope: {len(actionable)}/{total_pairs} pairs"
          + (" [DRY-RUN]" if dry_run else ""))
 
     cleaned = 0
@@ -1376,6 +1451,8 @@ Examples:
                        help="Seconds a pod may remain Pending (recoverable) before early reclaim [600]")
     run_p.add_argument("--max-pending-stalls", type=int, default=10, dest="max_pending_stalls",
                        help="Max early reclaims before marking pair stalled [10]")
+    run_p.add_argument("--max-backoff", type=int, default=600, dest="max_backoff",
+                       help="Maximum backoff interval in seconds during GPU scarcity [600]")
 
     cleanup_p = sub.add_parser("cleanup", help="Tear down cluster resources for all non-pending pairs")
     cleanup_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key (wl- prefix optional)")
