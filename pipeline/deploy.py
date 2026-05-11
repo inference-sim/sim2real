@@ -1133,6 +1133,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                         except (ValueError, TypeError) as exc:
                             warn(f"Backoff signal_reclaim failed: {exc} — ignoring")
                     del slots_busy[ns]
+                    progress["_orchestrator"] = backoff.to_dict()
                     store.save(progress)
                     continue
 
@@ -1179,9 +1180,6 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             if capacity != _last_probe_error or _probe_fail_count % 10 == 0:
                 warn(f"Capacity probe failed: {capacity} — dispatching without GPU gating")
             _last_probe_error = capacity
-            if backoff.state != "normal":
-                info("Capacity probe unavailable — resetting backoff to avoid stale gating")
-                backoff.signal_scheduling_success()
 
         # ── Backoff signals ──────────────────────────────────────────────
         if free_gpus is not None:

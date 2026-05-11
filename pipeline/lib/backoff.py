@@ -48,10 +48,14 @@ class BackoffController:
         now = _dt.datetime.now(_dt.timezone.utc)
         self._reclaim_times.append(now.isoformat())
         cutoff = now - _dt.timedelta(seconds=self._reclaim_window)
-        self._reclaim_times = [
-            t for t in self._reclaim_times
-            if _dt.datetime.fromisoformat(t.replace("Z", "+00:00")) >= cutoff
-        ]
+        valid = []
+        for t in self._reclaim_times:
+            try:
+                if _dt.datetime.fromisoformat(t.replace("Z", "+00:00")) >= cutoff:
+                    valid.append(t)
+            except (ValueError, TypeError):
+                pass
+        self._reclaim_times = valid
         if len(self._reclaim_times) >= self._reclaim_threshold:
             self.state = "backing_off"
             max_level = self._level_for_max()
