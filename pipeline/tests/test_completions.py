@@ -149,12 +149,16 @@ def test_cmd_pairs_silent_when_empty_and_machine_readable(tmp_path):
 
 def test_zsh_forwards_experiment_root():
     content = COMPLETIONS_ZSH.read_text()
-    assert 'opt_args[--experiment-root]' in content
+    assert '_saved_exroot' in content
+    assert content.count('_saved_exroot') >= 3, \
+        "all three helpers must reference _saved_exroot"
 
 
 def test_zsh_forwards_run():
     content = COMPLETIONS_ZSH.read_text()
-    assert 'opt_args[--run]' in content
+    assert '_saved_run' in content
+    assert content.count('_saved_run') >= 3, \
+        "all three helpers must reference _saved_run"
 
 
 def test_zsh_uses_python_variable():

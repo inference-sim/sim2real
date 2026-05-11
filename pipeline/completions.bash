@@ -31,7 +31,7 @@ _sim2real_deploy() {
         esac
     done
 
-    # Build the base command for dynamic queries.
+    # Build as an array to avoid word-splitting on paths with spaces.
     local -a _deploy_cmd=("${PYTHON:-python}" pipeline/deploy.py)
     [[ -n "$_exroot" ]]    && _deploy_cmd+=(--experiment-root "$_exroot")
     [[ -n "$_run_name" ]]  && _deploy_cmd+=(--run "$_run_name")

@@ -11,8 +11,8 @@
 _deploy_py_pair_keys() {
     local -a keys cmd
     cmd=("${PYTHON:-python}" pipeline/deploy.py)
-    [[ -n "${opt_args[--experiment-root]}" ]] && cmd+=(--experiment-root "${opt_args[--experiment-root]}")
-    [[ -n "${opt_args[--run]}" ]] && cmd+=(--run "${opt_args[--run]}")
+    [[ -n "$_saved_exroot" ]] && cmd+=(--experiment-root "$_saved_exroot")
+    [[ -n "$_saved_run" ]] && cmd+=(--run "$_saved_run")
     cmd+=(pairs --keys-only)
     keys=(${(f)"$("${cmd[@]}" 2>/dev/null)"})
     (( ${#keys} )) && compadd -a keys
@@ -21,8 +21,8 @@ _deploy_py_pair_keys() {
 _deploy_py_workloads() {
     local -a workloads cmd
     cmd=("${PYTHON:-python}" pipeline/deploy.py)
-    [[ -n "${opt_args[--experiment-root]}" ]] && cmd+=(--experiment-root "${opt_args[--experiment-root]}")
-    [[ -n "${opt_args[--run]}" ]] && cmd+=(--run "${opt_args[--run]}")
+    [[ -n "$_saved_exroot" ]] && cmd+=(--experiment-root "$_saved_exroot")
+    [[ -n "$_saved_run" ]] && cmd+=(--run "$_saved_run")
     cmd+=(pairs --workloads-only)
     workloads=(${(f)"$("${cmd[@]}" 2>/dev/null)"})
     (( ${#workloads} )) && compadd -a workloads
@@ -31,8 +31,8 @@ _deploy_py_workloads() {
 _deploy_py_packages() {
     local -a packages cmd
     cmd=("${PYTHON:-python}" pipeline/deploy.py)
-    [[ -n "${opt_args[--experiment-root]}" ]] && cmd+=(--experiment-root "${opt_args[--experiment-root]}")
-    [[ -n "${opt_args[--run]}" ]] && cmd+=(--run "${opt_args[--run]}")
+    [[ -n "$_saved_exroot" ]] && cmd+=(--experiment-root "$_saved_exroot")
+    [[ -n "$_saved_run" ]] && cmd+=(--run "$_saved_run")
     cmd+=(pairs --packages-only)
     packages=(${(f)"$("${cmd[@]}" 2>/dev/null)"})
     (( ${#packages} )) && compadd -a packages
@@ -64,6 +64,8 @@ _sim2real_deploy() {
             _describe 'subcommand' subcommands
             ;;
         args)
+            local _saved_exroot="${opt_args[--experiment-root]}"
+            local _saved_run="${opt_args[--run]}"
             case "${line[1]}" in
                 run)
                     _arguments \
