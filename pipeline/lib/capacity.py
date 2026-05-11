@@ -66,6 +66,8 @@ def probe_free_gpus(
 
     total_requested = 0
     for pod in pods.get("items", []):
+        if not pod.get("spec", {}).get("nodeName"):
+            continue
         for container in pod.get("spec", {}).get("containers", []):
             requests = container.get("resources", {}).get("requests", {})
             count = requests.get(gpu_resource_type)

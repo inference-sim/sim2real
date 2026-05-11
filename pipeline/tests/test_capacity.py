@@ -20,17 +20,27 @@ class TestProbeFreeGpus:
             nodes.append(node)
         return json.dumps({"items": nodes})
 
-    def _mock_pods(self, requested_gpus: list[int], resource="nvidia.com/gpu"):
-        """Build fake kubectl pods JSON."""
+    def _mock_pods(self, requested_gpus: list[int], resource="nvidia.com/gpu",
+                   node_names: list[str | None] | None = None):
+        """Build fake kubectl pods JSON.
+
+        node_names: per-pod nodeName (None = Pending, no nodeName).
+        Defaults to all pods having a nodeName.
+        """
+        if node_names is None:
+            node_names = [f"node-{i}" for i in range(len(requested_gpus))]
         pods = []
-        for gpu_req in requested_gpus:
+        for i, gpu_req in enumerate(requested_gpus):
+            spec: dict = {
+                "containers": [
+                    {"resources": {"requests": {resource: str(gpu_req)}}}
+                ]
+            }
+            if node_names[i] is not None:
+                spec["nodeName"] = node_names[i]
             pod = {
                 "metadata": {"name": f"pod-{len(pods)}"},
-                "spec": {
-                    "containers": [
-                        {"resources": {"requests": {resource: str(gpu_req)}}}
-                    ]
-                },
+                "spec": spec,
             }
             pods.append(pod)
         return json.dumps({"items": pods})
@@ -122,6 +132,23 @@ class TestProbeFreeGpus:
         result = probe_free_gpus()
         assert isinstance(result, str)
         assert "JSON parse error" in result
+
+    @patch("pipeline.lib.capacity.subprocess.run")
+    def test_pending_pods_excluded(self, mock_run):
+        """Pending pods (no nodeName) should not count as GPU consumers."""
+        nodes_json = self._mock_nodes([8, 8])
+        pods_json = self._mock_pods(
+            [4, 4, 4],
+            node_names=["node-0", "node-1", None],
+        )
+
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=nodes_json),
+            MagicMock(returncode=0, stdout=pods_json),
+        ]
+
+        result = probe_free_gpus()
+        assert result == (8, 16, 8)
 
 
 # ── derive_gpu_resource_type tests ─────────────────────────────────────────────
