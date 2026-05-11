@@ -142,3 +142,20 @@ def test_cmd_pairs_silent_when_empty_and_machine_readable(tmp_path):
     with contextlib.redirect_stdout(buf):
         _cmd_pairs(cluster_dir, keys_only=True)
     assert buf.getvalue() == ""
+
+
+def test_zsh_forwards_experiment_root():
+    content = COMPLETIONS_ZSH.read_text()
+    assert 'opt_args[--experiment-root]' in content
+
+
+def test_zsh_forwards_run():
+    content = COMPLETIONS_ZSH.read_text()
+    assert 'opt_args[--run]' in content
+
+
+def test_zsh_uses_python_variable():
+    content = COMPLETIONS_ZSH.read_text()
+    assert '${PYTHON:-python}' in content
+    assert content.count('"$(python pipeline/') == 0, \
+        "hardcoded 'python' should be replaced with ${PYTHON:-python}"
