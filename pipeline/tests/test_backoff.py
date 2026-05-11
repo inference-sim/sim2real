@@ -165,3 +165,13 @@ class TestBackoffController:
             base_interval=30, max_backoff=600,
         )
         assert len(bc._reclaim_times) == 1
+
+    def test_from_dict_drops_unparseable_timestamps(self):
+        bc = BackoffController.from_dict(
+            {"state": "normal", "reclaim_times": [
+                "2026-05-08T14:00:00+00:00", "not-a-date", "also-bad",
+            ]},
+            base_interval=30, max_backoff=600,
+        )
+        assert len(bc._reclaim_times) == 1
+        assert bc._reclaim_times[0] == "2026-05-08T14:00:00+00:00"

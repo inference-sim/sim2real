@@ -741,7 +741,7 @@ def _apply_run_filters(progress: dict, args) -> set:
 
     if only:
         only = only.strip()
-        if only in progress:
+        if only in progress and _is_pair_key(only):
             return {only}
         prefixed = "wl-" + only
         if prefixed in progress:
@@ -1184,6 +1184,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 backoff.signal_scheduling_success()
 
         # ── Backoff signals ──────────────────────────────────────────────
+        if free_gpus is not None:
+            backoff.last_probe_free_gpus = free_gpus
         pending = _pending_pairs()
         if free_gpus is not None and pending:
             min_cost = min(progress[k].get("gpu_cost", pair_gpu_cost) for k in pending)

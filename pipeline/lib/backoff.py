@@ -85,14 +85,14 @@ class BackoffController:
         state_corrupted = state not in cls._VALID_STATES
         if state_corrupted:
             import sys
-            print(f"\033[33m[WARN]  Unknown backoff state {state!r} in progress — resetting to normal\033[0m",
+            print(f"[WARN]  Unknown backoff state {state!r} in progress — resetting to normal",
                   file=sys.stderr)
             state = "normal"
         bc.state = state
         raw_level = 0 if state_corrupted else data.get("backoff_level", 0)
         if not isinstance(raw_level, int) or raw_level < 0:
             import sys
-            print(f"\033[33m[WARN]  Invalid backoff_level {raw_level!r} in progress — resetting to 0\033[0m",
+            print(f"[WARN]  Invalid backoff_level {raw_level!r} in progress — resetting to 0",
                   file=sys.stderr)
             raw_level = 0
         bc.backoff_level = min(raw_level, bc._level_for_max())
@@ -100,7 +100,16 @@ class BackoffController:
         bc.last_probe_free_gpus = data.get("last_probe_free_gpus")
         raw_times = data.get("reclaim_times", [])
         if isinstance(raw_times, list):
-            bc._reclaim_times = [t for t in raw_times if isinstance(t, str)]
+            valid = []
+            for t in raw_times:
+                if not isinstance(t, str):
+                    continue
+                try:
+                    _dt.datetime.fromisoformat(t.replace("Z", "+00:00"))
+                    valid.append(t)
+                except (ValueError, TypeError):
+                    pass
+            bc._reclaim_times = valid
         else:
             bc._reclaim_times = []
         return bc
