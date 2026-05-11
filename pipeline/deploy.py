@@ -62,8 +62,18 @@ def run(cmd: list[str], *, check: bool = True, capture: bool = False,
     return subprocess.run(cmd, check=check, text=True, capture_output=capture, cwd=cwd)
 
 
-# ── Data phases ─────────────────────────────────────────────────────────────
-DATA_PHASES = ["baseline", "treatment"]
+# ── Phase discovery ─────────────────────────────────────────────────────────
+
+def _discover_phases(cluster_dir: "Path") -> list[str]:
+    """Discover package phases from pipelinerun-*.yaml filenames in cluster/."""
+    phases: set[str] = set()
+    for pr_file in cluster_dir.glob("pipelinerun-*.yaml"):
+        # Filename pattern: pipelinerun-{workload}-{phase}.yaml
+        stem = pr_file.stem
+        parts = stem.split("-")
+        if len(parts) >= 3:
+            phases.add(parts[-1])
+    return sorted(phases) if phases else ["baseline", "treatment"]
 
 # ── Setup config ─────────────────────────────────────────────────────────────
 
@@ -553,7 +563,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
 
     run_name = run_dir.name
 
-    # Derive known phases from progress.json, fall back to DATA_PHASES
+    # Derive known phases from progress.json, fall back to _discover_phases()
     progress_path = run_dir / "progress.json"
     if progress_path.exists():
         try:
@@ -578,11 +588,12 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
         known_phases = []
 
     if not known_phases:
+        cluster_dir = run_dir / "cluster"
+        known_phases = _discover_phases(cluster_dir)
         if progress is None and not progress_path.exists():
-            warn("No progress.json found — falling back to default phases [baseline, treatment]")
+            warn(f"No progress.json found — discovered phases from cluster/: {known_phases}")
         elif progress is not None:
-            warn("No done/collecting phases in progress — falling back to default phases [baseline, treatment]")
-        known_phases = list(DATA_PHASES)
+            warn(f"No done/collecting phases in progress — discovered from cluster/: {known_phases}")
 
     if args.package:
         valid = set(known_phases) | {"experiment"}
@@ -1008,12 +1019,18 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     if isinstance(defaults_result, str):
         warn(defaults_result)
         defaults_result = None
-    baseline_scenario_path = cluster_dir / "baseline.yaml"
-    if defaults_result and baseline_scenario_path.exists():
+    scenario_path = None
+    for p in sorted(cluster_dir.glob("*.yaml")):
+        if not p.name.startswith("pipelinerun-"):
+            scenario_path = p
+            break
+    if scenario_path is None:
+        scenario_path = cluster_dir / "baseline.yaml"
+    if defaults_result and scenario_path.exists():
         try:
-            resolved = yaml.safe_load(baseline_scenario_path.read_text()) or {}
+            resolved = yaml.safe_load(scenario_path.read_text()) or {}
         except yaml.YAMLError as e:
-            warn(f"Could not parse {baseline_scenario_path.name}: {e}")
+            warn(f"Could not parse {scenario_path.name}: {e}")
             resolved = None
         if resolved:
             if gpu_resource_type is None:
@@ -1023,8 +1040,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 pair_gpu_cost = derived_cost
             else:
                 warn(f"GPU cost derivation failed: {derived_cost} — using fallback ({pair_gpu_cost})")
-    elif defaults_result is None and not baseline_scenario_path.exists():
-        info("Defaults or baseline.yaml not found — using CLI defaults")
+    elif defaults_result is None and not scenario_path.exists():
+        info("Defaults or scenario not found — using CLI defaults")
     if gpu_resource_type is None:
         gpu_resource_type = "nvidia.com/gpu"
     if gpu_resource_type != "nvidia.com/gpu":
