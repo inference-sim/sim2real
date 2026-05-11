@@ -150,6 +150,23 @@ class TestProbeFreeGpus:
         result = probe_free_gpus()
         assert result == (8, 16, 8)
 
+    @patch("pipeline.lib.capacity.subprocess.run")
+    def test_all_pods_pending_means_zero_requested(self, mock_run):
+        """When every pod is Pending, total requested should be zero."""
+        nodes_json = self._mock_nodes([8, 8])
+        pods_json = self._mock_pods(
+            [4, 4],
+            node_names=[None, None],
+        )
+
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=nodes_json),
+            MagicMock(returncode=0, stdout=pods_json),
+        ]
+
+        result = probe_free_gpus()
+        assert result == (16, 16, 0)
+
 
 # ── derive_gpu_resource_type tests ─────────────────────────────────────────────
 

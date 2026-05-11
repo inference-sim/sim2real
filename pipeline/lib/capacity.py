@@ -21,6 +21,9 @@ def probe_free_gpus(
     Queries kubectl for node allocatable resources and pod requests,
     computes the delta clamped to zero.
 
+    Skips pods without spec.nodeName — these are Pending (unscheduled) and
+    have not been allocated any node resources.
+
     Assumes only spec.containers request GPUs (initContainers are excluded —
     llm-d workloads do not use GPU-requesting init containers).
 
@@ -66,7 +69,7 @@ def probe_free_gpus(
 
     total_requested = 0
     for pod in pods.get("items", []):
-        if not pod.get("spec", {}).get("nodeName"):
+        if pod.get("spec", {}).get("nodeName") is None:
             continue
         for container in pod.get("spec", {}).get("containers", []):
             requests = container.get("resources", {}).get("requests", {})
