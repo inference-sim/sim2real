@@ -15,13 +15,14 @@ _sim2real_deploy() {
     local subcommands="run status collect cleanup pairs"
     local status_values="pending running done failed timed-out stalled collect-failed collecting"
 
+    # Extract --experiment-root and --run values while finding the subcommand.
     subcmd=""
+    local _exroot="" _run_name=""
     local i
     for ((i=1; i < COMP_CWORD; i++)); do
         case "${COMP_WORDS[i]}" in
-            # These flags take a value argument — skip it to avoid misidentifying
-            # the value as a subcommand (e.g. --experiment-root run)
-            --experiment-root|--run) ((i++)) ;;
+            --experiment-root) ((i++)); _exroot="${COMP_WORDS[i]}" ;;
+            --run)             ((i++)); _run_name="${COMP_WORDS[i]}" ;;
             -*) ;;
             run|status|collect|cleanup|pairs)
                 subcmd="${COMP_WORDS[i]}"
@@ -29,6 +30,11 @@ _sim2real_deploy() {
                 ;;
         esac
     done
+
+    # Build the base command for dynamic queries.
+    local -a _deploy_cmd=("${PYTHON:-python}" pipeline/deploy.py)
+    [[ -n "$_exroot" ]]    && _deploy_cmd+=(--experiment-root "$_exroot")
+    [[ -n "$_run_name" ]]  && _deploy_cmd+=(--run "$_run_name")
 
     if [[ -z "$subcmd" ]]; then
         if [[ "$cur" == -* ]]; then
@@ -42,19 +48,19 @@ _sim2real_deploy() {
     case "$prev" in
         --only)
             local keys
-            keys="$(python pipeline/deploy.py pairs --keys-only 2>/dev/null)"
+            keys="$("${_deploy_cmd[@]}" pairs --keys-only 2>/dev/null)"
             COMPREPLY=($(compgen -W "$keys" -- "$cur"))
             return
             ;;
         --workload)
             local workloads
-            workloads="$(python pipeline/deploy.py pairs --workloads-only 2>/dev/null)"
+            workloads="$("${_deploy_cmd[@]}" pairs --workloads-only 2>/dev/null)"
             COMPREPLY=($(compgen -W "$workloads" -- "$cur"))
             return
             ;;
         --package)
             local packages
-            packages="$(python pipeline/deploy.py pairs --packages-only 2>/dev/null)"
+            packages="$("${_deploy_cmd[@]}" pairs --packages-only 2>/dev/null)"
             COMPREPLY=($(compgen -W "$packages" -- "$cur"))
             return
             ;;
