@@ -88,7 +88,10 @@ def test_bash_graceful_on_failure():
 
 def test_bash_skips_flag_values_in_subcommand_detection():
     content = COMPLETIONS_BASH.read_text()
-    assert "--experiment-root|--run) ((i++))" in content
+    assert "--experiment-root)" in content
+    assert "--run)" in content
+    assert "_exroot" in content
+    assert "_run_name" in content
 
 
 def test_zsh_has_python_wrapper():
@@ -142,3 +145,52 @@ def test_cmd_pairs_silent_when_empty_and_machine_readable(tmp_path):
     with contextlib.redirect_stdout(buf):
         _cmd_pairs(cluster_dir, keys_only=True)
     assert buf.getvalue() == ""
+
+
+def test_zsh_forwards_experiment_root():
+    content = COMPLETIONS_ZSH.read_text()
+    assert '_saved_exroot' in content
+    assert content.count('_saved_exroot') >= 3, \
+        "all three helpers must reference _saved_exroot"
+
+
+def test_zsh_forwards_run():
+    content = COMPLETIONS_ZSH.read_text()
+    assert '_saved_run' in content
+    assert content.count('_saved_run') >= 3, \
+        "all three helpers must reference _saved_run"
+
+
+def test_zsh_uses_python_variable():
+    content = COMPLETIONS_ZSH.read_text()
+    assert '${PYTHON:-python}' in content
+    assert content.count('"$(python pipeline/') == 0, \
+        "hardcoded 'python' should be replaced with ${PYTHON:-python}"
+
+
+def test_bash_forwards_experiment_root():
+    content = COMPLETIONS_BASH.read_text()
+    assert '_exroot' in content
+    assert any('_deploy_cmd' in line and 'experiment-root' in line
+               for line in content.splitlines()), \
+        "_exroot must be forwarded via _deploy_cmd"
+
+
+def test_bash_forwards_run():
+    content = COMPLETIONS_BASH.read_text()
+    assert '_run_name' in content
+    assert any('_deploy_cmd' in line and '--run' in line
+               for line in content.splitlines()), \
+        "_run_name must be forwarded via _deploy_cmd"
+
+
+def test_bash_uses_python_variable():
+    content = COMPLETIONS_BASH.read_text()
+    assert '${PYTHON:-python}' in content
+    lines_with_pairs = [l for l in content.splitlines()
+                        if 'pairs --keys-only' in l
+                        or 'pairs --workloads-only' in l
+                        or 'pairs --packages-only' in l]
+    for line in lines_with_pairs:
+        assert '_deploy_cmd' in line, \
+            f"dynamic query should use _deploy_cmd: {line}"
