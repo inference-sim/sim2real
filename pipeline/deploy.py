@@ -1024,6 +1024,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
         for p in sorted(cluster_dir.glob("*.yaml")):
             if not p.name.startswith("pipelinerun-"):
                 scenario_path = p
+                info(f"Deriving GPU config from: {scenario_path.name}")
                 break
     if defaults_result and scenario_path.exists():
         try:

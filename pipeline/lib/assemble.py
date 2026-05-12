@@ -104,7 +104,13 @@ class Package(NamedTuple):
 
 
 def _resolve_overlay(name: str, generated_dir: Path, kind: str) -> dict:
-    """Find overlay: try {name}_config.yaml, then shared baseline_config.yaml fallback."""
+    """Find overlay for a package.
+
+    Lookup order:
+      1. {name}_config.yaml (per-package overlay)
+      2. baseline_config.yaml (shared fallback for baselines)
+      3. treatment_config.yaml (legacy fallback for algorithms)
+    """
     per_pkg = generated_dir / f"{name}_config.yaml"
     if per_pkg.exists():
         return _load_yaml(per_pkg)
@@ -112,6 +118,10 @@ def _resolve_overlay(name: str, generated_dir: Path, kind: str) -> dict:
         shared = generated_dir / "baseline_config.yaml"
         if shared.exists():
             return _load_yaml(shared)
+    elif kind == "algorithm":
+        legacy = generated_dir / "treatment_config.yaml"
+        if legacy.exists():
+            return _load_yaml(legacy)
     return {}
 
 

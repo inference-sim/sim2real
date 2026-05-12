@@ -371,7 +371,8 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
         if scenario_path:
             scenario_path = EXPERIMENT_ROOT / scenario_path
         else:
-            scenario_path = EXPERIMENT_ROOT / "treatment.yaml"
+            fallback = EXPERIMENT_ROOT / "treatment.yaml"
+            scenario_path = fallback if fallback.exists() else None
         algorithms_spec.append({
             "name": algo["name"],
             "scenario_path": scenario_path,
