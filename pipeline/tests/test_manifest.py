@@ -194,7 +194,6 @@ MINIMAL_V3 = {
     "target": {"repo": "llm-d-inference-scheduler"},
     "config": {
         "kind": "EndpointPickerConfig",
-        "helm_path": "gaie.treatment.helmValues.inferenceExtension.pluginsCustomConfig.custom-plugins.yaml",
     },
     "epp_image": {
         "upstream": {
@@ -282,7 +281,6 @@ def test_v3_target_and_config_loaded(tmp_path):
     m = load_manifest(path)
     assert m["target"]["repo"] == "llm-d-inference-scheduler"
     assert m["config"]["kind"] == "EndpointPickerConfig"
-    assert "helm_path" in m["config"]
 
 
 def test_v3_observe_defaults(tmp_path):
@@ -405,18 +403,11 @@ def test_v3_config_absent_raises(tmp_path):
 
 def test_v3_config_missing_kind_raises(tmp_path):
     """config without kind raises."""
-    data = {**MINIMAL_V3, "config": {"helm_path": "x"}}
+    data = {**MINIMAL_V3, "config": {}}
     path = _write_manifest(tmp_path, data)
     with pytest.raises(ManifestError, match="config.kind"):
         load_manifest(path)
 
-
-def test_v3_config_missing_helm_path_raises(tmp_path):
-    """config without helm_path raises."""
-    data = {**MINIMAL_V3, "config": {"kind": "EndpointPickerConfig"}}
-    path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="config.helm_path"):
-        load_manifest(path)
 
 
 def test_v3_target_missing_repo_raises(tmp_path):
@@ -487,7 +478,6 @@ MULTI_BASELINE_V3 = {
     "target": {"repo": "llm-d-inference-scheduler"},
     "config": {
         "kind": "EndpointPickerConfig",
-        "helm_path": "gaie.treatment.helmValues.inferenceExtension.pluginsCustomConfig.custom-plugins.yaml",
     },
 }
 
