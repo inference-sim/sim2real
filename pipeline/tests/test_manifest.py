@@ -591,10 +591,17 @@ def test_baselines_entry_requires_scenario(tmp_path):
         load_manifest(path)
 
 
-def test_baselines_name_must_be_dns_safe(tmp_path):
+def test_baselines_name_must_be_valid(tmp_path):
     data = {**MULTI_BASELINE_V3, "baselines": [{"name": "Bad_Name!", "scenario": "x.yaml"}]}
     path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="DNS"):
+    with pytest.raises(ManifestError, match="invalid"):
+        load_manifest(path)
+
+
+def test_baselines_name_rejects_hyphens(tmp_path):
+    data = {**MULTI_BASELINE_V3, "baselines": [{"name": "my-algo", "scenario": "x.yaml"}]}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="invalid"):
         load_manifest(path)
 
 

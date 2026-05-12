@@ -9,14 +9,14 @@ class ManifestError(Exception):
     """Manifest validation error."""
 
 
-_DNS_RE = re.compile(r'^[a-z0-9]([a-z0-9-]{0,18}[a-z0-9])?$')
+_PACKAGE_NAME_RE = re.compile(r'^[a-z0-9]{1,20}$')
 
 
 def _validate_package_name(name: str, context: str) -> None:
-    if not _DNS_RE.match(name):
+    if not _PACKAGE_NAME_RE.match(name):
         raise ManifestError(
-            f"{context} name '{name}' is not DNS-1123 safe "
-            "(lowercase alphanumeric and hyphens, 1-20 chars, no leading/trailing hyphen)"
+            f"{context} name '{name}' is invalid "
+            "(lowercase alphanumeric only, 1-20 chars, no hyphens or underscores)"
         )
 
 
@@ -146,6 +146,7 @@ def load_manifest(path: "Path | str") -> dict:
         algos = data["algorithms"]
         if not isinstance(algos, list):
             raise ManifestError("algorithms must be a list")
+        seen_algo_names: set[str] = set()
         for i, entry in enumerate(algos):
             if not isinstance(entry, dict):
                 raise ManifestError(f"algorithms[{i}] must be a mapping")
@@ -153,6 +154,9 @@ def load_manifest(path: "Path | str") -> dict:
                 if f not in entry:
                     raise ManifestError(f"algorithms[{i}] missing required field: {f}")
             _validate_package_name(entry["name"], f"algorithms[{i}]")
+            if entry["name"] in seen_algo_names:
+                raise ManifestError(f"algorithms: duplicate name '{entry['name']}'")
+            seen_algo_names.add(entry["name"])
     elif has_algorithm:
         algo = data["algorithm"]
         data["algorithms"] = [{
@@ -164,6 +168,15 @@ def load_manifest(path: "Path | str") -> dict:
         }]
     else:
         data["algorithms"] = []
+
+    # Cross-collision check: all package names must be globally unique
+    all_names = [bl["name"] for bl in data["baselines"]] + [a["name"] for a in data["algorithms"]]
+    if len(all_names) != len(set(all_names)):
+        dupes = [n for n in all_names if all_names.count(n) > 1]
+        raise ManifestError(
+            f"Package names must be globally unique across baselines and algorithms; "
+            f"duplicates: {sorted(set(dupes))}"
+        )
 
     # Hints section (optional)
     hints_raw = data.get("hints", {}) or {}

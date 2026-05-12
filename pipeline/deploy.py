@@ -1019,13 +1019,12 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     if isinstance(defaults_result, str):
         warn(defaults_result)
         defaults_result = None
-    scenario_path = None
-    for p in sorted(cluster_dir.glob("*.yaml")):
-        if not p.name.startswith("pipelinerun-"):
-            scenario_path = p
-            break
-    if scenario_path is None:
-        scenario_path = cluster_dir / "baseline.yaml"
+    scenario_path = cluster_dir / "baseline.yaml"
+    if not scenario_path.exists():
+        for p in sorted(cluster_dir.glob("*.yaml")):
+            if not p.name.startswith("pipelinerun-"):
+                scenario_path = p
+                break
     if defaults_result and scenario_path.exists():
         try:
             resolved = yaml.safe_load(scenario_path.read_text()) or {}

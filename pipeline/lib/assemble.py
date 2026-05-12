@@ -156,6 +156,10 @@ def assemble_packages(
             )
         base = resolved_baselines[defaults_name]
         diffs_path = algo.get("scenario_path")
+        if diffs_path and not Path(diffs_path).exists():
+            raise AssemblyError(
+                f"Algorithm '{name}' scenario not found: {diffs_path}"
+            )
         diffs = _load_yaml(diffs_path) if diffs_path and Path(diffs_path).exists() else {}
 
         treatment = deep_merge(base, diffs)
