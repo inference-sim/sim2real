@@ -62,7 +62,7 @@ python pipeline/run.py     --experiment-root ../admission-control switch <run-na
 
 | Module | Purpose |
 |--------|---------|
-| `manifest.py` | Loads and validates `transfer.yaml` (v2/v3 schema) |
+| `manifest.py` | Loads and validates `transfer.yaml` (v3 schema) |
 | `state_machine.py` | Phase tracking with atomic JSON persistence (`.state.json`) |
 | `context_builder.py` | Assembles context document, caches by SHA-256 hash |
 | `values.py` | Deep-merge utility (`deep_merge`) used by `assemble.py` |
