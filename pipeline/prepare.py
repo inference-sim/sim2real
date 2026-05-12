@@ -104,9 +104,9 @@ def _load_setup_config() -> dict:
 
 
 def _load_resolved_config(manifest: dict) -> dict:
-    """Build resolved config from manifest v3 fields (target, config, observe, build, epp_image)."""
+    """Build resolved config from manifest v3 fields (target, config, build, epp_image)."""
     resolved = {}
-    for key in ("target", "config", "observe", "build", "epp_image"):
+    for key in ("target", "config", "build", "epp_image"):
         if key in manifest:
             resolved[key] = manifest[key]
     return resolved
@@ -430,12 +430,7 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
 
     ok(f"Resolved scenarios: {_display_path(cluster_dir)}")
 
-    # 4d: Load and scale workloads
-    try:
-        multiplier = int(manifest.get("observe", {}).get("request_multiplier", 1))
-    except (TypeError, ValueError):
-        err("observe.request_multiplier must be a number")
-        sys.exit(1)
+    # 4d: Load workloads
     workloads = []
     for wl_path_str in manifest.get("workloads", []):
         wl_path = EXPERIMENT_ROOT / wl_path_str
@@ -452,8 +447,6 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
             sys.exit(1)
         if "name" not in wl_data and "workload_name" not in wl_data:
             wl_data["workload_name"] = Path(wl_path_str).stem
-        if multiplier > 1 and "num_requests" in wl_data:
-            wl_data["num_requests"] = int(wl_data["num_requests"] * multiplier)
         workloads.append(wl_data)
 
     if not workloads:
@@ -585,7 +578,6 @@ def _validate_assembly(run_dir: Path, resolved: dict, algorithm_packages: list[s
         warn("translation_output.json is not valid JSON — skipping validation")
         return
     plugin_type = output["plugin_type"]
-    config_cfg = resolved.get("config", {})
     target = resolved.get("target", {})
     treatment_config_generated = output.get("treatment_config_generated", True)
 
@@ -622,21 +614,7 @@ def _validate_assembly(run_dir: Path, resolved: dict, algorithm_packages: list[s
                     errors.append(
                         f"plugin_type '{plugin_type}' not found in {pkg_name}.yaml")
 
-    # Check 3: algorithm config contains expected kind (may be nested in scenario overlay)
-    if treatment_config_generated and config_cfg.get("kind"):
-        check_names = algorithm_packages or ["treatment"]
-        for pkg_name in check_names:
-            tc_path = run_dir / "generated" / f"{pkg_name}_config.yaml"
-            if not tc_path.exists():
-                tc_path = run_dir / "generated" / "treatment_config.yaml"
-            if tc_path.exists():
-                tc_text = tc_path.read_text()
-                expected_kind = config_cfg["kind"]
-                if f"kind: {expected_kind}" not in tc_text:
-                    errors.append(
-                        f"{pkg_name} config does not contain 'kind: {expected_kind}'")
-
-    # Check 4: all files_created exist in target repo
+    # Check 3: all files_created exist in target repo
     target_repo = target.get("repo", "")
     for f in output.get("files_created", []):
         if target_repo and not (EXPERIMENT_ROOT / target_repo / f).exists():
@@ -701,10 +679,9 @@ def _phase_summary(state: StateMachine, manifest: dict, run_dir: Path, resolved:
 
     # Workloads
     lines.extend(["", "**Workloads**", ""])
-    multiplier = resolved.get("observe", {}).get("request_multiplier", 1)
     for wl in manifest["workloads"]:
         wl_name = Path(wl).stem
-        lines.append(f"- {wl_name} (x{multiplier})")
+        lines.append(f"- {wl_name}")
 
     # Checklist
     if translation_output_path.exists():

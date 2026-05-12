@@ -22,7 +22,7 @@ python pipeline/deploy.py  --experiment-root ../admission-control
 ```
 
 The experiment repo must contain:
-- `transfer.yaml` (or `config/transfer.yaml` for backward compat) — v3 schema with `target`, `config`, `observe`, `build`, `epp_image` fields
+- `transfer.yaml` (or `config/transfer.yaml` for backward compat) — v3 schema with `target`, `config`, `build`, `epp_image` fields
 - `baseline.yaml` — llmdbenchmark-style scenario file (required for Phase 4 assembly)
 - `treatment.yaml` (optional) — merged into `baseline.yaml` for the treatment scenario
 - `algorithm/` and `workloads/` directories as referenced in `transfer.yaml`
@@ -87,7 +87,7 @@ python pipeline/prepare.py [--force] [--rebuild-context] [--manifest PATH] [--ru
 
 **Phase 3 checkpoint**: writes `skill_input.json` and exits cleanly (exit 0). Run `/sim2real-translate` in Claude Code, then re-run `prepare.py` to continue from Phase 4. When no `algorithm` is present in the manifest, Phase 3 is skipped entirely (baseline-only mode).
 
-**Phase 4 assembly** reads `baseline.yaml` and `treatment.yaml` from the experiment root, merges them with skill-generated overlay files (`generated/baseline_config.yaml`, `generated/treatment_config.yaml`), and writes resolved scenario files to `cluster/`. PipelineRuns are generated with a `scenarioContent` param containing the fully resolved scenario YAML. Workloads are loaded from the manifest and scaled by `observe.request_multiplier`.
+**Phase 4 assembly** reads `baseline.yaml` and `treatment.yaml` from the experiment root, merges them with skill-generated overlay files (`generated/baseline_config.yaml`, `generated/treatment_config.yaml`), and writes resolved scenario files to `cluster/`. PipelineRuns are generated with a `scenarioContent` param containing the fully resolved scenario YAML. Workloads are loaded from the manifest.
 
 **Phase 6 gate**: `d` marks the run `READY TO DEPLOY` (required by `deploy.py`). `e` drops you back to edit files, then re-displays the summary. `q` marks `abandoned` and exits.
 
@@ -274,8 +274,6 @@ target:
   repo: <path>              # llm-d-inference-scheduler repo path
 config:
   kind: <string>            # config kind (e.g. "gaie")
-observe:                    # optional — defaults applied if absent
-  request_multiplier: 1     # scales workload num_requests for real-cluster benchmarks (default: 1)
 build:                      # optional — defaults applied if absent
   commands: []              # EPP build commands
 epp_image:                  # optional
