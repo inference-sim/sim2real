@@ -27,7 +27,7 @@ Target repo: {TARGET_REPO}
 Read the following to build your foundation. These tell you what this run is translating and
 what the mapping context is.
 
-1. Read `{EXPERIMENT_ROOT}/transfer.yaml` — understand scenario, algorithm, baseline (sim + real), hints
+1. Read `{EXPERIMENT_ROOT}/transfer.yaml` — understand scenario, algorithm, baseline (sim + real), context
 2. Read the full content of `{ALGO_SOURCE}` — the simulation algorithm being translated
 3. If `{ALGO_CONFIG}` is non-empty: read it — algorithm weights and thresholds (ground truth)
 4. Read `{BASELINE_SIM_CONFIG}` — the simulation baseline policy

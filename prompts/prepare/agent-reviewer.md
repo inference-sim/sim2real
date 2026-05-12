@@ -31,11 +31,9 @@ Read and hold in context:
 
 You will read the generated plugin files and treatment config fresh on each review request.
 
-Hints from the operator (held in mind, not written to disk):
+Context from the operator (held in mind, not written to disk):
 
-{HINTS_TEXT}
-
-{HINTS_FILES_CONTENT}
+{CONTEXT_TEXT}
 
 ## Tool Discipline
 
