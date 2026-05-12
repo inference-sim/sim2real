@@ -328,29 +328,6 @@ def test_component_build_image_validates_hub(tmp_path):
         load_manifest(path)
 
 
-def test_old_target_key_rejected(tmp_path):
-    """Adding target to valid manifest raises."""
-    data = {**MINIMAL_V3, "target": {"repo": "x"}}
-    path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="no longer supported"):
-        load_manifest(path)
-
-
-def test_old_config_key_rejected(tmp_path):
-    """Adding config to valid manifest raises."""
-    data = {**MINIMAL_V3, "config": {"kind": "X"}}
-    path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="no longer supported"):
-        load_manifest(path)
-
-
-def test_old_epp_image_key_rejected(tmp_path):
-    """Adding epp_image to valid manifest raises."""
-    data = {**MINIMAL_V3, "epp_image": {}}
-    path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="no longer supported"):
-        load_manifest(path)
-
 
 # ── pipeline field (optional, v3 only) ─────────────────────────────────────
 

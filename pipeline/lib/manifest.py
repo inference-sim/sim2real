@@ -122,14 +122,6 @@ def load_manifest(path: "Path | str") -> dict:
 def _validate_v3_fields(data: dict) -> None:
     """Validate and apply defaults for v3-specific fields."""
 
-    # Reject old top-level keys that have been replaced by 'component'
-    for old_key in ("target", "config", "epp_image"):
-        if old_key in data:
-            raise ManifestError(
-                f"Top-level '{old_key}' is no longer supported; "
-                "use the 'component' section instead"
-            )
-
     # component (required)
     component = data.get("component")
     if component is None:
