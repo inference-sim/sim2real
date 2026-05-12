@@ -85,6 +85,8 @@ python pipeline/prepare.py [--force] [--rebuild-context] [--manifest PATH] [--ru
 | 5 | Summary — write `run_summary.md` | on re-run |
 | 6 | **Gate** — `[d]eploy / [e]dit / [q]uit` | on re-run |
 
+**Phase 1 ref validation**: If `component.ref` is set in the manifest, Phase 1 resolves it via `git rev-parse` in the component submodule and compares against HEAD. A mismatch produces a warning (not a hard error) with the expected/actual SHA and a checkout command. Missing submodule or non-git directory with `component.ref` set is a hard error with an init command.
+
 **Phase 3 checkpoint**: writes `skill_input.json` and exits cleanly (exit 0). Run `/sim2real-translate` in Claude Code, then re-run `prepare.py` to continue from Phase 4. When no `algorithm` is present in the manifest, Phase 3 is skipped entirely (baseline-only mode).
 
 **Phase 4 assembly** reads `baseline.yaml` and `treatment.yaml` from the experiment root, merges them with skill-generated overlay files (`generated/baseline_config.yaml`, `generated/treatment_config.yaml`), and writes resolved scenario files to `cluster/`. PipelineRuns are generated with a `scenarioContent` param containing the fully resolved scenario YAML. Workloads are loaded from the manifest.
@@ -291,6 +293,8 @@ pipeline:                   # optional — defaults applied if absent
 ```
 
 All paths are relative to the repo root and validated at Phase 1.
+
+`component.ref` (optional): tag, branch, or commit SHA identifying the expected version of the component submodule. Phase 1 warns on mismatch (see above).
 
 ---
 
