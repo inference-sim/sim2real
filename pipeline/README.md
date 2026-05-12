@@ -248,16 +248,19 @@ kind: sim2real-transfer
 version: 3
 scenario: <name>            # scenario name used in generated PipelineRun labels
 
-algorithm:                    # optional — omit for baseline-only benchmarks
-  source: <path>            # sim algorithm implementation
-  config: <path>            # sim algorithm config (optional)
+baselines:                  # required — list of baseline specs
+  - name: <pkg-name>       # unique package name (lowercase alphanumeric, 1-20 chars)
+    scenario: <path>        # baseline scenario YAML (null if none)
+    sim:
+      config: <path>        # baseline policy for sim
+    real:
+      config: <path>        # optional: baseline EPP config template
+      notes: |              # optional: notes embedded in skill_input.json
 
-baseline:
-  sim:
-    config: <path>          # baseline policy for sim
-  real:
-    config: <path>          # optional: baseline EPP config template
-    notes: |                # optional: notes embedded in skill_input.json
+algorithms:                 # optional — omit for baseline-only benchmarks
+  - name: <pkg-name>       # unique package name
+    source: <path>          # sim algorithm implementation
+    defaults: <baseline>    # name of baseline this algorithm inherits from
 
 workloads:
   - <path>                  # one or more workload YAMLs

@@ -20,7 +20,6 @@ def _validate_package_name(name: str, context: str) -> None:
 
 
 _REQUIRED_TOP = ["kind", "version", "scenario"]
-_REQUIRED_ALGORITHM = ["source"]
 
 
 def load_manifest(path: "Path | str") -> dict:
@@ -47,37 +46,6 @@ def load_manifest(path: "Path | str") -> dict:
         if field not in data:
             raise ManifestError(f"Missing required field: {field}")
 
-    algo = data.get("algorithm")
-    if algo is None and "algorithm" in data:
-        del data["algorithm"]
-    elif algo is not None:
-        if not isinstance(algo, dict):
-            raise ManifestError("algorithm must be a mapping")
-        for f in _REQUIRED_ALGORITHM:
-            if f not in algo:
-                raise ManifestError(f"Missing required field: algorithm.{f}")
-
-    if "baseline" in data:
-        bl = data["baseline"]
-        if not isinstance(bl, dict):
-            raise ManifestError("baseline must be a mapping")
-
-        sim_section = bl.get("sim")
-        if sim_section is None:
-            data["baseline"]["sim"] = {"config": None}
-        elif not isinstance(sim_section, dict):
-            raise ManifestError("baseline.sim must be a mapping")
-        else:
-            sim_section.setdefault("config", None)
-        real_section = bl.get("real")
-        if real_section is None:
-            data["baseline"]["real"] = {"config": None, "notes": ""}
-        elif not isinstance(real_section, dict):
-            raise ManifestError("baseline.real must be a mapping")
-        else:
-            data["baseline"]["real"].setdefault("config", None)
-            data["baseline"]["real"].setdefault("notes", "")
-
     # Normalize workloads: absent/null → [] (standby mode — stack up, no benchmarks)
     wl = data.get("workloads")
     if wl is None:
@@ -85,47 +53,26 @@ def load_manifest(path: "Path | str") -> dict:
     elif not isinstance(wl, list):
         raise ManifestError("workloads must be a list")
 
-    # ── Normalize to list forms ──────────────────────────────────────────────
-    has_baseline = "baseline" in data
-    has_baselines = "baselines" in data
+    # ── Validate list-form sections ─────────────────────────────────────────
+    if "baselines" not in data:
+        raise ManifestError("Missing required field: baselines")
+    bls = data["baselines"]
+    if not isinstance(bls, list):
+        raise ManifestError("baselines must be a list")
+    seen_names: set[str] = set()
+    for i, entry in enumerate(bls):
+        if not isinstance(entry, dict):
+            raise ManifestError(f"baselines[{i}] must be a mapping")
+        if "name" not in entry:
+            raise ManifestError(f"baselines[{i}] missing required field: name")
+        if "scenario" not in entry:
+            raise ManifestError(f"baselines[{i}] missing required field: scenario")
+        _validate_package_name(entry["name"], f"baselines[{i}]")
+        if entry["name"] in seen_names:
+            raise ManifestError(f"baselines: duplicate name '{entry['name']}'")
+        seen_names.add(entry["name"])
 
-    if has_baseline and has_baselines:
-        raise ManifestError("Cannot have both 'baseline' and 'baselines' — use one or the other")
-
-    if has_baselines:
-        bls = data["baselines"]
-        if not isinstance(bls, list):
-            raise ManifestError("baselines must be a list")
-        seen_names: set[str] = set()
-        for i, entry in enumerate(bls):
-            if not isinstance(entry, dict):
-                raise ManifestError(f"baselines[{i}] must be a mapping")
-            if "name" not in entry:
-                raise ManifestError(f"baselines[{i}] missing required field: name")
-            if "scenario" not in entry:
-                raise ManifestError(f"baselines[{i}] missing required field: scenario")
-            _validate_package_name(entry["name"], f"baselines[{i}]")
-            if entry["name"] in seen_names:
-                raise ManifestError(f"baselines: duplicate name '{entry['name']}'")
-            seen_names.add(entry["name"])
-    elif has_baseline:
-        bl = data["baseline"]
-        data["baselines"] = [{
-            "name": "baseline",
-            "scenario": None,
-            "sim": bl.get("sim", {"config": None}),
-            "real": bl.get("real", {"config": None, "notes": ""}),
-        }]
-    else:
-        raise ManifestError("Missing required field: baseline or baselines")
-
-    has_algorithm = "algorithm" in data
-    has_algorithms = "algorithms" in data
-
-    if has_algorithm and has_algorithms:
-        raise ManifestError("Cannot have both 'algorithm' and 'algorithms' — use one or the other")
-
-    if has_algorithms:
+    if "algorithms" in data:
         algos = data["algorithms"]
         if not isinstance(algos, list):
             raise ManifestError("algorithms must be a list")
@@ -140,15 +87,6 @@ def load_manifest(path: "Path | str") -> dict:
             if entry["name"] in seen_algo_names:
                 raise ManifestError(f"algorithms: duplicate name '{entry['name']}'")
             seen_algo_names.add(entry["name"])
-    elif has_algorithm:
-        algo = data["algorithm"]
-        data["algorithms"] = [{
-            "name": "treatment",
-            "source": algo["source"],
-            "config": algo.get("config"),
-            "scenario": None,
-            "defaults": data["baselines"][0]["name"],
-        }]
     else:
         data["algorithms"] = []
 

@@ -11,20 +11,10 @@ MINIMAL_MANIFEST = {
     "kind": "sim2real-transfer",
     "version": 3,
     "scenario": "routing",
-    "algorithm": {
-        "source": "sim2real_golden/routers/router_adaptive_v2.go",
-        "config": "sim2real_golden/routers/policy_adaptive_v2.yaml",
-    },
-    "baseline": {
-        "sim": {"config": "sim2real_golden/routers/policy_baseline_211.yaml"},
-        "real": {"config": None, "notes": ""},
-    },
-    # Normalized list forms (as produced by load_manifest)
     "baselines": [{
         "name": "baseline",
         "scenario": None,
         "sim": {"config": "sim2real_golden/routers/policy_baseline_211.yaml"},
-        "real": {"config": None, "notes": ""},
     }],
     "algorithms": [{
         "name": "treatment",
@@ -588,17 +578,20 @@ class TestPhaseTranslate:
             "kind": "sim2real-transfer",
             "version": 3,
             "scenario": "routing",
-            "algorithm": {
-                "source": "sim2real_golden/routers/router_adaptive_v2.go",
-                "config": "sim2real_golden/routers/policy_adaptive_v2.yaml",
-            },
-            "baseline": {
+            "baselines": [{
+                "name": "baseline",
+                "scenario": None,
                 "sim": {"config": "sim2real_golden/routers/policy_baseline_211.yaml"},
                 "real": {
                     "config": "sim2real_golden/routers/baseline_epp_template.yaml",
                     "notes": "Use EndpointPickerConfig",
                 },
-            },
+            }],
+            "algorithms": [{
+                "name": "treatment",
+                "source": "sim2real_golden/routers/router_adaptive_v2.go",
+                "defaults": "baseline",
+            }],
             "workloads": ["sim2real_golden/workloads/wl1.yaml"],
             "target": {"repo": "llm-d-inference-scheduler"},
             "config": {
@@ -851,8 +844,8 @@ class TestExperimentRootSeparation:
             "kind": "sim2real-transfer",
             "version": 3,
             "scenario": "admission_control",
-            "algorithm": {"source": "algorithm/admission.go"},
-            "baseline": {"sim": {"config": None}, "real": {"config": None, "notes": ""}},
+            "baselines": [{"name": "baseline", "scenario": None}],
+            "algorithms": [{"name": "treatment", "source": "algorithm/admission.go", "defaults": "baseline"}],
             "workloads": ["workloads/w1.yaml"],
             "target": {"repo": "llm-d-inference-scheduler"},
             "config": {"kind": "AdmissionConfig"},

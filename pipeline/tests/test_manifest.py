@@ -19,42 +19,19 @@ def test_missing_version_raises(tmp_path):
 
 
 def test_missing_required_field(tmp_path):
-    for field in ["scenario", "baseline"]:
+    for field in ["scenario", "baselines"]:
         data = {k: v for k, v in MINIMAL_V3.items() if k != field}
         path = _write_manifest(tmp_path, data)
         with pytest.raises(ManifestError, match=field):
             load_manifest(path)
 
 
-def test_algorithm_section_entirely_optional(tmp_path):
-    """Manifest without algorithm field is valid (baseline-only mode)."""
-    data = {k: v for k, v in MINIMAL_V3.items() if k != "algorithm"}
+def test_algorithms_section_entirely_optional(tmp_path):
+    """Manifest without algorithms is valid (baseline-only mode)."""
+    data = {k: v for k, v in MINIMAL_V3.items() if k != "algorithms"}
     path = _write_manifest(tmp_path, data)
     m = load_manifest(path)
-    assert "algorithm" not in m
-
-
-def test_algorithm_null_normalized_to_absent(tmp_path):
-    """algorithm: null in YAML is normalized to key-absent (baseline-only)."""
-    data = {**MINIMAL_V3, "algorithm": None}
-    path = _write_manifest(tmp_path, data)
-    m = load_manifest(path)
-    assert "algorithm" not in m
-
-
-def test_missing_algorithm_source(tmp_path):
-    data = {**MINIMAL_V3, "algorithm": {"config": "x.yaml"}}
-    path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="algorithm.source"):
-        load_manifest(path)
-
-
-def test_missing_algorithm_config_is_valid(tmp_path):
-    """algorithm.config is optional — manifests without it load cleanly."""
-    data = {**MINIMAL_V3, "algorithm": {"source": "x.go"}}
-    path = _write_manifest(tmp_path, data)
-    m = load_manifest(path)
-    assert "config" not in m["algorithm"]
+    assert m["algorithms"] == []
 
 
 def test_optional_context_fields(tmp_path):
@@ -169,13 +146,20 @@ MINIMAL_V3 = {
     "kind": "sim2real-transfer",
     "version": 3,
     "scenario": "routing",
-    "algorithm": {
-        "source": "sim2real_golden/routers/router_adaptive_v2.go",
-        "config": "sim2real_golden/routers/policy_adaptive_v2.yaml",
-    },
-    "baseline": {
-        "sim": {"config": "sim2real_golden/routers/policy_baseline_211.yaml"},
-    },
+    "algorithms": [
+        {
+            "name": "treatment",
+            "source": "sim2real_golden/routers/router_adaptive_v2.go",
+            "defaults": "baseline",
+        },
+    ],
+    "baselines": [
+        {
+            "name": "baseline",
+            "scenario": "baseline.yaml",
+            "sim": {"config": "sim2real_golden/routers/policy_baseline_211.yaml"},
+        },
+    ],
     "workloads": ["sim2real_golden/workloads/wl1.yaml"],
     "target": {"repo": "llm-d-inference-scheduler"},
     "config": {
@@ -193,68 +177,13 @@ MINIMAL_V3 = {
 
 
 def test_load_valid_v3_minimal(tmp_path):
-    """v3 with just baseline.sim.config loads cleanly."""
+    """v3 minimal manifest loads cleanly."""
     path = _write_manifest(tmp_path, MINIMAL_V3)
     m = load_manifest(path)
-    assert m["baseline"]["sim"]["config"] == "sim2real_golden/routers/policy_baseline_211.yaml"
-    assert m["baseline"]["real"]["config"] is None
-    assert m["baseline"]["real"]["notes"] == ""
-
-
-def test_v3_with_real_config_and_notes(tmp_path):
-    """v3 with baseline.real.config + notes loads and preserves both."""
-    data = {
-        **MINIMAL_V3,
-        "baseline": {
-            "sim": {"config": "sim2real_golden/routers/policy_baseline_211.yaml"},
-            "real": {
-                "config": "sim2real_golden/routers/baseline_epp_template.yaml",
-                "notes": "Use EndpointPickerConfig.Scorers[]",
-            },
-        },
-    }
-    path = _write_manifest(tmp_path, data)
-    m = load_manifest(path)
-    assert m["baseline"]["real"]["config"] == "sim2real_golden/routers/baseline_epp_template.yaml"
-    assert "EndpointPickerConfig" in m["baseline"]["real"]["notes"]
-
-
-def test_v3_missing_sim_config_defaults_to_none(tmp_path):
-    """v3 without baseline.sim.config is valid; sim.config defaults to None."""
-    data = {**MINIMAL_V3, "baseline": {"real": {"config": "x.yaml"}}}
-    path = _write_manifest(tmp_path, data)
-    m = load_manifest(path)
-    assert m["baseline"]["sim"]["config"] is None
-
-
-def test_v3_missing_sim_section_defaults_to_none(tmp_path):
-    """v3 baseline without sim key is valid; sim.config defaults to None."""
-    data = {**MINIMAL_V3, "baseline": {}}
-    path = _write_manifest(tmp_path, data)
-    m = load_manifest(path)
-    assert m["baseline"]["sim"]["config"] is None
-
-
-def test_v3_real_section_entirely_optional(tmp_path):
-    """v3 without baseline.real at all is valid; defaults applied."""
-    data = {**MINIMAL_V3}  # no baseline.real
-    path = _write_manifest(tmp_path, data)
-    m = load_manifest(path)
-    assert m["baseline"]["real"] == {"config": None, "notes": ""}
-
-
-def test_v3_real_partial_defaults_applied(tmp_path):
-    """v3 with baseline.real present but missing notes gets default."""
-    data = {
-        **MINIMAL_V3,
-        "baseline": {
-            "sim": {"config": "sim2real_golden/routers/policy_baseline_211.yaml"},
-            "real": {"config": "x.yaml"},  # no notes
-        },
-    }
-    path = _write_manifest(tmp_path, data)
-    m = load_manifest(path)
-    assert m["baseline"]["real"]["notes"] == ""
+    assert len(m["baselines"]) == 1
+    assert m["baselines"][0]["name"] == "baseline"
+    assert len(m["algorithms"]) == 1
+    assert m["algorithms"][0]["name"] == "treatment"
 
 
 
@@ -462,15 +391,6 @@ def test_baselines_list_loaded(tmp_path):
     assert m["baselines"][1]["name"] == "b2"
 
 
-def test_singular_baseline_normalized_to_baselines(tmp_path):
-    """v3 with singular baseline: normalizes to baselines: list of one."""
-    path = _write_manifest(tmp_path, MINIMAL_V3)
-    m = load_manifest(path)
-    assert "baselines" in m
-    assert len(m["baselines"]) == 1
-    assert m["baselines"][0]["name"] == "baseline"
-
-
 def test_baselines_must_be_list(tmp_path):
     data = {**MULTI_BASELINE_V3, "baselines": "not-a-list"}
     path = _write_manifest(tmp_path, data)
@@ -525,13 +445,6 @@ def test_baselines_with_defaults_field(tmp_path):
     assert m["baselines"][0]["defaults"] == "defaults.yaml"
 
 
-def test_both_baseline_and_baselines_raises(tmp_path):
-    data = {**MULTI_BASELINE_V3, "baseline": {"sim": {"config": "x.yaml"}}}
-    path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="both.*baseline.*baselines"):
-        load_manifest(path)
-
-
 def test_algorithms_list_loaded(tmp_path):
     data = {**MULTI_BASELINE_V3, "algorithms": [
         {"name": "ac1", "source": "algo.go", "scenario": "treatment.yaml", "defaults": "b1"},
@@ -541,16 +454,6 @@ def test_algorithms_list_loaded(tmp_path):
     assert len(m["algorithms"]) == 1
     assert m["algorithms"][0]["name"] == "ac1"
     assert m["algorithms"][0]["defaults"] == "b1"
-
-
-def test_singular_algorithm_normalized_to_algorithms(tmp_path):
-    """v3 with singular algorithm: normalizes to algorithms: list of one."""
-    path = _write_manifest(tmp_path, MINIMAL_V3)
-    m = load_manifest(path)
-    assert "algorithms" in m
-    assert len(m["algorithms"]) == 1
-    assert m["algorithms"][0]["name"] == "treatment"
-    assert m["algorithms"][0]["source"] == MINIMAL_V3["algorithm"]["source"]
 
 
 def test_no_algorithm_no_algorithms_is_baseline_only(tmp_path):
