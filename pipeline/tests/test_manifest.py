@@ -341,6 +341,73 @@ def test_component_build_image_validates_hub(tmp_path):
         load_manifest(path)
 
 
+def test_build_image_defaults_hub_from_base_image(tmp_path):
+    """build.image without hub inherits from base_image.hub."""
+    data = {**MINIMAL_V3, "component": {
+        "repo": "github.com/llm-d/llm-d-inference-scheduler",
+        "kind": "EndpointPickerConfig",
+        "base_image": {"hub": "ghcr.io/llm-d", "name": "llm-d-inference-scheduler"},
+        "build": {"image": {"name": "custom-name"}},
+    }}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["component"]["build"]["image"]["hub"] == "ghcr.io/llm-d"
+    assert m["component"]["build"]["image"]["name"] == "custom-name"
+
+
+def test_build_image_defaults_name_from_base_image(tmp_path):
+    """build.image without name inherits from base_image.name."""
+    data = {**MINIMAL_V3, "component": {
+        "repo": "github.com/llm-d/llm-d-inference-scheduler",
+        "kind": "EndpointPickerConfig",
+        "base_image": {"hub": "ghcr.io/llm-d", "name": "llm-d-inference-scheduler"},
+        "build": {"image": {"hub": "quay.io/me"}},
+    }}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["component"]["build"]["image"]["hub"] == "quay.io/me"
+    assert m["component"]["build"]["image"]["name"] == "llm-d-inference-scheduler"
+
+
+def test_build_image_defaults_both_from_base_image(tmp_path):
+    """build.image: {} inherits both hub and name from base_image."""
+    data = {**MINIMAL_V3, "component": {
+        "repo": "github.com/llm-d/llm-d-inference-scheduler",
+        "kind": "EndpointPickerConfig",
+        "base_image": {"hub": "ghcr.io/llm-d", "name": "llm-d-inference-scheduler"},
+        "build": {"image": {}},
+    }}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["component"]["build"]["image"]["hub"] == "ghcr.io/llm-d"
+    assert m["component"]["build"]["image"]["name"] == "llm-d-inference-scheduler"
+
+
+def test_build_image_no_base_image_requires_hub(tmp_path):
+    """Without base_image, build.image still requires hub."""
+    data = {**MINIMAL_V3, "component": {
+        "repo": "github.com/llm-d/llm-d-inference-scheduler",
+        "kind": "EndpointPickerConfig",
+        "build": {"image": {"name": "foo"}},
+    }}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="component.build.image.hub"):
+        load_manifest(path)
+
+
+def test_build_image_explicit_overrides_base_image(tmp_path):
+    """Explicit build.image fields are not overwritten by base_image."""
+    data = {**MINIMAL_V3, "component": {
+        "repo": "github.com/llm-d/llm-d-inference-scheduler",
+        "kind": "EndpointPickerConfig",
+        "base_image": {"hub": "ghcr.io/llm-d", "name": "llm-d-inference-scheduler"},
+        "build": {"image": {"hub": "quay.io/me", "name": "my-image"}},
+    }}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["component"]["build"]["image"]["hub"] == "quay.io/me"
+    assert m["component"]["build"]["image"]["name"] == "my-image"
+
 
 # ── pipeline field (optional, v3 only) ─────────────────────────────────────
 

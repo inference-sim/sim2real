@@ -165,6 +165,9 @@ def _validate_v3_fields(data: dict) -> None:
         if build_image is not None:
             if not isinstance(build_image, dict):
                 raise ManifestError("component.build.image must be a mapping")
+            if base_image is not None:
+                build_image.setdefault("hub", base_image["hub"])
+                build_image.setdefault("name", base_image["name"])
             if "hub" not in build_image:
                 raise ManifestError("Missing required field: component.build.image.hub")
 
