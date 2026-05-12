@@ -165,7 +165,7 @@ def triage_pod(
             message=f"{pod.name}: {pod.reason}",
             suggestion=(
                 f"Image pull failed: {img_detail}\n"
-                "Check run_metadata.json → epp_image or scenario bundle → "
+                "Check run_metadata.json → component_image or scenario bundle → "
                 "model.image"
             ),
         )

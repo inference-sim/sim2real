@@ -115,12 +115,12 @@ def _build_epp_image(run_dir: Path, run_name: str, namespace: str) -> str:
     meta_path = run_dir / "run_metadata.json"
     if meta_path.exists():
         meta = json.loads(meta_path.read_text())
-        full_image = meta.get("epp_image", "")
+        full_image = meta.get("component_image", "")
         if full_image:
             ok(f"EPP image: {full_image}")
             return full_image
 
-    err("EPP build completed but epp_image not set in run_metadata.json")
+    err("EPP build completed but component_image not set in run_metadata.json")
     sys.exit(1)
 
 
