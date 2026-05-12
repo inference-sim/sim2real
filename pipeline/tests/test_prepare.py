@@ -363,11 +363,10 @@ class TestPhaseTranslate:
             mod._phase_translate(Args(), state, manifest, run_dir, resolved, context_path)
         assert state.get_phase("translate").get("checkpoint_hits") == 2
 
-    def test_skill_input_contains_hints_empty(self, repo):
-        """When manifest has no hints, skill_input.json has hints={text:'', files:[]}."""
+    def test_skill_input_contains_context_empty(self, repo):
+        """When manifest has no context.text, skill_input.json has context={text:''}."""
         mod = _import_prepare_with_root(repo)
         manifest = dict(MINIMAL_MANIFEST)
-        # no 'hints' key in manifest
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -386,24 +385,17 @@ class TestPhaseTranslate:
             mod._phase_translate(Args(), state, manifest, run_dir, resolved, context_path)
 
         si = json.loads((run_dir / "skill_input.json").read_text())
-        assert "hints" in si
-        assert si["hints"]["text"] == ""
-        assert si["hints"]["files"] == []
+        assert "context" in si
+        assert si["context"]["text"] == ""
+        assert "hints" not in si
         # target has only repo
         assert set(si["target"].keys()) == {"repo"}
-        # old fields removed
-        assert "context_notes" not in si
-        assert "plugin_dir" not in si.get("target", {})
-        assert "register_file" not in si.get("target", {})
 
-    def test_skill_input_contains_hints_from_manifest(self, repo):
-        """When manifest has hints, they are written to skill_input.json."""
+    def test_skill_input_contains_context_text_from_manifest(self, repo):
+        """When manifest has context.text, it is written to skill_input.json."""
         mod = _import_prepare_with_root(repo)
         manifest = dict(MINIMAL_MANIFEST)
-        manifest["hints"] = {
-            "text": "Modify scorer X",
-            "files": [{"path": "hint.md", "content": "# Hint content"}],
-        }
+        manifest["context"] = {"text": "Modify scorer X", "files": []}
         run_dir = repo / "workspace" / "runs" / "test-run2"
         run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -422,8 +414,8 @@ class TestPhaseTranslate:
             mod._phase_translate(Args(), state, manifest, run_dir, resolved, context_path)
 
         si = json.loads((run_dir / "skill_input.json").read_text())
-        assert si["hints"]["text"] == "Modify scorer X"
-        assert si["hints"]["files"][0]["content"] == "# Hint content"
+        assert si["context"]["text"] == "Modify scorer X"
+        assert "hints" not in si
 
     def test_translation_output_validates_all_required_fields(self, repo):
         """translation_output.json must have all required fields."""

@@ -289,7 +289,7 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
         "target": {"repo": target.get("repo", "")},
         "build_commands": commands,
         "config_kind": config_cfg.get("kind", ""),
-        "hints": manifest.get("hints", {"text": "", "files": []}),
+        "context": {"text": manifest.get("context", {}).get("text", "")},
     }
     skill_input_path = run_dir / "skill_input.json"
     skill_input_path.write_text(json.dumps(skill_input, indent=2))
