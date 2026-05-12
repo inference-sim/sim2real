@@ -23,7 +23,7 @@ Read `skill_input.json` from the run directory. It contains:
 | `context.text`     | Free-text instructions from the manifest author (in `context` object) |
 | `algorithm_source` | Path to the source algorithm file                    |
 | `algorithm_config` | Path to the algorithm's policy config                |
-| `target`           | Target repo info (repo, plugin_dir, register_file, package) |
+| `target`           | Component repo info (derived from `component.repo`)  |
 | `build_commands`   | List of build/test commands to validate the plugin   |
 | `config_kind`      | Expected kind for the treatment config YAML          |
 
