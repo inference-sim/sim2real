@@ -108,23 +108,36 @@ def _load_resolved_config(manifest: dict) -> dict:
     return dict(manifest.get("component", {}))
 
 
-def _get_submodule_shas() -> dict[str, str]:
-    """Get HEAD commit SHAs for submodules."""
+def _get_submodule_shas(component_path: str = "") -> dict[str, str]:
+    """Get HEAD commit SHAs for submodules.
+
+    Args:
+        component_path: Relative path to the component submodule (from manifest).
+                        Resolved relative to EXPERIMENT_ROOT (with REPO_ROOT fallback).
+    """
     shas = {}
-    for name, path in [("inference-sim", "inference-sim"),
-                       ("llm-d-inference-scheduler", "llm-d-inference-scheduler"),
-                       ("llm-d-benchmark", "llm-d-benchmark")]:
-        if name == "inference-sim" or name == "llm-d-benchmark":
-            sub = REPO_ROOT / path
-        else:
-            sub = EXPERIMENT_ROOT / path
-            if not sub.exists():
-                sub = REPO_ROOT / path
+    # Framework submodules (always at REPO_ROOT)
+    for name in ("inference-sim", "llm-d-benchmark"):
+        sub = REPO_ROOT / name
         if sub.exists() and (sub / ".git").exists():
             result = run(["git", "rev-parse", "HEAD"], capture=True, cwd=sub)
             shas[name] = result.stdout.strip()
         else:
             shas[name] = "unknown"
+
+    # Component submodule (from manifest, EXPERIMENT_ROOT with fallback)
+    if component_path:
+        sub = EXPERIMENT_ROOT / component_path
+        if not sub.exists():
+            sub = REPO_ROOT / component_path
+        if sub.exists() and (sub / ".git").exists():
+            result = run(["git", "rev-parse", "HEAD"], capture=True, cwd=sub)
+            shas["component"] = result.stdout.strip()
+        else:
+            shas["component"] = "unknown"
+    else:
+        shas["component"] = "unknown"
+
     return shas
 
 
@@ -209,7 +222,7 @@ def _phase_context(args, state: StateMachine, manifest: dict, run_dir: Path) -> 
             sys.exit(1)
         context_files.append(full)
 
-    shas = _get_submodule_shas()
+    shas = _get_submodule_shas(manifest.get("component", {}).get("path", ""))
 
     path, cached = build_context(
         context_files=context_files,
@@ -459,7 +472,7 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     # 4f: Generate PipelineRuns
     namespace = setup_config.get("namespace", "default")
     ws_bindings = setup_config.get("workspaces") or {}
-    shas = _get_submodule_shas()
+    shas = _get_submodule_shas(manifest.get("component", {}).get("path", ""))
     benchmark_commit = shas.get("llm-d-benchmark", "")
     blis_commit = shas.get("inference-sim", "")
     benchmark_sub = REPO_ROOT / "llm-d-benchmark"

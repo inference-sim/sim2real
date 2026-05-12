@@ -811,6 +811,34 @@ class TestValidateAssembly:
 
 
 
+# ── _get_submodule_shas ────────────────────────────────────────────────────
+
+class TestGetSubmoduleShas:
+    def test_returns_component_sha_from_manifest_path(self, repo):
+        """_get_submodule_shas uses component_path for the component entry."""
+        comp = repo / "my-scheduler"
+        comp.mkdir()
+        _init_git_repo(comp)
+
+        mod = _import_prepare_with_root(repo)
+        shas = mod._get_submodule_shas(component_path="my-scheduler")
+        assert shas.get("component") != "unknown"
+        assert len(shas["component"]) == 40  # SHA-1 hex
+
+    def test_unknown_when_component_path_missing(self, repo):
+        """_get_submodule_shas returns 'unknown' when component dir doesn't exist."""
+        mod = _import_prepare_with_root(repo)
+        shas = mod._get_submodule_shas(component_path="nonexistent")
+        assert shas["component"] == "unknown"
+
+    def test_framework_submodules_still_resolved(self, repo):
+        """inference-sim and llm-d-benchmark are still in the result."""
+        mod = _import_prepare_with_root(repo)
+        shas = mod._get_submodule_shas(component_path="llm-d-inference-scheduler")
+        assert "inference-sim" in shas
+        assert "llm-d-benchmark" in shas
+
+
 # ── Config resolution ───────────────────────────────────────────────────────
 
 class TestConfigResolution:
