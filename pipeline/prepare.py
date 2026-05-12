@@ -108,23 +108,42 @@ def _load_resolved_config(manifest: dict) -> dict:
     return dict(manifest.get("component", {}))
 
 
-def _get_submodule_shas() -> dict[str, str]:
-    """Get HEAD commit SHAs for submodules."""
+def _get_submodule_shas(component_path: str = "") -> dict[str, str]:
+    """Get HEAD commit SHAs for submodules.
+
+    Args:
+        component_path: Relative path to the component submodule (from manifest).
+                        Resolved relative to EXPERIMENT_ROOT (with REPO_ROOT fallback).
+    """
     shas = {}
-    for name, path in [("inference-sim", "inference-sim"),
-                       ("llm-d-inference-scheduler", "llm-d-inference-scheduler"),
-                       ("llm-d-benchmark", "llm-d-benchmark")]:
-        if name == "inference-sim" or name == "llm-d-benchmark":
-            sub = REPO_ROOT / path
-        else:
-            sub = EXPERIMENT_ROOT / path
-            if not sub.exists():
-                sub = REPO_ROOT / path
+    # Framework submodules (always at REPO_ROOT)
+    for name in ("inference-sim", "llm-d-benchmark"):
+        sub = REPO_ROOT / name
         if sub.exists() and (sub / ".git").exists():
-            result = run(["git", "rev-parse", "HEAD"], capture=True, cwd=sub)
-            shas[name] = result.stdout.strip()
+            try:
+                result = run(["git", "rev-parse", "HEAD"], capture=True, cwd=sub)
+                shas[name] = result.stdout.strip()
+            except subprocess.CalledProcessError:
+                shas[name] = "unknown"
         else:
             shas[name] = "unknown"
+
+    # Component submodule (from manifest, EXPERIMENT_ROOT with fallback)
+    if component_path:
+        sub = EXPERIMENT_ROOT / component_path
+        if not sub.exists():
+            sub = REPO_ROOT / component_path
+        if sub.exists() and (sub / ".git").exists():
+            try:
+                result = run(["git", "rev-parse", "HEAD"], capture=True, cwd=sub)
+                shas["component"] = result.stdout.strip()
+            except subprocess.CalledProcessError:
+                shas["component"] = "unknown"
+        else:
+            shas["component"] = "unknown"
+    else:
+        shas["component"] = "unknown"
+
     return shas
 
 
@@ -175,11 +194,43 @@ def _phase_init(args, manifest: dict, run_dir: Path) -> StateMachine:
             err(f"Workload not found: {wl}")
             sys.exit(1)
 
-    # Validate component repo exists
+    # Validate component submodule
     target_path = resolved.get("path", "")
-    if target_path and not (EXPERIMENT_ROOT / target_path).exists():
-        err(f"Component repo not found: {target_path}")
-        sys.exit(1)
+    component_ref = manifest.get("component", {}).get("ref")
+    if target_path:
+        comp_dir = EXPERIMENT_ROOT / target_path
+        if not comp_dir.exists():
+            if component_ref:
+                err(f"Component repo not found: {target_path}\n"
+                    f"  Initialize with: git submodule update --init {target_path}")
+            else:
+                err(f"Component repo not found: {target_path}")
+            sys.exit(1)
+        elif component_ref:
+            if not (comp_dir / ".git").exists():
+                err(f"component.ref is set but {target_path} is not a git repository.\n"
+                    f"  Cannot verify ref {component_ref}.\n"
+                    f"  Initialize with: git submodule update --init {target_path}")
+                sys.exit(1)
+            try:
+                result = run(["git", "rev-parse", "HEAD"], capture=True, cwd=comp_dir)
+            except subprocess.CalledProcessError:
+                err(f"Cannot determine HEAD in {target_path} (git rev-parse failed).\n"
+                    f"  The .git directory may be corrupted.")
+                sys.exit(1)
+            actual_sha = result.stdout.strip()
+            try:
+                result_ref = run(["git", "rev-parse", component_ref], capture=True, cwd=comp_dir)
+                expected_sha = result_ref.stdout.strip()
+            except subprocess.CalledProcessError:
+                err(f"Cannot resolve component.ref '{component_ref}' in {target_path}.\n"
+                    f"  Ensure the ref exists: cd {target_path} && git fetch")
+                sys.exit(1)
+            if actual_sha != expected_sha:
+                warn(f"Component ref mismatch in {target_path}:\n"
+                     f"  manifest component.ref: {component_ref}\n"
+                     f"  checked-out HEAD:       {actual_sha}\n"
+                     f"  Update with: cd {target_path} && git checkout {component_ref}")
 
     run_name = args.run or _load_setup_config().get("current_run", _default_run_name())
     state = StateMachine(run_name, scenario, run_dir)
@@ -209,7 +260,7 @@ def _phase_context(args, state: StateMachine, manifest: dict, run_dir: Path) -> 
             sys.exit(1)
         context_files.append(full)
 
-    shas = _get_submodule_shas()
+    shas = _get_submodule_shas(manifest.get("component", {}).get("path", ""))
 
     path, cached = build_context(
         context_files=context_files,
@@ -459,7 +510,7 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     # 4f: Generate PipelineRuns
     namespace = setup_config.get("namespace", "default")
     ws_bindings = setup_config.get("workspaces") or {}
-    shas = _get_submodule_shas()
+    shas = _get_submodule_shas(manifest.get("component", {}).get("path", ""))
     benchmark_commit = shas.get("llm-d-benchmark", "")
     blis_commit = shas.get("inference-sim", "")
     benchmark_sub = REPO_ROOT / "llm-d-benchmark"
