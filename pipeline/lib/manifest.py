@@ -1,4 +1,4 @@
-"""Manifest loader for sim2real pipeline (v2/v3 schema)."""
+"""Manifest loader for sim2real pipeline (v3 schema)."""
 import re
 import warnings
 import yaml
@@ -25,7 +25,7 @@ _REQUIRED_ALGORITHM = ["source"]
 
 
 def load_manifest(path: "Path | str") -> dict:
-    """Load and validate a sim2real transfer manifest (v2 or v3)."""
+    """Load and validate a sim2real transfer manifest."""
     path = Path(path)
     if not path.exists():
         raise ManifestError(f"Manifest not found: {path}")
@@ -41,12 +41,7 @@ def load_manifest(path: "Path | str") -> dict:
     version = data.get("version")
     if version is None:
         raise ManifestError("Missing required field: version")
-    if version == 1:
-        raise ManifestError(
-            "v1 manifests are no longer supported. "
-            "Use version 2 or 3 (see pipeline/README.md for field reference)."
-        )
-    if version not in (2, 3):
+    if version != 3:
         raise ManifestError(f"Unsupported manifest version: {version}")
 
     for field in _REQUIRED_TOP:
@@ -68,32 +63,21 @@ def load_manifest(path: "Path | str") -> dict:
         if not isinstance(bl, dict):
             raise ManifestError("baseline must be a mapping")
 
-        if version == 2:
-            # v2: flat baseline.config — normalize to v3 shape for uniform downstream access
-            if "config" not in bl:
-                raise ManifestError("Missing required field: baseline.config")
-            data["baseline"] = {
-                "sim": {"config": bl["config"]},
-                "real": {"config": None, "notes": ""},
-            }
+        sim_section = bl.get("sim")
+        if sim_section is None:
+            data["baseline"]["sim"] = {"config": None}
+        elif not isinstance(sim_section, dict):
+            raise ManifestError("baseline.sim must be a mapping")
         else:
-            # v3: baseline.sim.config optional (None when scenario has no sim baseline);
-            # baseline.real.* optional with defaults
-            sim_section = bl.get("sim")
-            if sim_section is None:
-                data["baseline"]["sim"] = {"config": None}
-            elif not isinstance(sim_section, dict):
-                raise ManifestError("baseline.sim must be a mapping")
-            else:
-                sim_section.setdefault("config", None)
-            real_section = bl.get("real")
-            if real_section is None:
-                data["baseline"]["real"] = {"config": None, "notes": ""}
-            elif not isinstance(real_section, dict):
-                raise ManifestError("baseline.real must be a mapping")
-            else:
-                data["baseline"]["real"].setdefault("config", None)
-                data["baseline"]["real"].setdefault("notes", "")
+            sim_section.setdefault("config", None)
+        real_section = bl.get("real")
+        if real_section is None:
+            data["baseline"]["real"] = {"config": None, "notes": ""}
+        elif not isinstance(real_section, dict):
+            raise ManifestError("baseline.real must be a mapping")
+        else:
+            data["baseline"]["real"].setdefault("config", None)
+            data["baseline"]["real"].setdefault("notes", "")
 
     # Normalize workloads: absent/null → [] (standby mode — stack up, no benchmarks)
     wl = data.get("workloads")
@@ -190,9 +174,7 @@ def load_manifest(path: "Path | str") -> dict:
         hints_files.append({"path": str(fp), "content": fp.read_text()})
     data["hints"] = {"text": hints_text, "files": hints_files}
 
-    # ── v3 fields ─────────────────────────────────────────────────────────────
-    if version >= 3:
-        _validate_v3_fields(data)
+    _validate_v3_fields(data)
 
     # Deprecation warning for context.notes
     if data.get("context", {}).get("notes"):
