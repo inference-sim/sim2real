@@ -779,7 +779,7 @@ def main() -> int:
     print(f"Run directory: {run_dir}")
     print()
     print("Next steps:")
-    print("  1. Edit <experiment-root>/transfer.yaml (algorithm source, workloads, context hints)")
+    print("  1. Edit <experiment-root>/transfer.yaml (algorithm source, workloads, context)")
     print("  2. Run: python <repo-root>/pipeline/prepare.py")
     return 0
 

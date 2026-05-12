@@ -31,11 +31,9 @@ test -f pipeline/pipeline.yaml || { echo "ERROR: not in sim2real root"; exit 1; 
 | `{ALGO_CONFIG}` | Algorithm policy config (weights, thresholds) — empty when scenario has no custom config |
 | `prompts/prepare/translate.md` | Translation guidance — follow this |
 
-Hints from the operator (held in mind, not written to disk):
+Context from the operator (held in mind, not written to disk):
 
-{HINTS_TEXT}
-
-{HINTS_FILES_CONTENT}
+{CONTEXT_TEXT}
 
 Expert agent name (for queries): {EXPERT_AGENT_NAME}
 

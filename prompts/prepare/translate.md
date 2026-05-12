@@ -20,7 +20,7 @@ Read `skill_input.json` from the run directory. It contains:
 | `run_dir`          | Path to the run directory (relative to repo root)    |
 | `scenario`         | Transfer scenario (e.g., `routing`, `admission_control`) |
 | `context_path`     | Path to the cached context.md document               |
-| `context_notes`    | Free-text notes from the manifest author             |
+| `context.text`     | Free-text instructions from the manifest author (in `context` object) |
 | `algorithm_source` | Path to the source algorithm file                    |
 | `algorithm_config` | Path to the algorithm's policy config                |
 | `target`           | Target repo info (repo, plugin_dir, register_file, package) |
@@ -33,8 +33,8 @@ Read the context document at `context_path`. It contains:
 - Mapping documents (sim signals to production equivalents)
 - Submodule commit SHAs for traceability
 
-Also read `context_notes` for scenario-specific translation hints from the
-manifest author.
+Also read `context.text` from the `context` object in `skill_input.json` for
+scenario-specific instructions from the manifest author.
 
 ## Translation Loop
 

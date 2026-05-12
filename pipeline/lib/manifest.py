@@ -1,6 +1,5 @@
 """Manifest loader for sim2real pipeline (v3 schema)."""
 import re
-import warnings
 import yaml
 from pathlib import Path
 
@@ -162,28 +161,22 @@ def load_manifest(path: "Path | str") -> dict:
             f"duplicates: {sorted(set(dupes))}"
         )
 
-    # Hints section (optional)
-    hints_raw = data.get("hints", {}) or {}
-    hints_text = hints_raw.get("text", "") or ""
-    hints_files_raw = hints_raw.get("files", []) or []
-    hints_files = []
-    for fpath in hints_files_raw:
-        fp = Path(fpath)
-        if not fp.exists():
-            raise ManifestError(f"hints.files entry not found: {fpath}")
-        hints_files.append({"path": str(fp), "content": fp.read_text()})
-    data["hints"] = {"text": hints_text, "files": hints_files}
+    # Context section (optional): only 'text' and 'files' are valid keys
+    ctx_raw = data.get("context", {}) or {}
+    _valid_context_keys = {"text", "files"}
+    unknown = set(ctx_raw.keys()) - _valid_context_keys
+    if unknown:
+        raise ManifestError(
+            f"context contains unknown keys: {sorted(unknown)}. "
+            f"Valid keys: text, files"
+        )
+    ctx_text = ctx_raw.get("text", "") or ""
+    ctx_files = ctx_raw.get("files", []) or []
+    if not isinstance(ctx_files, list):
+        raise ManifestError("context.files must be a list")
+    data["context"] = {"text": ctx_text, "files": ctx_files}
 
     _validate_v3_fields(data)
-
-    # Deprecation warning for context.notes
-    if data.get("context", {}).get("notes"):
-        warnings.warn(
-            "context.notes is deprecated; use hints.text instead. "
-            "The value is currently ignored.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
 
     return data
 

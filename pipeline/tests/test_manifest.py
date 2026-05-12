@@ -60,12 +60,10 @@ def test_missing_algorithm_config_is_valid(tmp_path):
 def test_optional_context_fields(tmp_path):
     data = {**MINIMAL_V3, "context": {
         "files": ["docs/mapping.md"],
-        "notes": "Use regime detection pattern",
     }}
     path = _write_manifest(tmp_path, data)
     m = load_manifest(path)
-    assert m["context"]["notes"] == "Use regime detection pattern"
-    assert len(m["context"]["files"]) == 1
+    assert m["context"]["files"] == ["docs/mapping.md"]
 
 
 def test_workloads_must_be_list(tmp_path):
@@ -126,55 +124,43 @@ def test_file_not_found():
         load_manifest(Path("/nonexistent/transfer.yaml"))
 
 
-# ── Hints section ─────────────────────────────────────────────────────────────
+# ── Context section ──────────────────────────────────────────────────────────
 
-def test_hints_section_optional(tmp_path):
-    """Manifest without hints loads cleanly; hints defaults to empty."""
+def test_context_section_optional(tmp_path):
+    """Manifest without context loads cleanly; context defaults to empty."""
     path = _write_manifest(tmp_path, MINIMAL_V3)
     m = load_manifest(path)
-    hints = m.get("hints", {})
-    assert hints.get("text", "") == ""
-    assert hints.get("files", []) == []
+    ctx = m.get("context", {})
+    assert ctx.get("text", "") == ""
+    assert ctx.get("files", []) == []
 
 
-def test_hints_text_loaded(tmp_path):
-    data = {**MINIMAL_V3, "hints": {"text": "Modify precise_prefix_cache.go"}}
+def test_context_text_loaded(tmp_path):
+    data = {**MINIMAL_V3, "context": {"text": "Modify precise_prefix_cache.go"}}
     path = _write_manifest(tmp_path, data)
     m = load_manifest(path)
-    assert m["hints"]["text"] == "Modify precise_prefix_cache.go"
+    assert m["context"]["text"] == "Modify precise_prefix_cache.go"
 
 
-def test_hints_files_contents_embedded(tmp_path):
-    hint_file = tmp_path / "hint.md"
-    hint_file.write_text("# Transfer hint\nRewrite scorer")
-    data = {**MINIMAL_V3, "hints": {"files": [str(hint_file)]}}
+def test_context_files_loaded(tmp_path):
+    data = {**MINIMAL_V3, "context": {"files": ["docs/mapping.md"]}}
     path = _write_manifest(tmp_path, data)
     m = load_manifest(path)
-    assert len(m["hints"]["files"]) == 1
-    assert m["hints"]["files"][0]["path"] == str(hint_file)
-    assert "Rewrite scorer" in m["hints"]["files"][0]["content"]
+    assert m["context"]["files"] == ["docs/mapping.md"]
 
 
-def test_hints_file_not_found_raises(tmp_path):
-    data = {**MINIMAL_V3, "hints": {"files": ["/nonexistent/hint.md"]}}
+def test_context_rejects_unknown_keys(tmp_path):
+    data = {**MINIMAL_V3, "context": {"text": "ok", "notes": "bad"}}
     path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="hints.files"):
+    with pytest.raises(ManifestError, match="context.*unknown.*notes"):
         load_manifest(path)
 
 
-def test_context_notes_deprecated_warns(tmp_path):
-    data = {**MINIMAL_V3, "context": {"notes": "old style note", "files": []}}
+def test_context_files_must_be_list(tmp_path):
+    data = {**MINIMAL_V3, "context": {"files": "not_a_list"}}
     path = _write_manifest(tmp_path, data)
-    import warnings
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        m = load_manifest(path)
-    dep_warnings = [warning for warning in w if issubclass(warning.category, DeprecationWarning)]
-    assert dep_warnings, "No DeprecationWarning emitted"
-    texts = [str(warning.message) for warning in dep_warnings]
-    assert any("context.notes" in t and "deprecated" in t for t in texts)
-    # Value is ignored (not migrated to hints.text)
-    assert m.get("hints", {}).get("text", "") == ""
+    with pytest.raises(ManifestError, match="context.files.*list"):
+        load_manifest(path)
 
 
 # ── v3 manifest fixtures ───────────────────────────────────────────────────
