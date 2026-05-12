@@ -328,6 +328,45 @@ def test_component_build_image_validates_hub(tmp_path):
         load_manifest(path)
 
 
+def test_component_ref_optional(tmp_path):
+    """component without ref is valid."""
+    path = _write_manifest(tmp_path, MINIMAL_V3)
+    m = load_manifest(path)
+    assert "ref" not in m["component"]
+
+
+def test_component_ref_loaded(tmp_path):
+    """component.ref string is preserved."""
+    data = {**MINIMAL_V3, "component": {
+        **MINIMAL_V3["component"],
+        "ref": "abc123def",
+    }}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["component"]["ref"] == "abc123def"
+
+
+def test_component_ref_must_be_string(tmp_path):
+    """component.ref as non-string raises."""
+    data = {**MINIMAL_V3, "component": {
+        **MINIMAL_V3["component"],
+        "ref": 123,
+    }}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="component.ref.*string"):
+        load_manifest(path)
+
+
+def test_component_ref_must_be_nonempty(tmp_path):
+    """component.ref as empty string raises."""
+    data = {**MINIMAL_V3, "component": {
+        **MINIMAL_V3["component"],
+        "ref": "",
+    }}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="component.ref.*non-empty"):
+        load_manifest(path)
+
 
 # ── pipeline field (optional, v3 only) ─────────────────────────────────────
 

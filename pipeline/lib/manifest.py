@@ -143,6 +143,12 @@ def _validate_v3_fields(data: dict) -> None:
     if "path" not in component:
         component["path"] = repo.rstrip("/").rsplit("/", 1)[-1]
 
+    # component.ref (optional)
+    ref = component.get("ref")
+    if ref is not None:
+        if not isinstance(ref, str) or not ref.strip():
+            raise ManifestError("component.ref must be a non-empty string")
+
     # component.base_image (optional)
     base_image = component.get("base_image")
     if base_image is not None:
