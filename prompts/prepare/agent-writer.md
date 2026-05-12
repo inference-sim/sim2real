@@ -190,7 +190,7 @@ Follow `prompts/prepare/translate.md`. Specifically:
 ## Phase 4.5: Write Preliminary translation_output.json
 
 After writing all plugin code (but before running the build), write `{RUN_DIR}/translation_output.json`
-with all 10 required fields you now know. This must exist before the first snapshot.
+with all 9 required fields you now know. This must exist before the first snapshot.
 
 If the file list changes in a later round (e.g., you add or remove files), update it.
 
@@ -322,7 +322,7 @@ Then exit.
 
 ### `{RUN_DIR}/translation_output.json`
 
-Write this file with ALL 10 required fields:
+Write this file with ALL 9 required fields:
 
 ```json
 {
