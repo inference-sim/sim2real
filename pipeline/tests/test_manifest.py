@@ -250,8 +250,8 @@ def test_component_base_image_optional(tmp_path):
 
 
 def test_component_base_image_validates_fields(tmp_path):
-    """base_image missing hub/name/tag raises."""
-    for field in ("hub", "name", "tag"):
+    """base_image missing hub/name raises."""
+    for field in ("hub", "name"):
         base_image = {"hub": "a", "name": "b", "tag": "c"}
         del base_image[field]
         data = {**MINIMAL_V3, "component": {
@@ -262,6 +262,19 @@ def test_component_base_image_validates_fields(tmp_path):
         path = _write_manifest(tmp_path, data)
         with pytest.raises(ManifestError, match=f"component.base_image.{field}"):
             load_manifest(path)
+
+
+def test_component_base_image_tag_optional(tmp_path):
+    """base_image without tag is valid — tag is informational only."""
+    data = {**MINIMAL_V3, "component": {
+        "repo": "github.com/llm-d/llm-d-inference-scheduler",
+        "kind": "EndpointPickerConfig",
+        "base_image": {"hub": "ghcr.io/llm-d", "name": "llm-d-inference-scheduler"},
+    }}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["component"]["base_image"]["hub"] == "ghcr.io/llm-d"
+    assert "tag" not in m["component"]["base_image"]
 
 
 def test_component_base_image_loaded(tmp_path):

@@ -148,7 +148,7 @@ def _validate_v3_fields(data: dict) -> None:
     if base_image is not None:
         if not isinstance(base_image, dict):
             raise ManifestError("component.base_image must be a mapping")
-        for f in ("hub", "name", "tag"):
+        for f in ("hub", "name"):
             if f not in base_image:
                 raise ManifestError(f"Missing required field: component.base_image.{f}")
 
