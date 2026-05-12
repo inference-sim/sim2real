@@ -227,7 +227,7 @@ class TestPhaseInit:
         state = mod._phase_init(Args(), manifest, run_dir)
         assert state.is_done("init")
 
-    def test_init_ref_mismatch_exits(self, repo):
+    def test_init_ref_mismatch_exits(self, repo, capsys):
         """Phase 1 errors when component.ref doesn't match checked-out SHA."""
         comp = repo / "llm-d-inference-scheduler"
         _init_git_repo(comp)
@@ -245,6 +245,10 @@ class TestPhaseInit:
 
         with pytest.raises(SystemExit):
             mod._phase_init(Args(), manifest, run_dir)
+        captured = capsys.readouterr()
+        assert "Component ref mismatch" in captured.err
+        assert "deadbeef" * 5 in captured.err
+        assert "git checkout" in captured.err
 
     def test_init_ref_missing_submodule_exits_with_command(self, repo, capsys):
         """Phase 1 errors with init command when submodule missing and ref set."""
@@ -268,6 +272,31 @@ class TestPhaseInit:
             mod._phase_init(Args(), manifest, run_dir)
         captured = capsys.readouterr()
         assert "git submodule update --init" in captured.err or "git submodule update --init" in captured.out
+
+    def test_init_ref_not_git_repo_exits(self, repo, capsys):
+        """Phase 1 errors when component.ref is set but directory is not a git repo."""
+        import shutil
+        comp = repo / "llm-d-inference-scheduler"
+        if comp.exists():
+            shutil.rmtree(comp)
+        comp.mkdir()
+        (comp / "somefile.txt").write_text("not a git repo")
+
+        mod = _import_prepare_with_root(repo)
+        manifest = dict(MINIMAL_MANIFEST)
+        manifest["component"] = {**manifest["component"], "ref": "a" * 40}
+        run_dir = repo / "workspace" / "runs" / "test-run"
+
+        class Args:
+            force = True
+            run = "test-run"
+            manifest = None
+            rebuild_context = False
+
+        with pytest.raises(SystemExit):
+            mod._phase_init(Args(), manifest, run_dir)
+        captured = capsys.readouterr()
+        assert "not a git repository" in captured.err
 
     def test_init_no_ref_skips_validation(self, repo):
         """Phase 1 does not check ref when component.ref is absent."""

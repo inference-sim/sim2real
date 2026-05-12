@@ -120,8 +120,11 @@ def _get_submodule_shas(component_path: str = "") -> dict[str, str]:
     for name in ("inference-sim", "llm-d-benchmark"):
         sub = REPO_ROOT / name
         if sub.exists() and (sub / ".git").exists():
-            result = run(["git", "rev-parse", "HEAD"], capture=True, cwd=sub)
-            shas[name] = result.stdout.strip()
+            try:
+                result = run(["git", "rev-parse", "HEAD"], capture=True, cwd=sub)
+                shas[name] = result.stdout.strip()
+            except subprocess.CalledProcessError:
+                shas[name] = "unknown"
         else:
             shas[name] = "unknown"
 
@@ -131,8 +134,11 @@ def _get_submodule_shas(component_path: str = "") -> dict[str, str]:
         if not sub.exists():
             sub = REPO_ROOT / component_path
         if sub.exists() and (sub / ".git").exists():
-            result = run(["git", "rev-parse", "HEAD"], capture=True, cwd=sub)
-            shas["component"] = result.stdout.strip()
+            try:
+                result = run(["git", "rev-parse", "HEAD"], capture=True, cwd=sub)
+                shas["component"] = result.stdout.strip()
+            except subprocess.CalledProcessError:
+                shas["component"] = "unknown"
         else:
             shas["component"] = "unknown"
     else:
@@ -201,15 +207,31 @@ def _phase_init(args, manifest: dict, run_dir: Path) -> StateMachine:
                 err(f"Component repo not found: {target_path}")
             sys.exit(1)
         elif component_ref:
-            if (comp_dir / ".git").exists():
+            if not (comp_dir / ".git").exists():
+                err(f"component.ref is set but {target_path} is not a git repository.\n"
+                    f"  Cannot verify ref {component_ref}.\n"
+                    f"  Initialize with: git submodule update --init {target_path}")
+                sys.exit(1)
+            try:
                 result = run(["git", "rev-parse", "HEAD"], capture=True, cwd=comp_dir)
-                actual_sha = result.stdout.strip()
-                if actual_sha != component_ref:
-                    err(f"Component ref mismatch in {target_path}:\n"
-                        f"  manifest component.ref: {component_ref}\n"
-                        f"  checked-out HEAD:       {actual_sha}\n"
-                        f"  Update with: cd {target_path} && git checkout {component_ref}")
-                    sys.exit(1)
+            except subprocess.CalledProcessError:
+                err(f"Cannot determine HEAD in {target_path} (git rev-parse failed).\n"
+                    f"  The .git directory may be corrupted.")
+                sys.exit(1)
+            actual_sha = result.stdout.strip()
+            try:
+                result_ref = run(["git", "rev-parse", component_ref], capture=True, cwd=comp_dir)
+                expected_sha = result_ref.stdout.strip()
+            except subprocess.CalledProcessError:
+                err(f"Cannot resolve component.ref '{component_ref}' in {target_path}.\n"
+                    f"  Ensure the ref exists: cd {target_path} && git fetch")
+                sys.exit(1)
+            if actual_sha != expected_sha:
+                err(f"Component ref mismatch in {target_path}:\n"
+                    f"  manifest component.ref: {component_ref}\n"
+                    f"  checked-out HEAD:       {actual_sha}\n"
+                    f"  Update with: cd {target_path} && git checkout {component_ref}")
+                sys.exit(1)
 
     run_name = args.run or _load_setup_config().get("current_run", _default_run_name())
     state = StateMachine(run_name, scenario, run_dir)
