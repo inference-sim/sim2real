@@ -227,11 +227,10 @@ def _phase_init(args, manifest: dict, run_dir: Path) -> StateMachine:
                     f"  Ensure the ref exists: cd {target_path} && git fetch")
                 sys.exit(1)
             if actual_sha != expected_sha:
-                err(f"Component ref mismatch in {target_path}:\n"
-                    f"  manifest component.ref: {component_ref}\n"
-                    f"  checked-out HEAD:       {actual_sha}\n"
-                    f"  Update with: cd {target_path} && git checkout {component_ref}")
-                sys.exit(1)
+                warn(f"Component ref mismatch in {target_path}:\n"
+                     f"  manifest component.ref: {component_ref}\n"
+                     f"  checked-out HEAD:       {actual_sha}\n"
+                     f"  Update with: cd {target_path} && git checkout {component_ref}")
 
     run_name = args.run or _load_setup_config().get("current_run", _default_run_name())
     state = StateMachine(run_name, scenario, run_dir)

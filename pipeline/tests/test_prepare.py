@@ -227,8 +227,8 @@ class TestPhaseInit:
         state = mod._phase_init(Args(), manifest, run_dir)
         assert state.is_done("init")
 
-    def test_init_ref_mismatch_exits(self, repo, capsys):
-        """Phase 1 errors when component.ref doesn't match checked-out SHA."""
+    def test_init_ref_mismatch_warns(self, repo, capsys):
+        """Phase 1 warns (does not exit) when component.ref doesn't match checked-out SHA."""
         comp = repo / "llm-d-inference-scheduler"
         _init_git_repo(comp)
 
@@ -243,12 +243,12 @@ class TestPhaseInit:
             manifest = None
             rebuild_context = False
 
-        with pytest.raises(SystemExit):
-            mod._phase_init(Args(), manifest, run_dir)
+        state = mod._phase_init(Args(), manifest, run_dir)
+        assert state.is_done("init")
         captured = capsys.readouterr()
-        assert "Component ref mismatch" in captured.err
-        assert "deadbeef" * 5 in captured.err
-        assert "git checkout" in captured.err
+        assert "Component ref mismatch" in captured.out
+        assert "deadbeef" * 5 in captured.out
+        assert "git checkout" in captured.out
 
     def test_init_ref_missing_submodule_exits_with_command(self, repo, capsys):
         """Phase 1 errors with init command when submodule missing and ref set."""
