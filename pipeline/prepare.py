@@ -300,7 +300,7 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
         output = json.loads(output_path.read_text())
         # Validate required fields
         for f in ["plugin_type", "files_created", "files_modified",
-                  "package", "test_commands", "config_kind", "helm_path",
+                  "package", "test_commands", "config_kind",
                   "treatment_config_generated", "description"]:
             if f not in output:
                 err(f"translation_output.json missing required field: {f}")

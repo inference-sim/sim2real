@@ -208,8 +208,6 @@ def _validate_v3_fields(data: dict) -> None:
         raise ManifestError("config must be a mapping")
     if "kind" not in config:
         raise ManifestError("Missing required field: config.kind")
-    if "helm_path" not in config:
-        raise ManifestError("Missing required field: config.helm_path")
 
     # build (optional, defaults applied)
     build = data.get("build")

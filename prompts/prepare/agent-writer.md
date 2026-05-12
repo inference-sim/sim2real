@@ -190,7 +190,7 @@ Follow `prompts/prepare/translate.md`. Specifically:
 ## Phase 4.5: Write Preliminary translation_output.json
 
 After writing all plugin code (but before running the build), write `{RUN_DIR}/translation_output.json`
-with all 10 required fields you now know. This must exist before the first snapshot.
+with all 9 required fields you now know. This must exist before the first snapshot.
 
 If the file list changes in a later round (e.g., you add or remove files), update it.
 
@@ -322,7 +322,7 @@ Then exit.
 
 ### `{RUN_DIR}/translation_output.json`
 
-Write this file with ALL 10 required fields:
+Write this file with ALL 9 required fields:
 
 ```json
 {
@@ -337,7 +337,6 @@ Write this file with ALL 10 required fields:
     ["go", "test", "-timeout", "10m", "./pkg/plugins/<pkg>/...", "-v"]
   ],
   "config_kind": "{CONFIG_KIND}",
-  "helm_path": "gaie.treatment.helmValues.inferenceExtension.pluginsCustomConfig.custom-plugins.yaml",
   "treatment_config_generated": true,
   "description": "<one-line summary of what was built>"
 }

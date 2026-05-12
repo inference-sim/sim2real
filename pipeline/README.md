@@ -274,7 +274,6 @@ target:
   repo: <path>              # llm-d-inference-scheduler repo path
 config:
   kind: <string>            # config kind (e.g. "gaie")
-  helm_path: <path>         # Helm chart path within target repo
 build:                      # optional — defaults applied if absent
   commands: []              # EPP build commands
 epp_image:                  # optional

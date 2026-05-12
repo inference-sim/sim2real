@@ -46,7 +46,6 @@ def run_dir(tmp_path):
         "register_file": "register.go",
         "test_commands": ["go test ./..."],
         "config_kind": "ScorerConfig",
-        "helm_path": "epp.scorerConfig",
         "treatment_config_generated": True,
         "description": "test plugin",
     }))
