@@ -24,11 +24,12 @@ MINIMAL_MANIFEST = {
         "defaults": "baseline",
     }],
     "workloads": ["sim2real_golden/workloads/wl1.yaml"],
-    "target": {"repo": "llm-d-inference-scheduler"},
-    "config": {
+    "component": {
+        "repo": "github.com/llm-d/llm-d-inference-scheduler",
+        "path": "llm-d-inference-scheduler",
         "kind": "EndpointPickerConfig",
+        "build": {"commands": [["go", "build", "./..."]]},
     },
-    "build": {"commands": [["go", "build", "./..."]]},
 }
 
 
@@ -593,8 +594,9 @@ class TestPhaseTranslate:
                 "defaults": "baseline",
             }],
             "workloads": ["sim2real_golden/workloads/wl1.yaml"],
-            "target": {"repo": "llm-d-inference-scheduler"},
-            "config": {
+            "component": {
+                "repo": "github.com/llm-d/llm-d-inference-scheduler",
+                "path": "llm-d-inference-scheduler",
                 "kind": "EndpointPickerConfig",
             },
         }
@@ -635,7 +637,7 @@ class TestValidateAssembly:
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        resolved = {"target": {"repo": "llm-d-inference-scheduler"}, "config": {"kind": "EndpointPickerConfig"}}
+        resolved = {"repo": "github.com/llm-d/llm-d-inference-scheduler", "path": "llm-d-inference-scheduler", "kind": "EndpointPickerConfig"}
 
         # Set up translation output
         output = {
@@ -672,7 +674,7 @@ class TestValidateAssembly:
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        resolved = {"target": {"repo": "llm-d-inference-scheduler"}, "config": {"kind": "EndpointPickerConfig"}}
+        resolved = {"repo": "github.com/llm-d/llm-d-inference-scheduler", "path": "llm-d-inference-scheduler", "kind": "EndpointPickerConfig"}
 
         output = {
             "plugin_type": "missing-scorer",
@@ -701,7 +703,7 @@ class TestValidateAssembly:
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        resolved = {"target": {"repo": "llm-d-inference-scheduler"}, "config": {"kind": "EndpointPickerConfig"}}
+        resolved = {"repo": "github.com/llm-d/llm-d-inference-scheduler", "path": "llm-d-inference-scheduler", "kind": "EndpointPickerConfig"}
 
         output = {
             "plugin_type": "test-scorer",
@@ -729,7 +731,7 @@ class TestValidateAssembly:
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        resolved = {"target": {"repo": "llm-d-inference-scheduler"}, "config": {"kind": "EndpointPickerConfig"}}
+        resolved = {"repo": "github.com/llm-d/llm-d-inference-scheduler", "path": "llm-d-inference-scheduler", "kind": "EndpointPickerConfig"}
 
         output = {
             "plugin_type": "test-scorer",
@@ -758,7 +760,7 @@ class TestValidateAssembly:
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        resolved = {"target": {"repo": "llm-d-inference-scheduler"}, "config": {"kind": "EndpointPickerConfig"}}
+        resolved = {"repo": "github.com/llm-d/llm-d-inference-scheduler", "path": "llm-d-inference-scheduler", "kind": "EndpointPickerConfig"}
         output = {
             "plugin_type": "test-scorer",
             "files_created": [],
@@ -786,7 +788,7 @@ class TestValidateAssembly:
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        resolved = {"target": {"repo": "llm-d-inference-scheduler"}, "config": {"kind": "EndpointPickerConfig"}}
+        resolved = {"repo": "github.com/llm-d/llm-d-inference-scheduler", "path": "llm-d-inference-scheduler", "kind": "EndpointPickerConfig"}
         output = {
             "plugin_type": "test-scorer",
             "files_created": [],
@@ -816,9 +818,9 @@ class TestConfigResolution:
         mod = _import_prepare_with_root(repo)
         manifest = dict(MINIMAL_MANIFEST)
         resolved = mod._load_resolved_config(manifest)
-        # Should have merged common + routing scenario
-        assert resolved["target"]["repo"] == "llm-d-inference-scheduler"
-        assert resolved["config"]["kind"] == "EndpointPickerConfig"
+        # Should return component section fields
+        assert resolved["path"] == "llm-d-inference-scheduler"
+        assert resolved["kind"] == "EndpointPickerConfig"
 
 
 
@@ -847,8 +849,7 @@ class TestExperimentRootSeparation:
             "baselines": [{"name": "baseline", "scenario": None}],
             "algorithms": [{"name": "treatment", "source": "algorithm/admission.go", "defaults": "baseline"}],
             "workloads": ["workloads/w1.yaml"],
-            "target": {"repo": "llm-d-inference-scheduler"},
-            "config": {"kind": "AdmissionConfig"},
+            "component": {"repo": "github.com/llm-d/llm-d-inference-scheduler", "path": "llm-d-inference-scheduler", "kind": "AdmissionConfig"},
         }
         _write_yaml(exp / "transfer.yaml", manifest_data)
         _write_text(exp / "algorithm" / "admission.go", "package main\n")
@@ -901,7 +902,7 @@ class TestExperimentRootSeparation:
         from pipeline.lib.manifest import load_manifest
         manifest = load_manifest(exp / "transfer.yaml")
         resolved = mod._load_resolved_config(manifest)
-        assert resolved["target"]["repo"] == "llm-d-inference-scheduler"
+        assert resolved["path"] == "llm-d-inference-scheduler"
 
     def test_workspace_created_in_experiment_root(self, tmp_path):
         """run_dir should be under EXPERIMENT_ROOT, not REPO_ROOT."""
@@ -1086,7 +1087,7 @@ class TestBaselineOnlyAssembly:
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        resolved = {"target": {"repo": "llm-d-inference-scheduler"}, "config": {"kind": "EndpointPickerConfig"}}
+        resolved = {"repo": "github.com/llm-d/llm-d-inference-scheduler", "path": "llm-d-inference-scheduler", "kind": "EndpointPickerConfig"}
 
         # Do NOT create translation_output.json
         # Should return without raising or sys.exit
