@@ -161,16 +161,13 @@ MINIMAL_V3 = {
         },
     ],
     "workloads": ["sim2real_golden/workloads/wl1.yaml"],
-    "target": {"repo": "llm-d-inference-scheduler"},
-    "config": {
+    "component": {
+        "repo": "github.com/llm-d/llm-d-inference-scheduler",
         "kind": "EndpointPickerConfig",
-    },
-    "epp_image": {
-        "upstream": {
+        "base_image": {
             "hub": "ghcr.io/llm-d",
             "name": "llm-d-inference-scheduler",
             "tag": "v0.7.1",
-            "pullPolicy": "Always",
         },
     },
 }
@@ -188,133 +185,148 @@ def test_load_valid_v3_minimal(tmp_path):
 
 
 
-# ── v3 fields ────────────────────────────────────────────────────────────────
+# ── component section ─────────────────────────────────────────────────────────
 
-def test_v3_target_and_config_loaded(tmp_path):
-    """v3 target and config fields are loaded and preserved."""
-    path = _write_manifest(tmp_path, MINIMAL_V3)
-    m = load_manifest(path)
-    assert m["target"]["repo"] == "llm-d-inference-scheduler"
-    assert m["config"]["kind"] == "EndpointPickerConfig"
-
-
-def test_v3_build_defaults(tmp_path):
-    """v3 without build section gets default commands=[]."""
-    data = {k: v for k, v in MINIMAL_V3.items() if k != "build"}
+def test_component_required(tmp_path):
+    """Missing component raises ManifestError."""
+    data = {k: v for k, v in MINIMAL_V3.items() if k != "component"}
     path = _write_manifest(tmp_path, data)
-    m = load_manifest(path)
-    assert m["build"]["commands"] == []
-
-
-def test_v3_build_commands_loaded(tmp_path):
-    """v3 with build.commands preserves the list."""
-    data = {**MINIMAL_V3, "build": {"commands": [["go", "build", "./..."]]}}
-    path = _write_manifest(tmp_path, data)
-    m = load_manifest(path)
-    assert m["build"]["commands"] == [["go", "build", "./..."]]
-
-
-def test_v3_build_commands_not_list_raises(tmp_path):
-    """build.commands must be a list."""
-    data = {**MINIMAL_V3, "build": {"commands": "go build"}}
-    path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="build.commands.*list"):
+    with pytest.raises(ManifestError, match="component"):
         load_manifest(path)
 
 
-def test_v3_epp_image_loaded(tmp_path):
-    """v3 epp_image.upstream fields are loaded."""
+def test_component_must_be_mapping(tmp_path):
+    """component: 'string' raises."""
+    data = {**MINIMAL_V3, "component": "string"}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="component.*mapping"):
+        load_manifest(path)
+
+
+def test_component_repo_required(tmp_path):
+    """component without repo raises."""
+    data = {**MINIMAL_V3, "component": {"kind": "EndpointPickerConfig"}}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="component.repo"):
+        load_manifest(path)
+
+
+def test_component_kind_required(tmp_path):
+    """component without kind raises."""
+    data = {**MINIMAL_V3, "component": {"repo": "github.com/llm-d/llm-d-inference-scheduler"}}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="component.kind"):
+        load_manifest(path)
+
+
+def test_component_path_defaults_from_repo(tmp_path):
+    """component.path defaults from last segment of repo URL."""
     path = _write_manifest(tmp_path, MINIMAL_V3)
     m = load_manifest(path)
-    assert m["epp_image"]["upstream"]["hub"] == "ghcr.io/llm-d"
-    assert m["epp_image"]["upstream"]["name"] == "llm-d-inference-scheduler"
-    assert m["epp_image"]["upstream"]["tag"] == "v0.7.1"
+    assert m["component"]["path"] == "llm-d-inference-scheduler"
 
 
-def test_v3_epp_image_with_build(tmp_path):
-    """v3 epp_image with both upstream and build loads both."""
-    data = {**MINIMAL_V3, "epp_image": {
-        "upstream": {"hub": "ghcr.io/llm-d", "name": "epp", "tag": "v1"},
-        "build": {"hub": "ghcr.io/me", "name": "epp", "tag": "dev", "platform": "linux/amd64"},
+def test_component_path_explicit(tmp_path):
+    """Explicit component.path is preserved."""
+    data = {**MINIMAL_V3, "component": {
+        "repo": "github.com/llm-d/llm-d-inference-scheduler",
+        "kind": "EndpointPickerConfig",
+        "path": "custom",
     }}
     path = _write_manifest(tmp_path, data)
     m = load_manifest(path)
-    assert m["epp_image"]["build"]["hub"] == "ghcr.io/me"
-    assert m["epp_image"]["build"]["tag"] == "dev"
+    assert m["component"]["path"] == "custom"
 
 
-def test_v3_epp_image_missing_upstream_raises(tmp_path):
-    """epp_image without upstream raises."""
-    data = {**MINIMAL_V3, "epp_image": {"build": {"hub": "x", "name": "y", "tag": "z"}}}
-    path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="epp_image.upstream"):
-        load_manifest(path)
-
-
-def test_v3_epp_image_upstream_missing_field_raises(tmp_path):
-    """epp_image.upstream missing hub/name/tag raises."""
-    for field in ("hub", "name", "tag"):
-        upstream = {"hub": "a", "name": "b", "tag": "c"}
-        del upstream[field]
-        data = {**MINIMAL_V3, "epp_image": {"upstream": upstream}}
-        path = _write_manifest(tmp_path, data)
-        with pytest.raises(ManifestError, match=f"epp_image.upstream.{field}"):
-            load_manifest(path)
-
-
-def test_v3_epp_image_build_missing_field_raises(tmp_path):
-    """epp_image.build missing hub/name/tag raises."""
-    for field in ("hub", "name", "tag"):
-        build = {"hub": "a", "name": "b", "tag": "c"}
-        del build[field]
-        data = {**MINIMAL_V3, "epp_image": {
-            "upstream": {"hub": "x", "name": "y", "tag": "z"},
-            "build": build,
-        }}
-        path = _write_manifest(tmp_path, data)
-        with pytest.raises(ManifestError, match=f"epp_image.build.{field}"):
-            load_manifest(path)
-
-
-def test_v3_epp_image_optional(tmp_path):
-    """v3 without epp_image is valid."""
-    data = {k: v for k, v in MINIMAL_V3.items() if k != "epp_image"}
+def test_component_base_image_optional(tmp_path):
+    """MINIMAL_V3 without base_image is valid."""
+    data = {**MINIMAL_V3, "component": {
+        "repo": "github.com/llm-d/llm-d-inference-scheduler",
+        "kind": "EndpointPickerConfig",
+    }}
     path = _write_manifest(tmp_path, data)
     m = load_manifest(path)
-    assert "epp_image" not in m
+    assert "base_image" not in m["component"]
 
 
-def test_v3_target_absent_raises(tmp_path):
-    """v3 without target raises."""
-    data = {k: v for k, v in MINIMAL_V3.items() if k != "target"}
+def test_component_base_image_validates_fields(tmp_path):
+    """base_image missing hub/name/tag raises."""
+    for field in ("hub", "name", "tag"):
+        base_image = {"hub": "a", "name": "b", "tag": "c"}
+        del base_image[field]
+        data = {**MINIMAL_V3, "component": {
+            "repo": "github.com/llm-d/llm-d-inference-scheduler",
+            "kind": "EndpointPickerConfig",
+            "base_image": base_image,
+        }}
+        path = _write_manifest(tmp_path, data)
+        with pytest.raises(ManifestError, match=f"component.base_image.{field}"):
+            load_manifest(path)
+
+
+def test_component_base_image_loaded(tmp_path):
+    """Loading MINIMAL_V3 yields correct base_image fields."""
+    path = _write_manifest(tmp_path, MINIMAL_V3)
+    m = load_manifest(path)
+    assert m["component"]["base_image"]["hub"] == "ghcr.io/llm-d"
+    assert m["component"]["base_image"]["name"] == "llm-d-inference-scheduler"
+    assert m["component"]["base_image"]["tag"] == "v0.7.1"
+
+
+def test_component_build_optional(tmp_path):
+    """MINIMAL_V3 without build is valid."""
+    path = _write_manifest(tmp_path, MINIMAL_V3)
+    m = load_manifest(path)
+    assert "build" not in m["component"]
+
+
+def test_component_build_defaults_commands(tmp_path):
+    """component with build: {} gets commands=[]."""
+    data = {**MINIMAL_V3, "component": {
+        "repo": "github.com/llm-d/llm-d-inference-scheduler",
+        "kind": "EndpointPickerConfig",
+        "build": {},
+    }}
     path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="target"):
+    m = load_manifest(path)
+    assert m["component"]["build"]["commands"] == []
+
+
+def test_component_build_commands_loaded(tmp_path):
+    """Explicit commands are preserved."""
+    data = {**MINIMAL_V3, "component": {
+        "repo": "github.com/llm-d/llm-d-inference-scheduler",
+        "kind": "EndpointPickerConfig",
+        "build": {"commands": [["go", "build", "./..."]]},
+    }}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["component"]["build"]["commands"] == [["go", "build", "./..."]]
+
+
+def test_component_build_commands_must_be_list(tmp_path):
+    """build.commands as string raises."""
+    data = {**MINIMAL_V3, "component": {
+        "repo": "github.com/llm-d/llm-d-inference-scheduler",
+        "kind": "EndpointPickerConfig",
+        "build": {"commands": "go build"},
+    }}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="component.build.commands.*list"):
         load_manifest(path)
 
 
-def test_v3_config_absent_raises(tmp_path):
-    """v3 without config raises."""
-    data = {k: v for k, v in MINIMAL_V3.items() if k != "config"}
+def test_component_build_image_validates_hub(tmp_path):
+    """build.image without hub raises."""
+    data = {**MINIMAL_V3, "component": {
+        "repo": "github.com/llm-d/llm-d-inference-scheduler",
+        "kind": "EndpointPickerConfig",
+        "build": {"image": {}},
+    }}
     path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="config"):
+    with pytest.raises(ManifestError, match="component.build.image.hub"):
         load_manifest(path)
 
-
-def test_v3_config_missing_kind_raises(tmp_path):
-    """config without kind raises."""
-    data = {**MINIMAL_V3, "config": {}}
-    path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="config.kind"):
-        load_manifest(path)
-
-
-
-def test_v3_target_missing_repo_raises(tmp_path):
-    """target without repo raises."""
-    data = {**MINIMAL_V3, "target": {}}
-    path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="target.repo"):
-        load_manifest(path)
 
 
 # ── pipeline field (optional, v3 only) ─────────────────────────────────────
@@ -374,8 +386,8 @@ MULTI_BASELINE_V3 = {
         {"name": "b2", "scenario": "baseline_2.yaml"},
     ],
     "workloads": ["sim2real_golden/workloads/wl1.yaml"],
-    "target": {"repo": "llm-d-inference-scheduler"},
-    "config": {
+    "component": {
+        "repo": "github.com/llm-d/llm-d-inference-scheduler",
         "kind": "EndpointPickerConfig",
     },
 }

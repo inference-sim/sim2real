@@ -104,12 +104,8 @@ def _load_setup_config() -> dict:
 
 
 def _load_resolved_config(manifest: dict) -> dict:
-    """Build resolved config from manifest v3 fields (target, config, build, epp_image)."""
-    resolved = {}
-    for key in ("target", "config", "build", "epp_image"):
-        if key in manifest:
-            resolved[key] = manifest[key]
-    return resolved
+    """Build resolved config from manifest component section."""
+    return dict(manifest.get("component", {}))
 
 
 def _get_submodule_shas() -> dict[str, str]:
@@ -179,11 +175,10 @@ def _phase_init(args, manifest: dict, run_dir: Path) -> StateMachine:
             err(f"Workload not found: {wl}")
             sys.exit(1)
 
-    # Validate target repo exists
-    target = resolved.get("target", {})
-    target_repo = target.get("repo", "")
-    if target_repo and not (EXPERIMENT_ROOT / target_repo).exists():
-        err(f"Target repo not found: {target_repo}")
+    # Validate component repo exists
+    target_path = resolved.get("path", "")
+    if target_path and not (EXPERIMENT_ROOT / target_path).exists():
+        err(f"Component repo not found: {target_path}")
         sys.exit(1)
 
     run_name = args.run or _load_setup_config().get("current_run", _default_run_name())
@@ -245,9 +240,7 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
         state.mark_done("translate", mode="baseline-only")
         return
 
-    target = resolved.get("target", {})
     build_cfg = resolved.get("build", {})
-    config_cfg = resolved.get("config", {})
 
     # Build commands: common commands (skill determines test scope)
     commands = [list(c) for c in build_cfg.get("commands", [])]
@@ -286,9 +279,9 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
         "baseline_sim_config": first_bl.get("sim", {}).get("config"),
         "baseline_real_config": first_bl.get("real", {}).get("config"),
         "baseline_real_notes": first_bl.get("real", {}).get("notes", ""),
-        "target": {"repo": target.get("repo", "")},
+        "target": {"repo": resolved.get("repo", "")},
         "build_commands": commands,
-        "config_kind": config_cfg.get("kind", ""),
+        "config_kind": resolved.get("kind", ""),
         "context": {"text": manifest.get("context", {}).get("text", "")},
     }
     skill_input_path = run_dir / "skill_input.json"
@@ -578,7 +571,7 @@ def _validate_assembly(run_dir: Path, resolved: dict, algorithm_packages: list[s
         warn("translation_output.json is not valid JSON — skipping validation")
         return
     plugin_type = output["plugin_type"]
-    target = resolved.get("target", {})
+    target_path = resolved.get("path", "")
     treatment_config_generated = output.get("treatment_config_generated", True)
 
     errors = []
@@ -586,7 +579,7 @@ def _validate_assembly(run_dir: Path, resolved: dict, algorithm_packages: list[s
     # Check 1: plugin_type in register_file (skip if null — rewrite mode)
     register_file = output.get("register_file")
     if register_file is not None:
-        register_path = EXPERIMENT_ROOT / target.get("repo", "") / register_file
+        register_path = EXPERIMENT_ROOT / target_path / register_file
         if register_path.exists():
             # Search register_file's directory recursively: Go plugins use constants
             # defined in sibling files (e.g. AdaptiveV2Type = "adaptive-v2-scorer" in
@@ -615,9 +608,8 @@ def _validate_assembly(run_dir: Path, resolved: dict, algorithm_packages: list[s
                         f"plugin_type '{plugin_type}' not found in {pkg_name}.yaml")
 
     # Check 3: all files_created exist in target repo
-    target_repo = target.get("repo", "")
     for f in output.get("files_created", []):
-        if target_repo and not (EXPERIMENT_ROOT / target_repo / f).exists():
+        if target_path and not (EXPERIMENT_ROOT / target_path / f).exists():
             errors.append(f"files_created entry missing on disk: {f}")
 
     if errors:

@@ -686,7 +686,7 @@ def step_config_output(cfg: SetupConfig, run_dir: Path, container_rt: str) -> No
         "container_runtime": container_rt,
         "created_at": now_iso,
         "pipeline_commit": commit,
-        **({"epp_image": f"{cfg.registry}/{cfg.repo_name}:{cfg.run_name}"} if cfg.registry else {}),
+        **({"component_image": f"{cfg.registry}/{cfg.repo_name}:{cfg.run_name}"} if cfg.registry else {}),
         "stages": {
             "setup":   {"status": "completed", "completed_at": now_iso,
                         "summary": f"Namespace {cfg.namespace} configured, "
