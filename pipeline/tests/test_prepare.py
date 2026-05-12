@@ -37,7 +37,6 @@ MINIMAL_MANIFEST = {
     "target": {"repo": "llm-d-inference-scheduler"},
     "config": {
         "kind": "EndpointPickerConfig",
-        "helm_path": "gaie.treatment.helmValues.inferenceExtension.pluginsCustomConfig.custom-plugins.yaml",
     },
     "observe": {"request_multiplier": 10},
     "build": {"commands": [["go", "build", "./..."]]},
@@ -296,7 +295,6 @@ class TestPhaseTranslate:
             "package": "scorer",
             "test_commands": [["go", "test", "./..."]],
             "config_kind": "EndpointPickerConfig",
-            "helm_path": "gaie.treatment.helmValues.config",
             "treatment_config_generated": True,
             "description": "Adaptive v2 scorer",
             "register_file": "pkg/plugins/register.go",
@@ -449,7 +447,6 @@ class TestPhaseTranslate:
             "files_modified": [],
             "package": "scorer",
             "config_kind": "EndpointPickerConfig",
-            "helm_path": "some.path",
             "treatment_config_generated": True,
             "description": "A test scorer",
             "register_file": None,
@@ -486,7 +483,6 @@ class TestPhaseTranslate:
             "package": "scorer",
             "test_commands": [["go", "test", "./..."]],
             "config_kind": "EndpointPickerConfig",
-            "helm_path": "some.path",
             "treatment_config_generated": True,
             "description": "A test scorer",
             # missing register_file
@@ -522,7 +518,6 @@ class TestPhaseTranslate:
             "package": "scorer",
             "test_commands": [["go", "test", "./..."]],
             "config_kind": "EndpointPickerConfig",
-            "helm_path": "some.path",
             "treatment_config_generated": True,
             "description": "A test scorer",
             "register_file": "pkg/plugins/register.go",
@@ -617,7 +612,6 @@ class TestPhaseTranslate:
             "target": {"repo": "llm-d-inference-scheduler"},
             "config": {
                 "kind": "EndpointPickerConfig",
-                "helm_path": "gaie.treatment.helmValues.inferenceExtension.pluginsCustomConfig.custom-plugins.yaml",
             },
         }
         _write_yaml(repo / "config" / "transfer.yaml", v3_data)
@@ -928,7 +922,7 @@ class TestExperimentRootSeparation:
             "baseline": {"sim": {"config": None}, "real": {"config": None, "notes": ""}},
             "workloads": ["workloads/w1.yaml"],
             "target": {"repo": "llm-d-inference-scheduler"},
-            "config": {"kind": "AdmissionConfig", "helm_path": "x"},
+            "config": {"kind": "AdmissionConfig"},
         }
         _write_yaml(exp / "transfer.yaml", manifest_data)
         _write_text(exp / "algorithm" / "admission.go", "package main\n")
@@ -1142,7 +1136,6 @@ class TestBaselineOnlyAssembly:
             "package": "scorer",
             "test_commands": [["go", "test", "./..."]],
             "config_kind": "EndpointPickerConfig",
-            "helm_path": "gaie.treatment.helmValues.config",
             "treatment_config_generated": True,
             "description": "Test scorer plugin",
             "register_file": "pkg/plugins/register.go",
