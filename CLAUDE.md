@@ -166,5 +166,3 @@ If a fix only exists in `workspace/`, it will be silently lost the next time tha
 - `treatment_resolved = deep_merge(deep_merge(baseline_resolved, treatment_diffs), treatment_overlay)`
 - EPP image injected into treatment scenarios from `run_metadata.json`
 - PipelineRuns generated per workload × {baseline, treatment}
-
-**Manifest config** — `observe.request_multiplier` (number, default `1`): multiplies each workload's `num_requests` for real-cluster benchmarks. Set in `transfer.yaml` under `observe:`.
