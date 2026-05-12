@@ -262,11 +262,8 @@ baseline:
 workloads:
   - <path>                  # one or more workload YAMLs
 
-hints:
-  files: [<path>, ...]      # hint files passed to translation skill
-  text: |                   # freeform hint text
-
 context:
+  text: |                   # freeform instructions for translation skill
   files: [<path>, ...]      # files assembled into context document (Phase 2)
 
 # v3 fields (required unless noted)
