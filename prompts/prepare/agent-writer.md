@@ -337,7 +337,6 @@ Write this file with ALL 10 required fields:
     ["go", "test", "-timeout", "10m", "./pkg/plugins/<pkg>/...", "-v"]
   ],
   "config_kind": "{CONFIG_KIND}",
-  "helm_path": "gaie.treatment.helmValues.inferenceExtension.pluginsCustomConfig.custom-plugins.yaml",
   "treatment_config_generated": true,
   "description": "<one-line summary of what was built>"
 }

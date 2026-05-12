@@ -165,8 +165,6 @@ Verify:
 - `treatment_config_generated: true` is set in `translation_output.json`
 - Every key in the treatment overlay also appears in the baseline structure, or is explicitly
   justified (no invented keys that would silently be ignored by the EPP)
-- `helm_path` in `translation_output.json` matches `config.helm_path` from the manifest
-
 Raise any problem as `[assembly]` NEEDS_CHANGES. Assembly failures only manifest at
 Phase 4 and are silent — catch them here.
 
@@ -208,7 +206,7 @@ Verification summary (required — one line per criterion):
 - Code quality: [confirm interfaces correct, no dead code, patterns followed]
 - Registration: TypeConst=<exact value>, Factory=<name>, register.go line ~<N>
 - Config: kind=<value>, all plugin types registered, keys match baseline
-- Assembly: baseline bundle shape matches, overlay YAML valid, helm_path correct,
+- Assembly: baseline bundle shape matches, overlay YAML valid,
   treatment_config_generated=true
 ```
 

@@ -617,7 +617,7 @@ import json, sys
 from pathlib import Path
 o = json.load(open('$RUN_DIR/translation_output.json'))
 required = ['plugin_type', 'files_created', 'files_modified', 'package',
-            'register_file', 'test_commands', 'config_kind', 'helm_path',
+            'register_file', 'test_commands', 'config_kind',
             'treatment_config_generated', 'description']
 missing = [f for f in required if f not in o]
 if missing:
