@@ -139,7 +139,7 @@ import json, sys
 si = json.load(open('$RUN_DIR/skill_input.json'))
 required = ['run_name', 'run_dir', 'scenario', 'context_path', 'manifest_path',
             'algorithm_source', 'baseline_sim_config',
-            'target', 'build_commands', 'config_kind', 'hints']
+            'target', 'build_commands', 'config_kind', 'context']
 missing = [f for f in required if f not in si]
 if missing:
     print(f'HALT: skill_input.json missing fields: {missing}')
@@ -163,15 +163,7 @@ ALGO_SOURCE=$EXPERIMENT_ROOT/$(python3 -c "import json; print(json.load(open('$R
 ALGO_CONFIG=$(python3 -c "import json; v=json.load(open('$RUN_DIR/skill_input.json')).get('algorithm_config'); print('$EXPERIMENT_ROOT/' + v if v else '')")
 TARGET_REPO=$EXPERIMENT_ROOT/$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['target']['repo'])")
 CONFIG_KIND=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['config_kind'])")
-HINTS_TEXT=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json')).get('hints', {}).get('text', ''))")
-HINTS_FILES_CONTENT=$(python3 -c "
-import json
-hints = json.load(open('$RUN_DIR/skill_input.json')).get('hints', {}).get('files', [])
-for f in hints:
-    print(f'### {f[\"path\"]}')
-    print(f['content'])
-    print()
-")
+CONTEXT_TEXT=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json')).get('context', {}).get('text', ''))")
 BASELINE_SIM_CONFIG=$(python3 -c "import json; v=json.load(open('$RUN_DIR/skill_input.json'))['baseline_sim_config']; print('$EXPERIMENT_ROOT/' + v if v else '')")
 BASELINE_REAL_CONFIG=$(python3 -c "import json; v=json.load(open('$RUN_DIR/skill_input.json')).get('baseline_real_config'); print('$EXPERIMENT_ROOT/' + v if v else 'null')")
 BASELINE_REAL_NOTES=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json')).get('baseline_real_notes', ''))")
@@ -310,7 +302,7 @@ Scenario: $SCENARIO | inference-sim@<sha> | llm-d@<sha>
 [full contents]
 ```
 
-Do NOT include hints in the context file — hints are held in session memory via $HINTS_TEXT and $HINTS_FILES_CONTENT.
+Do NOT include context.text in the context file — it is held in session memory via $CONTEXT_TEXT.
 
 Verify the file was written:
 
@@ -363,8 +355,8 @@ all `{PLACEHOLDER}` values with the corresponding shell variables
 `{EXPERT_AGENT_NAME}` → `"expert"`,
 `{TARGET_REPO}` → `$TARGET_REPO`, `{CONFIG_KIND}` →
 `$CONFIG_KIND`, `{REVIEW_ROUNDS}` → `$REVIEW_ROUNDS`, `{SCENARIO}` →
-`$SCENARIO`, `{BUILD_COMMANDS}` → `$BUILD_COMMANDS`, `{HINTS_TEXT}` →
-`$HINTS_TEXT`, `{HINTS_FILES_CONTENT}` → `$HINTS_FILES_CONTENT`,
+`$SCENARIO`, `{BUILD_COMMANDS}` → `$BUILD_COMMANDS`, `{CONTEXT_TEXT}` →
+`$CONTEXT_TEXT`,
 `{MAIN_SESSION_NAME}` → `"main-session"`).
 
 Use TeamCreate to create the team:
