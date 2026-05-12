@@ -29,7 +29,7 @@ from pipeline.lib.manifest import load_manifest, ManifestError
 from pipeline.lib.state_machine import StateMachine
 from pipeline.lib.context_builder import build_context
 from pipeline.lib.tekton import make_pipelinerun_scenario
-from pipeline.lib.assemble import assemble_scenarios, AssemblyError
+from pipeline.lib.assemble import assemble_packages, AssemblyError
 from pipeline.lib.epp import inject_epp_image
 
 # ── Repo layout ──────────────────────────────────────────────────────────────
@@ -148,26 +148,30 @@ def _phase_init(args, manifest: dict, run_dir: Path) -> StateMachine:
     scenario = manifest["scenario"]
     resolved = _load_resolved_config(manifest)
 
-    # Validate prerequisites
-    if "algorithm" in manifest:
-        if not (EXPERIMENT_ROOT / manifest["algorithm"]["source"]).exists():
-            err(f"algorithm.source not found: {manifest['algorithm']['source']}")
+    # Validate prerequisites — per-algorithm files
+    for algo in manifest.get("algorithms", []):
+        src = algo.get("source")
+        if src and not (EXPERIMENT_ROOT / src).exists():
+            err(f"algorithm '{algo['name']}' source not found: {src}")
             sys.exit(1)
-        algo_config = manifest["algorithm"].get("config")
+        algo_config = algo.get("config")
         if algo_config and not (EXPERIMENT_ROOT / algo_config).exists():
-            err(f"algorithm.config not found: {algo_config}")
+            err(f"algorithm '{algo['name']}' config not found: {algo_config}")
             sys.exit(1)
 
-    baseline_sim_config = manifest["baseline"]["sim"]["config"]
-    if baseline_sim_config and not (EXPERIMENT_ROOT / baseline_sim_config).exists():
-        err(f"baseline.sim.config not found: {baseline_sim_config}")
-        sys.exit(1)
-
-    # Validate baseline.real.config if present
-    baseline_real_config = manifest["baseline"]["real"].get("config")
-    if baseline_real_config is not None:
-        if not (EXPERIMENT_ROOT / baseline_real_config).exists():
-            err(f"baseline.real.config not found: {baseline_real_config}")
+    # Validate prerequisites — per-baseline files
+    for bl in manifest.get("baselines", []):
+        sim_cfg = bl.get("sim", {}).get("config")
+        if sim_cfg and not (EXPERIMENT_ROOT / sim_cfg).exists():
+            err(f"baseline '{bl['name']}' sim.config not found: {sim_cfg}")
+            sys.exit(1)
+        real_cfg = bl.get("real", {}).get("config")
+        if real_cfg and not (EXPERIMENT_ROOT / real_cfg).exists():
+            err(f"baseline '{bl['name']}' real.config not found: {real_cfg}")
+            sys.exit(1)
+        scenario_file = bl.get("scenario")
+        if scenario_file and not (EXPERIMENT_ROOT / scenario_file).exists():
+            err(f"baseline '{bl['name']}' scenario not found: {scenario_file}")
             sys.exit(1)
 
     for wl in manifest["workloads"]:
@@ -236,7 +240,7 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
         info("[skip] Translation already complete")
         return
 
-    if "algorithm" not in manifest:
+    if not manifest.get("algorithms"):
         info("[skip] No algorithm in manifest — baseline-only mode")
         state.mark_done("translate", mode="baseline-only")
         return
@@ -249,17 +253,39 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
     commands = [list(c) for c in build_cfg.get("commands", [])]
 
     # Write skill_input.json
+    first_bl = manifest.get("baselines", [{}])[0]
+    first_algo = manifest.get("algorithms", [{}])[0]
+
     skill_input = {
         "run_name": state.run_name,
         "run_dir": _display_path(run_dir),
         "scenario": manifest["scenario"],
         "context_path": _display_path(context_path),
         "manifest_path": str(getattr(args, "manifest", None) or "transfer.yaml"),
-        "algorithm_source": manifest["algorithm"]["source"],
-        "algorithm_config": manifest["algorithm"].get("config"),
-        "baseline_sim_config": manifest["baseline"]["sim"].get("config"),
-        "baseline_real_config": manifest["baseline"]["real"].get("config"),
-        "baseline_real_notes": manifest["baseline"]["real"].get("notes", ""),
+        "baselines": [
+            {
+                "name": bl["name"],
+                "sim_config": bl.get("sim", {}).get("config"),
+                "real_config": bl.get("real", {}).get("config"),
+                "real_notes": bl.get("real", {}).get("notes", ""),
+            }
+            for bl in manifest.get("baselines", [])
+        ],
+        "algorithms": [
+            {
+                "name": algo["name"],
+                "source": algo["source"],
+                "config": algo.get("config"),
+                "defaults": algo["defaults"],
+            }
+            for algo in manifest.get("algorithms", [])
+        ],
+        # Legacy fields for backward compat with existing skill
+        "algorithm_source": first_algo.get("source", ""),
+        "algorithm_config": first_algo.get("config"),
+        "baseline_sim_config": first_bl.get("sim", {}).get("config"),
+        "baseline_real_config": first_bl.get("real", {}).get("config"),
+        "baseline_real_notes": first_bl.get("real", {}).get("notes", ""),
         "target": {"repo": target.get("repo", "")},
         "build_commands": commands,
         "config_kind": config_cfg.get("kind", ""),
@@ -318,36 +344,57 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
         info("[skip] Assembly already complete")
         return
 
-    # 4b: Assemble scenarios
-    baseline_path = EXPERIMENT_ROOT / "baseline.yaml"
-    if not baseline_path.exists():
-        err(f"baseline.yaml not found: {baseline_path}. "
-            f"Create baseline.yaml in the experiment root.")
-        sys.exit(1)
-    treatment_path = EXPERIMENT_ROOT / "treatment.yaml"
-    baseline_overlay = run_dir / "generated" / "baseline_config.yaml"
-    treatment_overlay = run_dir / "generated" / "treatment_config.yaml"
+    # 4b: Build baseline and algorithm specs from manifest
+    baselines_spec = []
+    for bl in manifest.get("baselines", []):
+        scenario_path = bl.get("scenario")
+        if scenario_path:
+            scenario_path = EXPERIMENT_ROOT / scenario_path
+        else:
+            scenario_path = EXPERIMENT_ROOT / "baseline.yaml"
+        if not scenario_path.exists():
+            err(f"Baseline scenario not found: {scenario_path}")
+            sys.exit(1)
+        spec = {"name": bl["name"], "scenario_path": scenario_path}
+        defaults_path = bl.get("defaults")
+        if defaults_path:
+            dp = EXPERIMENT_ROOT / defaults_path
+            if not dp.exists():
+                err(f"Baseline defaults not found: {dp}")
+                sys.exit(1)
+            spec["defaults_path"] = dp
+        baselines_spec.append(spec)
+
+    algorithms_spec = []
+    for algo in manifest.get("algorithms", []):
+        scenario_path = algo.get("scenario")
+        if scenario_path:
+            scenario_path = EXPERIMENT_ROOT / scenario_path
+        else:
+            fallback = EXPERIMENT_ROOT / "treatment.yaml"
+            scenario_path = fallback if fallback.exists() else None
+        algorithms_spec.append({
+            "name": algo["name"],
+            "scenario_path": scenario_path,
+            "defaults": algo["defaults"],
+        })
 
     translation_output_path = run_dir / "translation_output.json"
-    overlays_expected = translation_output_path.exists()
+    translation_happened = translation_output_path.exists()
+    generated_dir = run_dir / "generated"
 
     try:
-        baseline_resolved, treatment_resolved = assemble_scenarios(
-            baseline_path=baseline_path,
-            treatment_path=treatment_path if treatment_path.exists() else None,
-            baseline_overlay_path=baseline_overlay,
-            treatment_overlay_path=treatment_overlay,
-            overlays_expected=overlays_expected,
+        packages = assemble_packages(
+            baselines=baselines_spec,
+            algorithms=algorithms_spec if translation_happened else [],
+            generated_dir=generated_dir,
+            overlays_expected=translation_happened,
         )
     except AssemblyError as e:
         err(str(e))
         sys.exit(1)
 
-    # 4b.5: Inject EPP image into treatment (only when translation occurred)
-    # The image tag is deterministic: {registry}/{repo_name}:{run_name} — same as
-    # what build-epp.sh pushes. Read from run_metadata.json (written by setup.py).
-    translation_happened = translation_output_path.exists()
-
+    # 4b.5: Inject EPP image into algorithm packages (only when translation occurred)
     if translation_happened:
         meta_path = run_dir / "run_metadata.json"
         if not meta_path.exists():
@@ -364,23 +411,22 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
         if not registry:
             err("run_metadata.json has no registry — cannot determine EPP image. Re-run setup.py.")
             sys.exit(1)
-        injected = inject_epp_image(treatment_resolved, registry, repo_name, run_name_tag)
-        if injected:
-            ok(f"EPP image injected: {registry}/{repo_name}:{run_name_tag}")
-        else:
-            err("treatment has no 'scenario' entries — EPP image cannot be injected.")
-            sys.exit(1)
+        for pkg in packages:
+            if pkg.kind == "algorithm":
+                injected = inject_epp_image(pkg.resolved, registry, repo_name, run_name_tag)
+                if injected:
+                    ok(f"EPP image injected into {pkg.name}: {registry}/{repo_name}:{run_name_tag}")
+                else:
+                    err(f"{pkg.name} has no 'scenario' entries — EPP image cannot be injected.")
+                    sys.exit(1)
 
     # 4c: Write resolved scenarios
     cluster_dir = run_dir / "cluster"
     cluster_dir.mkdir(parents=True, exist_ok=True)
 
-    baseline_out = cluster_dir / "baseline.yaml"
-    baseline_out.write_text(yaml.dump(baseline_resolved, default_flow_style=False, allow_unicode=True))
-
-    if translation_happened:
-        treatment_out = cluster_dir / "treatment.yaml"
-        treatment_out.write_text(yaml.dump(treatment_resolved, default_flow_style=False, allow_unicode=True))
+    for pkg in packages:
+        out = cluster_dir / f"{pkg.name}.yaml"
+        out.write_text(yaml.dump(pkg.resolved, default_flow_style=False, allow_unicode=True))
 
     ok(f"Resolved scenarios: {_display_path(cluster_dir)}")
 
@@ -412,7 +458,7 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
 
     if not workloads:
         warn("No workloads defined — cannot generate PipelineRuns")
-        done_packages = ["baseline", "treatment"] if translation_happened else ["baseline"]
+        done_packages = [pkg.name for pkg in packages]
         state.mark_done("assembly", packages=done_packages)
         return
 
@@ -461,21 +507,18 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
             warn(f"Submodule params not available: {', '.join(missing_params)}. "
                  "Generated PipelineRuns will FAIL on cluster until submodules are initialized: "
                  "git submodule update --init")
-    scenarios = baseline_resolved.get("scenario", [])
-    model_name = scenarios[0].get("model", {}).get("name", "") if scenarios else ""
+    first_baseline = next((p for p in packages if p.kind == "baseline"), packages[0])
+    scenarios_list = first_baseline.resolved.get("scenario", [])
+    model_name = scenarios_list[0].get("model", {}).get("name", "") if scenarios_list else ""
 
-    packages = [("baseline", baseline_resolved)]
-    if translation_happened:
-        packages.append(("treatment", treatment_resolved))
-
-    for pkg, scenario in packages:
-        scenario_content = yaml.dump(scenario, default_flow_style=False, allow_unicode=True)
+    for pkg in packages:
+        scenario_content = yaml.dump(pkg.resolved, default_flow_style=False, allow_unicode=True)
         for wl in workloads:
             wl_name = wl.get("name", wl.get("workload_name", "unknown"))
             safe_wl = wl_name.replace("_", "-")
 
             pr = make_pipelinerun_scenario(
-                phase=pkg,
+                phase=pkg.name,
                 workload=wl,
                 run_name=run_name,
                 namespace=namespace,
@@ -488,7 +531,7 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
                 blis_git_repo_url=blis_repo_url,
                 model=model_name,
             )
-            pr_path = cluster_dir / f"pipelinerun-{safe_wl}-{pkg}.yaml"
+            pr_path = cluster_dir / f"pipelinerun-{safe_wl}-{pkg.name}.yaml"
             pr_path.write_text(yaml.dump(pr, default_flow_style=False, allow_unicode=True))
 
     ok(f"PipelineRuns: {len(workloads) * len(packages)} generated")
@@ -498,9 +541,10 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
         _verify_generated_dir(run_dir)
 
     # 4h: validate-assembly
-    _validate_assembly(run_dir, resolved)
+    algo_names = [pkg.name for pkg in packages if pkg.kind == "algorithm"] if translation_happened else None
+    _validate_assembly(run_dir, resolved, algorithm_packages=algo_names)
 
-    done_packages = ["baseline", "treatment"] if translation_happened else ["baseline"]
+    done_packages = [pkg.name for pkg in packages]
     state.mark_done("assembly", packages=done_packages)
     ok("Assembly complete")
 
@@ -530,7 +574,7 @@ def _verify_generated_dir(run_dir: Path):
             warn(f"generated/ missing: {Path(f).name}")
 
 
-def _validate_assembly(run_dir: Path, resolved: dict):
+def _validate_assembly(run_dir: Path, resolved: dict, algorithm_packages: list[str] | None = None):
     """Phase 4g: Deterministic consistency checks."""
     output_path = run_dir / "translation_output.json"
     if not output_path.exists():
@@ -566,25 +610,31 @@ def _validate_assembly(run_dir: Path, resolved: dict):
         else:
             errors.append(f"register_file not found on disk: {register_file}")
 
-    # Check 2: plugin_type string present inside treatment scenario YAML
+    # Check 2: plugin_type string present inside algorithm scenario YAMLs
     # Skip when treatment_config_generated=False: baseline config is copied instead,
     # and plugin_type may not appear in the treatment YAML.
     if treatment_config_generated:
-        treatment_yaml = run_dir / "cluster" / "treatment.yaml"
-        if treatment_yaml.exists():
-            if plugin_type not in treatment_yaml.read_text():
-                errors.append(
-                    f"plugin_type '{plugin_type}' not found in treatment.yaml")
+        check_names = algorithm_packages or ["treatment"]
+        for pkg_name in check_names:
+            pkg_yaml = run_dir / "cluster" / f"{pkg_name}.yaml"
+            if pkg_yaml.exists():
+                if plugin_type not in pkg_yaml.read_text():
+                    errors.append(
+                        f"plugin_type '{plugin_type}' not found in {pkg_name}.yaml")
 
-    # Check 3: treatment_config contains expected kind (may be nested in scenario overlay)
+    # Check 3: algorithm config contains expected kind (may be nested in scenario overlay)
     if treatment_config_generated and config_cfg.get("kind"):
-        tc_path = run_dir / "generated" / "treatment_config.yaml"
-        if tc_path.exists():
-            tc_text = tc_path.read_text()
-            expected_kind = config_cfg["kind"]
-            if f"kind: {expected_kind}" not in tc_text:
-                errors.append(
-                    f"treatment_config does not contain 'kind: {expected_kind}'")
+        check_names = algorithm_packages or ["treatment"]
+        for pkg_name in check_names:
+            tc_path = run_dir / "generated" / f"{pkg_name}_config.yaml"
+            if not tc_path.exists():
+                tc_path = run_dir / "generated" / "treatment_config.yaml"
+            if tc_path.exists():
+                tc_text = tc_path.read_text()
+                expected_kind = config_cfg["kind"]
+                if f"kind: {expected_kind}" not in tc_text:
+                    errors.append(
+                        f"{pkg_name} config does not contain 'kind: {expected_kind}'")
 
     # Check 4: all files_created exist in target repo
     target_repo = target.get("repo", "")
@@ -621,7 +671,7 @@ def _phase_summary(state: StateMachine, manifest: dict, run_dir: Path, resolved:
             f"Generated: {datetime.now(timezone.utc).isoformat()} | Scenario: {manifest['scenario']}",
             "",
             "**Algorithm**",
-            f"- Source: `{manifest.get('algorithm', {}).get('source', 'N/A')}`",
+            f"- Source: `{(manifest.get('algorithms') or [{}])[0].get('source', 'N/A')}`",
             f"- Description: {output.get('description', 'N/A')}",
             "",
             "**Translation**",
@@ -634,11 +684,12 @@ def _phase_summary(state: StateMachine, manifest: dict, run_dir: Path, resolved:
             lines.append(f"- Review: {translate_meta.get('consensus', 'N/A')} "
                          f"after {translate_meta['review_rounds']} rounds")
     else:
+        baselines_str = ", ".join(bl["name"] for bl in manifest.get("baselines", []))
         lines = [
             f"**Run Summary: `{state.run_name}`**",
             f"Generated: {datetime.now(timezone.utc).isoformat()} | Scenario: {manifest['scenario']}",
             "",
-            "**Mode:** Baseline-only (no translation)",
+            f"**Mode:** Baseline-only ({baselines_str})" if baselines_str else "**Mode:** Baseline-only (no translation)",
         ]
 
     # Baseline vs Treatment config comparison
@@ -766,7 +817,8 @@ def _cmd_validate_assembly(args, manifest, run_dir):
         info("Baseline-only run — no treatment validation needed")
         return
     resolved = _load_resolved_config(manifest)
-    _validate_assembly(run_dir, resolved)
+    algo_names = [a["name"] for a in manifest.get("algorithms", []) if a]
+    _validate_assembly(run_dir, resolved, algorithm_packages=algo_names or None)
 
 
 def _cmd_status(run_dir):

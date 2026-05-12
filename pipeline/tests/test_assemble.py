@@ -1,7 +1,9 @@
 """Tests for scenario assembly (baseline/treatment merge logic)."""
+import pytest
 import yaml
 
 from pipeline.lib.assemble import assemble_scenarios
+from pipeline.lib.assemble import assemble_packages, AssemblyError
 
 
 BASELINE = {
@@ -53,6 +55,19 @@ TREATMENT_OVERLAY = {
                 "custom-plugins.yaml": "kind: EndpointPickerConfig\nplugins:\n- type: quintic-shed\n",
             },
         },
+    }],
+}
+
+BASELINE_ALT = {
+    "scenario": [{
+        "name": "admission-control",
+        "model": {"name": "Qwen/Qwen3-14B", "maxModelLen": 40960},
+        "images": {
+            "vllm": {"repository": "ghcr.io/llm-d/llm-d-cuda", "tag": "v0.6.0"},
+            "inferenceScheduler": {"repository": "ghcr.io/llm-d/llm-d-inference-scheduler", "tag": "v0.7.1"},
+        },
+        "inferenceExtension": {"verbosity": "3"},
+        "decode": {"replicas": 8},
     }],
 }
 
@@ -160,3 +175,101 @@ def test_overlay_preserves_existing_fields(tmp_path):
     assert sc["inferenceExtension"]["verbosity"] == "3"
     assert sc["inferenceExtension"]["inferencePoolProviderConfig"] == {"destinationRule": {"trafficPolicy": {}}}
     assert sc["images"]["vllm"]["tag"] == "v0.6.0"
+
+
+# ── assemble_packages tests ────────────────────────────────────────────────
+
+def test_assemble_packages_single_baseline(tmp_path):
+    """Single baseline with no algorithms produces one package."""
+    _write(tmp_path / "b1.yaml", BASELINE)
+    pkgs = assemble_packages(
+        baselines=[{"name": "b1", "scenario_path": tmp_path / "b1.yaml"}],
+        algorithms=[],
+        generated_dir=tmp_path / "generated",
+    )
+    assert len(pkgs) == 1
+    assert pkgs[0].name == "b1"
+    assert pkgs[0].kind == "baseline"
+    assert pkgs[0].resolved["scenario"][0]["model"]["name"] == "Qwen/Qwen3-14B"
+
+
+def test_assemble_packages_multi_baseline(tmp_path):
+    """Two baselines produce two packages in declaration order."""
+    _write(tmp_path / "b1.yaml", BASELINE)
+    _write(tmp_path / "b2.yaml", BASELINE_ALT)
+    pkgs = assemble_packages(
+        baselines=[
+            {"name": "b1", "scenario_path": tmp_path / "b1.yaml"},
+            {"name": "b2", "scenario_path": tmp_path / "b2.yaml"},
+        ],
+        algorithms=[],
+        generated_dir=tmp_path / "generated",
+    )
+    assert len(pkgs) == 2
+    assert pkgs[0].name == "b1"
+    assert pkgs[1].name == "b2"
+    assert pkgs[0].resolved["scenario"][0]["decode"]["replicas"] == 4
+    assert pkgs[1].resolved["scenario"][0]["decode"]["replicas"] == 8
+
+
+def test_assemble_packages_baseline_with_defaults(tmp_path):
+    """Baseline with defaults merges defaults under scenario."""
+    defaults = {"scenario": [{"name": "admission-control", "decode": {"replicas": 2}, "model": {"name": "default-model"}}]}
+    override = {"scenario": [{"name": "admission-control", "decode": {"replicas": 8}}]}
+    _write(tmp_path / "defaults.yaml", defaults)
+    _write(tmp_path / "b1.yaml", override)
+    pkgs = assemble_packages(
+        baselines=[{"name": "b1", "scenario_path": tmp_path / "b1.yaml", "defaults_path": tmp_path / "defaults.yaml"}],
+        algorithms=[],
+        generated_dir=tmp_path / "generated",
+    )
+    sc = pkgs[0].resolved["scenario"][0]
+    assert sc["decode"]["replicas"] == 8
+    assert sc["model"]["name"] == "default-model"
+
+
+def test_assemble_packages_with_algorithm(tmp_path):
+    """Algorithm derives from its default baseline's resolved config."""
+    _write(tmp_path / "b1.yaml", BASELINE)
+    _write(tmp_path / "treatment.yaml", TREATMENT_DIFFS)
+    _write(tmp_path / "generated" / "b1_config.yaml", BASELINE_OVERLAY)
+    _write(tmp_path / "generated" / "ac1_config.yaml", TREATMENT_OVERLAY)
+    pkgs = assemble_packages(
+        baselines=[{"name": "b1", "scenario_path": tmp_path / "b1.yaml"}],
+        algorithms=[{"name": "ac1", "scenario_path": tmp_path / "treatment.yaml", "defaults": "b1"}],
+        generated_dir=tmp_path / "generated",
+        overlays_expected=True,
+    )
+    assert len(pkgs) == 2
+    assert pkgs[0].kind == "baseline"
+    assert pkgs[1].kind == "algorithm"
+    assert pkgs[1].resolved["scenario"][0]["images"]["inferenceScheduler"]["tag"] == "ac"
+    assert "quintic-shed" in pkgs[1].resolved["scenario"][0]["inferenceExtension"]["pluginsCustomConfig"]["custom-plugins.yaml"]
+
+
+def test_assemble_packages_shared_baseline_overlay(tmp_path):
+    """When per-baseline overlay missing, shared baseline_config.yaml applies to all."""
+    _write(tmp_path / "b1.yaml", BASELINE)
+    _write(tmp_path / "b2.yaml", BASELINE_ALT)
+    _write(tmp_path / "generated" / "baseline_config.yaml", BASELINE_OVERLAY)
+    pkgs = assemble_packages(
+        baselines=[
+            {"name": "b1", "scenario_path": tmp_path / "b1.yaml"},
+            {"name": "b2", "scenario_path": tmp_path / "b2.yaml"},
+        ],
+        algorithms=[],
+        generated_dir=tmp_path / "generated",
+    )
+    for pkg in pkgs:
+        assert pkg.resolved["scenario"][0]["inferenceExtension"]["pluginsConfigFile"] == "custom-plugins.yaml"
+
+
+def test_assemble_packages_algorithm_unknown_baseline_raises(tmp_path):
+    """Algorithm referencing unknown baseline name raises AssemblyError."""
+    _write(tmp_path / "b1.yaml", BASELINE)
+    with pytest.raises(AssemblyError, match="unknown baseline.*nonexistent"):
+        assemble_packages(
+            baselines=[{"name": "b1", "scenario_path": tmp_path / "b1.yaml"}],
+            algorithms=[{"name": "ac1", "scenario_path": tmp_path / "t.yaml", "defaults": "nonexistent"}],
+            generated_dir=tmp_path / "generated",
+        )

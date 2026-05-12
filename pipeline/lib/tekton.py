@@ -53,7 +53,8 @@ def make_pipelinerun_scenario(
         spec_content = _default_spec_content()
     wl_name = workload.get("name", workload.get("workload_name", "unknown"))
     safe_name = wl_name.replace("_", "-")
-    pr_name = f"{phase}-{safe_name}-{run_name}"
+    safe_phase = phase.replace("_", "-")
+    pr_name = f"{safe_phase}-{safe_name}-{run_name}"
 
     wl_spec = {k: v for k, v in workload.items() if k != "workload_name"}
     wl_spec_str = yaml.dump(wl_spec, default_flow_style=True).strip()

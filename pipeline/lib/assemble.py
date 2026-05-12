@@ -6,6 +6,7 @@ to produce fully resolved scenario files.
 """
 import yaml
 from pathlib import Path
+from typing import NamedTuple
 
 from pipeline.lib.values import deep_merge
 
@@ -94,3 +95,98 @@ def assemble_scenarios(
     treatment_resolved = deep_merge(treatment_resolved, treatment_overlay)
 
     return baseline_resolved, treatment_resolved
+
+
+class Package(NamedTuple):
+    name: str
+    kind: str       # "baseline" | "algorithm"
+    resolved: dict
+
+
+def _resolve_overlay(name: str, generated_dir: Path, kind: str) -> dict:
+    """Find overlay for a package.
+
+    Lookup order:
+      1. {name}_config.yaml (per-package overlay)
+      2. baseline_config.yaml (shared fallback for baselines)
+      3. treatment_config.yaml (legacy fallback for algorithms)
+    """
+    per_pkg = generated_dir / f"{name}_config.yaml"
+    if per_pkg.exists():
+        return _load_yaml(per_pkg)
+    if kind == "baseline":
+        shared = generated_dir / "baseline_config.yaml"
+        if shared.exists():
+            return _load_yaml(shared)
+    elif kind == "algorithm":
+        legacy = generated_dir / "treatment_config.yaml"
+        if legacy.exists():
+            return _load_yaml(legacy)
+    return {}
+
+
+def assemble_packages(
+    baselines: list[dict],
+    algorithms: list[dict],
+    generated_dir: Path,
+    overlays_expected: bool = False,
+) -> list[Package]:
+    """Assemble all packages (baselines + algorithms) into resolved scenarios.
+
+    Each baseline entry: {name, scenario_path, defaults_path?}
+    Each algorithm entry: {name, scenario_path, defaults (baseline name)}
+    """
+    resolved_baselines: dict[str, dict] = {}
+    packages: list[Package] = []
+
+    for bl in baselines:
+        name = bl["name"]
+        scenario = _load_yaml(bl["scenario_path"])
+
+        if "defaults_path" in bl and bl["defaults_path"] is not None:
+            defaults = _load_yaml(bl["defaults_path"])
+            raw = deep_merge(defaults, scenario)
+        else:
+            raw = scenario
+
+        overlay = _resolve_overlay(name, generated_dir, "baseline")
+        overlay = _align_overlay_name(raw, overlay)
+        resolved = deep_merge(raw, overlay)
+
+        resolved_baselines[name] = resolved
+        packages.append(Package(name=name, kind="baseline", resolved=resolved))
+
+    for algo in algorithms:
+        name = algo["name"]
+        defaults_name = algo["defaults"]
+        if defaults_name not in resolved_baselines:
+            raise AssemblyError(
+                f"Algorithm '{name}' references unknown baseline '{defaults_name}'. "
+                f"Available: {sorted(resolved_baselines)}"
+            )
+        base = resolved_baselines[defaults_name]
+        diffs_path = algo.get("scenario_path")
+        if diffs_path and not Path(diffs_path).exists():
+            raise AssemblyError(
+                f"Algorithm '{name}' scenario not found: {diffs_path}"
+            )
+        diffs = _load_yaml(diffs_path) if diffs_path and Path(diffs_path).exists() else {}
+
+        treatment = deep_merge(base, diffs)
+        overlay = _resolve_overlay(name, generated_dir, "algorithm")
+        overlay = _align_overlay_name(treatment, overlay)
+        resolved = deep_merge(treatment, overlay)
+
+        packages.append(Package(name=name, kind="algorithm", resolved=resolved))
+
+    if overlays_expected:
+        for algo in algorithms:
+            overlay_path = generated_dir / f"{algo['name']}_config.yaml"
+            if not overlay_path.exists():
+                legacy = generated_dir / "treatment_config.yaml"
+                if not legacy.exists():
+                    raise AssemblyError(
+                        f"Overlay expected but missing for algorithm '{algo['name']}': {overlay_path}"
+                    )
+
+    return packages

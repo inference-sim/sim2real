@@ -41,7 +41,7 @@ def test_collect_with_progress_default(tmp_path):
 
 
 def test_collect_fallback_no_progress(tmp_path):
-    """Without --package and no progress.json, falls back to DATA_PHASES with warning."""
+    """Without --package and no progress.json, discovers phases from cluster/ with warning."""
     from pipeline import deploy
 
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
@@ -249,3 +249,57 @@ def test_collect_missing_package_key_skipped(tmp_path):
         deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
 
     assert collected_phases == ["baseline"]
+
+
+def test_collect_with_multi_baseline_progress(tmp_path):
+    """Collect discovers arbitrary phase names from progress.json."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    _write_progress(run_dir, {
+        "wl-smoke-b1": {"workload": "wl-smoke", "package": "b1", "status": "done"},
+        "wl-smoke-b2": {"workload": "wl-smoke", "package": "b2", "status": "done"},
+        "wl-smoke-ac1": {"workload": "wl-smoke", "package": "ac1", "status": "done"},
+    })
+
+    class Args:
+        package = None
+        skip_logs = False
+
+    collected_phases = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        collected_phases.extend(phases)
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert collected_phases == ["ac1", "b1", "b2"]
+
+
+def test_collect_fallback_discovers_from_pipelinerun_files(tmp_path):
+    """Without progress.json, falls back to discovering phases from pipelinerun YAMLs."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    cluster_dir = run_dir / "cluster"
+    cluster_dir.mkdir(parents=True)
+    (cluster_dir / "pipelinerun-wl-smoke-b1.yaml").write_text("apiVersion: tekton.dev/v1")
+    (cluster_dir / "pipelinerun-wl-smoke-b2.yaml").write_text("apiVersion: tekton.dev/v1")
+
+    class Args:
+        package = None
+        skip_logs = False
+
+    collected_phases = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        collected_phases.extend(phases)
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert collected_phases == ["b1", "b2"]

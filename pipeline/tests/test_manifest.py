@@ -530,3 +530,130 @@ def test_v2_does_not_get_pipeline_field(tmp_path):
     path = _write_manifest(tmp_path, MINIMAL_V2)
     m = load_manifest(path)
     assert "pipeline" not in m
+
+
+# ── Multi-baseline (v3 extension) ─────────────────────────────────────────
+
+MULTI_BASELINE_V3 = {
+    "kind": "sim2real-transfer",
+    "version": 3,
+    "scenario": "routing",
+    "baselines": [
+        {"name": "b1", "scenario": "baseline_1.yaml"},
+        {"name": "b2", "scenario": "baseline_2.yaml"},
+    ],
+    "workloads": ["sim2real_golden/workloads/wl1.yaml"],
+    "target": {"repo": "llm-d-inference-scheduler"},
+    "config": {
+        "kind": "EndpointPickerConfig",
+        "helm_path": "gaie.treatment.helmValues.inferenceExtension.pluginsCustomConfig.custom-plugins.yaml",
+    },
+}
+
+
+def test_baselines_list_loaded(tmp_path):
+    """v3 with baselines: list loads and normalizes each entry."""
+    path = _write_manifest(tmp_path, MULTI_BASELINE_V3)
+    m = load_manifest(path)
+    assert "baselines" in m
+    assert len(m["baselines"]) == 2
+    assert m["baselines"][0]["name"] == "b1"
+    assert m["baselines"][1]["name"] == "b2"
+
+
+def test_singular_baseline_normalized_to_baselines(tmp_path):
+    """v3 with singular baseline: normalizes to baselines: list of one."""
+    path = _write_manifest(tmp_path, MINIMAL_V3)
+    m = load_manifest(path)
+    assert "baselines" in m
+    assert len(m["baselines"]) == 1
+    assert m["baselines"][0]["name"] == "baseline"
+
+
+def test_baselines_must_be_list(tmp_path):
+    data = {**MULTI_BASELINE_V3, "baselines": "not-a-list"}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="baselines.*list"):
+        load_manifest(path)
+
+
+def test_baselines_entry_requires_name(tmp_path):
+    data = {**MULTI_BASELINE_V3, "baselines": [{"scenario": "x.yaml"}]}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="baselines.*name"):
+        load_manifest(path)
+
+
+def test_baselines_entry_requires_scenario(tmp_path):
+    data = {**MULTI_BASELINE_V3, "baselines": [{"name": "b1"}]}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="baselines.*scenario"):
+        load_manifest(path)
+
+
+def test_baselines_name_must_be_valid(tmp_path):
+    data = {**MULTI_BASELINE_V3, "baselines": [{"name": "Bad_Name!", "scenario": "x.yaml"}]}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="invalid"):
+        load_manifest(path)
+
+
+def test_baselines_name_rejects_hyphens(tmp_path):
+    data = {**MULTI_BASELINE_V3, "baselines": [{"name": "my-algo", "scenario": "x.yaml"}]}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="invalid"):
+        load_manifest(path)
+
+
+def test_baselines_duplicate_name_raises(tmp_path):
+    data = {**MULTI_BASELINE_V3, "baselines": [
+        {"name": "b1", "scenario": "x.yaml"},
+        {"name": "b1", "scenario": "y.yaml"},
+    ]}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="duplicate.*b1"):
+        load_manifest(path)
+
+
+def test_baselines_with_defaults_field(tmp_path):
+    data = {**MULTI_BASELINE_V3, "baselines": [
+        {"name": "b1", "scenario": "x.yaml", "defaults": "defaults.yaml"},
+    ]}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["baselines"][0]["defaults"] == "defaults.yaml"
+
+
+def test_both_baseline_and_baselines_raises(tmp_path):
+    data = {**MULTI_BASELINE_V3, "baseline": {"sim": {"config": "x.yaml"}}}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="both.*baseline.*baselines"):
+        load_manifest(path)
+
+
+def test_algorithms_list_loaded(tmp_path):
+    data = {**MULTI_BASELINE_V3, "algorithms": [
+        {"name": "ac1", "source": "algo.go", "scenario": "treatment.yaml", "defaults": "b1"},
+    ]}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert len(m["algorithms"]) == 1
+    assert m["algorithms"][0]["name"] == "ac1"
+    assert m["algorithms"][0]["defaults"] == "b1"
+
+
+def test_singular_algorithm_normalized_to_algorithms(tmp_path):
+    """v3 with singular algorithm: normalizes to algorithms: list of one."""
+    path = _write_manifest(tmp_path, MINIMAL_V3)
+    m = load_manifest(path)
+    assert "algorithms" in m
+    assert len(m["algorithms"]) == 1
+    assert m["algorithms"][0]["name"] == "treatment"
+    assert m["algorithms"][0]["source"] == MINIMAL_V3["algorithm"]["source"]
+
+
+def test_no_algorithm_no_algorithms_is_baseline_only(tmp_path):
+    data = {k: v for k, v in MULTI_BASELINE_V3.items() if k != "algorithms"}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m.get("algorithms", []) == []

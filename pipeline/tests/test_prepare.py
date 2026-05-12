@@ -19,6 +19,20 @@ MINIMAL_MANIFEST = {
         "sim": {"config": "sim2real_golden/routers/policy_baseline_211.yaml"},
         "real": {"config": None, "notes": ""},
     },
+    # Normalized list forms (as produced by load_manifest)
+    "baselines": [{
+        "name": "baseline",
+        "scenario": None,
+        "sim": {"config": "sim2real_golden/routers/policy_baseline_211.yaml"},
+        "real": {"config": None, "notes": ""},
+    }],
+    "algorithms": [{
+        "name": "treatment",
+        "source": "sim2real_golden/routers/router_adaptive_v2.go",
+        "config": "sim2real_golden/routers/policy_adaptive_v2.yaml",
+        "scenario": None,
+        "defaults": "baseline",
+    }],
     "workloads": ["sim2real_golden/workloads/wl1.yaml"],
     "target": {"repo": "llm-d-inference-scheduler"},
     "config": {
@@ -154,10 +168,12 @@ class TestPhaseInit:
     def test_init_missing_algorithm_source_exits(self, repo):
         mod = _import_prepare_with_root(repo)
         manifest = dict(MINIMAL_MANIFEST)
-        manifest["algorithm"] = {
+        manifest["algorithms"] = [{
+            "name": "treatment",
             "source": "nonexistent/file.go",
             "config": "sim2real_golden/routers/policy_adaptive_v2.yaml",
-        }
+            "defaults": "baseline",
+        }]
         run_dir = repo / "workspace" / "runs" / "test-run"
 
         class Args:
@@ -1210,7 +1226,8 @@ class TestBaselineOnlyNoAlgorithm:
 
     def _no_algo_manifest(self):
         """Manifest without algorithm section."""
-        m = {k: v for k, v in MINIMAL_MANIFEST.items() if k != "algorithm"}
+        m = {k: v for k, v in MINIMAL_MANIFEST.items() if k not in ("algorithm", "algorithms")}
+        m["algorithms"] = []
         return m
 
     def test_phase_init_no_algorithm(self, repo):

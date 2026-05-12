@@ -1,4 +1,6 @@
-"""Tests for pipeline.lib.tekton module."""
+"""Tests for Tekton PipelineRun generation."""
+
+from pipeline.lib.tekton import make_pipelinerun_scenario
 
 
 # ── Tests for make_pipelinerun_scenario ──────────────────────────────────────
@@ -9,7 +11,6 @@ _WORKSPACE_BINDINGS = {
 }
 
 def test_make_pipelinerun_scenario_name():
-    from pipeline.lib.tekton import make_pipelinerun_scenario
     pr = make_pipelinerun_scenario(
         phase="baseline", workload={"name": "wl-smoke"}, run_name="ac",
         namespace="kalantar-0", pipeline_name="sim2real-ac",
@@ -21,7 +22,6 @@ def test_make_pipelinerun_scenario_name():
 
 
 def test_make_pipelinerun_scenario_params():
-    from pipeline.lib.tekton import make_pipelinerun_scenario
     pr = make_pipelinerun_scenario(
         phase="treatment", workload={"name": "chatbot-mid"}, run_name="ac",
         namespace="ns", pipeline_name="sim2real-ac",
@@ -37,7 +37,6 @@ def test_make_pipelinerun_scenario_params():
 
 
 def test_make_pipelinerun_scenario_spec_content_default():
-    from pipeline.lib.tekton import make_pipelinerun_scenario
     pr = make_pipelinerun_scenario(
         phase="baseline", workload={"name": "wl"}, run_name="r",
         namespace="ns", pipeline_name="sim2real-r",
@@ -68,7 +67,6 @@ def test_make_pipelinerun_scenario_spec_content_custom():
 
 
 def test_make_pipelinerun_scenario_workspace_bindings():
-    from pipeline.lib.tekton import make_pipelinerun_scenario
     pr = make_pipelinerun_scenario(
         phase="baseline", workload={"name": "wl"}, run_name="r",
         namespace="ns", pipeline_name="sim2real-r",
@@ -80,3 +78,67 @@ def test_make_pipelinerun_scenario_workspace_bindings():
     assert "data-storage" in ws_names
     assert "model-cache" not in ws_names
     assert "hf-credentials" not in ws_names
+
+
+# ── Tests for phase name sanitization ─────────────────────────────────────────
+
+
+def test_phase_name_in_pipelinerun():
+    """Custom phase names appear in PipelineRun metadata and params."""
+    pr = make_pipelinerun_scenario(
+        phase="b1",
+        workload={"name": "wl-smoke"},
+        run_name="test-run",
+        namespace="ns-0",
+        pipeline_name="sim2real",
+        scenario_content="scenario: []",
+    )
+    assert pr["metadata"]["name"] == "b1-wl-smoke-test-run"
+    params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
+    assert params["phase"] == "b1"
+
+
+def test_phase_underscore_sanitized_in_name():
+    """Underscores in phase names are converted to hyphens in PipelineRun name."""
+    pr = make_pipelinerun_scenario(
+        phase="my_phase",
+        workload={"name": "wl-smoke"},
+        run_name="test-run",
+        namespace="ns-0",
+        pipeline_name="sim2real",
+        scenario_content="scenario: []",
+    )
+    assert pr["metadata"]["name"] == "my-phase-wl-smoke-test-run"
+    params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
+    assert params["phase"] == "my_phase"
+
+
+def test_default_spec_content():
+    """PipelineRun includes default spec content when none provided."""
+    pr = make_pipelinerun_scenario(
+        phase="baseline",
+        workload={"name": "wl-smoke"},
+        run_name="run-1",
+        namespace="ns-0",
+        pipeline_name="sim2real",
+        scenario_content="scenario: []",
+    )
+    params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
+    assert "defaults.yaml" in params["specContent"]
+
+
+def test_workspace_bindings():
+    """Workspace bindings are applied when provided."""
+    pr = make_pipelinerun_scenario(
+        phase="baseline",
+        workload={"name": "wl-smoke"},
+        run_name="run-1",
+        namespace="ns-0",
+        pipeline_name="sim2real",
+        scenario_content="scenario: []",
+        workspace_bindings={"data-storage": {"persistentVolumeClaim": {"claimName": "my-pvc"}}},
+    )
+    assert "workspaces" in pr["spec"]
+    ws = pr["spec"]["workspaces"]
+    assert ws[0]["name"] == "data-storage"
+    assert ws[0]["persistentVolumeClaim"]["claimName"] == "my-pvc"
