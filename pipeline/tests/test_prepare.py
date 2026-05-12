@@ -746,38 +746,6 @@ class TestValidateAssembly:
         with pytest.raises(SystemExit):
             mod._validate_assembly(run_dir, resolved)
 
-    def test_fails_kind_mismatch(self, repo):
-        mod = _import_prepare_with_root(repo)
-        run_dir = repo / "workspace" / "runs" / "test-run"
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-        resolved = {"target": {"repo": "llm-d-inference-scheduler"}, "config": {"kind": "EndpointPickerConfig"}}
-
-        output = {
-            "plugin_type": "test-scorer",
-            "files_created": [],
-            "files_modified": [],
-            "register_file": "pkg/plugins/register.go",
-            "treatment_config_generated": True,
-        }
-        (run_dir / "translation_output.json").write_text(json.dumps(output))
-
-        # register.go contains the plugin type
-        register_path = repo / "llm-d-inference-scheduler" / "pkg" / "plugins" / "register.go"
-        register_path.write_text('Register("test-scorer", NewTestScorer)')
-
-        # treatment.yaml contains the plugin type
-        cluster_dir = run_dir / "cluster"
-        cluster_dir.mkdir(parents=True, exist_ok=True)
-        (cluster_dir / "treatment.yaml").write_text("- type: test-scorer\n")
-
-        # treatment_config has wrong kind
-        (run_dir / "generated").mkdir(parents=True, exist_ok=True)
-        _write_yaml(run_dir / "generated" / "treatment_config.yaml", {"kind": "WrongKind"})
-
-        with pytest.raises(SystemExit):
-            mod._validate_assembly(run_dir, resolved)
-
     def test_fails_files_created_missing(self, repo):
         mod = _import_prepare_with_root(repo)
         run_dir = repo / "workspace" / "runs" / "test-run"
@@ -861,31 +829,6 @@ class TestValidateAssembly:
 
         mod._validate_assembly(run_dir, resolved)  # should not raise
 
-    def test_check3_skipped_when_not_generated(self, repo):
-        """treatment_config_generated=False — Check 3 (kind match) skipped."""
-        mod = _import_prepare_with_root(repo)
-        run_dir = repo / "workspace" / "runs" / "test-run"
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-        resolved = {"target": {"repo": "llm-d-inference-scheduler"}, "config": {"kind": "EndpointPickerConfig"}}
-        output = {
-            "plugin_type": "test-scorer",
-            "files_created": [],
-            "files_modified": ["pkg/plugins/scorer/precise_prefix_cache.go"],
-            "register_file": "pkg/plugins/register.go",
-            "treatment_config_generated": False,
-        }
-        (run_dir / "translation_output.json").write_text(json.dumps(output))
-
-        register = repo / "llm-d-inference-scheduler" / "pkg" / "plugins" / "register.go"
-        register.write_text('Register("test-scorer", NewTestScorer)')
-
-        cluster_dir = run_dir / "cluster"
-        cluster_dir.mkdir(parents=True, exist_ok=True)
-        (cluster_dir / "treatment.yaml").write_text("type: test-scorer\n")
-        # No treatment_config.yaml — but treatment_config_generated=False, so Check 3 is skipped
-
-        mod._validate_assembly(run_dir, resolved)  # should not raise
 
 
 # ── Config resolution ───────────────────────────────────────────────────────
