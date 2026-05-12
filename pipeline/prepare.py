@@ -188,11 +188,28 @@ def _phase_init(args, manifest: dict, run_dir: Path) -> StateMachine:
             err(f"Workload not found: {wl}")
             sys.exit(1)
 
-    # Validate component repo exists
+    # Validate component submodule
     target_path = resolved.get("path", "")
-    if target_path and not (EXPERIMENT_ROOT / target_path).exists():
-        err(f"Component repo not found: {target_path}")
-        sys.exit(1)
+    component_ref = manifest.get("component", {}).get("ref")
+    if target_path:
+        comp_dir = EXPERIMENT_ROOT / target_path
+        if not comp_dir.exists():
+            if component_ref:
+                err(f"Component repo not found: {target_path}\n"
+                    f"  Initialize with: git submodule update --init {target_path}")
+            else:
+                err(f"Component repo not found: {target_path}")
+            sys.exit(1)
+        elif component_ref:
+            if (comp_dir / ".git").exists():
+                result = run(["git", "rev-parse", "HEAD"], capture=True, cwd=comp_dir)
+                actual_sha = result.stdout.strip()
+                if actual_sha != component_ref:
+                    err(f"Component ref mismatch in {target_path}:\n"
+                        f"  manifest component.ref: {component_ref}\n"
+                        f"  checked-out HEAD:       {actual_sha}\n"
+                        f"  Update with: cd {target_path} && git checkout {component_ref}")
+                    sys.exit(1)
 
     run_name = args.run or _load_setup_config().get("current_run", _default_run_name())
     state = StateMachine(run_name, scenario, run_dir)

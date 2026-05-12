@@ -205,6 +205,86 @@ class TestPhaseInit:
         state = mod._phase_init(Args(), manifest, run_dir)
         assert state is not None
 
+    def test_init_ref_match_succeeds(self, repo):
+        """Phase 1 passes when component.ref matches checked-out SHA."""
+        comp = repo / "llm-d-inference-scheduler"
+        _init_git_repo(comp)
+        import subprocess
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                            text=True, cwd=comp).stdout.strip()
+
+        mod = _import_prepare_with_root(repo)
+        manifest = dict(MINIMAL_MANIFEST)
+        manifest["component"] = {**manifest["component"], "ref": sha}
+        run_dir = repo / "workspace" / "runs" / "test-run"
+
+        class Args:
+            force = True
+            run = "test-run"
+            manifest = None
+            rebuild_context = False
+
+        state = mod._phase_init(Args(), manifest, run_dir)
+        assert state.is_done("init")
+
+    def test_init_ref_mismatch_exits(self, repo):
+        """Phase 1 errors when component.ref doesn't match checked-out SHA."""
+        comp = repo / "llm-d-inference-scheduler"
+        _init_git_repo(comp)
+
+        mod = _import_prepare_with_root(repo)
+        manifest = dict(MINIMAL_MANIFEST)
+        manifest["component"] = {**manifest["component"], "ref": "deadbeef" * 5}
+        run_dir = repo / "workspace" / "runs" / "test-run"
+
+        class Args:
+            force = True
+            run = "test-run"
+            manifest = None
+            rebuild_context = False
+
+        with pytest.raises(SystemExit):
+            mod._phase_init(Args(), manifest, run_dir)
+
+    def test_init_ref_missing_submodule_exits_with_command(self, repo, capsys):
+        """Phase 1 errors with init command when submodule missing and ref set."""
+        import shutil
+        comp = repo / "llm-d-inference-scheduler"
+        if comp.exists():
+            shutil.rmtree(comp)
+
+        mod = _import_prepare_with_root(repo)
+        manifest = dict(MINIMAL_MANIFEST)
+        manifest["component"] = {**manifest["component"], "ref": "a" * 40}
+        run_dir = repo / "workspace" / "runs" / "test-run"
+
+        class Args:
+            force = True
+            run = "test-run"
+            manifest = None
+            rebuild_context = False
+
+        with pytest.raises(SystemExit):
+            mod._phase_init(Args(), manifest, run_dir)
+        captured = capsys.readouterr()
+        assert "git submodule update --init" in captured.err or "git submodule update --init" in captured.out
+
+    def test_init_no_ref_skips_validation(self, repo):
+        """Phase 1 does not check ref when component.ref is absent."""
+        mod = _import_prepare_with_root(repo)
+        manifest = dict(MINIMAL_MANIFEST)
+        # No ref field — should pass without error
+        run_dir = repo / "workspace" / "runs" / "test-run"
+
+        class Args:
+            force = True
+            run = "test-run"
+            manifest = None
+            rebuild_context = False
+
+        state = mod._phase_init(Args(), manifest, run_dir)
+        assert state.is_done("init")
+
 
 # ── Phase 3: Translation Checkpoint ────────────────────────────────────────
 
