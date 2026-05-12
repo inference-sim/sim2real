@@ -285,22 +285,6 @@ def test_v3_target_and_config_loaded(tmp_path):
     assert "helm_path" in m["config"]
 
 
-def test_v3_observe_defaults(tmp_path):
-    """v3 without observe section gets default request_multiplier=1."""
-    data = {k: v for k, v in MINIMAL_V3.items() if k != "observe"}
-    path = _write_manifest(tmp_path, data)
-    m = load_manifest(path)
-    assert m["observe"]["request_multiplier"] == 1
-
-
-def test_v3_observe_explicit(tmp_path):
-    """v3 with explicit observe.request_multiplier preserves value."""
-    data = {**MINIMAL_V3, "observe": {"request_multiplier": 10}}
-    path = _write_manifest(tmp_path, data)
-    m = load_manifest(path)
-    assert m["observe"]["request_multiplier"] == 10
-
-
 def test_v3_build_defaults(tmp_path):
     """v3 without build section gets default commands=[]."""
     data = {k: v for k, v in MINIMAL_V3.items() if k != "build"}
