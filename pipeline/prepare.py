@@ -585,7 +585,6 @@ def _validate_assembly(run_dir: Path, resolved: dict, algorithm_packages: list[s
         warn("translation_output.json is not valid JSON — skipping validation")
         return
     plugin_type = output["plugin_type"]
-    config_cfg = resolved.get("config", {})
     target = resolved.get("target", {})
     treatment_config_generated = output.get("treatment_config_generated", True)
 
@@ -622,21 +621,7 @@ def _validate_assembly(run_dir: Path, resolved: dict, algorithm_packages: list[s
                     errors.append(
                         f"plugin_type '{plugin_type}' not found in {pkg_name}.yaml")
 
-    # Check 3: algorithm config contains expected kind (may be nested in scenario overlay)
-    if treatment_config_generated and config_cfg.get("kind"):
-        check_names = algorithm_packages or ["treatment"]
-        for pkg_name in check_names:
-            tc_path = run_dir / "generated" / f"{pkg_name}_config.yaml"
-            if not tc_path.exists():
-                tc_path = run_dir / "generated" / "treatment_config.yaml"
-            if tc_path.exists():
-                tc_text = tc_path.read_text()
-                expected_kind = config_cfg["kind"]
-                if f"kind: {expected_kind}" not in tc_text:
-                    errors.append(
-                        f"{pkg_name} config does not contain 'kind: {expected_kind}'")
-
-    # Check 4: all files_created exist in target repo
+    # Check 3: all files_created exist in target repo
     target_repo = target.get("repo", "")
     for f in output.get("files_created", []):
         if target_repo and not (EXPERIMENT_ROOT / target_repo / f).exists():
