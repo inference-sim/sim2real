@@ -39,7 +39,6 @@ MINIMAL_MANIFEST = {
         "kind": "EndpointPickerConfig",
         "helm_path": "gaie.treatment.helmValues.inferenceExtension.pluginsCustomConfig.custom-plugins.yaml",
     },
-    "observe": {"request_multiplier": 10},
     "build": {"commands": [["go", "build", "./..."]]},
 }
 
@@ -896,7 +895,6 @@ class TestConfigResolution:
         manifest = dict(MINIMAL_MANIFEST)
         resolved = mod._load_resolved_config(manifest)
         # Should have merged common + routing scenario
-        assert resolved["observe"]["request_multiplier"] == 10
         assert resolved["target"]["repo"] == "llm-d-inference-scheduler"
         assert resolved["config"]["kind"] == "EndpointPickerConfig"
 
@@ -1321,7 +1319,7 @@ class TestBaselineOnlyNoAlgorithm:
         state.mark_done("translate", mode="baseline-only")
         state.mark_done("assembly", packages=["baseline"])
 
-        resolved = {"observe": {"request_multiplier": 1}}
+        resolved = {}
 
         # Should not crash even with stale translation_output.json
         mod._phase_summary(state, manifest, run_dir, resolved)
