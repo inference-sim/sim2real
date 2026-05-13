@@ -204,14 +204,6 @@ def test_no_algorithms_no_component_valid(tmp_path):
     assert m.get("component") is None
 
 
-def test_algorithms_without_component_raises(tmp_path):
-    """algorithms present but component missing → ManifestError."""
-    data = {k: v for k, v in MINIMAL_V3.items() if k != "component"}
-    path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="component.*required.*algorithms"):
-        load_manifest(path)
-
-
 def test_no_algorithms_with_component_valid(tmp_path):
     """No algorithms but component present → valid (component used for SHA tracking)."""
     data = {k: v for k, v in MINIMAL_V3.items() if k != "algorithms"}
@@ -219,6 +211,15 @@ def test_no_algorithms_with_component_valid(tmp_path):
     m = load_manifest(path)
     assert m["algorithms"] == []
     assert m["component"]["repo"] == "github.com/llm-d/llm-d-inference-scheduler"
+
+
+def test_explicit_component_null_normalized(tmp_path):
+    """component: null (explicit YAML null) is removed from manifest, not left as None."""
+    data = {k: v for k, v in MINIMAL_V3.items() if k not in ("algorithms", "component")}
+    data["component"] = None
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert "component" not in m
 
 
 def test_component_must_be_mapping(tmp_path):

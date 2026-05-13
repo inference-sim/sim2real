@@ -996,14 +996,19 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     if not namespaces or not namespaces[0]:
         err("No namespaces configured. Run setup.py with --namespaces."); sys.exit(1)
 
-    # Build EPP image (tag is deterministic — already embedded in PipelineRuns by prepare.py)
+    # Decide whether to build EPP image
     run_meta_path = run_dir / "run_metadata.json"
-    has_component_image = False
-    if run_meta_path.exists():
-        has_component_image = bool(json.loads(run_meta_path.read_text()).get("component_image"))
+    if not run_meta_path.exists():
+        err("run_metadata.json not found — run setup.py first."); sys.exit(1)
+    try:
+        run_meta = json.loads(run_meta_path.read_text())
+    except json.JSONDecodeError as e:
+        err(f"run_metadata.json is not valid JSON: {e}. Re-run setup.py."); sys.exit(1)
+
+    has_component_image = bool(run_meta.get("component_image"))
 
     if not has_component_image:
-        info("No component_image in run metadata — skipping EPP build (baseline-only)")
+        info("No component_image in run metadata — skipping EPP build")
     elif args.skip_build_epp:
         info("Skipping EPP build (--skip-build-epp)")
     else:
