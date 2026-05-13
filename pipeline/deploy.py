@@ -696,6 +696,7 @@ def _load_pairs(cluster_dir: Path) -> dict:
                 "pr_name": pr_name,
                 "pr_path": str(pr_path),
                 "namespace": pr_data.get("metadata", {}).get("namespace", ""),
+                "scenario_content": params.get("scenarioContent"),
             }
         except Exception as e:
             warn(f"Skipping {pr_path.name}: {e}")
@@ -982,6 +983,51 @@ def _do_collect(pair_key: str, entry: dict, run_dir: Path, store, progress: dict
     return ok
 
 
+def _derive_pair_gpu_costs(
+    discovered: dict,
+    *,
+    defaults: dict | None,
+    fallback_cost: int,
+) -> dict[str, int]:
+    """Compute GPU cost per pair from its scenarioContent.
+
+    If defaults is None, returns fallback_cost for all pairs immediately.
+
+    Otherwise, per pair:
+      1. Parse scenarioContent → gpu_cost_per_pair(scenario, defaults)
+      2. If scenarioContent missing/invalid → gpu_cost_per_pair({}, defaults)
+      3. If derivation returns an error → fallback_cost
+    """
+    from pipeline.lib.capacity import gpu_cost_per_pair
+
+    costs = {}
+    for key, meta in discovered.items():
+        if defaults is None:
+            costs[key] = fallback_cost
+            continue
+
+        scenario_content = meta.get("scenario_content")
+        resolved = None
+        if scenario_content:
+            try:
+                resolved = yaml.safe_load(scenario_content)
+            except yaml.YAMLError as e:
+                warn(f"{key}: scenarioContent is invalid YAML ({e}) — deriving cost from defaults")
+
+        if resolved and isinstance(resolved, dict):
+            result = gpu_cost_per_pair(resolved, defaults)
+        else:
+            result = gpu_cost_per_pair({}, defaults)
+
+        if isinstance(result, int):
+            costs[key] = result
+        else:
+            warn(f"{key}: GPU cost derivation failed: {result} — using fallback ({fallback_cost})")
+            costs[key] = fallback_cost
+
+    return costs
+
+
 def _capacity_limited_pairs(
     pending: list[str],
     progress: dict,
@@ -1014,7 +1060,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     from pipeline.lib.progress import LocalProgressStore
     from pipeline.lib.backoff import BackoffController
     from pipeline.lib.capacity import (
-        probe_free_gpus, gpu_cost_per_pair, derive_gpu_resource_type, load_defaults
+        probe_free_gpus, derive_gpu_resource_type, load_defaults
     )
 
     namespaces = setup_config.get("namespaces") or [setup_config.get("namespace", "")]
@@ -1039,10 +1085,10 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     progress_path = run_dir / "progress.json"
     store = LocalProgressStore(progress_path)
 
-    # Derive GPU resource type and cost from scenario + defaults
+    # Derive GPU resource type from baseline scenario
     # CLI --gpu-resource-type overrides auto-derivation when explicitly set
     gpu_resource_type = args.gpu_resource_type  # None means auto-derive
-    pair_gpu_cost = args.default_gpu_cost
+    fallback_cost = args.default_gpu_cost
     defaults_result = load_defaults(REPO_ROOT)
     if isinstance(defaults_result, str):
         warn(defaults_result)
@@ -1063,18 +1109,12 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
         if resolved:
             if gpu_resource_type is None:
                 gpu_resource_type = derive_gpu_resource_type(resolved, defaults_result)
-            derived_cost = gpu_cost_per_pair(resolved, defaults_result)
-            if isinstance(derived_cost, int):
-                pair_gpu_cost = derived_cost
-            else:
-                warn(f"GPU cost derivation failed: {derived_cost} — using fallback ({pair_gpu_cost})")
     elif defaults_result is None and not scenario_path.exists():
         info("Defaults or scenario not found — using CLI defaults")
     if gpu_resource_type is None:
         gpu_resource_type = "nvidia.com/gpu"
     if gpu_resource_type != "nvidia.com/gpu":
         info(f"GPU resource type: {gpu_resource_type}")
-    info(f"GPU cost per pair: {pair_gpu_cost}")
     _probe_fail_count = 0
     _last_probe_error = ""
 
@@ -1094,6 +1134,15 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     if not discovered:
         err("No pairs found in cluster/. Run prepare.py first."); sys.exit(1)
 
+    pair_costs = _derive_pair_gpu_costs(
+        discovered, defaults=defaults_result, fallback_cost=fallback_cost,
+    )
+    unique_costs = set(pair_costs.values())
+    if len(unique_costs) == 1:
+        info(f"GPU cost per pair: {unique_costs.pop()}")
+    else:
+        info(f"GPU cost per pair: {min(unique_costs)}–{max(unique_costs)} (heterogeneous)")
+
     # Initialize new entries (first run or new pairs added)
     for key, meta in discovered.items():
         if key not in progress:
@@ -1103,7 +1152,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 "status":   "pending",
                 "namespace": None,
                 "retries":  0,
-                "gpu_cost": pair_gpu_cost,
+                "gpu_cost": pair_costs[key],
                 "pending_stalls": 0,
                 "pending_since": None,
             }
@@ -1282,8 +1331,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             backoff.last_probe_free_gpus = free_gpus
         pending = _pending_pairs()
         if free_gpus is not None and pending:
-            min_cost = min(progress[k].get("gpu_cost", pair_gpu_cost) for k in pending)
-            max_cost = max(progress[k].get("gpu_cost", pair_gpu_cost) for k in pending)
+            min_cost = min(progress[k].get("gpu_cost", fallback_cost) for k in pending)
+            max_cost = max(progress[k].get("gpu_cost", fallback_cost) for k in pending)
             if free_gpus < min_cost:
                 prev_state = backoff.state
                 backoff.signal_scarcity(free_gpus=free_gpus, min_cost=min_cost)
@@ -1300,17 +1349,17 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
         free_slots = [ns for ns in namespaces if ns not in slots_busy]
         pending = _pending_pairs()
         if free_gpus is not None and pending:
-            min_cost = min(progress[k].get("gpu_cost", pair_gpu_cost) for k in pending)
+            min_cost = min(progress[k].get("gpu_cost", fallback_cost) for k in pending)
             if not backoff.should_dispatch(free_gpus=free_gpus, min_cost=min_cost):
                 info(f"Backoff: skipping dispatch ({len(pending)} pending, {free_gpus} free GPUs)")
                 dispatchable = []
             else:
                 dispatchable = _capacity_limited_pairs(
                     pending, progress,
-                    free_gpus=free_gpus, default_gpu_cost=pair_gpu_cost,
+                    free_gpus=free_gpus, default_gpu_cost=fallback_cost,
                 )
                 if len(dispatchable) == 0 and pending:
-                    smallest = min(progress[k].get("gpu_cost", pair_gpu_cost) for k in pending)
+                    smallest = min(progress[k].get("gpu_cost", fallback_cost) for k in pending)
                     warn(f"Dispatching 0/{len(pending)} pending pairs — smallest cost ({smallest}) exceeds free GPUs ({free_gpus})")
                 elif len(dispatchable) < len(pending):
                     info(f"Dispatching {len(dispatchable)}/{len(pending)} pending pairs (capacity-limited: {free_gpus} free GPUs)")

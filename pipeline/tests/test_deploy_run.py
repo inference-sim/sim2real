@@ -1396,3 +1396,168 @@ class TestCheckSlotReadyHfSecret:
 
         assert not ready
         assert any("my-hf-token" in f for f in failures)
+
+
+def test_load_pairs_includes_scenario_content(tmp_path):
+    """_load_pairs extracts scenarioContent param from PipelineRun YAMLs."""
+    import yaml as _yaml
+    from pipeline.deploy import _load_pairs
+
+    cluster_dir = tmp_path / "cluster"
+    cluster_dir.mkdir()
+
+    scenario = {"scenario": [{"decode": {"replicas": 2}}]}
+    pr = {
+        "metadata": {"name": "baseline-wl1-run1", "namespace": "ns"},
+        "spec": {"params": [
+            {"name": "workloadName", "value": "wl1"},
+            {"name": "phase", "value": "baseline"},
+            {"name": "scenarioContent", "value": _yaml.dump(scenario)},
+        ]},
+    }
+    (cluster_dir / "pipelinerun-wl1-baseline.yaml").write_text(_yaml.dump(pr))
+
+    pairs = _load_pairs(cluster_dir)
+    assert "wl-wl1-baseline" in pairs
+    assert pairs["wl-wl1-baseline"]["scenario_content"] == _yaml.dump(scenario)
+
+
+def test_load_pairs_missing_scenario_content(tmp_path):
+    """_load_pairs sets scenario_content to None when param is absent."""
+    import yaml as _yaml
+    from pipeline.deploy import _load_pairs
+
+    cluster_dir = tmp_path / "cluster"
+    cluster_dir.mkdir()
+
+    pr = {
+        "metadata": {"name": "baseline-wl1-run1", "namespace": "ns"},
+        "spec": {"params": [
+            {"name": "workloadName", "value": "wl1"},
+            {"name": "phase", "value": "baseline"},
+        ]},
+    }
+    (cluster_dir / "pipelinerun-wl1-baseline.yaml").write_text(_yaml.dump(pr))
+
+    pairs = _load_pairs(cluster_dir)
+    assert pairs["wl-wl1-baseline"]["scenario_content"] is None
+
+
+# ── _derive_pair_gpu_costs ───────────────────────────────────────────────────
+
+
+def test_derive_pair_gpu_costs_heterogeneous():
+    """Per-pair cost derivation produces different costs for different scenarios."""
+    import yaml as _yaml
+    from pipeline.deploy import _derive_pair_gpu_costs
+
+    defaults = {
+        "accelerator": {"count": 1},
+        "decode": {"enabled": True, "replicas": 1},
+    }
+
+    scenario_a = {"scenario": [{"decode": {"replicas": 2}}]}
+    scenario_b = {"scenario": [{"decode": {"replicas": 4}}]}
+
+    discovered = {
+        "wl-a-baseline": {"scenario_content": _yaml.dump(scenario_a)},
+        "wl-b-treatment": {"scenario_content": _yaml.dump(scenario_b)},
+    }
+
+    costs = _derive_pair_gpu_costs(discovered, defaults=defaults, fallback_cost=1)
+    assert costs["wl-a-baseline"] == 2
+    assert costs["wl-b-treatment"] == 4
+
+
+def test_derive_pair_gpu_costs_fallback_on_missing_scenario():
+    """When scenarioContent is None, falls back to defaults-only derivation."""
+    from pipeline.deploy import _derive_pair_gpu_costs
+
+    defaults = {
+        "decode": {"enabled": True, "replicas": 1},
+        "accelerator": {"count": 4},
+    }
+
+    discovered = {
+        "wl-a-baseline": {"scenario_content": None},
+    }
+
+    costs = _derive_pair_gpu_costs(discovered, defaults=defaults, fallback_cost=1)
+    assert costs["wl-a-baseline"] == 4
+
+
+def test_derive_pair_gpu_costs_fallback_on_bad_yaml():
+    """When scenarioContent is invalid YAML, falls back to defaults-only derivation."""
+    from pipeline.deploy import _derive_pair_gpu_costs
+
+    defaults = {"decode": {"enabled": True, "replicas": 1}, "accelerator": {"count": 2}}
+
+    discovered = {
+        "wl-a-baseline": {"scenario_content": ": invalid: yaml: ["},
+    }
+
+    costs = _derive_pair_gpu_costs(discovered, defaults=defaults, fallback_cost=99)
+    assert costs["wl-a-baseline"] == 2
+
+
+def test_derive_pair_gpu_costs_no_defaults():
+    """When defaults is None, uses fallback_cost for all pairs."""
+    from pipeline.deploy import _derive_pair_gpu_costs
+
+    discovered = {
+        "wl-a-baseline": {"scenario_content": "scenario:\n- decode:\n    replicas: 2\n"},
+    }
+
+    costs = _derive_pair_gpu_costs(discovered, defaults=None, fallback_cost=7)
+    assert costs["wl-a-baseline"] == 7
+
+
+def test_init_progress_per_pair_heterogeneous_cost(tmp_path):
+    """Progress entries get individually-derived gpu_cost from scenarioContent."""
+    import yaml as _yaml
+    from pipeline.deploy import _load_pairs, _derive_pair_gpu_costs
+
+    cluster_dir = tmp_path / "cluster"
+    cluster_dir.mkdir()
+
+    scenario_a = {"scenario": [{"decode": {"replicas": 2, "accelerator": {"count": 4}}}]}
+    pr_a = {
+        "metadata": {"name": "baseline-a-run1", "namespace": "ns"},
+        "spec": {"params": [
+            {"name": "workloadName", "value": "wl-a"},
+            {"name": "phase", "value": "baseline"},
+            {"name": "scenarioContent", "value": _yaml.dump(scenario_a)},
+        ]},
+    }
+    (cluster_dir / "pipelinerun-a-baseline.yaml").write_text(_yaml.dump(pr_a))
+
+    scenario_b = {"scenario": [{"decode": {"replicas": 1, "accelerator": {"count": 2}}}]}
+    pr_b = {
+        "metadata": {"name": "treatment-b-run1", "namespace": "ns"},
+        "spec": {"params": [
+            {"name": "workloadName", "value": "wl-b"},
+            {"name": "phase", "value": "treatment"},
+            {"name": "scenarioContent", "value": _yaml.dump(scenario_b)},
+        ]},
+    }
+    (cluster_dir / "pipelinerun-b-treatment.yaml").write_text(_yaml.dump(pr_b))
+
+    defaults = {"decode": {"enabled": True, "replicas": 1}, "accelerator": {"count": 1}}
+    discovered = _load_pairs(cluster_dir)
+    costs = _derive_pair_gpu_costs(discovered, defaults=defaults, fallback_cost=1)
+
+    progress = {}
+    for key, meta in discovered.items():
+        progress[key] = {
+            "workload": meta["workload"],
+            "package":  meta["package"],
+            "status":   "pending",
+            "namespace": None,
+            "retries":  0,
+            "gpu_cost": costs[key],
+            "pending_stalls": 0,
+            "pending_since": None,
+        }
+
+    assert progress["wl-a-baseline"]["gpu_cost"] == 8
+    assert progress["wl-b-treatment"]["gpu_cost"] == 2
