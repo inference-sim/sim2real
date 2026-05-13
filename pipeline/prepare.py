@@ -29,7 +29,7 @@ from pipeline.lib.manifest import load_manifest, ManifestError
 from pipeline.lib.state_machine import StateMachine
 from pipeline.lib.context_builder import build_context
 from pipeline.lib.tekton import make_pipelinerun_scenario
-from pipeline.lib.assemble import assemble_packages, AssemblyError
+from pipeline.lib.assemble import assemble_packages, AssemblyError, inject_hf_secret_name
 from pipeline.lib.epp import inject_epp_image
 
 # ── Repo layout ──────────────────────────────────────────────────────────────
@@ -464,6 +464,17 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
                     err(f"{pkg.name} has no 'scenario' entries — EPP image cannot be injected.")
                     sys.exit(1)
 
+    # 4b.6: Inject huggingface.secretName into all packages
+    setup_config = _load_setup_config()
+    if not setup_config:
+        err("setup_config.json not found. Run setup.py first to bootstrap cluster resources.")
+        sys.exit(1)
+    hf_secret_name = setup_config.get("hf_secret_name", "hf-secret")
+    for pkg in packages:
+        if not inject_hf_secret_name(pkg.resolved, hf_secret_name):
+            err(f"{pkg.name} has no 'scenario' entries — huggingface.secretName cannot be injected.")
+            sys.exit(1)
+
     # 4c: Write resolved scenarios
     cluster_dir = run_dir / "cluster"
     cluster_dir.mkdir(parents=True, exist_ok=True)
@@ -500,10 +511,6 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
         return
 
     # 4e: Pipeline resource
-    setup_config = _load_setup_config()
-    if not setup_config:
-        err("setup_config.json not found. Run setup.py first to bootstrap cluster resources.")
-        sys.exit(1)
     run_name = run_dir.name
     pipeline_name = manifest.get("pipeline", {}).get("name", "sim2real")
 

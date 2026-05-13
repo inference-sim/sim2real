@@ -30,6 +30,7 @@ class SetupConfig:
 # ── Repo layout ──────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEKTONC_DIR = REPO_ROOT / "tektonc-data-collection"
+_DEFAULT_HF_SECRET_NAME = "hf-secret"
 
 # Overridden in main() when --experiment-root is specified.
 EXPERIMENT_ROOT = REPO_ROOT
@@ -390,21 +391,22 @@ def step_secrets(cfg: SetupConfig, container_rt: str) -> None:
     if cfg.no_cluster:
         ok("Secrets (skipped — --no-cluster)"); return
 
-    # hf-secret — skip if token is empty and secret already exists (reuse mode)
-    if not cfg.hf_token and secret_exists("hf-secret", cfg.namespace):
-        ok("hf-secret already exists (reusing)")
+    hf_secret_name = _DEFAULT_HF_SECRET_NAME
+
+    if not cfg.hf_token and secret_exists(hf_secret_name, cfg.namespace):
+        ok(f"{hf_secret_name} already exists (reusing)")
     elif not cfg.hf_token:
-        err("HF_TOKEN is required and hf-secret does not exist in namespace"); sys.exit(1)
+        err(f"HF_TOKEN is required and {hf_secret_name} does not exist in namespace"); sys.exit(1)
     else:
         yaml_out = run(
-            ["kubectl", "create", "secret", "generic", "hf-secret",
+            ["kubectl", "create", "secret", "generic", hf_secret_name,
              f"--namespace={cfg.namespace}",
              f"--from-literal=HF_TOKEN={cfg.hf_token}",
              "--dry-run=client", "-o", "yaml"],
             capture=True,
         ).stdout
         run(["kubectl", "apply", "-f", "-"], input=yaml_out)
-        ok("hf-secret created/updated")
+        ok(f"{hf_secret_name} created/updated")
 
     # github-token — used by install-llmdbenchmark to clone private repos
     github_token = cfg.github_token
@@ -666,6 +668,7 @@ def step_config_output(cfg: SetupConfig, run_dir: Path, container_rt: str) -> No
         "container_runtime": container_rt,
         "current_run": cfg.run_name,
         "setup_timestamp": now_iso,
+        "hf_secret_name": _DEFAULT_HF_SECRET_NAME,
         "workspaces": {
             "data-storage":   {"persistentVolumeClaim": {"claimName": "data-pvc"}},
             "source":         {"persistentVolumeClaim": {"claimName": "source-pvc"}},

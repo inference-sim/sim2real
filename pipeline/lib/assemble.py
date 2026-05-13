@@ -190,3 +190,18 @@ def assemble_packages(
                     )
 
     return packages
+
+
+def inject_hf_secret_name(scenario_dict: dict, hf_secret_name: str) -> bool:
+    """Inject huggingface.secretName into all scenario entries.
+
+    Does not overwrite an explicitly set secretName.
+    Returns True if injection occurred, False if skipped (no scenarios).
+    """
+    scenario_list = scenario_dict.get("scenario", [])
+    if not scenario_list:
+        return False
+    for entry in scenario_list:
+        hf = entry.setdefault("huggingface", {})
+        hf.setdefault("secretName", hf_secret_name)
+    return True
