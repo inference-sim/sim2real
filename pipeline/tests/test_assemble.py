@@ -3,7 +3,7 @@ import pytest
 import yaml
 
 from pipeline.lib.assemble import assemble_scenarios
-from pipeline.lib.assemble import assemble_packages, AssemblyError
+from pipeline.lib.assemble import assemble_packages, AssemblyError, inject_hf_secret_name
 
 
 BASELINE = {
@@ -273,3 +273,36 @@ def test_assemble_packages_algorithm_unknown_baseline_raises(tmp_path):
             algorithms=[{"name": "ac1", "scenario_path": tmp_path / "t.yaml", "defaults": "nonexistent"}],
             generated_dir=tmp_path / "generated",
         )
+
+
+class TestInjectHfSecretName:
+    """inject_hf_secret_name sets huggingface.secretName on all scenario entries."""
+
+    def test_injects_into_scenario_entries(self):
+        scenario_dict = {"scenario": [
+            {"name": "baseline", "model": {"name": "Qwen/Qwen3-14B"}},
+        ]}
+        result = inject_hf_secret_name(scenario_dict, "hf-secret")
+        assert result is True
+        assert scenario_dict["scenario"][0]["huggingface"] == {"secretName": "hf-secret"}
+
+    def test_preserves_existing_huggingface_fields(self):
+        scenario_dict = {"scenario": [
+            {"name": "baseline", "huggingface": {"existingField": "value"}},
+        ]}
+        inject_hf_secret_name(scenario_dict, "my-token")
+        assert scenario_dict["scenario"][0]["huggingface"] == {
+            "existingField": "value",
+            "secretName": "my-token",
+        }
+
+    def test_returns_false_for_empty_scenarios(self):
+        assert inject_hf_secret_name({"scenario": []}, "hf-secret") is False
+        assert inject_hf_secret_name({}, "hf-secret") is False
+
+    def test_does_not_overwrite_explicit_secret_name(self):
+        scenario_dict = {"scenario": [
+            {"name": "baseline", "huggingface": {"secretName": "explicit-override"}},
+        ]}
+        inject_hf_secret_name(scenario_dict, "hf-secret")
+        assert scenario_dict["scenario"][0]["huggingface"]["secretName"] == "explicit-override"

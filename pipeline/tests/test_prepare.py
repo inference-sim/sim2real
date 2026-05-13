@@ -1334,6 +1334,11 @@ class TestBaselineOnlyNoAlgorithm:
         # baseline.yaml must exist for assembly
         (repo / "baseline.yaml").write_text(yaml.dump({"model": {"name": "test"}}))
 
+        # setup_config.json required for HF secret injection
+        ws_dir = repo / "workspace"
+        ws_dir.mkdir(parents=True, exist_ok=True)
+        (ws_dir / "setup_config.json").write_text(json.dumps({"namespace": "default"}))
+
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
