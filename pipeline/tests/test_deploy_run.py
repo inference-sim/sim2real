@@ -1510,3 +1510,54 @@ def test_derive_pair_gpu_costs_no_defaults():
 
     costs = _derive_pair_gpu_costs(discovered, defaults=None, fallback_cost=7)
     assert costs["wl-a-baseline"] == 7
+
+
+def test_init_progress_per_pair_heterogeneous_cost(tmp_path):
+    """Progress entries get individually-derived gpu_cost from scenarioContent."""
+    import yaml as _yaml
+    from pipeline.deploy import _load_pairs, _derive_pair_gpu_costs
+
+    cluster_dir = tmp_path / "cluster"
+    cluster_dir.mkdir()
+
+    scenario_a = {"scenario": [{"decode": {"replicas": 2, "accelerator": {"count": 4}}}]}
+    pr_a = {
+        "metadata": {"name": "baseline-a-run1", "namespace": "ns"},
+        "spec": {"params": [
+            {"name": "workloadName", "value": "wl-a"},
+            {"name": "phase", "value": "baseline"},
+            {"name": "scenarioContent", "value": _yaml.dump(scenario_a)},
+        ]},
+    }
+    (cluster_dir / "pipelinerun-a-baseline.yaml").write_text(_yaml.dump(pr_a))
+
+    scenario_b = {"scenario": [{"decode": {"replicas": 1, "accelerator": {"count": 2}}}]}
+    pr_b = {
+        "metadata": {"name": "treatment-b-run1", "namespace": "ns"},
+        "spec": {"params": [
+            {"name": "workloadName", "value": "wl-b"},
+            {"name": "phase", "value": "treatment"},
+            {"name": "scenarioContent", "value": _yaml.dump(scenario_b)},
+        ]},
+    }
+    (cluster_dir / "pipelinerun-b-treatment.yaml").write_text(_yaml.dump(pr_b))
+
+    defaults = {"decode": {"enabled": True, "replicas": 1}, "accelerator": {"count": 1}}
+    discovered = _load_pairs(cluster_dir)
+    costs = _derive_pair_gpu_costs(discovered, defaults=defaults, fallback_cost=1)
+
+    progress = {}
+    for key, meta in discovered.items():
+        progress[key] = {
+            "workload": meta["workload"],
+            "package":  meta["package"],
+            "status":   "pending",
+            "namespace": None,
+            "retries":  0,
+            "gpu_cost": costs[key],
+            "pending_stalls": 0,
+            "pending_since": None,
+        }
+
+    assert progress["wl-a-baseline"]["gpu_cost"] == 8
+    assert progress["wl-b-treatment"]["gpu_cost"] == 2
