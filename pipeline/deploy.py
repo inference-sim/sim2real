@@ -902,7 +902,7 @@ def _report_filter_mismatch(progress: dict, args) -> None:
     print(f"  Valid --status values:   {', '.join(valid_statuses)}", file=sys.stderr)
 
 
-def _check_slot_ready(namespace: str) -> tuple[bool, list[str]]:
+def _check_slot_ready(namespace: str, hf_secret_name: str = "hf-secret") -> tuple[bool, list[str]]:
     """Check that a namespace slot is ready to accept a new PipelineRun.
 
     Checks: PVCs bound, HF secret present.
@@ -924,11 +924,11 @@ def _check_slot_ready(namespace: str) -> tuple[bool, list[str]]:
             failures.append(f"PVC {pvc} not Bound in {namespace}{hint}")
 
     result = run(
-        ["kubectl", "get", "secret", "hf-secret", f"-n={namespace}"],
+        ["kubectl", "get", "secret", hf_secret_name, f"-n={namespace}"],
         check=False, capture=True,
     )
     if result.returncode != 0:
-        failures.append(f"Secret hf-secret missing in {namespace}")
+        failures.append(f"Secret {hf_secret_name} missing in {namespace}")
 
     return len(failures) == 0, failures
 
@@ -1320,7 +1320,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             dispatchable = pending
 
         for ns, pair_key in zip(free_slots, dispatchable):
-            ready, reasons = _check_slot_ready(ns)
+            hf_secret_name = setup_config.get("hf_secret_name", "hf-secret")
+            ready, reasons = _check_slot_ready(ns, hf_secret_name=hf_secret_name)
             if not ready:
                 warn(f"Slot {ns} not ready: {'; '.join(reasons)}")
                 continue

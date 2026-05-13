@@ -1,6 +1,7 @@
 """Tests for deploy.py run orchestrator and status subcommand."""
 import argparse
 import json
+from unittest.mock import patch
 
 
 _PROGRESS = {
@@ -1354,3 +1355,44 @@ def test_epp_action_build(tmp_path):
     (tmp_path / "run_metadata.json").write_text(json.dumps({"component_image": "quay.io/me/sched:run1"}))
     result = _resolve_epp_action(tmp_path, skip_build_epp=False)
     assert result == "build"
+
+
+# ── _check_slot_ready hf_secret_name parameter ──────────────────────────────
+
+
+class TestCheckSlotReadyHfSecret:
+    """_check_slot_ready uses the hf_secret_name parameter."""
+
+    @patch("pipeline.deploy.run")
+    def test_uses_configured_secret_name(self, mock_run):
+        from pipeline.deploy import _check_slot_ready
+
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = "Bound"
+
+        ready, failures = _check_slot_ready("test-ns", hf_secret_name="my-hf-token")
+
+        secret_calls = [c for c in mock_run.call_args_list
+                        if "secret" in str(c) and "my-hf-token" in str(c)]
+        assert len(secret_calls) == 1
+        assert ready
+
+    @patch("pipeline.deploy.run")
+    def test_reports_configured_secret_name_in_failure(self, mock_run):
+        from pipeline.deploy import _check_slot_ready
+
+        def side_effect(cmd, *, check=True, capture=False, input=None):
+            class R:
+                returncode = 0
+                stdout = "Bound"
+            r = R()
+            if "secret" in cmd:
+                r.returncode = 1
+            return r
+
+        mock_run.side_effect = side_effect
+
+        ready, failures = _check_slot_ready("test-ns", hf_secret_name="my-hf-token")
+
+        assert not ready
+        assert any("my-hf-token" in f for f in failures)
