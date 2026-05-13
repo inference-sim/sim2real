@@ -1137,11 +1137,6 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     pair_costs = _derive_pair_gpu_costs(
         discovered, defaults=defaults_result, fallback_cost=fallback_cost,
     )
-    unique_costs = set(pair_costs.values())
-    if len(unique_costs) == 1:
-        info(f"GPU cost per pair: {unique_costs.pop()}")
-    else:
-        info(f"GPU cost per pair: {min(unique_costs)}–{max(unique_costs)} (heterogeneous)")
 
     # Initialize new entries (first run or new pairs added)
     for key, meta in discovered.items():
@@ -1314,7 +1309,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
         capacity = probe_free_gpus(gpu_resource_type=gpu_resource_type)
         if isinstance(capacity, tuple):
             free_gpus, allocatable, requested = capacity
-            info(f"Capacity: {free_gpus} free GPUs ({allocatable} allocatable − {requested} requested)")
+            if _pending_pairs():
+                info(f"Capacity: {free_gpus} free GPUs ({allocatable} allocatable − {requested} requested)")
             if _probe_fail_count > 0:
                 info(f"Capacity probe recovered after {_probe_fail_count} failure(s)")
             _probe_fail_count = 0
@@ -1376,6 +1372,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 continue
 
             entry = progress[pair_key]
+            pair_cost = entry.get("gpu_cost", fallback_cost)
+            info(f"{pair_key} requires {pair_cost} GPUs")
             pr_meta = discovered.get(pair_key, {})
             pr_path_str = pr_meta.get("pr_path", "")
             if not pr_path_str:
