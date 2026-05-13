@@ -1441,3 +1441,72 @@ def test_load_pairs_missing_scenario_content(tmp_path):
 
     pairs = _load_pairs(cluster_dir)
     assert pairs["wl-wl1-baseline"]["scenario_content"] is None
+
+
+# ── _derive_pair_gpu_costs ───────────────────────────────────────────────────
+
+
+def test_derive_pair_gpu_costs_heterogeneous():
+    """Per-pair cost derivation produces different costs for different scenarios."""
+    import yaml as _yaml
+    from pipeline.deploy import _derive_pair_gpu_costs
+
+    defaults = {
+        "accelerator": {"count": 1},
+        "decode": {"enabled": True, "replicas": 1},
+    }
+
+    scenario_a = {"scenario": [{"decode": {"replicas": 2}}]}
+    scenario_b = {"scenario": [{"decode": {"replicas": 4}}]}
+
+    discovered = {
+        "wl-a-baseline": {"scenario_content": _yaml.dump(scenario_a)},
+        "wl-b-treatment": {"scenario_content": _yaml.dump(scenario_b)},
+    }
+
+    costs = _derive_pair_gpu_costs(discovered, defaults=defaults, fallback_cost=1)
+    assert costs["wl-a-baseline"] == 2
+    assert costs["wl-b-treatment"] == 4
+
+
+def test_derive_pair_gpu_costs_fallback_on_missing_scenario():
+    """When scenarioContent is None, falls back to defaults-only derivation."""
+    from pipeline.deploy import _derive_pair_gpu_costs
+
+    defaults = {
+        "decode": {"enabled": True, "replicas": 1},
+        "accelerator": {"count": 4},
+    }
+
+    discovered = {
+        "wl-a-baseline": {"scenario_content": None},
+    }
+
+    costs = _derive_pair_gpu_costs(discovered, defaults=defaults, fallback_cost=1)
+    assert costs["wl-a-baseline"] == 4
+
+
+def test_derive_pair_gpu_costs_fallback_on_bad_yaml():
+    """When scenarioContent is invalid YAML, falls back to defaults-only derivation."""
+    from pipeline.deploy import _derive_pair_gpu_costs
+
+    defaults = {"decode": {"enabled": True, "replicas": 1}, "accelerator": {"count": 2}}
+
+    discovered = {
+        "wl-a-baseline": {"scenario_content": ": invalid: yaml: ["},
+    }
+
+    costs = _derive_pair_gpu_costs(discovered, defaults=defaults, fallback_cost=99)
+    assert costs["wl-a-baseline"] == 2
+
+
+def test_derive_pair_gpu_costs_no_defaults():
+    """When defaults is None, uses fallback_cost for all pairs."""
+    from pipeline.deploy import _derive_pair_gpu_costs
+
+    discovered = {
+        "wl-a-baseline": {"scenario_content": "scenario:\n- decode:\n    replicas: 2\n"},
+    }
+
+    costs = _derive_pair_gpu_costs(discovered, defaults=None, fallback_cost=7)
+    assert costs["wl-a-baseline"] == 7

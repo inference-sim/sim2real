@@ -983,6 +983,48 @@ def _do_collect(pair_key: str, entry: dict, run_dir: Path, store, progress: dict
     return ok
 
 
+def _derive_pair_gpu_costs(
+    discovered: dict,
+    *,
+    defaults: dict | None,
+    fallback_cost: int,
+) -> dict[str, int]:
+    """Compute GPU cost per pair from its scenarioContent.
+
+    Fallback chain per pair:
+      1. Parse scenarioContent → gpu_cost_per_pair(scenario, defaults)
+      2. If scenarioContent missing/invalid → gpu_cost_per_pair({}, defaults)
+      3. If defaults unavailable or derivation fails → fallback_cost
+    """
+    from pipeline.lib.capacity import gpu_cost_per_pair
+
+    costs = {}
+    for key, meta in discovered.items():
+        if defaults is None:
+            costs[key] = fallback_cost
+            continue
+
+        scenario_content = meta.get("scenario_content")
+        resolved = None
+        if scenario_content:
+            try:
+                resolved = yaml.safe_load(scenario_content)
+            except yaml.YAMLError:
+                pass
+
+        if resolved and isinstance(resolved, dict):
+            result = gpu_cost_per_pair(resolved, defaults)
+        else:
+            result = gpu_cost_per_pair({}, defaults)
+
+        if isinstance(result, int):
+            costs[key] = result
+        else:
+            costs[key] = fallback_cost
+
+    return costs
+
+
 def _capacity_limited_pairs(
     pending: list[str],
     progress: dict,
