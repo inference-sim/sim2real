@@ -30,6 +30,7 @@ class SetupConfig:
 # ── Repo layout ──────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEKTONC_DIR = REPO_ROOT / "tektonc-data-collection"
+_DEFAULT_HF_SECRET_NAME = "hf-secret"
 
 # Overridden in main() when --experiment-root is specified.
 EXPERIMENT_ROOT = REPO_ROOT
@@ -390,7 +391,7 @@ def step_secrets(cfg: SetupConfig, container_rt: str) -> None:
     if cfg.no_cluster:
         ok("Secrets (skipped — --no-cluster)"); return
 
-    hf_secret_name = "hf-secret"
+    hf_secret_name = _DEFAULT_HF_SECRET_NAME
 
     if not cfg.hf_token and secret_exists(hf_secret_name, cfg.namespace):
         ok(f"{hf_secret_name} already exists (reusing)")
@@ -667,7 +668,7 @@ def step_config_output(cfg: SetupConfig, run_dir: Path, container_rt: str) -> No
         "container_runtime": container_rt,
         "current_run": cfg.run_name,
         "setup_timestamp": now_iso,
-        "hf_secret_name": "hf-secret",
+        "hf_secret_name": _DEFAULT_HF_SECRET_NAME,
         "workspaces": {
             "data-storage":   {"persistentVolumeClaim": {"claimName": "data-pvc"}},
             "source":         {"persistentVolumeClaim": {"claimName": "source-pvc"}},

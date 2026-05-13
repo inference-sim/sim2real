@@ -471,7 +471,9 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
         sys.exit(1)
     hf_secret_name = setup_config.get("hf_secret_name", "hf-secret")
     for pkg in packages:
-        inject_hf_secret_name(pkg.resolved, hf_secret_name)
+        if not inject_hf_secret_name(pkg.resolved, hf_secret_name):
+            err(f"{pkg.name} has no 'scenario' entries — huggingface.secretName cannot be injected.")
+            sys.exit(1)
 
     # 4c: Write resolved scenarios
     cluster_dir = run_dir / "cluster"

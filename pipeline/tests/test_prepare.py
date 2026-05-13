@@ -1331,8 +1331,8 @@ class TestBaselineOnlyNoAlgorithm:
         # Empty workloads to skip PipelineRun generation (avoids setup_config dep)
         manifest["workloads"] = []
 
-        # baseline.yaml must exist for assembly
-        (repo / "baseline.yaml").write_text(yaml.dump({"model": {"name": "test"}}))
+        # baseline.yaml must exist for assembly (needs scenario list for HF injection)
+        (repo / "baseline.yaml").write_text(yaml.dump({"scenario": [{"name": "test", "model": {"name": "test"}}]}))
 
         # setup_config.json required for HF secret injection
         ws_dir = repo / "workspace"
