@@ -991,10 +991,12 @@ def _derive_pair_gpu_costs(
 ) -> dict[str, int]:
     """Compute GPU cost per pair from its scenarioContent.
 
-    Fallback chain per pair:
+    If defaults is None, returns fallback_cost for all pairs immediately.
+
+    Otherwise, per pair:
       1. Parse scenarioContent → gpu_cost_per_pair(scenario, defaults)
       2. If scenarioContent missing/invalid → gpu_cost_per_pair({}, defaults)
-      3. If defaults unavailable or derivation fails → fallback_cost
+      3. If derivation returns an error → fallback_cost
     """
     from pipeline.lib.capacity import gpu_cost_per_pair
 
@@ -1009,8 +1011,8 @@ def _derive_pair_gpu_costs(
         if scenario_content:
             try:
                 resolved = yaml.safe_load(scenario_content)
-            except yaml.YAMLError:
-                pass
+            except yaml.YAMLError as e:
+                warn(f"{key}: scenarioContent is invalid YAML ({e}) — deriving cost from defaults")
 
         if resolved and isinstance(resolved, dict):
             result = gpu_cost_per_pair(resolved, defaults)
@@ -1020,6 +1022,7 @@ def _derive_pair_gpu_costs(
         if isinstance(result, int):
             costs[key] = result
         else:
+            warn(f"{key}: GPU cost derivation failed: {result} — using fallback ({fallback_cost})")
             costs[key] = fallback_cost
 
     return costs
