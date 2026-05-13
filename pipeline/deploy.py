@@ -696,6 +696,7 @@ def _load_pairs(cluster_dir: Path) -> dict:
                 "pr_name": pr_name,
                 "pr_path": str(pr_path),
                 "namespace": pr_data.get("metadata", {}).get("namespace", ""),
+                "scenario_content": params.get("scenarioContent"),
             }
         except Exception as e:
             warn(f"Skipping {pr_path.name}: {e}")

@@ -1396,3 +1396,48 @@ class TestCheckSlotReadyHfSecret:
 
         assert not ready
         assert any("my-hf-token" in f for f in failures)
+
+
+def test_load_pairs_includes_scenario_content(tmp_path):
+    """_load_pairs extracts scenarioContent param from PipelineRun YAMLs."""
+    import yaml as _yaml
+    from pipeline.deploy import _load_pairs
+
+    cluster_dir = tmp_path / "cluster"
+    cluster_dir.mkdir()
+
+    scenario = {"scenario": [{"decode": {"replicas": 2}}]}
+    pr = {
+        "metadata": {"name": "baseline-wl1-run1", "namespace": "ns"},
+        "spec": {"params": [
+            {"name": "workloadName", "value": "wl1"},
+            {"name": "phase", "value": "baseline"},
+            {"name": "scenarioContent", "value": _yaml.dump(scenario)},
+        ]},
+    }
+    (cluster_dir / "pipelinerun-wl1-baseline.yaml").write_text(_yaml.dump(pr))
+
+    pairs = _load_pairs(cluster_dir)
+    assert "wl-wl1-baseline" in pairs
+    assert pairs["wl-wl1-baseline"]["scenario_content"] == _yaml.dump(scenario)
+
+
+def test_load_pairs_missing_scenario_content(tmp_path):
+    """_load_pairs sets scenario_content to None when param is absent."""
+    import yaml as _yaml
+    from pipeline.deploy import _load_pairs
+
+    cluster_dir = tmp_path / "cluster"
+    cluster_dir.mkdir()
+
+    pr = {
+        "metadata": {"name": "baseline-wl1-run1", "namespace": "ns"},
+        "spec": {"params": [
+            {"name": "workloadName", "value": "wl1"},
+            {"name": "phase", "value": "baseline"},
+        ]},
+    }
+    (cluster_dir / "pipelinerun-wl1-baseline.yaml").write_text(_yaml.dump(pr))
+
+    pairs = _load_pairs(cluster_dir)
+    assert pairs["wl-wl1-baseline"]["scenario_content"] is None
