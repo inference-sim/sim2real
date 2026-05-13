@@ -131,6 +131,7 @@ def _validate_v3_fields(data: dict) -> None:
             raise ManifestError(
                 "component is required when algorithms are specified"
             )
+        # Remove explicit null so downstream .get("component", {}) returns {} not None
         data.pop("component", None)
     elif not isinstance(component, dict):
         raise ManifestError("component must be a mapping")

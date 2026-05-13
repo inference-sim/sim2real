@@ -1302,3 +1302,55 @@ def test_status_empty_pairs_only_orchestrator(tmp_path, capsys):
     _cmd_status(args, pf)
     out = capsys.readouterr().out
     assert "0 pairs" in out
+
+
+# ── EPP build decision (_resolve_epp_action) ──────────────────────────────────
+
+def test_epp_action_missing_metadata(tmp_path):
+    """Missing run_metadata.json → error."""
+    from pipeline.deploy import _resolve_epp_action
+    result = _resolve_epp_action(tmp_path, skip_build_epp=False)
+    assert result.startswith("error:")
+    assert "run_metadata.json not found" in result
+
+
+def test_epp_action_malformed_json(tmp_path):
+    """Corrupt run_metadata.json → error."""
+    from pipeline.deploy import _resolve_epp_action
+    (tmp_path / "run_metadata.json").write_text("{bad json")
+    result = _resolve_epp_action(tmp_path, skip_build_epp=False)
+    assert result.startswith("error:")
+    assert "not valid JSON" in result
+
+
+def test_epp_action_no_component_image(tmp_path):
+    """component_image absent → skip."""
+    from pipeline.deploy import _resolve_epp_action
+    (tmp_path / "run_metadata.json").write_text(json.dumps({"registry": "quay.io/me"}))
+    result = _resolve_epp_action(tmp_path, skip_build_epp=False)
+    assert result == "skip"
+
+
+def test_epp_action_empty_component_image(tmp_path):
+    """component_image is empty string → error (misconfigured setup)."""
+    from pipeline.deploy import _resolve_epp_action
+    (tmp_path / "run_metadata.json").write_text(json.dumps({"component_image": ""}))
+    result = _resolve_epp_action(tmp_path, skip_build_epp=False)
+    assert result.startswith("error:")
+    assert "empty" in result
+
+
+def test_epp_action_skip_build_flag(tmp_path):
+    """component_image present + --skip-build-epp → skip."""
+    from pipeline.deploy import _resolve_epp_action
+    (tmp_path / "run_metadata.json").write_text(json.dumps({"component_image": "quay.io/me/sched:run1"}))
+    result = _resolve_epp_action(tmp_path, skip_build_epp=True)
+    assert result == "skip"
+
+
+def test_epp_action_build(tmp_path):
+    """component_image present, no skip flag → build."""
+    from pipeline.deploy import _resolve_epp_action
+    (tmp_path / "run_metadata.json").write_text(json.dumps({"component_image": "quay.io/me/sched:run1"}))
+    result = _resolve_epp_action(tmp_path, skip_build_epp=False)
+    assert result == "build"

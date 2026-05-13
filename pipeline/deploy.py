@@ -86,6 +86,31 @@ def _load_setup_config() -> dict:
     return {}
 
 
+# ── EPP build decision ─────────────────────────────────────────────────────────
+
+def _resolve_epp_action(run_dir: Path, skip_build_epp: bool) -> str:
+    """Determine EPP build action based on run metadata.
+
+    Returns one of: "build", "skip", "error:<message>"
+    """
+    run_meta_path = run_dir / "run_metadata.json"
+    if not run_meta_path.exists():
+        return "error:run_metadata.json not found — run setup.py first."
+    try:
+        run_meta = json.loads(run_meta_path.read_text())
+    except json.JSONDecodeError as e:
+        return f"error:run_metadata.json is not valid JSON: {e}. Re-run setup.py."
+
+    component_image = run_meta.get("component_image")
+    if component_image is None:
+        return "skip"
+    if not component_image:
+        return "error:component_image is empty in run_metadata.json. Re-run setup.py with a valid --registry."
+    if skip_build_epp:
+        return "skip"
+    return "build"
+
+
 # ── EPP Image build ─────────────────────────────────────────────────────────
 
 def _build_epp_image(run_dir: Path, run_name: str, namespace: str) -> str:
@@ -997,20 +1022,11 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
         err("No namespaces configured. Run setup.py with --namespaces."); sys.exit(1)
 
     # Decide whether to build EPP image
-    run_meta_path = run_dir / "run_metadata.json"
-    if not run_meta_path.exists():
-        err("run_metadata.json not found — run setup.py first."); sys.exit(1)
-    try:
-        run_meta = json.loads(run_meta_path.read_text())
-    except json.JSONDecodeError as e:
-        err(f"run_metadata.json is not valid JSON: {e}. Re-run setup.py."); sys.exit(1)
-
-    has_component_image = bool(run_meta.get("component_image"))
-
-    if not has_component_image:
+    epp_action = _resolve_epp_action(run_dir, args.skip_build_epp)
+    if epp_action.startswith("error:"):
+        err(epp_action[len("error:"):]); sys.exit(1)
+    elif epp_action == "skip":
         info("No component_image in run metadata — skipping EPP build")
-    elif args.skip_build_epp:
-        info("Skipping EPP build (--skip-build-epp)")
     else:
         _build_epp_image(run_dir, run_dir.name, namespaces[0])
 
