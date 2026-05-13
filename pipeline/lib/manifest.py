@@ -122,60 +122,65 @@ def load_manifest(path: "Path | str") -> dict:
 def _validate_v3_fields(data: dict) -> None:
     """Validate and apply defaults for v3-specific fields."""
 
-    # component (required)
+    # component (required only when algorithms are present)
     component = data.get("component")
+    has_algorithms = bool(data.get("algorithms"))
+
     if component is None:
-        raise ManifestError("Missing required field: component")
-    if not isinstance(component, dict):
+        if has_algorithms:
+            raise ManifestError(
+                "component is required when algorithms are specified"
+            )
+    elif not isinstance(component, dict):
         raise ManifestError("component must be a mapping")
+    else:
+        # component.repo (required)
+        repo = component.get("repo")
+        if not repo or not isinstance(repo, str):
+            raise ManifestError("Missing required field: component.repo")
 
-    # component.repo (required)
-    repo = component.get("repo")
-    if not repo or not isinstance(repo, str):
-        raise ManifestError("Missing required field: component.repo")
+        # component.kind (required)
+        kind = component.get("kind")
+        if not kind or not isinstance(kind, str):
+            raise ManifestError("Missing required field: component.kind")
 
-    # component.kind (required)
-    kind = component.get("kind")
-    if not kind or not isinstance(kind, str):
-        raise ManifestError("Missing required field: component.kind")
+        # component.path (optional, defaults from last segment of repo)
+        if "path" not in component:
+            component["path"] = repo.rstrip("/").rsplit("/", 1)[-1]
 
-    # component.path (optional, defaults from last segment of repo)
-    if "path" not in component:
-        component["path"] = repo.rstrip("/").rsplit("/", 1)[-1]
+        # component.ref (optional)
+        ref = component.get("ref")
+        if ref is not None:
+            if not isinstance(ref, str) or not ref.strip():
+                raise ManifestError("component.ref must be a non-empty string")
 
-    # component.ref (optional)
-    ref = component.get("ref")
-    if ref is not None:
-        if not isinstance(ref, str) or not ref.strip():
-            raise ManifestError("component.ref must be a non-empty string")
+        # component.base_image (optional)
+        base_image = component.get("base_image")
+        if base_image is not None:
+            if not isinstance(base_image, dict):
+                raise ManifestError("component.base_image must be a mapping")
+            for f in ("hub", "name"):
+                if f not in base_image:
+                    raise ManifestError(f"Missing required field: component.base_image.{f}")
 
-    # component.base_image (optional)
-    base_image = component.get("base_image")
-    if base_image is not None:
-        if not isinstance(base_image, dict):
-            raise ManifestError("component.base_image must be a mapping")
-        for f in ("hub", "name"):
-            if f not in base_image:
-                raise ManifestError(f"Missing required field: component.base_image.{f}")
-
-    # component.build (optional)
-    build = component.get("build")
-    if build is not None:
-        if not isinstance(build, dict):
-            raise ManifestError("component.build must be a mapping")
-        build.setdefault("commands", [])
-        cmds = build["commands"]
-        if not isinstance(cmds, list):
-            raise ManifestError("component.build.commands must be a list")
-        build_image = build.get("image")
-        if build_image is not None:
-            if not isinstance(build_image, dict):
-                raise ManifestError("component.build.image must be a mapping")
-            if base_image is not None:
-                build_image.setdefault("hub", base_image["hub"])
-                build_image.setdefault("name", base_image["name"])
-            if "hub" not in build_image:
-                raise ManifestError("Missing required field: component.build.image.hub")
+        # component.build (optional)
+        build = component.get("build")
+        if build is not None:
+            if not isinstance(build, dict):
+                raise ManifestError("component.build must be a mapping")
+            build.setdefault("commands", [])
+            cmds = build["commands"]
+            if not isinstance(cmds, list):
+                raise ManifestError("component.build.commands must be a list")
+            build_image = build.get("image")
+            if build_image is not None:
+                if not isinstance(build_image, dict):
+                    raise ManifestError("component.build.image must be a mapping")
+                if base_image is not None:
+                    build_image.setdefault("hub", base_image["hub"])
+                    build_image.setdefault("name", base_image["name"])
+                if "hub" not in build_image:
+                    raise ManifestError("Missing required field: component.build.image.hub")
 
     # pipeline (optional, defaults applied)
     pipeline = data.get("pipeline")

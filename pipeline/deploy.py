@@ -997,10 +997,17 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
         err("No namespaces configured. Run setup.py with --namespaces."); sys.exit(1)
 
     # Build EPP image (tag is deterministic — already embedded in PipelineRuns by prepare.py)
-    if not args.skip_build_epp:
-        _build_epp_image(run_dir, run_dir.name, namespaces[0])
-    else:
+    run_meta_path = run_dir / "run_metadata.json"
+    has_component_image = False
+    if run_meta_path.exists():
+        has_component_image = bool(json.loads(run_meta_path.read_text()).get("component_image"))
+
+    if not has_component_image:
+        info("No component_image in run metadata — skipping EPP build (baseline-only)")
+    elif args.skip_build_epp:
         info("Skipping EPP build (--skip-build-epp)")
+    else:
+        _build_epp_image(run_dir, run_dir.name, namespaces[0])
 
     max_retries = getattr(args, "max_retries", 2)
     poll_interval = getattr(args, "poll_interval", 30)
