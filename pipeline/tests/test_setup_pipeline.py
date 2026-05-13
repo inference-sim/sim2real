@@ -188,6 +188,28 @@ class TestSetupConfigJson:
             setup_module.EXPERIMENT_ROOT = original_experiment_root
 
 
+    def test_config_output_includes_hf_secret_name(self, tmp_path):
+        """setup_config.json includes hf_secret_name field."""
+        from pipeline.setup import step_config_output
+        import pipeline.setup as setup_module
+
+        original_experiment_root = setup_module.EXPERIMENT_ROOT
+        setup_module.EXPERIMENT_ROOT = tmp_path
+
+        try:
+            run_dir = tmp_path / "workspace" / "runs" / "test-run"
+            run_dir.mkdir(parents=True)
+
+            cfg = _make_config()
+            step_config_output(cfg, run_dir, "podman")
+
+            config_path = tmp_path / "workspace" / "setup_config.json"
+            data = json.loads(config_path.read_text())
+            assert data["hf_secret_name"] == "hf-secret"
+        finally:
+            setup_module.EXPERIMENT_ROOT = original_experiment_root
+
+
 class TestBuildParser:
     """build_parser includes --pipeline-yaml flag."""
 
