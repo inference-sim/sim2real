@@ -6,6 +6,7 @@ on:
     paths:
       - "pipeline/**"
       - "Dockerfile"
+      - ".dockerignore"
       - ".github/workflows/orchestrator-image.yml"
   workflow_dispatch:
 
@@ -53,7 +54,10 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Smoke test
-        run: docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} --help
+        run: |
+          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} --help
+          docker run --rm --entrypoint kubectl ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} version --client
+          docker run --rm --entrypoint python ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} -c "from pipeline.lib import assemble, backoff, capacity, context_builder, epp, health, manifest, pod_pending, progress, run_manager, state_machine, tekton, values; print('OK')"
 
       - name: Push
         run: docker push --all-tags ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}

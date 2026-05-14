@@ -17,4 +17,5 @@ prompts
 *.log
 .env
 .env.local
+go.work
 .DS_Store
