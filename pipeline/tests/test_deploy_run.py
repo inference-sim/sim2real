@@ -499,6 +499,97 @@ def test_do_collect_interrupt_saves_collect_failed(tmp_path, monkeypatch):
     assert saved["wl-x-baseline"]["namespace"] is None
 
 
+# ── _do_collect + _delete_pipelinerun ─────────────────────────────────────────
+
+def test_do_collect_deletes_pipelinerun_on_success(tmp_path, monkeypatch):
+    """Successful collection triggers PipelineRun deletion."""
+    import pipeline.deploy as mod
+    from pipeline.lib.progress import LocalProgressStore
+
+    monkeypatch.setattr(mod, "_collect_pair", lambda *a: True)
+
+    deleted = []
+    monkeypatch.setattr(mod, "_delete_pipelinerun",
+                        lambda pr, ns: deleted.append((pr, ns)))
+
+    entry = {"workload": "wl-x", "package": "baseline", "status": "collecting",
+             "namespace": "sim2real-0", "retries": 0}
+    progress = {"wl-x-baseline": entry}
+    store = LocalProgressStore(tmp_path / "progress.json")
+    store.save(progress)
+    result = mod._do_collect("wl-x-baseline", entry, tmp_path, store, progress,
+                             pr_name="baseline-x-run1")
+    assert result is True
+    assert deleted == [("baseline-x-run1", "sim2real-0")]
+
+
+def test_do_collect_skips_delete_on_failure(tmp_path, monkeypatch):
+    """Failed collection does NOT delete the PipelineRun."""
+    import pipeline.deploy as mod
+    from pipeline.lib.progress import LocalProgressStore
+
+    monkeypatch.setattr(mod, "_collect_pair", lambda *a: False)
+
+    deleted = []
+    monkeypatch.setattr(mod, "_delete_pipelinerun",
+                        lambda pr, ns: deleted.append((pr, ns)))
+
+    entry = {"workload": "wl-x", "package": "baseline", "status": "collecting",
+             "namespace": "sim2real-0", "retries": 0}
+    progress = {"wl-x-baseline": entry}
+    store = LocalProgressStore(tmp_path / "progress.json")
+    store.save(progress)
+    result = mod._do_collect("wl-x-baseline", entry, tmp_path, store, progress,
+                             pr_name="baseline-x-run1")
+    assert result is False
+    assert deleted == []
+
+
+def test_do_collect_skips_delete_on_interrupt(tmp_path, monkeypatch):
+    """KeyboardInterrupt during collection does NOT delete PipelineRun."""
+    import pytest
+    import pipeline.deploy as mod
+    from pipeline.lib.progress import LocalProgressStore
+
+    def _raise(*a):
+        raise KeyboardInterrupt()
+    monkeypatch.setattr(mod, "_collect_pair", _raise)
+
+    deleted = []
+    monkeypatch.setattr(mod, "_delete_pipelinerun",
+                        lambda pr, ns: deleted.append((pr, ns)))
+
+    entry = {"workload": "wl-x", "package": "baseline", "status": "collecting",
+             "namespace": "sim2real-0", "retries": 0}
+    progress = {"wl-x-baseline": entry}
+    store = LocalProgressStore(tmp_path / "progress.json")
+    store.save(progress)
+    with pytest.raises(KeyboardInterrupt):
+        mod._do_collect("wl-x-baseline", entry, tmp_path, store, progress,
+                        pr_name="baseline-x-run1")
+    assert deleted == []
+
+
+def test_do_collect_returns_true_when_delete_raises(tmp_path, monkeypatch):
+    """If _delete_pipelinerun raises OSError, _do_collect still returns True."""
+    import pipeline.deploy as mod
+    from pipeline.lib.progress import LocalProgressStore
+
+    monkeypatch.setattr(mod, "_collect_pair", lambda *a: True)
+    monkeypatch.setattr(mod, "_delete_pipelinerun",
+                        lambda pr, ns: (_ for _ in ()).throw(OSError("kubectl not found")))
+
+    entry = {"workload": "wl-x", "package": "baseline", "status": "collecting",
+             "namespace": "sim2real-0", "retries": 0}
+    progress = {"wl-x-baseline": entry}
+    store = LocalProgressStore(tmp_path / "progress.json")
+    store.save(progress)
+    result = mod._do_collect("wl-x-baseline", entry, tmp_path, store, progress,
+                             pr_name="baseline-x-run1")
+    assert result is True
+    assert entry["status"] == "done"
+
+
 # ── _force_reset ──────────────────────────────────────────────────────────────
 
 def _mock_run(monkeypatch):

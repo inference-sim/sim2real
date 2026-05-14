@@ -187,6 +187,19 @@ def _cancel_and_delete_pipelinerun(pr_name: str, namespace: str) -> None:
     )
 
 
+def _delete_pipelinerun(pr_name: str, namespace: str) -> None:
+    """Delete a completed PipelineRun. Best-effort — warns on failure."""
+    result = run(
+        ["kubectl", "delete", "pipelinerun", pr_name, "-n", namespace,
+         "--ignore-not-found"],
+        check=False, capture=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() if result.stderr else ""
+        warn(f"Failed to delete PipelineRun {pr_name!r} in {namespace}" +
+             (f": {detail}" if detail else ""))
+
+
 # ── Deploy command ───────────────────────────────────────────────────────────
 
 # ── Status command ───────────────────────────────────────────────────────────
@@ -969,7 +982,9 @@ def _reconcile_collecting(key: str, entry: dict, run_dir: Path) -> None:
     entry["namespace"] = None
 
 
-def _do_collect(pair_key: str, entry: dict, run_dir: Path, store, progress: dict) -> bool:
+def _do_collect(pair_key: str, entry: dict, run_dir: Path, store, progress: dict,
+                *, pr_name: str = "") -> bool:
+    namespace = entry.get("namespace", "")
     ok = False
     try:
         ok = _collect_pair(pair_key, entry, run_dir)
@@ -980,6 +995,11 @@ def _do_collect(pair_key: str, entry: dict, run_dir: Path, store, progress: dict
     finally:
         entry["namespace"] = None
         store.save(progress)
+    if ok and pr_name and namespace:
+        try:
+            _delete_pipelinerun(pr_name, namespace)
+        except Exception as exc:
+            warn(f"Failed to delete PipelineRun {pr_name!r} in {namespace}: {exc}")
     return ok
 
 
@@ -1233,7 +1253,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 store.save(progress)
                 ok_collect = False
                 try:
-                    ok_collect = _do_collect(pair_key, entry, run_dir, store, progress)
+                    ok_collect = _do_collect(pair_key, entry, run_dir, store, progress,
+                                            pr_name=pr_name)
                 finally:
                     del slots_busy[ns]
                 if ok_collect:
