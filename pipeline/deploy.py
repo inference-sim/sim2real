@@ -1697,6 +1697,8 @@ def _cmd_wipe(args, run_dir: Path,
                 pkg_dir.rmdir()
             except OSError:
                 pass
+        else:
+            ok(f"Reset: {key} (no results on disk)")
         entry = progress[key]
         entry["status"] = "pending"
         entry["retries"] = 0
@@ -1709,6 +1711,8 @@ def _cmd_wipe(args, run_dir: Path,
     msg = f"{wiped} pair(s) wiped"
     if errors:
         msg += f" ({errors} failed — check permissions)"
+        warn(msg)
+        sys.exit(1)
     ok(msg)
 
 

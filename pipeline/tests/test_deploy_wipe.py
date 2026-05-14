@@ -337,6 +337,8 @@ def test_wipe_no_results_on_disk(tmp_path, capsys):
 
     saved = json.loads(progress_path.read_text())
     _assert_reset(saved["wl-a-baseline"])
+    captured = capsys.readouterr()
+    assert "no results on disk" in (captured.out + captured.err).lower()
 
 
 def test_wipe_parent_not_removed_when_siblings_remain(tmp_path):
@@ -401,7 +403,9 @@ def test_wipe_rmtree_failure_skips_pair(tmp_path, monkeypatch, capsys):
     class _Args:
         only = None; workload = None; package = None; dry_run = False; yes = True
 
-    mod._cmd_wipe(_Args(), run_dir)
+    with __import__("pytest").raises(SystemExit) as exc_info:
+        mod._cmd_wipe(_Args(), run_dir)
+    assert exc_info.value.code == 1
 
     saved = json.loads(progress_path.read_text())
     # wl-a: rmtree failed → status NOT reset
