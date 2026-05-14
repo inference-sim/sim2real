@@ -442,18 +442,12 @@ def _fmt_size(b: int) -> str:
 
 def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                               run_dir: Path,
-                              skip_logs: bool = False,
-                              workload: "str | None" = None) -> dict[str, "Exception | None"]:
+                              skip_logs: bool = False) -> dict[str, "Exception | None"]:
     """Extract results for one or more phases from data-pvc using a single pod.
 
     Data layout on PVC (written by run-workload-blis-observe):
       /data/{runName}/{phase}/{workloadName}/trace_header.yaml
       /data/{runName}/{phase}/{workloadName}/trace_data.csv
-
-    When *workload* is set, only that workload's subdirectory is copied for
-    each phase (used by inline collection during parallel pool execution).
-    When *workload* is None (default), the entire phase directory is copied
-    (used by `deploy.py collect` for bulk collection).
 
     When *skip_logs* is True, only trace files are copied (skipping vLLM and
     EPP log files which typically account for the bulk of the data).
@@ -520,20 +514,17 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                 # Selective copy: trace files + epp_logs via kubectl cp per
                 # workload; skips vLLM server_logs which dominate data volume.
                 # BusyBox tar doesn't handle large streaming well, so use cp.
-                if workload:
-                    wl_names = [workload]
-                else:
-                    list_result = run(
-                        ["kubectl", "exec", pod_name, f"-n={namespace}", "--",
-                         "sh", "-c",
-                         f"ls /data/{run_name}/{phase}/"],
-                        check=False, capture=True,
-                    )
-                    if list_result.returncode != 0:
-                        errors[phase] = RuntimeError(
-                            f"failed to list workloads: {list_result.stderr.strip()}")
-                        continue
-                    wl_names = list_result.stdout.strip().split() if list_result.stdout.strip() else []
+                list_result = run(
+                    ["kubectl", "exec", pod_name, f"-n={namespace}", "--",
+                     "sh", "-c",
+                     f"ls /data/{run_name}/{phase}/"],
+                    check=False, capture=True,
+                )
+                if list_result.returncode != 0:
+                    errors[phase] = RuntimeError(
+                        f"failed to list workloads: {list_result.stderr.strip()}")
+                    continue
+                wl_names = list_result.stdout.strip().split() if list_result.stdout.strip() else []
                 phase_errors = []
                 for wl_name in wl_names:
                     wl_dest = dest_dir / wl_name
@@ -555,21 +546,6 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                         phase_errors.append(f"{wl_name}/epp_logs: {r.stderr.strip()}")
                 if phase_errors:
                     errors[phase] = RuntimeError("; ".join(phase_errors))
-                else:
-                    errors[phase] = None
-            elif workload:
-                # Workload-scoped full copy: only this workload's subdirectory.
-                wl_dest = dest_dir / workload
-                wl_dest.mkdir(parents=True, exist_ok=True)
-                result = run(
-                    ["kubectl", "cp",
-                     f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{workload}/",
-                     str(wl_dest), "--retries=3"],
-                    check=False, capture=True,
-                )
-                if result.returncode != 0:
-                    errors[phase] = RuntimeError(
-                        f"kubectl cp failed: {result.stderr.strip()}")
                 else:
                     errors[phase] = None
             else:
@@ -620,7 +596,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
         known_phases = sorted({
             entry.get("package", "")
             for entry in progress.values()
-            if isinstance(entry, dict) and entry.get("status") in ("done", "collecting")
+            if isinstance(entry, dict) and entry.get("status") == "done"
         } - {""})
     else:
         known_phases = []
@@ -631,7 +607,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
         if progress is None and not progress_path.exists():
             warn(f"No progress.json found — discovered phases from cluster/: {known_phases}")
         elif progress is not None:
-            warn(f"No done/collecting phases in progress — discovered from cluster/: {known_phases}")
+            warn(f"No done phases in progress — discovered from cluster/: {known_phases}")
 
     if args.package:
         valid = set(known_phases) | {"experiment"}
@@ -730,7 +706,7 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
     pr_name = discovered.get(key, {}).get("pr_name", "")
     is_done = entry.get("status") == "done"
 
-    # No namespace and no pr_name — just reset state (e.g. collect-failed)
+    # No namespace and no pr_name — just reset state
     if not ns and not pr_name:
         if not dry_run and not is_done:
             entry["status"] = "pending"
@@ -762,7 +738,7 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
             else:
                 warn(f"{key}: kubectl delete pipelinerun failed in {ns}")
     elif namespaces:
-        # Namespace already freed (done/collect-failed) — search all slots
+        # Namespace already freed — search all slots
         for slot_ns in namespaces:
             result = run(["kubectl", "delete", "pipelinerun", pr_name, "-n", slot_ns,
                          "--ignore-not-found"], check=False, capture=True)
@@ -947,60 +923,59 @@ def _check_slot_ready(namespace: str, hf_secret_name: str = "hf-secret") -> tupl
     return len(failures) == 0, failures
 
 
-def _collect_pair(pair_key: str, entry: dict, run_dir: Path) -> bool:
-    """Collect results for a completed pair inline. Returns True on success."""
-    namespace = entry.get("namespace", "")
-    package = entry.get("package", "")
-    wl_name = entry.get("workload", "")
-    run_name = run_dir.name
+def _reconcile_on_resume(progress: dict, discovered: dict) -> None:
+    """Reconcile pair statuses against cluster state when resuming an interrupted run.
 
-    if not namespace or not package:
-        return False
-
-    try:
-        errors = _extract_phases_from_pvc(
-            phases=[package],
-            run_name=run_name,
-            namespace=namespace,
-            run_dir=run_dir,
-            skip_logs=False,
-            workload=wl_name or None,
-        )
-        return errors.get(package) is None
-    except RuntimeError as e:
-        warn(f"Collection failed for {pair_key}: {e}")
-        return False
-
-
-def _reconcile_collecting(key: str, entry: dict, run_dir: Path) -> None:
-    pkg = entry.get("package", "")
-    wl = entry.get("workload", "")
-    if (run_dir / "results" / pkg / wl / "trace_data.csv").exists():
-        entry["status"] = "done"
-    else:
-        entry["status"] = "done" if _collect_pair(key, entry, run_dir) else "pending"
-    entry["namespace"] = None
-
-
-def _do_collect(pair_key: str, entry: dict, run_dir: Path, store, progress: dict,
-                *, pr_name: str = "") -> bool:
-    namespace = entry.get("namespace", "")
-    ok = False
-    try:
-        ok = _collect_pair(pair_key, entry, run_dir)
-        entry["status"] = "done" if ok else "collect-failed"
-    except BaseException:
-        entry["status"] = "collect-failed"
-        raise
-    finally:
-        entry["namespace"] = None
-        store.save(progress)
-    if ok and pr_name and namespace:
-        try:
-            _delete_pipelinerun(pr_name, namespace)
-        except Exception as exc:
-            warn(f"Failed to delete PipelineRun {pr_name!r} in {namespace}: {exc}")
-    return ok
+    - running pairs: check PipelineRun status on cluster and update accordingly
+    - unrecognized statuses (e.g. 'collecting' or 'collect-failed' from a
+      pre-#120 progress.json): reset to pending so they are re-dispatched.
+      This is safe because both historical statuses imply the PipelineRun
+      already succeeded.
+    """
+    _known = ("pending", "running", "done", "failed", "timed-out", "stalled")
+    for key, entry in progress.items():
+        if not _is_pair_key(key):
+            continue
+        if entry["status"] == "running":
+            pr_meta = discovered.get(key, {})
+            pr_name = pr_meta.get("pr_name", "")
+            ns = entry.get("namespace") or ""
+            if pr_name and ns:
+                try:
+                    actual = _check_pipelinerun_status(pr_name, ns)
+                except Exception as exc:
+                    warn(f"[{key}] failed to check PipelineRun status: {exc}")
+                    continue
+                if actual == "Succeeded":
+                    entry["status"] = "done"
+                    entry["pending_since"] = None
+                    try:
+                        _delete_pipelinerun(pr_name, ns)
+                    except Exception as exc:
+                        warn(f"Failed to delete PipelineRun {pr_name!r} in {ns}: {exc}")
+                    entry["namespace"] = None
+                elif actual in ("Failed", "PipelineRunCancelled",
+                               "PipelineRunCouldntGetPipeline",
+                               "PipelineRunTimeout", "CreateRunFailed",
+                               "PipelineRunStopping",
+                               "PipelineRunStoppingTimeout"):
+                    entry["status"] = "failed"
+                    # Retain namespace so reset/cleanup can find the resources
+                    entry["pending_since"] = None
+                elif actual == "Unknown":
+                    warn(f"[{key}] PipelineRun not found on cluster → resetting to pending")
+                    entry["status"] = "pending"
+                    entry["namespace"] = None
+                    entry["pending_since"] = None
+            else:
+                entry["status"] = "pending"
+                entry["namespace"] = None
+                entry["pending_since"] = None
+        elif entry["status"] not in _known:
+            warn(f"[{key}] unrecognized status '{entry['status']}' → resetting to pending")
+            entry["status"] = "pending"
+            entry["namespace"] = None
+            entry["pending_since"] = None
 
 
 def _derive_pair_gpu_costs(
@@ -1185,34 +1160,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             info("--force: no non-pending pairs found in scope — nothing reset")
         store.save(progress)
 
-    # Reconcile 'running' entries against actual cluster state on resume
-    for key, entry in progress.items():
-        if not _is_pair_key(key):
-            continue
-        if entry["status"] == "running":
-            pr_meta = discovered.get(key, {})
-            pr_name = pr_meta.get("pr_name", "")
-            ns = entry.get("namespace") or ""
-            if pr_name and ns:
-                actual = _check_pipelinerun_status(pr_name, ns)
-                if actual == "Succeeded":
-                    entry["status"] = "collecting"
-                    entry["pending_since"] = None
-                elif actual in ("Failed", "PipelineRunCancelled"):
-                    entry["status"] = "failed"
-                    entry["pending_since"] = None
-                elif actual == "Unknown":
-                    warn(f"[{key}] PipelineRun not found on cluster → resetting to pending")
-                    entry["status"] = "pending"
-                    entry["namespace"] = None
-                    entry["pending_since"] = None
-                # If still "Running"/"Started", leave as "running" — will be monitored
-            else:
-                entry["status"] = "pending"
-                entry["namespace"] = None
-                entry["pending_since"] = None
-        elif entry["status"] == "collecting":
-            _reconcile_collecting(key, entry, run_dir)
+    _reconcile_on_resume(progress, discovered)
     store.save(progress)
 
     # Track which namespace is assigned to which pair
@@ -1227,7 +1175,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 if _is_pair_key(k) and v.get("status") == "pending" and k in _scope]
 
     def _work_remaining() -> bool:
-        return any(v.get("status") in ("pending", "running", "collecting")
+        return any(v.get("status") in ("pending", "running")
                    for k, v in progress.items() if _is_pair_key(k) and k in _scope)
 
     timeout_hours = 4
@@ -1248,19 +1196,15 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             status = _check_pipelinerun_status(pr_name, ns) if pr_name else "Unknown"
 
             if status == "Succeeded":
-                info(f"[{pair_key}] Succeeded → collecting")
-                entry["status"] = "collecting"
+                ok(f"[{pair_key}] Succeeded → done")
+                entry["status"] = "done"
+                entry["namespace"] = None
                 store.save(progress)
-                ok_collect = False
                 try:
-                    ok_collect = _do_collect(pair_key, entry, run_dir, store, progress,
-                                            pr_name=pr_name)
-                finally:
-                    del slots_busy[ns]
-                if ok_collect:
-                    ok(f"[{pair_key}] {entry['status']}")
-                else:
-                    warn(f"[{pair_key}] {entry['status']}")
+                    _delete_pipelinerun(pr_name, ns)
+                except Exception as exc:
+                    warn(f"Failed to delete PipelineRun {pr_name!r} in {ns}: {exc}")
+                del slots_busy[ns]
 
             elif status in ("Failed", "PipelineRunCancelled", "PipelineRunCouldntGetPipeline",
                             "PipelineRunTimeout", "CreateRunFailed", "PipelineRunStopping",

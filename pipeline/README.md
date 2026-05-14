@@ -128,7 +128,7 @@ Common flags (all subcommands):
 
 **Pair discovery** — `deploy.py run` discovers `pipelinerun-*.yaml` files at the `cluster/` root. Each file's pair key is derived as `wl-` + filename stem minus the `pipelinerun-` prefix.
 
-**Collection phases** — `deploy.py collect` derives valid phases dynamically from `progress.json` (packages with status `done` or `collecting`). Falls back to `[baseline, treatment]` when no progress exists. Use `--package` to filter, or `--package experiment` to collect all known phases.
+**Collection phases** — `deploy.py collect` derives valid phases dynamically from `progress.json` (packages with status `done`). Falls back to `[baseline, treatment]` when no progress exists. Use `--package` to filter, or `--package experiment` to collect all known phases.
 
 **`--skip-build-epp`** — skips the image build; use when resubmitting after a failed PipelineRun without changing the scorer.
 
@@ -142,7 +142,7 @@ python pipeline/deploy.py reset [flags]     # tear down cluster resources for fa
 python pipeline/deploy.py pairs   [flags]   # list available pair keys, workloads, and packages
 ```
 
-**`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, collects results inline, and retries pairs that time out. Reads `progress.json` to resume interrupted runs.
+**`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, and retries pairs that time out. Reads `progress.json` to resume interrupted runs. Use `deploy.py collect` to pull results off-cluster after runs complete.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -163,9 +163,9 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 **Backoff controller** — when the capacity probe shows `free_gpus < min(pending workload GPU costs)`, the orchestrator enters exponential backoff: poll interval doubles each cycle (capped at `--max-backoff`), and dispatch is skipped until capacity returns. Backoff is also triggered when 3 early reclaims (recoverable only) occur within 10 minutes. The controller resets to normal when a pod successfully schedules or the probe shows sufficient capacity for the largest pending workload. Already-running slots continue to be monitored during backoff. Orchestrator state is persisted in `progress.json` under the `_orchestrator` metadata key.
 
-**Pair statuses:** `pending` → `running` → `collecting` → `done` | `collect-failed`. Failure paths: `running` → `failed` (hard failure or non-recoverable pending), `running` → `timed-out` (4h timeout exceeded), `running` → `pending` (recoverable early reclaim, repeats up to `--max-pending-stalls` times) → `stalled`.
+**Pair statuses:** `pending` → `running` → `done`. Failure paths: `running` → `failed` (hard failure or non-recoverable pending), `running` → `timed-out` (4h timeout exceeded), `running` → `pending` (recoverable early reclaim, repeats up to `--max-pending-stalls` times) → `stalled`.
 
-**Auto-cleanup** — when a PipelineRun succeeds and results are collected, the orchestrator deletes the PipelineRun CR from the cluster. Failed PipelineRuns are left in place for debugging (`kubectl describe`, pod logs). Use `reset` to remove them when done.
+**Auto-cleanup** — when a PipelineRun succeeds, the orchestrator deletes the PipelineRun CR from the cluster. Failed PipelineRuns are left in place for debugging (`kubectl describe`, pod logs). Use `reset` to remove them when done.
 
 **`deploy.py status`** — prints the current state of all pairs from `workspace/runs/<run>/progress.json`. When the orchestrator is in backoff, an additional line shows the current state and backoff level.
 
@@ -302,7 +302,7 @@ All paths are relative to the repo root and validated at Phase 1.
 
 ## Parallel Pool Execution
 
-`setup.py --namespaces NS1,NS2,...` provisions N namespace slots, each bootstrapped identically. `prepare.py` generates one shared Tekton Pipeline plus one PipelineRun per `(workload, package)` pair. `deploy.py run` orchestrates execution by assigning pairs to free slots, polling for completion, collecting results inline, and retrying on timeout. `deploy.py status` reads `workspace/runs/<run>/progress.json` and prints the current state of every pair.
+`setup.py --namespaces NS1,NS2,...` provisions N namespace slots, each bootstrapped identically. `prepare.py` generates one shared Tekton Pipeline plus one PipelineRun per `(workload, package)` pair. `deploy.py run` orchestrates execution by assigning pairs to free slots, polling for completion, and retrying on timeout. Use `deploy.py collect` to pull results off-cluster. `deploy.py status` reads `workspace/runs/<run>/progress.json` and prints the current state of every pair.
 
 | Artifact | Written by | Read by |
 |----------|-----------|---------|
