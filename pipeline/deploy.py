@@ -1533,6 +1533,10 @@ Examples:
 
     sub = p.add_subparsers(dest="command")
     collect_p = sub.add_parser("collect", help="Pull results for completed packages")
+    collect_p.add_argument("--only",     metavar="PAIR",
+                           help="Scope to one specific pair key (wl- prefix optional)")
+    collect_p.add_argument("--workload", metavar="NAME",
+                           help="Scope to pairs matching this workload")
     collect_p.add_argument("--package", nargs="+", metavar="NAME",
                            help="Collect only these packages")
     collect_p.add_argument("--skip-logs", action="store_true", dest="skip_logs",

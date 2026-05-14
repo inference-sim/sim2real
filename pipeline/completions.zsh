@@ -91,6 +91,8 @@ _sim2real_deploy() {
                     ;;
                 collect)
                     _arguments \
+                        '--only[Scope to one pair key]:pair key:_deploy_py_pair_keys' \
+                        '--workload[Scope to workload]:workload:_deploy_py_workloads' \
                         '*--package[Collect only these packages]:package:_deploy_py_packages' \
                         '--skip-logs[Skip vLLM and EPP log files]'
                     ;;

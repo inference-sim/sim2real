@@ -82,7 +82,7 @@ _sim2real_deploy() {
                 COMPREPLY=($(compgen -W "--only --workload --package --status --dry-run" -- "$cur"))
                 ;;
             collect)
-                COMPREPLY=($(compgen -W "--package --skip-logs" -- "$cur"))
+                COMPREPLY=($(compgen -W "--only --workload --package --skip-logs" -- "$cur"))
                 ;;
             pairs)
                 COMPREPLY=($(compgen -W "--keys-only --workloads-only --packages-only" -- "$cur"))
