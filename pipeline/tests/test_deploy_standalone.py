@@ -39,7 +39,7 @@ def test_main_works_without_transfer_yaml(tmp_path, monkeypatch):
 
     status_called = []
 
-    def mock_status(args, progress_path):
+    def mock_status(args, progress_path, setup_config=None):
         status_called.append(progress_path)
 
     with patch.object(deploy, "_cmd_status", mock_status):
