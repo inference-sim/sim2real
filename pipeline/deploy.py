@@ -5,7 +5,7 @@ Subcommands:
   run      Build EPP image, submit PipelineRuns
   status   Show progress of all (workload, package) pairs
   collect  Pull results from cluster for completed phases
-  cleanup  Tear down cluster resources for all non-pending pairs
+  reset    Tear down cluster resources for all non-pending pairs
   pairs    List available pair keys, workloads, and packages
 """
 
@@ -717,14 +717,14 @@ def _load_pairs(cluster_dir: Path) -> dict:
     return pairs
 
 
-def _cleanup_pair(key: str, entry: dict, discovered: dict, *,
-                  dry_run: bool = False, namespaces: list[str] | None = None) -> bool:
+def _reset_pair(key: str, entry: dict, discovered: dict, *,
+                dry_run: bool = False, namespaces: list[str] | None = None) -> bool:
     """Delete PipelineRun and Helm releases for a pair.
 
     For non-done pairs: also resets state to pending.
     For done pairs: deletes PipelineRun only (Helm already torn down by Tekton).
 
-    Returns True if cleanup was performed, False if it failed and state was NOT reset.
+    Returns True if reset was performed, False if it failed and state was NOT reset.
     """
     ns = entry.get("namespace")
     pr_name = discovered.get(key, {}).get("pr_name", "")
@@ -785,7 +785,7 @@ def _cleanup_pair(key: str, entry: dict, discovered: dict, *,
     if ns:
         result = run(["helm", "list", "-n", ns, "-q"], check=False, capture=True)
         if result.returncode != 0:
-            warn(f"{key}: helm list failed in {ns} — skipping cleanup (manual intervention needed)")
+            warn(f"{key}: helm list failed in {ns} — skipping reset (manual intervention needed)")
             return False
         if result.stdout.strip():
             helm_failed = False
@@ -813,19 +813,19 @@ def _force_reset(progress: dict, scope: set, discovered: dict | None = None,
                  namespaces: list[str] | None = None) -> int:
     """Reset non-pending, non-done pairs in scope to pending.
 
-    Calls _cleanup_pair for cluster teardown when possible. Pairs where
-    cleanup fails are skipped (not counted, state preserved).
+    Calls _reset_pair for cluster teardown when possible. Pairs where
+    reset fails are skipped (not counted, state preserved).
     """
     reset = 0
     for key in scope:
         entry = progress.get(key, {})
         if entry.get("status") not in (None, "pending", "done"):
             try:
-                if _cleanup_pair(key, entry, discovered or {},
-                                 namespaces=namespaces):
+                if _reset_pair(key, entry, discovered or {},
+                              namespaces=namespaces):
                     reset += 1
             except Exception as e:
-                warn(f"{key}: cleanup failed during --force: {e}")
+                warn(f"{key}: reset failed during --force: {e}")
     return reset
 
 
@@ -1457,25 +1457,25 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     print()
 
 
-def _cmd_cleanup(args, progress_path: Path, discovered: dict,
-                 namespaces: list[str] | None = None) -> None:
+def _cmd_reset(args, progress_path: Path, discovered: dict,
+               namespaces: list[str] | None = None) -> None:
     """Tear down cluster resources for all non-pending pairs."""
     from pipeline.lib.progress import LocalProgressStore
     store = LocalProgressStore(progress_path)
     progress = store.load()
 
     if not progress:
-        info("No progress data found — nothing to clean up")
+        info("No progress data found — nothing to reset")
         return
 
     _scope = _resolve_scope(progress, args)
 
-    # Exclude pending (nothing to clean)
+    # Exclude pending (nothing to reset)
     actionable = {k for k in _scope
                   if progress[k].get("status") not in (None, "pending")}
 
     if not actionable:
-        info("No pairs need cleanup (all pending)")
+        info("No pairs need reset (all pending)")
         return
 
     dry_run = getattr(args, "dry_run", False)
@@ -1488,19 +1488,19 @@ def _cmd_cleanup(args, progress_path: Path, discovered: dict,
     for key in sorted(actionable):
         entry = progress[key]
         try:
-            if _cleanup_pair(key, entry, discovered, dry_run=dry_run,
-                             namespaces=namespaces):
+            if _reset_pair(key, entry, discovered, dry_run=dry_run,
+                          namespaces=namespaces):
                 cleaned += 1
             else:
                 errors += 1
         except Exception as e:
-            err(f"{key}: cleanup failed — {e}")
+            err(f"{key}: reset failed — {e}")
             errors += 1
 
     if not dry_run:
         store.save(progress)
 
-    msg = f"{cleaned} pair(s) cleaned up"
+    msg = f"{cleaned} pair(s) reset"
     if errors:
         msg += f" ({errors} failed — manual intervention needed)"
     ok(msg)
@@ -1520,8 +1520,8 @@ Examples:
   python pipeline/deploy.py status                     # Show progress snapshot
   python pipeline/deploy.py collect                    # Pull results for completed phases
   python pipeline/deploy.py collect --skip-logs        # Collect traces only (skip large logs)
-  python pipeline/deploy.py cleanup                    # Tear down stalled/failed pairs
-  python pipeline/deploy.py cleanup --dry-run          # Preview what would be cleaned
+  python pipeline/deploy.py reset                       # Reset stalled/failed pairs
+  python pipeline/deploy.py reset --dry-run             # Preview what would be reset
   python pipeline/deploy.py pairs                       # List pairs with workloads and packages
   python pipeline/deploy.py pairs --keys-only           # Machine-readable: keys only
 """,
@@ -1568,13 +1568,13 @@ Examples:
     run_p.add_argument("--max-backoff", type=int, default=600, dest="max_backoff",
                        help="Maximum backoff interval in seconds during GPU scarcity [600]")
 
-    cleanup_p = sub.add_parser("cleanup", help="Tear down cluster resources for all non-pending pairs")
-    cleanup_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key (wl- prefix optional)")
-    cleanup_p.add_argument("--workload", metavar="NAME",  help="Scope to pairs matching this workload")
-    cleanup_p.add_argument("--package",  metavar="NAME",  help="Scope to pairs matching this package")
-    cleanup_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status")
-    cleanup_p.add_argument("--dry-run",  action="store_true", dest="dry_run",
-                           help="Print what would be cleaned up without doing it")
+    reset_p = sub.add_parser("reset", help="Tear down cluster resources for all non-pending pairs")
+    reset_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key (wl- prefix optional)")
+    reset_p.add_argument("--workload", metavar="NAME",  help="Scope to pairs matching this workload")
+    reset_p.add_argument("--package",  metavar="NAME",  help="Scope to pairs matching this package")
+    reset_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status")
+    reset_p.add_argument("--dry-run",  action="store_true", dest="dry_run",
+                         help="Print what would be reset without doing it")
 
     pairs_p = sub.add_parser("pairs", help="List available pair keys, workloads, and packages")
     pairs_group = pairs_p.add_mutually_exclusive_group()
@@ -1619,7 +1619,7 @@ def main():
         _cmd_status(args, progress_path)
     elif cmd == "collect":
         _cmd_collect(args, run_dir, setup_config)
-    elif cmd == "cleanup":
+    elif cmd == "reset":
         progress_path = run_dir / "progress.json"
         cluster_dir = run_dir / "cluster"
         discovered = _load_pairs(cluster_dir)
@@ -1627,14 +1627,14 @@ def main():
                       [setup_config.get("namespace", "")]) if ns]
         if not namespaces:
             warn("No namespaces in setup_config — PipelineRun deletion for done pairs may be incomplete")
-        _cmd_cleanup(args, progress_path, discovered, namespaces=namespaces or None)
+        _cmd_reset(args, progress_path, discovered, namespaces=namespaces or None)
     elif cmd == "pairs":
         cluster_dir = run_dir / "cluster"
         _cmd_pairs(cluster_dir, keys_only=args.keys_only,
                    workloads_only=args.workloads_only,
                    packages_only=args.packages_only)
     else:
-        err("No subcommand specified. Use: deploy.py run | status | collect | cleanup | pairs")
+        err("No subcommand specified. Use: deploy.py run | status | collect | reset | pairs")
         sys.exit(1)
 
 

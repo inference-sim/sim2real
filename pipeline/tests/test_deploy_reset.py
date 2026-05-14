@@ -1,4 +1,4 @@
-"""Tests for deploy.py cleanup subcommand and _cleanup_pair helper."""
+"""Tests for deploy.py reset subcommand and _reset_pair helper."""
 
 import json
 
@@ -20,7 +20,7 @@ _DISCOVERED = {
 }
 
 
-def test_cleanup_pair_failed_deletes_pr_and_helm(monkeypatch):
+def test_reset_pair_failed_deletes_pr_and_helm(monkeypatch):
     """A failed pair gets its PipelineRun deleted and Helm releases uninstalled."""
     import pipeline.deploy as mod
 
@@ -37,7 +37,7 @@ def test_cleanup_pair_failed_deletes_pr_and_helm(monkeypatch):
 
     monkeypatch.setattr(mod, "run", fake_run)
 
-    mod._cleanup_pair("wl-heavy-baseline", entry, _DISCOVERED)
+    mod._reset_pair("wl-heavy-baseline", entry, _DISCOVERED)
 
     assert entry["status"] == "pending"
     assert entry["namespace"] is None
@@ -55,7 +55,7 @@ def test_cleanup_pair_failed_deletes_pr_and_helm(monkeypatch):
     assert len(helm_uninstalls) == 2
 
 
-def test_cleanup_pair_running_cancels_first(monkeypatch):
+def test_reset_pair_running_cancels_first(monkeypatch):
     """A running pair gets cancelled before deletion."""
     import pipeline.deploy as mod
 
@@ -75,27 +75,27 @@ def test_cleanup_pair_running_cancels_first(monkeypatch):
     monkeypatch.setattr(mod, "_cancel_and_delete_pipelinerun", fake_cancel)
     monkeypatch.setattr(mod, "run", fake_run)
 
-    mod._cleanup_pair("wl-smoke-treatment", entry, _DISCOVERED)
+    mod._reset_pair("wl-smoke-treatment", entry, _DISCOVERED)
 
     assert cancelled == [("treatment-smoke-run1", "sim2real-1")]
     assert entry["status"] == "pending"
     assert entry["namespace"] is None
 
 
-def test_cleanup_pair_none_namespace_resets_state(monkeypatch):
+def test_reset_pair_none_namespace_resets_state(monkeypatch):
     """Pairs with no namespace still get reset (e.g. collect-failed)."""
     import pipeline.deploy as mod
 
     entry = {"workload": "wl-load", "package": "baseline", "status": "collect-failed",
              "namespace": None, "retries": 2}
 
-    result = mod._cleanup_pair("wl-load-baseline", entry, _DISCOVERED)
+    result = mod._reset_pair("wl-load-baseline", entry, _DISCOVERED)
     assert result is True
     assert entry["status"] == "pending"
     assert entry["retries"] == 0
 
 
-def test_cleanup_pair_kubectl_delete_failure_does_not_reset(monkeypatch):
+def test_reset_pair_kubectl_delete_failure_does_not_reset(monkeypatch):
     """When kubectl delete pipelinerun fails, state is NOT reset."""
     import pipeline.deploy as mod
 
@@ -110,13 +110,13 @@ def test_cleanup_pair_kubectl_delete_failure_does_not_reset(monkeypatch):
 
     monkeypatch.setattr(mod, "run", fake_run)
 
-    result = mod._cleanup_pair("wl-heavy-baseline", entry, _DISCOVERED)
+    result = mod._reset_pair("wl-heavy-baseline", entry, _DISCOVERED)
     assert result is False
     assert entry["status"] == "failed"
     assert entry["namespace"] == "sim2real-0"
 
 
-def test_cleanup_pair_helm_list_failure_does_not_reset(monkeypatch):
+def test_reset_pair_helm_list_failure_does_not_reset(monkeypatch):
     """When helm list fails, state is NOT reset — operator needs manual intervention."""
     import pipeline.deploy as mod
 
@@ -131,13 +131,13 @@ def test_cleanup_pair_helm_list_failure_does_not_reset(monkeypatch):
 
     monkeypatch.setattr(mod, "run", fake_run)
 
-    result = mod._cleanup_pair("wl-heavy-baseline", entry, _DISCOVERED)
+    result = mod._reset_pair("wl-heavy-baseline", entry, _DISCOVERED)
     assert result is False
     assert entry["status"] == "failed"
     assert entry["namespace"] == "sim2real-0"
 
 
-def test_cleanup_pair_helm_uninstall_failure_does_not_reset(monkeypatch):
+def test_reset_pair_helm_uninstall_failure_does_not_reset(monkeypatch):
     """When helm uninstall fails, state is NOT reset."""
     import pipeline.deploy as mod
 
@@ -152,13 +152,13 @@ def test_cleanup_pair_helm_uninstall_failure_does_not_reset(monkeypatch):
 
     monkeypatch.setattr(mod, "run", fake_run)
 
-    result = mod._cleanup_pair("wl-heavy-baseline", entry, _DISCOVERED)
+    result = mod._reset_pair("wl-heavy-baseline", entry, _DISCOVERED)
     assert result is False
     assert entry["status"] == "failed"
     assert entry["namespace"] == "sim2real-0"
 
 
-def test_cleanup_pair_missing_pr_name_warns(monkeypatch, capsys):
+def test_reset_pair_missing_pr_name_warns(monkeypatch, capsys):
     """When pr_name is not in discovered, a warning is emitted."""
     import pipeline.deploy as mod
 
@@ -173,15 +173,15 @@ def test_cleanup_pair_missing_pr_name_warns(monkeypatch, capsys):
 
     monkeypatch.setattr(mod, "run", fake_run)
 
-    result = mod._cleanup_pair("wl-unknown-baseline", entry, {})
+    result = mod._reset_pair("wl-unknown-baseline", entry, {})
     assert result is True
     assert entry["status"] == "pending"
     err = capsys.readouterr().err
     assert "no PipelineRun name found" in err
 
 
-def test_cmd_cleanup_continues_on_exception(tmp_path, monkeypatch, capsys):
-    """One pair raising an exception does not abort cleanup of remaining pairs."""
+def test_cmd_reset_continues_on_exception(tmp_path, monkeypatch, capsys):
+    """One pair raising an exception does not abort reset of remaining pairs."""
     import pipeline.deploy as mod
 
     progress = {
@@ -195,7 +195,7 @@ def test_cmd_cleanup_continues_on_exception(tmp_path, monkeypatch, capsys):
 
     call_count = []
 
-    def exploding_cleanup(key, entry, disc, dry_run=False, namespaces=None):
+    def exploding_reset(key, entry, disc, dry_run=False, namespaces=None):
         call_count.append(key)
         if key == "wl-a-baseline":
             raise RuntimeError("kubectl not found")
@@ -204,22 +204,22 @@ def test_cmd_cleanup_continues_on_exception(tmp_path, monkeypatch, capsys):
         entry["retries"] = 0
         return True
 
-    monkeypatch.setattr(mod, "_cleanup_pair", exploding_cleanup)
+    monkeypatch.setattr(mod, "_reset_pair", exploding_reset)
 
     class _Args:
         only = None; workload = None; package = None; status = None; dry_run = False
 
-    mod._cmd_cleanup(_Args(), progress_path, _DISCOVERED)
+    mod._cmd_reset(_Args(), progress_path, _DISCOVERED)
 
     # Both pairs should have been attempted
     assert "wl-a-baseline" in call_count
     assert "wl-b-baseline" in call_count
-    # Progress should still be saved (wl-b was cleaned)
+    # Progress should still be saved (wl-b was reset)
     saved = json.loads(progress_path.read_text())
     assert saved["wl-b-baseline"]["status"] == "pending"
 
 
-def test_cleanup_pair_done_deletes_pr_without_state_reset(monkeypatch):
+def test_reset_pair_done_deletes_pr_without_state_reset(monkeypatch):
     """Done pairs get PipelineRun deleted but stay in done state."""
     import pipeline.deploy as mod
 
@@ -236,8 +236,8 @@ def test_cleanup_pair_done_deletes_pr_without_state_reset(monkeypatch):
 
     monkeypatch.setattr(mod, "run", fake_run)
 
-    result = mod._cleanup_pair("wl-smoke-baseline", entry, _DISCOVERED,
-                               namespaces=["sim2real-0", "sim2real-1"])
+    result = mod._reset_pair("wl-smoke-baseline", entry, _DISCOVERED,
+                             namespaces=["sim2real-0", "sim2real-1"])
 
     assert result is True
     # State stays done
@@ -252,78 +252,77 @@ def test_cleanup_pair_done_deletes_pr_without_state_reset(monkeypatch):
     assert helm_calls == []
 
 
-def test_cmd_cleanup_skips_pending_only(tmp_path, monkeypatch, capsys):
-    """cleanup acts on all non-pending pairs, including done."""
+def test_cmd_reset_skips_pending_only(tmp_path, monkeypatch, capsys):
+    """reset acts on all non-pending pairs, including done."""
     import pipeline.deploy as mod
 
     progress_path = tmp_path / "progress.json"
     progress_path.write_text(json.dumps(_PROGRESS))
 
     cleaned = []
-    monkeypatch.setattr(mod, "_cleanup_pair",
+    monkeypatch.setattr(mod, "_reset_pair",
                         lambda k, e, d, dry_run=False, namespaces=None: cleaned.append(k) or True)
 
     class _Args:
         only = None; workload = None; package = None; status = None; dry_run = False
 
-    mod._cmd_cleanup(_Args(), progress_path, _DISCOVERED)
+    mod._cmd_reset(_Args(), progress_path, _DISCOVERED)
 
     # pending (wl-load-baseline) should be skipped
     assert "wl-load-baseline" not in cleaned
-    # done, running, timed-out, failed should all be cleaned
+    # done, running, timed-out, failed should all be reset
     assert "wl-smoke-baseline" in cleaned
     assert "wl-smoke-treatment" in cleaned
     assert "wl-load-treatment" in cleaned
     assert "wl-heavy-baseline" in cleaned
 
 
-def test_cmd_cleanup_respects_only_filter(tmp_path, monkeypatch, capsys):
-    """--only scopes cleanup to a single pair."""
+def test_cmd_reset_respects_only_filter(tmp_path, monkeypatch, capsys):
+    """--only scopes reset to a single pair."""
     import pipeline.deploy as mod
 
     progress_path = tmp_path / "progress.json"
     progress_path.write_text(json.dumps(_PROGRESS))
 
     cleaned = []
-    monkeypatch.setattr(mod, "_cleanup_pair",
+    monkeypatch.setattr(mod, "_reset_pair",
                         lambda k, e, d, dry_run=False, namespaces=None: cleaned.append(k) or True)
 
     class _Args:
         only = "wl-heavy-baseline"; workload = None; package = None; status = None; dry_run = False
 
-    mod._cmd_cleanup(_Args(), progress_path, _DISCOVERED)
+    mod._cmd_reset(_Args(), progress_path, _DISCOVERED)
 
     assert cleaned == ["wl-heavy-baseline"]
 
 
-def test_cmd_cleanup_dry_run_does_not_save(tmp_path, monkeypatch, capsys):
+def test_cmd_reset_dry_run_does_not_save(tmp_path, monkeypatch, capsys):
     """--dry-run does not mutate progress.json."""
     import pipeline.deploy as mod
 
     progress_path = tmp_path / "progress.json"
     progress_path.write_text(json.dumps(_PROGRESS))
 
-    monkeypatch.setattr(mod, "_cleanup_pair",
+    monkeypatch.setattr(mod, "_reset_pair",
                         lambda k, e, d, dry_run=False, namespaces=None: True)
 
     class _Args:
         only = None; workload = None; package = None; status = None; dry_run = True
 
-    mod._cmd_cleanup(_Args(), progress_path, _DISCOVERED)
+    mod._cmd_reset(_Args(), progress_path, _DISCOVERED)
 
     # Progress should not be modified
     saved = json.loads(progress_path.read_text())
     assert saved == _PROGRESS
 
 
-def test_cmd_cleanup_saves_progress_on_success(tmp_path, monkeypatch, capsys):
-    """After cleanup, progress.json is updated with reset entries."""
+def test_cmd_reset_saves_progress_on_success(tmp_path, monkeypatch, capsys):
+    """After reset, progress.json is updated with reset entries."""
     import pipeline.deploy as mod
 
     progress_path = tmp_path / "progress.json"
     progress_path.write_text(json.dumps(_PROGRESS))
 
-    # Use real _cleanup_pair logic but mock subprocess calls
     def fake_run(cmd, *, check=True, capture=False, cwd=None):
         class _R:
             returncode = 0
@@ -339,8 +338,8 @@ def test_cmd_cleanup_saves_progress_on_success(tmp_path, monkeypatch, capsys):
     class _Args:
         only = None; workload = None; package = None; status = None; dry_run = False
 
-    mod._cmd_cleanup(_Args(), progress_path, _DISCOVERED,
-                     namespaces=["sim2real-0", "sim2real-1", "sim2real-2"])
+    mod._cmd_reset(_Args(), progress_path, _DISCOVERED,
+                   namespaces=["sim2real-0", "sim2real-1", "sim2real-2"])
 
     saved = json.loads(progress_path.read_text())
     # Non-done pairs reset to pending
@@ -353,8 +352,8 @@ def test_cmd_cleanup_saves_progress_on_success(tmp_path, monkeypatch, capsys):
     assert saved["wl-load-baseline"]["status"] == "pending"
 
 
-def test_force_reset_calls_cleanup_for_non_pending_non_done(monkeypatch):
-    """_force_reset cleans non-pending, non-done pairs via _cleanup_pair."""
+def test_force_reset_calls_reset_for_non_pending_non_done(monkeypatch):
+    """_force_reset resets non-pending, non-done pairs via _reset_pair."""
     import pipeline.deploy as mod
 
     progress = {
@@ -376,14 +375,14 @@ def test_force_reset_calls_cleanup_for_non_pending_non_done(monkeypatch):
 
     cleaned = []
 
-    def fake_cleanup(key, entry, disc, dry_run=False, namespaces=None):
+    def fake_reset(key, entry, disc, dry_run=False, namespaces=None):
         cleaned.append(key)
         entry["status"] = "pending"
         entry["namespace"] = None
         entry["retries"] = 0
         return True
 
-    monkeypatch.setattr(mod, "_cleanup_pair", fake_cleanup)
+    monkeypatch.setattr(mod, "_reset_pair", fake_reset)
 
     scope = set(progress.keys())
     n = mod._force_reset(progress, scope, discovered,
@@ -392,15 +391,15 @@ def test_force_reset_calls_cleanup_for_non_pending_non_done(monkeypatch):
     # Pending and done should be skipped
     assert "wl-a-treatment" not in cleaned
     assert "wl-c-baseline" not in cleaned
-    # Failed and timed-out should be cleaned
+    # Failed and timed-out should be reset
     assert "wl-a-baseline" in cleaned
     assert "wl-b-baseline" in cleaned
     assert n == 2
     assert progress["wl-c-baseline"]["status"] == "done"
 
 
-def test_force_reset_skips_count_on_cleanup_failure(monkeypatch):
-    """_force_reset does not count pairs where _cleanup_pair returned False."""
+def test_force_reset_skips_count_on_reset_failure(monkeypatch):
+    """_force_reset does not count pairs where _reset_pair returned False."""
     import pipeline.deploy as mod
 
     progress = {
@@ -409,7 +408,7 @@ def test_force_reset_skips_count_on_cleanup_failure(monkeypatch):
     }
     discovered = {"wl-a-baseline": {"pr_name": "pr1", "workload": "wl-a", "package": "baseline"}}
 
-    monkeypatch.setattr(mod, "_cleanup_pair", lambda *a, **kw: False)
+    monkeypatch.setattr(mod, "_reset_pair", lambda *a, **kw: False)
 
     n = mod._force_reset(progress, {"wl-a-baseline"}, discovered)
     assert n == 0
@@ -442,7 +441,7 @@ def test_force_reset_continues_on_exception(monkeypatch):
         entry["retries"] = 0
         return True
 
-    monkeypatch.setattr(mod, "_cleanup_pair", sometimes_fails)
+    monkeypatch.setattr(mod, "_reset_pair", sometimes_fails)
 
     n = mod._force_reset(progress, set(progress.keys()), discovered)
 
@@ -452,8 +451,8 @@ def test_force_reset_continues_on_exception(monkeypatch):
     assert progress["wl-b-baseline"]["status"] == "pending"
 
 
-def test_cmd_cleanup_aborts_on_filter_mismatch(tmp_path, capsys):
-    """cleanup exits with error when --only doesn't match any pair."""
+def test_cmd_reset_aborts_on_filter_mismatch(tmp_path, capsys):
+    """reset exits with error when --only doesn't match any pair."""
     import pipeline.deploy as mod
 
     progress_path = tmp_path / "progress.json"
@@ -463,7 +462,7 @@ def test_cmd_cleanup_aborts_on_filter_mismatch(tmp_path, capsys):
         only = "nonexistent"; workload = None; package = None; status = None; dry_run = False
 
     with __import__("pytest").raises(SystemExit) as exc_info:
-        mod._cmd_cleanup(_Args(), progress_path, _DISCOVERED)
+        mod._cmd_reset(_Args(), progress_path, _DISCOVERED)
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
     assert "No pairs matched" in captured.out + captured.err
