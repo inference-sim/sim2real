@@ -47,7 +47,7 @@ def test_stop_no_job_prints_message(monkeypatch, capsys):
         class _R:
             returncode = 1
             stdout = ""
-            stderr = 'Error from server (NotFound): jobs.batch "sim2real-orchestrator" not found'
+            stderr = 'Error from server (NotFound): jobs.batch "sim2real-orchestrator" not found\n'
         return _R()
 
     monkeypatch.setattr(mod, "run", fake_run)
