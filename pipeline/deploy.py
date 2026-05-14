@@ -5,6 +5,7 @@ Subcommands:
   run      Build EPP image, submit PipelineRuns
   status   Show progress of all (workload, package) pairs
   collect  Pull results from cluster for completed phases
+  stop     Stop the remote orchestrator Job
   reset    Tear down cluster resources for all non-pending pairs
   pairs    List available pair keys, workloads, and packages
 """
@@ -1560,6 +1561,33 @@ def _cmd_reset(args, progress_path: Path, discovered: dict,
     ok(msg)
 
 
+# ── Stop remote orchestrator ────────────────────────────────────────────────
+
+JOB_NAME = "sim2real-orchestrator"
+
+
+def _cmd_stop(namespace: str) -> None:
+    """Stop the remote orchestrator Job."""
+    result = run(["kubectl", "get", "job", JOB_NAME, "-n", namespace],
+                 check=False, capture=True)
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        if "(NotFound)" in stderr:
+            info(f"No remote orchestrator started in {namespace}")
+            return
+        err(f"Failed to check for orchestrator Job in {namespace}: {stderr}")
+        sys.exit(1)
+
+    result = run(["kubectl", "delete", "job", JOB_NAME, "-n", namespace,
+                   "--cascade=foreground"], check=False, capture=True)
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip()
+        err(f"Failed to delete {JOB_NAME} in {namespace}"
+            + (f": {detail}" if detail else ""))
+        sys.exit(1)
+    ok(f"Stopped {JOB_NAME} in {namespace}")
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1574,6 +1602,7 @@ Examples:
   python pipeline/deploy.py status                     # Show progress snapshot
   python pipeline/deploy.py collect                    # Pull results for completed phases
   python pipeline/deploy.py collect --skip-logs        # Collect traces only (skip large logs)
+  python pipeline/deploy.py stop                         # Stop remote orchestrator Job
   python pipeline/deploy.py reset                       # Reset stalled/failed pairs
   python pipeline/deploy.py reset --dry-run             # Preview what would be reset
   python pipeline/deploy.py pairs                       # List pairs with workloads and packages
@@ -1626,6 +1655,8 @@ Examples:
     run_p.add_argument("--max-backoff", type=int, default=600, dest="max_backoff",
                        help="Maximum backoff interval in seconds during GPU scarcity [600]")
 
+    sub.add_parser("stop", help="Stop the remote orchestrator Job")
+
     reset_p = sub.add_parser("reset", help="Tear down cluster resources for all non-pending pairs")
     reset_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key (wl- prefix optional)")
     reset_p.add_argument("--workload", metavar="NAME",  help="Scope to pairs matching this workload")
@@ -1659,6 +1690,18 @@ def main():
     EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if args.experiment_root else Path.cwd()
 
     setup_config = _load_setup_config()
+
+    cmd = args.command
+
+    if cmd == "stop":
+        namespaces = [ns for ns in (setup_config.get("namespaces") or
+                      [setup_config.get("namespace", "")]) if ns]
+        if not namespaces:
+            err("No namespaces configured. Run setup.py first.")
+            sys.exit(1)
+        _cmd_stop(namespace=namespaces[0])
+        return
+
     run_name = args.run or setup_config.get("current_run", "")
     if not run_name:
         err("No run name. Use --run NAME or set current_run in setup_config.json.")
@@ -1669,7 +1712,6 @@ def main():
         err(f"Run directory not found: {run_dir}")
         sys.exit(1)
 
-    cmd = args.command
     if cmd == "run":
         _cmd_run(args, run_dir, setup_config)
     elif cmd == "status":
@@ -1692,7 +1734,7 @@ def main():
                    workloads_only=args.workloads_only,
                    packages_only=args.packages_only)
     else:
-        err("No subcommand specified. Use: deploy.py run | status | collect | reset | pairs")
+        err("No subcommand specified. Use: deploy.py run | status | collect | stop | reset | pairs")
         sys.exit(1)
 
 
