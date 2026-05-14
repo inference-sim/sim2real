@@ -177,7 +177,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 **`deploy.py collect`** — extracts results from the cluster PVC and writes to `workspace/runs/<run>/results/{phase}/<workload>/`.
 
-**`deploy.py stop`** — deletes the `sim2real-orchestrator` Kubernetes Job (with cascading pod deletion) in the primary namespace. Only meaningful for remote execution (`run --remote`). Does not touch `progress.json` — pair state is left as-is. If no remote orchestrator Job exists, prints a message and returns. Use `reset` separately to clear failed/stalled pair state.
+**`deploy.py stop`** — deletes the `sim2real-orchestrator` Kubernetes Job (with cascading pod deletion) in the primary namespace. Only meaningful when the orchestrator runs as an in-cluster Job. Does not touch `progress.json` — pair state is left as-is. If no remote orchestrator Job exists, prints a message and returns. Use `reset` separately to clear failed/stalled pair state.
 
 **`deploy.py reset`** — removes cluster resources (PipelineRuns, Helm releases) for all non-pending pairs. Failed/running/timed-out pairs are reset to `pending` so they can be re-dispatched. Done pairs stay `done` — only their PipelineRun is deleted to free cluster resources.
 

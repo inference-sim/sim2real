@@ -5,6 +5,7 @@ Subcommands:
   run      Build EPP image, submit PipelineRuns
   status   Show progress of all (workload, package) pairs
   collect  Pull results from cluster for completed phases
+  stop     Stop the remote orchestrator Job
   reset    Tear down cluster resources for all non-pending pairs
   pairs    List available pair keys, workloads, and packages
 """
@@ -1457,15 +1458,23 @@ JOB_NAME = "sim2real-orchestrator"
 
 def _cmd_stop(namespace: str) -> None:
     """Stop the remote orchestrator Job."""
-    try:
-        run(["kubectl", "get", "job", JOB_NAME, "-n", namespace],
-            check=True, capture=True)
-    except subprocess.CalledProcessError:
-        info(f"No remote orchestrator started in {namespace}")
-        return
+    result = run(["kubectl", "get", "job", JOB_NAME, "-n", namespace],
+                 check=False, capture=True)
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        if "NotFound" in stderr or "not found" in stderr:
+            info(f"No remote orchestrator started in {namespace}")
+            return
+        err(f"Failed to check for orchestrator Job in {namespace}: {stderr}")
+        sys.exit(1)
 
-    run(["kubectl", "delete", "job", JOB_NAME, "-n", namespace,
-         "--cascade=foreground"])
+    result = run(["kubectl", "delete", "job", JOB_NAME, "-n", namespace,
+                   "--cascade=foreground"], check=False, capture=True)
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip()
+        err(f"Failed to delete {JOB_NAME} in {namespace}"
+            + (f": {detail}" if detail else ""))
+        sys.exit(1)
     ok(f"Stopped {JOB_NAME} in {namespace}")
 
 
@@ -1567,6 +1576,18 @@ def main():
     EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if args.experiment_root else Path.cwd()
 
     setup_config = _load_setup_config()
+
+    cmd = args.command
+
+    if cmd == "stop":
+        namespaces = [ns for ns in (setup_config.get("namespaces") or
+                      [setup_config.get("namespace", "")]) if ns]
+        if not namespaces:
+            err("No namespaces configured. Run setup.py first.")
+            sys.exit(1)
+        _cmd_stop(namespace=namespaces[0])
+        return
+
     run_name = args.run or setup_config.get("current_run", "")
     if not run_name:
         err("No run name. Use --run NAME or set current_run in setup_config.json.")
@@ -1577,7 +1598,6 @@ def main():
         err(f"Run directory not found: {run_dir}")
         sys.exit(1)
 
-    cmd = args.command
     if cmd == "run":
         _cmd_run(args, run_dir, setup_config)
     elif cmd == "status":
@@ -1585,13 +1605,6 @@ def main():
         _cmd_status(args, progress_path)
     elif cmd == "collect":
         _cmd_collect(args, run_dir, setup_config)
-    elif cmd == "stop":
-        namespaces = [ns for ns in (setup_config.get("namespaces") or
-                      [setup_config.get("namespace", "")]) if ns]
-        if not namespaces:
-            err("No namespaces configured. Run setup.py first.")
-            sys.exit(1)
-        _cmd_stop(namespace=namespaces[0])
     elif cmd == "reset":
         progress_path = run_dir / "progress.json"
         cluster_dir = run_dir / "cluster"

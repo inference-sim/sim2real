@@ -58,6 +58,7 @@ _sim2real_deploy() {
                 'run:Orchestrate parallel pool execution'
                 'status:Show progress of all (workload, package) pairs'
                 'collect:Pull results for completed packages'
+                'stop:Stop the remote orchestrator Job'
                 'reset:Tear down cluster resources for all non-pending pairs'
                 'pairs:List available pair keys, workloads, and packages'
             )
