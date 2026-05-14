@@ -7,9 +7,10 @@
 __pycache__
 *.pyc
 workspace
-workspace */
 inference-sim
+llm-d-benchmark
 tektonc-data-collection
+pipeline/tests
 docs
 prompts
 *.md
