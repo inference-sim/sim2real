@@ -451,8 +451,7 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
       /data/{runName}/{phase}/{workloadName}/trace_data.csv
 
     When *workload* is set, only that workload's subdirectory is copied for
-    each phase (used by scoped ``collect --only/--workload`` and by the
-    orchestrator during inline collection).
+    each phase (used by scoped ``collect --only/--workload``).
     When *workload* is None (default), the entire phase directory is copied
     (used by unscoped ``deploy.py collect`` for bulk collection).
 
@@ -701,6 +700,8 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                         warn(f"Extraction failed for {phase}/{wl_name}: {exc}")
                         if phase not in failed:
                             failed.append(phase)
+
+        collected = [p for p in collected if p not in failed]
     else:
         # ── Unscoped path (no --only/--workload) ─────────────────────────
         if progress:
