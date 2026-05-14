@@ -1133,7 +1133,10 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 entry["namespace"] = None
                 entry["pending_since"] = None
         elif entry["status"] not in ("pending", "done", "failed", "timed-out", "stalled"):
-            warn(f"[{key}] unrecognized status '{entry['status']}' — use --force to reset")
+            warn(f"[{key}] unrecognized status '{entry['status']}' → resetting to pending")
+            entry["status"] = "pending"
+            entry["namespace"] = None
+            entry["pending_since"] = None
     store.save(progress)
 
     # Track which namespace is assigned to which pair
@@ -1173,6 +1176,10 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 entry["status"] = "done"
                 entry["namespace"] = None
                 store.save(progress)
+                try:
+                    _delete_pipelinerun(pr_name, ns)
+                except Exception as exc:
+                    warn(f"Failed to delete PipelineRun {pr_name!r} in {ns}: {exc}")
                 del slots_busy[ns]
 
             elif status in ("Failed", "PipelineRunCancelled", "PipelineRunCouldntGetPipeline",

@@ -30,7 +30,7 @@ def test_collect_with_progress_default(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -54,7 +54,7 @@ def test_collect_fallback_no_progress(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -83,7 +83,7 @@ def test_collect_single_package_from_progress(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -111,7 +111,7 @@ def test_collect_experiment_expands_to_all_progress_phases(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -158,7 +158,7 @@ def test_collect_custom_package_in_progress(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -182,7 +182,7 @@ def test_collect_corrupt_progress_warns_and_falls_back(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -213,7 +213,7 @@ def test_collect_only_done_phases(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -241,7 +241,7 @@ def test_collect_missing_package_key_skipped(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -269,7 +269,7 @@ def test_collect_with_multi_baseline_progress(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -295,7 +295,7 @@ def test_collect_fallback_discovers_from_pipelinerun_files(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 

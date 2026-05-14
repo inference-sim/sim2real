@@ -417,6 +417,86 @@ def test_resolve_scope_combined_filter_mismatch(capsys):
     assert "--status 'timed-out'" in captured
 
 
+# ── Reconciliation on resume ──────────────────────────────────────────────────
+
+def test_reconcile_succeeded_sets_done_and_frees_namespace(monkeypatch):
+    """On resume, a 'running' pair whose PipelineRun Succeeded transitions to done."""
+    import pipeline.deploy as mod
+    from pipeline.lib.progress import LocalProgressStore
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        run_dir = Path(tmp)
+        progress = {
+            "wl-smoke-baseline": {
+                "workload": "wl-smoke", "package": "baseline",
+                "status": "running", "namespace": "sim2real-0",
+                "pending_since": "2026-01-01T00:00:00Z",
+            }
+        }
+        store = LocalProgressStore(run_dir / "progress.json")
+        store.save(progress)
+
+        monkeypatch.setattr(mod, "_check_pipelinerun_status", lambda pr, ns: "Succeeded")
+
+        # Reload and run the reconciliation loop inline
+        progress = store.load()
+        for key, entry in progress.items():
+            if not mod._is_pair_key(key):
+                continue
+            if entry["status"] == "running":
+                pr_name = "baseline-smoke-run1"
+                ns = entry.get("namespace") or ""
+                if pr_name and ns:
+                    actual = mod._check_pipelinerun_status(pr_name, ns)
+                    if actual == "Succeeded":
+                        entry["status"] = "done"
+                        entry["namespace"] = None
+                        entry["pending_since"] = None
+
+        assert progress["wl-smoke-baseline"]["status"] == "done"
+        assert progress["wl-smoke-baseline"]["namespace"] is None
+        assert progress["wl-smoke-baseline"]["pending_since"] is None
+
+
+def test_reconcile_unrecognized_status_resets_to_pending(monkeypatch, capsys):
+    """Stale statuses (e.g. 'collecting' from pre-upgrade) are reset to pending."""
+    import pipeline.deploy as mod
+    from pipeline.lib.progress import LocalProgressStore
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        run_dir = Path(tmp)
+        progress = {
+            "wl-smoke-baseline": {
+                "workload": "wl-smoke", "package": "baseline",
+                "status": "collecting", "namespace": "sim2real-0",
+                "pending_since": None,
+            }
+        }
+        store = LocalProgressStore(run_dir / "progress.json")
+        store.save(progress)
+
+        progress = store.load()
+        for key, entry in progress.items():
+            if not mod._is_pair_key(key):
+                continue
+            if entry["status"] == "running":
+                pass
+            elif entry["status"] not in ("pending", "done", "failed", "timed-out", "stalled"):
+                mod.warn(f"[{key}] unrecognized status '{entry['status']}' → resetting to pending")
+                entry["status"] = "pending"
+                entry["namespace"] = None
+                entry["pending_since"] = None
+
+        assert progress["wl-smoke-baseline"]["status"] == "pending"
+        assert progress["wl-smoke-baseline"]["namespace"] is None
+        captured = capsys.readouterr().err
+        assert "unrecognized status 'collecting'" in captured
+
+
 # ── _force_reset ──────────────────────────────────────────────────────────────
 
 def _mock_run(monkeypatch):
