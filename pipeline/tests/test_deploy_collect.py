@@ -529,3 +529,90 @@ def test_collect_scoped_without_progress_exits(tmp_path):
 
     with pytest.raises(SystemExit):
         deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+
+def test_collect_scoped_all_nondone_no_extraction(tmp_path):
+    """When all scoped pairs are non-done, no extraction is attempted and summary prints 0/0."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    _write_progress(run_dir, {
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "running"},
+        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "pending"},
+    })
+
+    class Args:
+        only = None
+        workload = "smoke"
+        package = None
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        extract_calls.append({"phases": phases, "workload": workload})
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
+         patch.object(deploy, "warn") as mock_warn:
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert len(extract_calls) == 0
+    assert any("running" in str(c) or "pending" in str(c) for c in mock_warn.call_args_list)
+
+
+def test_collect_scoped_runtime_error(tmp_path):
+    """RuntimeError from extractor pod is caught and reported."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    _write_progress(run_dir, {
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done"},
+    })
+
+    class Args:
+        only = None
+        workload = "smoke"
+        package = None
+        skip_logs = False
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        raise RuntimeError("pod failed")
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
+         patch.object(deploy, "warn") as mock_warn:
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert any("pod failed" in str(c) for c in mock_warn.call_args_list)
+
+
+def test_collect_scoped_per_phase_failure(tmp_path):
+    """Per-phase extraction failure in scoped path populates failed list."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    _write_progress(run_dir, {
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done"},
+        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done"},
+    })
+
+    class Args:
+        only = None
+        workload = "smoke"
+        package = None
+        skip_logs = False
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        return {
+            "baseline": None,
+            "treatment": RuntimeError("tar failed"),
+        }
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
+         patch.object(deploy, "warn") as mock_warn:
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert any("tar failed" in str(c) for c in mock_warn.call_args_list)

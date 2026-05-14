@@ -451,9 +451,9 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
       /data/{runName}/{phase}/{workloadName}/trace_data.csv
 
     When *workload* is set, only that workload's subdirectory is copied for
-    each phase (used by inline collection during parallel pool execution).
+    each phase (used by scoped ``collect --only/--workload``).
     When *workload* is None (default), the entire phase directory is copied
-    (used by `deploy.py collect` for bulk collection).
+    (used by unscoped ``deploy.py collect`` for bulk collection).
 
     When *skip_logs* is True, only trace files are copied (skipping vLLM and
     EPP log files which typically account for the bulk of the data).
@@ -637,38 +637,31 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
 
         in_scope = _resolve_scope(progress, _ScopeArgs())
 
-        # Warn about non-done scoped pairs
-        for key in sorted(in_scope):
-            entry = progress.get(key, {})
-            st = entry.get("status", "")
-            if st not in ("done", "collecting"):
-                warn(f"Scoped pair {key} has status '{st}' — skipping")
-
-        # Derive phases and workloads from done/collecting scoped pairs
-        scoped_phases = sorted({
-            progress[k].get("package", "")
-            for k in in_scope
+        # Filter to collectible pairs (done/collecting) and warn about the rest
+        collectible = {
+            k for k in in_scope
             if isinstance(progress[k], dict) and progress[k].get("status") in ("done", "collecting")
+        }
+        for key in sorted(in_scope - collectible):
+            warn(f"Scoped pair {key} has status '{progress[key].get('status', '')}' — skipping")
+
+        scoped_phases = sorted({
+            progress[k].get("package", "") for k in collectible
         } - {""})
         scoped_workloads = sorted({
-            progress[k].get("workload", "")
-            for k in in_scope
-            if isinstance(progress[k], dict) and progress[k].get("status") in ("done", "collecting")
+            progress[k].get("workload", "") for k in collectible
         } - {""})
 
         if not scoped_phases:
             warn("No done/collecting phases for scoped pairs.")
-            print()
-            return
-
-        # Apply --package phase-level filter on top
-        if args.package:
+            phases_to_collect: list[str] = []
+        elif args.package:
             valid = set(scoped_phases) | {"experiment"}
             unknown = set(args.package) - valid
             if unknown:
                 err(f"Unknown packages: {sorted(unknown)}. Valid: {sorted(valid)}")
                 sys.exit(1)
-            phases_to_collect: list[str] = []
+            phases_to_collect = []
             for p in args.package:
                 if p == "experiment":
                     phases_to_collect.extend(scoped_phases)
@@ -706,7 +699,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                         if phase not in failed:
                             failed.append(phase)
     else:
-        # ── Unscoped path (original behavior) ────────────────────────────
+        # ── Unscoped path (no --only/--workload) ─────────────────────────
         if progress:
             known_phases = sorted({
                 entry.get("package", "")
