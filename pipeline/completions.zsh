@@ -60,6 +60,7 @@ _sim2real_deploy() {
                 'collect:Pull results for completed packages'
                 'stop:Stop the remote orchestrator Job'
                 'reset:Tear down cluster resources for all non-pending pairs'
+                'wipe:Delete local results and reset pairs to pending'
                 'pairs:List available pair keys, workloads, and packages'
             )
             _describe 'subcommand' subcommands
@@ -104,7 +105,15 @@ _sim2real_deploy() {
                         '--workload[Scope to workload]:workload:_deploy_py_workloads' \
                         '--package[Scope to package]:package:_deploy_py_packages' \
                         '--status[Scope to status]:status:_deploy_py_statuses' \
-                        '--dry-run[Print what would be cleaned up]'
+                        '--dry-run[Print what would be reset]'
+                    ;;
+                wipe)
+                    _arguments \
+                        '--only[Scope to one pair key]:pair key:_deploy_py_pair_keys' \
+                        '--workload[Scope to workload]:workload:_deploy_py_workloads' \
+                        '--package[Scope to package]:package:_deploy_py_packages' \
+                        '--dry-run[Print what would be wiped]' \
+                        '(-y --yes)'{-y,--yes}'[Skip confirmation prompt]'
                     ;;
                 pairs)
                     _arguments \
