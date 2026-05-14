@@ -417,177 +417,182 @@ def test_resolve_scope_combined_filter_mismatch(capsys):
     assert "--status 'timed-out'" in captured
 
 
-# ── _reconcile_collecting (bugs 1+2) ─────────────────────────────────────────
+# ── _reconcile_on_resume ──────────────────────────────────────────────────────
 
-def test_reconcile_collecting_trace_present_marks_done(tmp_path):
-    from pipeline.deploy import _reconcile_collecting
-    pkg, wl = "baseline", "wl-smoke"
-    trace = tmp_path / "results" / pkg / wl / "trace_data.csv"
-    trace.parent.mkdir(parents=True)
-    trace.write_text("data")
-    entry = {"workload": wl, "package": pkg, "status": "collecting", "namespace": "ns", "retries": 0}
-    _reconcile_collecting("wl-smoke-baseline", entry, tmp_path)
-    assert entry["status"] == "done"
-    assert entry["namespace"] is None
+_DISCOVERED = {
+    "wl-smoke-baseline": {"pr_name": "baseline-smoke-run1", "pr_path": "cluster/pipelinerun-smoke-baseline.yaml"},
+}
 
 
-def test_reconcile_collecting_empty_dir_does_not_false_positive(tmp_path, monkeypatch):
-    """Old bug: results/baseline/ existing was enough to mark done. Fixed: must have trace_data.csv."""
+def test_reconcile_succeeded_sets_done_and_frees_namespace(monkeypatch):
+    """On resume, a 'running' pair whose PipelineRun Succeeded transitions to done."""
     import pipeline.deploy as mod
-    pkg, wl = "baseline", "wl-smoke"
-    (tmp_path / "results" / pkg).mkdir(parents=True)   # dir exists but no trace_data.csv
-    entry = {"workload": wl, "package": pkg, "status": "collecting", "namespace": "ns", "retries": 0}
-    collected = []
-    monkeypatch.setattr(mod, "_collect_pair", lambda k, e, d: collected.append(k) or True)
-    mod._reconcile_collecting("wl-smoke-baseline", entry, tmp_path)
-    assert "wl-smoke-baseline" in collected   # collection was attempted, not falsely skipped
-    assert entry["status"] == "done"
-    assert entry["namespace"] is None
+
+    monkeypatch.setattr(mod, "_check_pipelinerun_status", lambda pr, ns: "Succeeded")
+
+    progress = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "running", "namespace": "sim2real-0",
+            "pending_since": "2026-01-01T00:00:00Z",
+        }
+    }
+    mod._reconcile_on_resume(progress, _DISCOVERED)
+    assert progress["wl-smoke-baseline"]["status"] == "done"
+    assert progress["wl-smoke-baseline"]["namespace"] is None
+    assert progress["wl-smoke-baseline"]["pending_since"] is None
 
 
-def test_reconcile_collecting_no_data_collect_ok_marks_done(tmp_path, monkeypatch):
+def test_reconcile_unrecognized_status_resets_to_pending(capsys):
+    """Stale statuses (e.g. 'collecting' from pre-upgrade) are reset to pending."""
     import pipeline.deploy as mod
-    entry = {"workload": "wl-x", "package": "baseline", "status": "collecting", "namespace": "ns", "retries": 0}
-    monkeypatch.setattr(mod, "_collect_pair", lambda *a: True)
-    mod._reconcile_collecting("wl-x-baseline", entry, tmp_path)
-    assert entry["status"] == "done"
-    assert entry["namespace"] is None
+
+    progress = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "collecting", "namespace": "sim2real-0",
+            "pending_since": None,
+        }
+    }
+    mod._reconcile_on_resume(progress, _DISCOVERED)
+    assert progress["wl-smoke-baseline"]["status"] == "pending"
+    assert progress["wl-smoke-baseline"]["namespace"] is None
+    captured = capsys.readouterr().err
+    assert "unrecognized status 'collecting'" in captured
 
 
-def test_reconcile_collecting_no_data_collect_fails_marks_pending(tmp_path, monkeypatch):
+def test_reconcile_running_no_pr_resets_to_pending():
+    """Running pair with no PipelineRun metadata resets to pending."""
     import pipeline.deploy as mod
-    entry = {"workload": "wl-x", "package": "baseline", "status": "collecting", "namespace": "ns", "retries": 0}
-    monkeypatch.setattr(mod, "_collect_pair", lambda *a: False)
-    mod._reconcile_collecting("wl-x-baseline", entry, tmp_path)
-    assert entry["status"] == "pending"
-    assert entry["namespace"] is None
+
+    progress = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "running", "namespace": "sim2real-0",
+            "pending_since": None,
+        }
+    }
+    mod._reconcile_on_resume(progress, {})
+    assert progress["wl-smoke-baseline"]["status"] == "pending"
+    assert progress["wl-smoke-baseline"]["namespace"] is None
 
 
-# ── _do_collect (bug 3) ───────────────────────────────────────────────────────
-
-def test_do_collect_saves_done_on_success(tmp_path, monkeypatch):
+def test_reconcile_succeeded_deletes_pipelinerun(monkeypatch):
+    """On Succeeded, _reconcile_on_resume calls _delete_pipelinerun."""
     import pipeline.deploy as mod
-    from pipeline.lib.progress import LocalProgressStore
-    monkeypatch.setattr(mod, "_collect_pair", lambda *a: True)
-    entry = {"workload": "wl-x", "package": "baseline", "status": "collecting", "namespace": "ns", "retries": 0}
-    progress = {"wl-x-baseline": entry}
-    store = LocalProgressStore(tmp_path / "progress.json")
-    store.save(progress)
-    result = mod._do_collect("wl-x-baseline", entry, tmp_path, store, progress)
-    assert result is True
-    saved = store.load()
-    assert saved["wl-x-baseline"]["status"] == "done"
-    assert saved["wl-x-baseline"]["namespace"] is None
 
-
-def test_do_collect_interrupt_saves_collect_failed(tmp_path, monkeypatch):
-    import pytest
-    import pipeline.deploy as mod
-    from pipeline.lib.progress import LocalProgressStore
-
-    def _raise(*a):
-        raise KeyboardInterrupt()
-    monkeypatch.setattr(mod, "_collect_pair", _raise)
-    entry = {"workload": "wl-x", "package": "baseline", "status": "collecting", "namespace": "ns", "retries": 0}
-    progress = {"wl-x-baseline": entry}
-    store = LocalProgressStore(tmp_path / "progress.json")
-    store.save(progress)
-    with pytest.raises(KeyboardInterrupt):
-        mod._do_collect("wl-x-baseline", entry, tmp_path, store, progress)
-    saved = store.load()
-    assert saved["wl-x-baseline"]["status"] == "collect-failed"
-    assert saved["wl-x-baseline"]["namespace"] is None
-
-
-# ── _do_collect + _delete_pipelinerun ─────────────────────────────────────────
-
-def test_do_collect_deletes_pipelinerun_on_success(tmp_path, monkeypatch):
-    """Successful collection triggers PipelineRun deletion."""
-    import pipeline.deploy as mod
-    from pipeline.lib.progress import LocalProgressStore
-
-    monkeypatch.setattr(mod, "_collect_pair", lambda *a: True)
-
+    monkeypatch.setattr(mod, "_check_pipelinerun_status", lambda pr, ns: "Succeeded")
     deleted = []
     monkeypatch.setattr(mod, "_delete_pipelinerun",
                         lambda pr, ns: deleted.append((pr, ns)))
 
-    entry = {"workload": "wl-x", "package": "baseline", "status": "collecting",
-             "namespace": "sim2real-0", "retries": 0}
-    progress = {"wl-x-baseline": entry}
-    store = LocalProgressStore(tmp_path / "progress.json")
-    store.save(progress)
-    result = mod._do_collect("wl-x-baseline", entry, tmp_path, store, progress,
-                             pr_name="baseline-x-run1")
-    assert result is True
-    assert deleted == [("baseline-x-run1", "sim2real-0")]
+    progress = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "running", "namespace": "sim2real-0",
+            "pending_since": "2026-01-01T00:00:00Z",
+        }
+    }
+    mod._reconcile_on_resume(progress, _DISCOVERED)
+    assert progress["wl-smoke-baseline"]["status"] == "done"
+    assert deleted == [("baseline-smoke-run1", "sim2real-0")]
 
 
-def test_do_collect_skips_delete_on_failure(tmp_path, monkeypatch):
-    """Failed collection does NOT delete the PipelineRun."""
+def test_reconcile_succeeded_delete_failure_nonfatal(monkeypatch, capsys):
+    """If _delete_pipelinerun raises, the pair still transitions to done."""
     import pipeline.deploy as mod
-    from pipeline.lib.progress import LocalProgressStore
 
-    monkeypatch.setattr(mod, "_collect_pair", lambda *a: False)
-
-    deleted = []
+    monkeypatch.setattr(mod, "_check_pipelinerun_status", lambda pr, ns: "Succeeded")
     monkeypatch.setattr(mod, "_delete_pipelinerun",
-                        lambda pr, ns: deleted.append((pr, ns)))
+                        lambda pr, ns: (_ for _ in ()).throw(OSError("kubectl fail")))
 
-    entry = {"workload": "wl-x", "package": "baseline", "status": "collecting",
-             "namespace": "sim2real-0", "retries": 0}
-    progress = {"wl-x-baseline": entry}
-    store = LocalProgressStore(tmp_path / "progress.json")
-    store.save(progress)
-    result = mod._do_collect("wl-x-baseline", entry, tmp_path, store, progress,
-                             pr_name="baseline-x-run1")
-    assert result is False
-    assert deleted == []
+    progress = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "running", "namespace": "sim2real-0",
+            "pending_since": None,
+        }
+    }
+    mod._reconcile_on_resume(progress, _DISCOVERED)
+    assert progress["wl-smoke-baseline"]["status"] == "done"
+    assert progress["wl-smoke-baseline"]["namespace"] is None
+    assert "kubectl fail" in capsys.readouterr().err
 
 
-def test_do_collect_skips_delete_on_interrupt(tmp_path, monkeypatch):
-    """KeyboardInterrupt during collection does NOT delete PipelineRun."""
-    import pytest
+def test_reconcile_failed_sets_failed_retains_namespace(monkeypatch):
+    """On Failed, pair transitions to failed but namespace is retained for reset."""
     import pipeline.deploy as mod
-    from pipeline.lib.progress import LocalProgressStore
 
-    def _raise(*a):
-        raise KeyboardInterrupt()
-    monkeypatch.setattr(mod, "_collect_pair", _raise)
+    monkeypatch.setattr(mod, "_check_pipelinerun_status", lambda pr, ns: "Failed")
 
-    deleted = []
-    monkeypatch.setattr(mod, "_delete_pipelinerun",
-                        lambda pr, ns: deleted.append((pr, ns)))
-
-    entry = {"workload": "wl-x", "package": "baseline", "status": "collecting",
-             "namespace": "sim2real-0", "retries": 0}
-    progress = {"wl-x-baseline": entry}
-    store = LocalProgressStore(tmp_path / "progress.json")
-    store.save(progress)
-    with pytest.raises(KeyboardInterrupt):
-        mod._do_collect("wl-x-baseline", entry, tmp_path, store, progress,
-                        pr_name="baseline-x-run1")
-    assert deleted == []
+    progress = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "running", "namespace": "sim2real-0",
+            "pending_since": "2026-01-01T00:00:00Z",
+        }
+    }
+    mod._reconcile_on_resume(progress, _DISCOVERED)
+    assert progress["wl-smoke-baseline"]["status"] == "failed"
+    assert progress["wl-smoke-baseline"]["namespace"] == "sim2real-0"
 
 
-def test_do_collect_returns_true_when_delete_raises(tmp_path, monkeypatch):
-    """If _delete_pipelinerun raises OSError, _do_collect still returns True."""
+def test_reconcile_unknown_resets_to_pending(monkeypatch, capsys):
+    """On Unknown (PR not found on cluster), pair resets to pending with warning."""
     import pipeline.deploy as mod
-    from pipeline.lib.progress import LocalProgressStore
 
-    monkeypatch.setattr(mod, "_collect_pair", lambda *a: True)
-    monkeypatch.setattr(mod, "_delete_pipelinerun",
-                        lambda pr, ns: (_ for _ in ()).throw(OSError("kubectl not found")))
+    monkeypatch.setattr(mod, "_check_pipelinerun_status", lambda pr, ns: "Unknown")
 
-    entry = {"workload": "wl-x", "package": "baseline", "status": "collecting",
-             "namespace": "sim2real-0", "retries": 0}
-    progress = {"wl-x-baseline": entry}
-    store = LocalProgressStore(tmp_path / "progress.json")
-    store.save(progress)
-    result = mod._do_collect("wl-x-baseline", entry, tmp_path, store, progress,
-                             pr_name="baseline-x-run1")
-    assert result is True
-    assert entry["status"] == "done"
+    progress = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "running", "namespace": "sim2real-0",
+            "pending_since": None,
+        }
+    }
+    mod._reconcile_on_resume(progress, _DISCOVERED)
+    assert progress["wl-smoke-baseline"]["status"] == "pending"
+    assert progress["wl-smoke-baseline"]["namespace"] is None
+    assert "not found on cluster" in capsys.readouterr().err
+
+
+def test_reconcile_status_check_exception_skips_pair(monkeypatch, capsys):
+    """If _check_pipelinerun_status raises, the pair is skipped with a warning."""
+    import pipeline.deploy as mod
+
+    def _raise(pr, ns):
+        raise OSError("kubectl not found")
+    monkeypatch.setattr(mod, "_check_pipelinerun_status", _raise)
+
+    progress = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "running", "namespace": "sim2real-0",
+            "pending_since": None,
+        }
+    }
+    mod._reconcile_on_resume(progress, _DISCOVERED)
+    assert progress["wl-smoke-baseline"]["status"] == "running"
+    assert "failed to check PipelineRun status" in capsys.readouterr().err
+
+
+def test_reconcile_still_running_left_unchanged(monkeypatch):
+    """Running PipelineRun is left as-is (no double-dispatch)."""
+    import pipeline.deploy as mod
+
+    monkeypatch.setattr(mod, "_check_pipelinerun_status", lambda pr, ns: "Running")
+
+    progress = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "running", "namespace": "sim2real-0",
+            "pending_since": "2026-01-01T00:00:00Z",
+        }
+    }
+    mod._reconcile_on_resume(progress, _DISCOVERED)
+    assert progress["wl-smoke-baseline"]["status"] == "running"
+    assert progress["wl-smoke-baseline"]["namespace"] == "sim2real-0"
+    assert progress["wl-smoke-baseline"]["pending_since"] == "2026-01-01T00:00:00Z"
 
 
 # ── _force_reset ──────────────────────────────────────────────────────────────

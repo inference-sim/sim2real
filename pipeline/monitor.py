@@ -132,7 +132,7 @@ def _resolve_active_slots(progress: dict) -> dict[str, list[str]]:
 
 def _work_remaining(progress: dict) -> bool:
     return any(
-        v.get("status") in ("pending", "running", "collecting")
+        v.get("status") in ("pending", "running")
         for v in progress.values()
     )
 

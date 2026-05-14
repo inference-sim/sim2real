@@ -13,7 +13,7 @@ _sim2real_deploy() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     local subcommands="run status collect reset pairs"
-    local status_values="pending running done failed timed-out stalled collect-failed collecting"
+    local status_values="pending running done failed timed-out stalled"
 
     # Extract --experiment-root and --run values while finding the subcommand.
     subcmd=""

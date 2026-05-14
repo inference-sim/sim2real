@@ -39,7 +39,7 @@ _deploy_py_packages() {
 }
 
 _deploy_py_statuses() {
-    compadd pending running done failed timed-out stalled collect-failed collecting
+    compadd pending running done failed timed-out stalled
 }
 
 _sim2real_deploy() {

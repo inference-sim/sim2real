@@ -298,8 +298,8 @@ def test_diagnose_with_api_exception_path():
     assert "API diagnosis failed" in result
 
 
-def test_work_remaining_includes_pending_and_collecting():
+def test_work_remaining_includes_pending_and_running():
     from pipeline.monitor import _work_remaining
     assert _work_remaining({"a": {"status": "pending"}}) is True
-    assert _work_remaining({"a": {"status": "collecting"}}) is True
+    assert _work_remaining({"a": {"status": "running"}}) is True
     assert _work_remaining({"a": {"status": "done"}}) is False
