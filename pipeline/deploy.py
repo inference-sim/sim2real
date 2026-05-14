@@ -1615,11 +1615,20 @@ def _cmd_reset(args, progress_path: Path, discovered: dict,
     ok(msg)
 
 
-def _cmd_wipe(args, run_dir: Path) -> None:
+def _cmd_wipe(args, run_dir: Path,
+              setup_config: dict | None = None) -> None:
     """Delete local results and reset wiped pairs to pending."""
-    from pipeline.lib.progress import LocalProgressStore
+    from pipeline.lib.progress import (
+        LocalProgressStore, ConfigMapProgressStore, CompositeProgressStore,
+    )
     progress_path = run_dir / "progress.json"
-    store = LocalProgressStore(progress_path)
+    local_store = LocalProgressStore(progress_path)
+    primary_ns = _configmap_namespace(setup_config)
+    if primary_ns:
+        cm_store = ConfigMapProgressStore(primary_ns)
+        store = CompositeProgressStore(local_store, cm_store)
+    else:
+        store = local_store
     progress = store.load()
 
     if not progress:
@@ -1643,9 +1652,11 @@ def _cmd_wipe(args, run_dir: Path) -> None:
         entry = progress[key]
         pkg = entry.get("package", "")
         wl = entry.get("workload", "")
-        if pkg and wl:
-            target_dir = results_dir / pkg / wl
-            targets.append((key, pkg, wl, target_dir))
+        if not pkg or not wl:
+            warn(f"{key}: missing package/workload fields — skipping")
+            continue
+        target_dir = results_dir / pkg / wl
+        targets.append((key, pkg, wl, target_dir))
 
     info(f"Scope: {len(actionable)}/{total_pairs} pairs"
          + (" [DRY-RUN]" if args.dry_run else ""))
@@ -1884,7 +1895,7 @@ def main():
                    namespaces=namespaces or None,
                    setup_config=setup_config)
     elif cmd == "wipe":
-        _cmd_wipe(args, run_dir)
+        _cmd_wipe(args, run_dir, setup_config=setup_config)
     elif cmd == "pairs":
         cluster_dir = run_dir / "cluster"
         _cmd_pairs(cluster_dir, keys_only=args.keys_only,

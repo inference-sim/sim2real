@@ -365,3 +365,75 @@ def test_wipe_parent_not_removed_when_siblings_remain(tmp_path):
     assert not (run_dir / "results" / "baseline" / "wl-a").exists()
     assert (run_dir / "results" / "baseline" / "wl-b").exists()
     assert (run_dir / "results" / "baseline").exists()
+
+
+def test_wipe_rmtree_failure_skips_pair(tmp_path, monkeypatch, capsys):
+    """When rmtree fails for one pair, that pair's status is preserved."""
+    import shutil
+    import pipeline.deploy as mod
+
+    run_dir = tmp_path / "run1"
+    run_dir.mkdir()
+    progress = {
+        "wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "done",
+                          "namespace": None, "retries": 0, "pending_stalls": 0, "pending_since": None},
+        "wl-b-baseline": {"workload": "wl-b", "package": "baseline", "status": "done",
+                          "namespace": None, "retries": 0, "pending_stalls": 0, "pending_since": None},
+    }
+    progress_path = run_dir / "progress.json"
+    progress_path.write_text(json.dumps(progress))
+    for wl in ("wl-a", "wl-b"):
+        d = run_dir / "results" / "baseline" / wl
+        d.mkdir(parents=True)
+        (d / "trace.csv").write_text("data")
+
+    orig_rmtree = shutil.rmtree
+
+    def failing_rmtree(path, *a, **kw):
+        if "wl-a" in str(path):
+            raise OSError("permission denied")
+        return orig_rmtree(path, *a, **kw)
+
+    monkeypatch.setattr("shutil.rmtree", failing_rmtree)
+
+    class _Args:
+        only = None; workload = None; package = None; dry_run = False; yes = True
+
+    mod._cmd_wipe(_Args(), run_dir)
+
+    saved = json.loads(progress_path.read_text())
+    # wl-a: rmtree failed → status NOT reset
+    assert saved["wl-a-baseline"]["status"] == "done"
+    # wl-b: succeeded → status reset
+    _assert_reset(saved["wl-b-baseline"])
+    # Error count in summary
+    captured = capsys.readouterr()
+    assert "1 failed" in captured.out + captured.err
+
+
+def test_wipe_warns_on_missing_package_workload(tmp_path, capsys):
+    """Entries missing package/workload fields emit a warning."""
+    import pipeline.deploy as mod
+
+    run_dir = tmp_path / "run1"
+    run_dir.mkdir()
+    progress = {
+        "wl-broken": {"status": "done", "namespace": None, "retries": 0,
+                      "pending_stalls": 0, "pending_since": None},
+        "wl-ok-baseline": {"workload": "wl-ok", "package": "baseline", "status": "done",
+                           "namespace": None, "retries": 0, "pending_stalls": 0, "pending_since": None},
+    }
+    progress_path = run_dir / "progress.json"
+    progress_path.write_text(json.dumps(progress))
+
+    class _Args:
+        only = None; workload = None; package = None; dry_run = False; yes = True
+
+    mod._cmd_wipe(_Args(), run_dir)
+
+    saved = json.loads(progress_path.read_text())
+    _assert_reset(saved["wl-ok-baseline"])
+    # Broken entry was skipped — status unchanged
+    assert saved["wl-broken"]["status"] == "done"
+    captured = capsys.readouterr()
+    assert "missing package/workload" in (captured.out + captured.err).lower()
