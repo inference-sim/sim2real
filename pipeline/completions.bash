@@ -76,7 +76,7 @@ _sim2real_deploy() {
                 COMPREPLY=($(compgen -W "--only --workload --package --status --force --skip-build-epp --max-retries --poll-interval --gpu-resource-type --default-gpu-cost --pending-threshold --max-pending-stalls" -- "$cur"))
                 ;;
             status)
-                COMPREPLY=($(compgen -W "--only --workload --package --status" -- "$cur"))
+                COMPREPLY=($(compgen -W "--only --workload --package --status --remote" -- "$cur"))
                 ;;
             reset)
                 COMPREPLY=($(compgen -W "--only --workload --package --status --dry-run" -- "$cur"))

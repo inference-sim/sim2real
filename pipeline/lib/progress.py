@@ -49,6 +49,8 @@ class ConfigMapProgressStore(ProgressStore):
     DATA_KEY = "progress"
 
     def __init__(self, namespace: str) -> None:
+        if not namespace:
+            raise ValueError("ConfigMapProgressStore requires a non-empty namespace")
         self._namespace = namespace
 
     def load(self) -> dict:
@@ -59,7 +61,13 @@ class ConfigMapProgressStore(ProgressStore):
             check=False, text=True, capture_output=True,
         )
         if result.returncode != 0:
-            return {}
+            stderr = result.stderr.strip().lower()
+            if "notfound" in stderr or "not found" in stderr:
+                return {}
+            raise RuntimeError(
+                f"kubectl get configmap {self.CONFIGMAP_NAME} failed: "
+                f"{result.stderr.strip()}"
+            )
         raw = result.stdout.strip()
         if not raw:
             return {}
@@ -125,4 +133,4 @@ class CompositeProgressStore(ProgressStore):
             try:
                 store.save(data)
             except Exception as exc:
-                print(f"[WARN] ConfigMap save failed: {exc}", file=sys.stderr)
+                print(f"[WARN] {type(store).__name__} save failed: {exc}", file=sys.stderr)

@@ -1,6 +1,7 @@
 """Tests for deploy.py run orchestrator and status subcommand."""
 import argparse
 import json
+import pytest
 from unittest.mock import patch
 
 
@@ -1775,13 +1776,113 @@ def test_configmap_namespace_from_setup_config():
     from pipeline.deploy import _configmap_namespace
     assert _configmap_namespace({"namespace": "sim2real-ns"}) == "sim2real-ns"
 
-def test_configmap_namespace_fallback_to_namespaces():
-    """Falls back to namespaces[0] when setup_config has no namespace."""
+def test_configmap_namespace_fallback_to_namespaces_arg():
+    """Falls back to explicit namespaces[0] when setup_config has no namespace."""
     from pipeline.deploy import _configmap_namespace
     assert _configmap_namespace({}, ["sim2real-0", "sim2real-1"]) == "sim2real-0"
+
+def test_configmap_namespace_fallback_to_setup_config_namespaces():
+    """Falls back to setup_config['namespaces'][0] when namespace key is empty."""
+    from pipeline.deploy import _configmap_namespace
+    assert _configmap_namespace({"namespaces": ["sim2real-0"]}) == "sim2real-0"
 
 def test_configmap_namespace_empty():
     """Returns '' when no namespace source is available."""
     from pipeline.deploy import _configmap_namespace
     assert _configmap_namespace({}) == ""
     assert _configmap_namespace(None) == ""
+
+
+# ── Composite store wiring in _cmd_run / _cmd_reset ─────────────────────────
+
+def test_cmd_run_creates_composite_store_when_namespace_available(monkeypatch, tmp_path):
+    """_cmd_run creates CompositeProgressStore with ConfigMap secondary."""
+    import pipeline.deploy as mod
+    from pipeline.lib.progress import CompositeProgressStore
+
+    stores_created = []
+    _original_init = CompositeProgressStore.__init__
+
+    def track(self, primary, *secondaries):
+        stores_created.append([type(s).__name__ for s in secondaries])
+        _original_init(self, primary, *secondaries)
+
+    monkeypatch.setattr(CompositeProgressStore, "__init__", track)
+    monkeypatch.setattr(mod, "_resolve_epp_action", lambda *a: "skip")
+    monkeypatch.setattr(mod, "_load_pairs", lambda d: {})
+
+    run_dir = tmp_path / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run_metadata.json").write_text('{}')
+    (run_dir / "cluster").mkdir()
+
+    args = argparse.Namespace(
+        skip_build_epp=True, only=None, workload=None, package=None,
+        status=None, force=False, max_retries=2, poll_interval=30,
+        gpu_resource_type=None, default_gpu_cost=1,
+        pending_threshold=600, max_pending_stalls=10, max_backoff=600,
+    )
+    setup = {"namespace": "sim2real-ns", "namespaces": ["sim2real-ns"]}
+
+    with pytest.raises(SystemExit):
+        mod._cmd_run(args, run_dir, setup)
+
+    assert len(stores_created) == 1
+    assert "ConfigMapProgressStore" in stores_created[0]
+
+def test_cmd_reset_creates_composite_store_when_namespace_available(monkeypatch, tmp_path):
+    """_cmd_reset creates CompositeProgressStore with ConfigMap secondary."""
+    import pipeline.deploy as mod
+    from pipeline.lib.progress import CompositeProgressStore
+
+    stores_created = []
+    _original_init = CompositeProgressStore.__init__
+
+    def track(self, primary, *secondaries):
+        stores_created.append([type(s).__name__ for s in secondaries])
+        _original_init(self, primary, *secondaries)
+
+    monkeypatch.setattr(CompositeProgressStore, "__init__", track)
+
+    progress_path = tmp_path / "progress.json"
+    progress_path.write_text(json.dumps({
+        "wl-a-baseline": {"workload": "wl-a", "package": "baseline",
+                          "status": "done", "namespace": None, "retries": 0},
+    }))
+
+    args = argparse.Namespace(only=None, workload=None, package=None,
+                              status=None, dry_run=False)
+    mod._cmd_reset(args, progress_path, {},
+                   namespaces=["sim2real-ns"],
+                   setup_config={"namespace": "sim2real-ns"})
+
+    assert len(stores_created) == 1
+    assert "ConfigMapProgressStore" in stores_created[0]
+
+
+# ── --remote with existing local file ────────────────────────────────────────
+
+def test_status_remote_prefers_configmap_over_existing_local(tmp_path, capsys):
+    """--remote reads from ConfigMap even when local progress.json exists."""
+    from unittest.mock import patch, MagicMock
+    from pipeline.deploy import _cmd_status
+
+    local_data = {"wl-local-baseline": {"workload": "wl-local", "package": "baseline",
+                                        "status": "done", "namespace": None, "retries": 0}}
+    progress_path = tmp_path / "progress.json"
+    progress_path.write_text(json.dumps(local_data))
+
+    remote_data = {"wl-remote-baseline": {"workload": "wl-remote", "package": "baseline",
+                                          "status": "running", "namespace": "ns-0", "retries": 0}}
+
+    class _Args:
+        only = None; workload = None; package = None; status = None
+        remote = True
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(remote_data))
+        _cmd_status(_Args(), progress_path, setup_config={"namespace": "sim2real-ns"})
+
+    out = capsys.readouterr().out
+    assert "wl-remote-baseline" in out
+    assert "wl-local-baseline" not in out

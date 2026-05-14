@@ -46,12 +46,31 @@ def test_load_corrupt_file_raises(tmp_path):
 
 # --- ConfigMapProgressStore tests ---
 
-def test_configmap_load_missing_returns_empty():
+def test_configmap_load_not_found_returns_empty():
     """ConfigMap not found on cluster returns {}."""
     with patch("subprocess.run") as mock:
-        mock.return_value = MagicMock(returncode=1, stdout="", stderr="not found")
+        mock.return_value = MagicMock(
+            returncode=1, stdout="",
+            stderr='Error from server (NotFound): configmaps "sim2real-progress" not found',
+        )
         store = ConfigMapProgressStore("sim2real-ns")
         assert store.load() == {}
+
+def test_configmap_load_kubectl_error_raises():
+    """Non-NotFound kubectl errors raise RuntimeError."""
+    with patch("subprocess.run") as mock:
+        mock.return_value = MagicMock(
+            returncode=1, stdout="",
+            stderr="error: You must be logged in to the server (Unauthorized)",
+        )
+        store = ConfigMapProgressStore("sim2real-ns")
+        with pytest.raises(RuntimeError, match="kubectl get configmap"):
+            store.load()
+
+def test_configmap_empty_namespace_raises():
+    """Empty namespace is rejected at construction time."""
+    with pytest.raises(ValueError, match="non-empty namespace"):
+        ConfigMapProgressStore("")
 
 def test_configmap_load_returns_data():
     """ConfigMap with valid JSON returns parsed dict."""
@@ -149,7 +168,9 @@ def test_composite_secondary_save_failure_warns(tmp_path, capsys):
     store = CompositeProgressStore(primary, FailStore())
     store.save({"wl-x": {"status": "done"}})
     assert primary.load() == {"wl-x": {"status": "done"}}
-    assert "kubectl fail" in capsys.readouterr().err
+    err_output = capsys.readouterr().err
+    assert "FailStore save failed" in err_output
+    assert "kubectl fail" in err_output
 
 def test_composite_secondary_load_failure_warns(tmp_path, capsys):
     """Secondary store load failure warns and is skipped."""

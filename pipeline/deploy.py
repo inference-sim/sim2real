@@ -68,13 +68,17 @@ def _configmap_namespace(setup_config: dict | None,
                          namespaces: list[str] | None = None) -> str:
     """Return the namespace for the sim2real-progress ConfigMap.
 
-    Checks setup_config["namespace"] first, then falls back to namespaces[0].
+    Checks setup_config["namespace"] first, then falls back to
+    namespaces[0] (or setup_config["namespaces"][0] if namespaces
+    is not passed).
     """
-    ns = (setup_config or {}).get("namespace", "")
+    cfg = setup_config or {}
+    ns = cfg.get("namespace", "")
     if ns:
         return ns
-    if namespaces:
-        return namespaces[0]
+    ns_list = namespaces or cfg.get("namespaces") or []
+    if ns_list:
+        return ns_list[0]
     return ""
 
 
