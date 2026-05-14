@@ -1657,3 +1657,90 @@ def test_init_progress_per_pair_heterogeneous_cost(tmp_path):
 
     assert progress["wl-a-baseline"]["gpu_cost"] == 8
     assert progress["wl-b-treatment"]["gpu_cost"] == 2
+
+
+# ── status --remote / ConfigMap fallback ─────────────────────────────────────
+
+def test_status_parser_has_remote_flag():
+    """status subcommand should accept --remote flag."""
+    from pipeline.deploy import build_parser
+    parser = build_parser()
+    args = parser.parse_args(["status", "--remote"])
+    assert args.remote is True
+
+def test_status_parser_remote_default_false():
+    """--remote defaults to False."""
+    from pipeline.deploy import build_parser
+    parser = build_parser()
+    args = parser.parse_args(["status"])
+    assert args.remote is False
+
+def test_status_remote_reads_configmap(tmp_path, capsys):
+    """status --remote reads from ConfigMap instead of local file."""
+    from unittest.mock import patch, MagicMock
+    from pipeline.deploy import _cmd_status
+
+    progress_data = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "running", "namespace": "sim2real-0", "retries": 0,
+        },
+    }
+
+    class _Args:
+        only = None; workload = None; package = None; status = None
+        remote = True
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout=json.dumps(progress_data),
+        )
+        _cmd_status(_Args(), tmp_path / "progress.json",
+                    setup_config={"namespace": "sim2real-ns"})
+
+    out = capsys.readouterr().out
+    assert "wl-smoke-baseline" in out
+
+def test_status_fallback_to_configmap_when_no_local(tmp_path, capsys):
+    """status reads ConfigMap when local progress.json doesn't exist."""
+    from unittest.mock import patch, MagicMock
+    from pipeline.deploy import _cmd_status
+
+    progress_data = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "done", "namespace": None, "retries": 0,
+        },
+    }
+
+    class _Args:
+        only = None; workload = None; package = None; status = None
+        remote = False
+
+    missing_path = tmp_path / "nonexistent" / "progress.json"
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout=json.dumps(progress_data),
+        )
+        _cmd_status(_Args(), missing_path,
+                    setup_config={"namespace": "sim2real-ns"})
+
+    out = capsys.readouterr().out
+    assert "wl-smoke-baseline" in out
+
+def test_status_no_configmap_no_local_reports_no_run(tmp_path, capsys):
+    """No local file and no ConfigMap reports '0 pairs'."""
+    from unittest.mock import patch, MagicMock
+    from pipeline.deploy import _cmd_status
+
+    class _Args:
+        only = None; workload = None; package = None; status = None
+        remote = True
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="not found")
+        _cmd_status(_Args(), tmp_path / "missing.json",
+                    setup_config={"namespace": "sim2real-ns"})
+
+    out = capsys.readouterr().out
+    assert "0 pairs" in out
