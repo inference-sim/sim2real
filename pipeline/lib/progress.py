@@ -61,8 +61,7 @@ class ConfigMapProgressStore(ProgressStore):
             check=False, text=True, capture_output=True,
         )
         if result.returncode != 0:
-            stderr = result.stderr.strip().lower()
-            if "notfound" in stderr or "not found" in stderr:
+            if "(NotFound)" in result.stderr:
                 return {}
             raise RuntimeError(
                 f"kubectl get configmap {self.CONFIGMAP_NAME} failed: "

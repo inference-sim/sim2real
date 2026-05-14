@@ -47,7 +47,7 @@ def test_load_corrupt_file_raises(tmp_path):
 # --- ConfigMapProgressStore tests ---
 
 def test_configmap_load_not_found_returns_empty():
-    """ConfigMap not found on cluster returns {}."""
+    """ConfigMap NotFound on cluster returns {}."""
     with patch("subprocess.run") as mock:
         mock.return_value = MagicMock(
             returncode=1, stdout="",
@@ -55,6 +55,17 @@ def test_configmap_load_not_found_returns_empty():
         )
         store = ConfigMapProgressStore("sim2real-ns")
         assert store.load() == {}
+
+def test_configmap_load_generic_not_found_raises():
+    """Generic 'not found' without K8s reason code raises (not silently ignored)."""
+    with patch("subprocess.run") as mock:
+        mock.return_value = MagicMock(
+            returncode=1, stdout="",
+            stderr="error: the path \"sim2real-progress\" does not exist, not found anywhere",
+        )
+        store = ConfigMapProgressStore("sim2real-ns")
+        with pytest.raises(RuntimeError, match="kubectl get configmap"):
+            store.load()
 
 def test_configmap_load_kubectl_error_raises():
     """Non-NotFound kubectl errors raise RuntimeError."""

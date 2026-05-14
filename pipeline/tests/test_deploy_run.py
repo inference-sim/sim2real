@@ -1739,7 +1739,10 @@ def test_status_no_configmap_no_local_reports_no_run(tmp_path, capsys):
         remote = True
 
     with patch("subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="not found")
+        mock_run.return_value = MagicMock(
+            returncode=1, stdout="",
+            stderr='Error from server (NotFound): configmaps "sim2real-progress" not found',
+        )
         _cmd_status(_Args(), tmp_path / "missing.json",
                     setup_config={"namespace": "sim2real-ns"})
 
