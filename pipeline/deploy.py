@@ -927,10 +927,10 @@ def _reconcile_on_resume(progress: dict, discovered: dict) -> None:
     """Reconcile pair statuses against cluster state when resuming an interrupted run.
 
     - running pairs: check PipelineRun status on cluster and update accordingly
-    - unrecognized statuses (e.g. 'collecting' from a pre-#120 progress.json):
-      reset to pending so they are re-dispatched. This is safe because the only
-      historical unrecognized status is 'collecting', which implies the
-      PipelineRun already succeeded.
+    - unrecognized statuses (e.g. 'collecting' or 'collect-failed' from a
+      pre-#120 progress.json): reset to pending so they are re-dispatched.
+      This is safe because both historical statuses imply the PipelineRun
+      already succeeded.
     """
     _known = ("pending", "running", "done", "failed", "timed-out", "stalled")
     for key, entry in progress.items():
@@ -954,8 +954,13 @@ def _reconcile_on_resume(progress: dict, discovered: dict) -> None:
                     except Exception as exc:
                         warn(f"Failed to delete PipelineRun {pr_name!r} in {ns}: {exc}")
                     entry["namespace"] = None
-                elif actual in ("Failed", "PipelineRunCancelled"):
+                elif actual in ("Failed", "PipelineRunCancelled",
+                               "PipelineRunCouldntGetPipeline",
+                               "PipelineRunTimeout", "CreateRunFailed",
+                               "PipelineRunStopping",
+                               "PipelineRunStoppingTimeout"):
                     entry["status"] = "failed"
+                    # Retain namespace so reset/cleanup can find the resources
                     entry["pending_since"] = None
                 elif actual == "Unknown":
                     warn(f"[{key}] PipelineRun not found on cluster → resetting to pending")

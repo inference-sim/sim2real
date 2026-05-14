@@ -576,6 +576,25 @@ def test_reconcile_status_check_exception_skips_pair(monkeypatch, capsys):
     assert "failed to check PipelineRun status" in capsys.readouterr().err
 
 
+def test_reconcile_still_running_left_unchanged(monkeypatch):
+    """Running PipelineRun is left as-is (no double-dispatch)."""
+    import pipeline.deploy as mod
+
+    monkeypatch.setattr(mod, "_check_pipelinerun_status", lambda pr, ns: "Running")
+
+    progress = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "running", "namespace": "sim2real-0",
+            "pending_since": "2026-01-01T00:00:00Z",
+        }
+    }
+    mod._reconcile_on_resume(progress, _DISCOVERED)
+    assert progress["wl-smoke-baseline"]["status"] == "running"
+    assert progress["wl-smoke-baseline"]["namespace"] == "sim2real-0"
+    assert progress["wl-smoke-baseline"]["pending_since"] == "2026-01-01T00:00:00Z"
+
+
 # ── _force_reset ──────────────────────────────────────────────────────────────
 
 def _mock_run(monkeypatch):
