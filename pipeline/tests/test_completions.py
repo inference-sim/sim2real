@@ -38,13 +38,13 @@ def test_bash_syntax_valid():
 
 def test_zsh_declares_subcommands():
     content = COMPLETIONS_ZSH.read_text()
-    for subcmd in ("run", "status", "collect", "cleanup", "pairs"):
+    for subcmd in ("run", "status", "collect", "reset", "pairs"):
         assert subcmd in content
 
 
 def test_bash_declares_subcommands():
     content = COMPLETIONS_BASH.read_text()
-    for subcmd in ("run", "status", "collect", "cleanup", "pairs"):
+    for subcmd in ("run", "status", "collect", "reset", "pairs"):
         assert subcmd in content
 
 

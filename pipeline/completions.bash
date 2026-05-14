@@ -12,7 +12,7 @@ _sim2real_deploy() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    local subcommands="run status collect cleanup pairs"
+    local subcommands="run status collect reset pairs"
     local status_values="pending running done failed timed-out stalled collect-failed collecting"
 
     # Extract --experiment-root and --run values while finding the subcommand.
@@ -24,7 +24,7 @@ _sim2real_deploy() {
             --experiment-root) ((i++)); _exroot="${COMP_WORDS[i]}" ;;
             --run)             ((i++)); _run_name="${COMP_WORDS[i]}" ;;
             -*) ;;
-            run|status|collect|cleanup|pairs)
+            run|status|collect|reset|pairs)
                 subcmd="${COMP_WORDS[i]}"
                 break
                 ;;
@@ -78,7 +78,7 @@ _sim2real_deploy() {
             status)
                 COMPREPLY=($(compgen -W "--only --workload --package --status" -- "$cur"))
                 ;;
-            cleanup)
+            reset)
                 COMPREPLY=($(compgen -W "--only --workload --package --status --dry-run" -- "$cur"))
                 ;;
             collect)

@@ -115,7 +115,7 @@ Phase state is tracked per-run in `workspace/runs/<run>/.state.json`. Delete it 
 Builds the EPP image and orchestrates PipelineRun execution across namespace slots. Operates independently of `transfer.yaml` — driven by workspace files and `setup_config.json`.
 
 ```bash
-python pipeline/deploy.py {run|status|collect|cleanup|pairs} [flags]
+python pipeline/deploy.py {run|status|collect|reset|pairs} [flags]
 ```
 
 Common flags (all subcommands):
@@ -138,7 +138,7 @@ Common flags (all subcommands):
 python pipeline/deploy.py run     [flags]   # orchestrate parallel pool execution across namespace slots
 python pipeline/deploy.py status            # show progress snapshot of all (workload, package) pairs
 python pipeline/deploy.py collect [--package NAME…]
-python pipeline/deploy.py cleanup [flags]   # tear down cluster resources for failed/stalled pairs
+python pipeline/deploy.py reset [flags]     # tear down cluster resources for failed/stalled pairs
 python pipeline/deploy.py pairs   [flags]   # list available pair keys, workloads, and packages
 ```
 
@@ -165,7 +165,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 **Pair statuses:** `pending` → `running` → `collecting` → `done` | `collect-failed`. Failure paths: `running` → `failed` (hard failure or non-recoverable pending), `running` → `timed-out` (4h timeout exceeded), `running` → `pending` (recoverable early reclaim, repeats up to `--max-pending-stalls` times) → `stalled`.
 
-**Auto-cleanup** — when a PipelineRun succeeds and results are collected, the orchestrator deletes the PipelineRun CR from the cluster. Failed PipelineRuns are left in place for debugging (`kubectl describe`, pod logs). Use `cleanup` to remove them when done.
+**Auto-cleanup** — when a PipelineRun succeeds and results are collected, the orchestrator deletes the PipelineRun CR from the cluster. Failed PipelineRuns are left in place for debugging (`kubectl describe`, pod logs). Use `reset` to remove them when done.
 
 **`deploy.py status`** — prints the current state of all pairs from `workspace/runs/<run>/progress.json`. When the orchestrator is in backoff, an additional line shows the current state and backoff level.
 
@@ -176,15 +176,15 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 **`deploy.py collect`** — extracts results from the cluster PVC and writes to `workspace/runs/<run>/results/{phase}/<workload>/`.
 
-**`deploy.py cleanup`** — removes cluster resources (PipelineRuns, Helm releases) for all non-pending pairs. Failed/running/timed-out pairs are reset to `pending` so they can be re-dispatched. Done pairs stay `done` — only their PipelineRun is deleted to free cluster resources.
+**`deploy.py reset`** — removes cluster resources (PipelineRuns, Helm releases) for all non-pending pairs. Failed/running/timed-out pairs are reset to `pending` so they can be re-dispatched. Done pairs stay `done` — only their PipelineRun is deleted to free cluster resources.
 
 | Flag | Description |
 |------|-------------|
-| `--only PAIR` | Scope cleanup to one specific pair key (`wl-` prefix optional) |
-| `--workload NAME` | Scope cleanup to pairs matching this workload |
-| `--package NAME` | Scope cleanup to pairs matching this package |
-| `--status STATE` | Scope cleanup to pairs with this status |
-| `--dry-run` | Print what would be cleaned up without acting |
+| `--only PAIR` | Scope reset to one specific pair key (`wl-` prefix optional) |
+| `--workload NAME` | Scope reset to pairs matching this workload |
+| `--package NAME` | Scope reset to pairs matching this package |
+| `--status STATE` | Scope reset to pairs with this status |
+| `--dry-run` | Print what would be reset without acting |
 
 **Safety:** Results in `workspace/runs/<run>/results/` are preserved — only cluster resources are removed. For `done` pairs, only the PipelineRun is deleted (Tekton already tore down Helm releases).
 

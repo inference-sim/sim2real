@@ -58,7 +58,7 @@ _sim2real_deploy() {
                 'run:Orchestrate parallel pool execution'
                 'status:Show progress of all (workload, package) pairs'
                 'collect:Pull results for completed packages'
-                'cleanup:Tear down cluster resources for all non-pending pairs'
+                'reset:Tear down cluster resources for all non-pending pairs'
                 'pairs:List available pair keys, workloads, and packages'
             )
             _describe 'subcommand' subcommands
@@ -94,7 +94,7 @@ _sim2real_deploy() {
                         '*--package[Collect only these packages]:package:_deploy_py_packages' \
                         '--skip-logs[Skip vLLM and EPP log files]'
                     ;;
-                cleanup)
+                reset)
                     _arguments \
                         '--only[Scope to one pair key]:pair key:_deploy_py_pair_keys' \
                         '--workload[Scope to workload]:workload:_deploy_py_workloads' \
