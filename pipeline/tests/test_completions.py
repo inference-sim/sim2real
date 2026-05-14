@@ -53,6 +53,8 @@ def test_zsh_handles_status_values():
     for val in ("pending", "running", "done", "failed", "timed-out",
                 "stalled"):
         assert val in content
+    for removed in ("collecting", "collect-failed"):
+        assert removed not in content
 
 
 def test_bash_handles_status_values():
@@ -60,6 +62,8 @@ def test_bash_handles_status_values():
     for val in ("pending", "running", "done", "failed", "timed-out",
                 "stalled"):
         assert val in content
+    for removed in ("collecting", "collect-failed"):
+        assert removed not in content
 
 
 def test_zsh_calls_pairs_subcommand():

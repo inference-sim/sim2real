@@ -738,7 +738,7 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
             else:
                 warn(f"{key}: kubectl delete pipelinerun failed in {ns}")
     elif namespaces:
-        # Namespace already freed (done) — search all slots
+        # Namespace already freed — search all slots
         for slot_ns in namespaces:
             result = run(["kubectl", "delete", "pipelinerun", pr_name, "-n", slot_ns,
                          "--ignore-not-found"], check=False, capture=True)
@@ -923,6 +923,48 @@ def _check_slot_ready(namespace: str, hf_secret_name: str = "hf-secret") -> tupl
     return len(failures) == 0, failures
 
 
+def _reconcile_on_resume(progress: dict, discovered: dict) -> None:
+    """Reconcile pair statuses against cluster state when resuming an interrupted run.
+
+    - running pairs: check PipelineRun status on cluster and update accordingly
+    - unrecognized statuses (e.g. 'collecting' from a pre-#120 progress.json):
+      reset to pending so they are re-dispatched. This is safe because the only
+      historical unrecognized status is 'collecting', which implies the
+      PipelineRun already succeeded.
+    """
+    _known = ("pending", "running", "done", "failed", "timed-out", "stalled")
+    for key, entry in progress.items():
+        if not _is_pair_key(key):
+            continue
+        if entry["status"] == "running":
+            pr_meta = discovered.get(key, {})
+            pr_name = pr_meta.get("pr_name", "")
+            ns = entry.get("namespace") or ""
+            if pr_name and ns:
+                actual = _check_pipelinerun_status(pr_name, ns)
+                if actual == "Succeeded":
+                    entry["status"] = "done"
+                    entry["namespace"] = None
+                    entry["pending_since"] = None
+                elif actual in ("Failed", "PipelineRunCancelled"):
+                    entry["status"] = "failed"
+                    entry["pending_since"] = None
+                elif actual == "Unknown":
+                    warn(f"[{key}] PipelineRun not found on cluster → resetting to pending")
+                    entry["status"] = "pending"
+                    entry["namespace"] = None
+                    entry["pending_since"] = None
+            else:
+                entry["status"] = "pending"
+                entry["namespace"] = None
+                entry["pending_since"] = None
+        elif entry["status"] not in _known:
+            warn(f"[{key}] unrecognized status '{entry['status']}' → resetting to pending")
+            entry["status"] = "pending"
+            entry["namespace"] = None
+            entry["pending_since"] = None
+
+
 def _derive_pair_gpu_costs(
     discovered: dict,
     *,
@@ -1105,38 +1147,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             info("--force: no non-pending pairs found in scope — nothing reset")
         store.save(progress)
 
-    # Reconcile 'running' entries against actual cluster state on resume
-    for key, entry in progress.items():
-        if not _is_pair_key(key):
-            continue
-        if entry["status"] == "running":
-            pr_meta = discovered.get(key, {})
-            pr_name = pr_meta.get("pr_name", "")
-            ns = entry.get("namespace") or ""
-            if pr_name and ns:
-                actual = _check_pipelinerun_status(pr_name, ns)
-                if actual == "Succeeded":
-                    entry["status"] = "done"
-                    entry["namespace"] = None
-                    entry["pending_since"] = None
-                elif actual in ("Failed", "PipelineRunCancelled"):
-                    entry["status"] = "failed"
-                    entry["pending_since"] = None
-                elif actual == "Unknown":
-                    warn(f"[{key}] PipelineRun not found on cluster → resetting to pending")
-                    entry["status"] = "pending"
-                    entry["namespace"] = None
-                    entry["pending_since"] = None
-                # If still "Running"/"Started", leave as "running" — will be monitored
-            else:
-                entry["status"] = "pending"
-                entry["namespace"] = None
-                entry["pending_since"] = None
-        elif entry["status"] not in ("pending", "done", "failed", "timed-out", "stalled"):
-            warn(f"[{key}] unrecognized status '{entry['status']}' → resetting to pending")
-            entry["status"] = "pending"
-            entry["namespace"] = None
-            entry["pending_since"] = None
+    _reconcile_on_resume(progress, discovered)
     store.save(progress)
 
     # Track which namespace is assigned to which pair

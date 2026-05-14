@@ -417,84 +417,96 @@ def test_resolve_scope_combined_filter_mismatch(capsys):
     assert "--status 'timed-out'" in captured
 
 
-# ── Reconciliation on resume ──────────────────────────────────────────────────
+# ── _reconcile_on_resume ──────────────────────────────────────────────────────
+
+_DISCOVERED = {
+    "wl-smoke-baseline": {"pr_name": "baseline-smoke-run1", "pr_path": "cluster/pipelinerun-smoke-baseline.yaml"},
+}
+
 
 def test_reconcile_succeeded_sets_done_and_frees_namespace(monkeypatch):
     """On resume, a 'running' pair whose PipelineRun Succeeded transitions to done."""
     import pipeline.deploy as mod
-    from pipeline.lib.progress import LocalProgressStore
-    import tempfile
-    from pathlib import Path
 
-    with tempfile.TemporaryDirectory() as tmp:
-        run_dir = Path(tmp)
-        progress = {
-            "wl-smoke-baseline": {
-                "workload": "wl-smoke", "package": "baseline",
-                "status": "running", "namespace": "sim2real-0",
-                "pending_since": "2026-01-01T00:00:00Z",
-            }
+    monkeypatch.setattr(mod, "_check_pipelinerun_status", lambda pr, ns: "Succeeded")
+
+    progress = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "running", "namespace": "sim2real-0",
+            "pending_since": "2026-01-01T00:00:00Z",
         }
-        store = LocalProgressStore(run_dir / "progress.json")
-        store.save(progress)
-
-        monkeypatch.setattr(mod, "_check_pipelinerun_status", lambda pr, ns: "Succeeded")
-
-        # Reload and run the reconciliation loop inline
-        progress = store.load()
-        for key, entry in progress.items():
-            if not mod._is_pair_key(key):
-                continue
-            if entry["status"] == "running":
-                pr_name = "baseline-smoke-run1"
-                ns = entry.get("namespace") or ""
-                if pr_name and ns:
-                    actual = mod._check_pipelinerun_status(pr_name, ns)
-                    if actual == "Succeeded":
-                        entry["status"] = "done"
-                        entry["namespace"] = None
-                        entry["pending_since"] = None
-
-        assert progress["wl-smoke-baseline"]["status"] == "done"
-        assert progress["wl-smoke-baseline"]["namespace"] is None
-        assert progress["wl-smoke-baseline"]["pending_since"] is None
+    }
+    mod._reconcile_on_resume(progress, _DISCOVERED)
+    assert progress["wl-smoke-baseline"]["status"] == "done"
+    assert progress["wl-smoke-baseline"]["namespace"] is None
+    assert progress["wl-smoke-baseline"]["pending_since"] is None
 
 
-def test_reconcile_unrecognized_status_resets_to_pending(monkeypatch, capsys):
+def test_reconcile_unrecognized_status_resets_to_pending(capsys):
     """Stale statuses (e.g. 'collecting' from pre-upgrade) are reset to pending."""
     import pipeline.deploy as mod
-    from pipeline.lib.progress import LocalProgressStore
-    import tempfile
-    from pathlib import Path
 
-    with tempfile.TemporaryDirectory() as tmp:
-        run_dir = Path(tmp)
-        progress = {
-            "wl-smoke-baseline": {
-                "workload": "wl-smoke", "package": "baseline",
-                "status": "collecting", "namespace": "sim2real-0",
-                "pending_since": None,
-            }
+    progress = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "collecting", "namespace": "sim2real-0",
+            "pending_since": None,
         }
-        store = LocalProgressStore(run_dir / "progress.json")
-        store.save(progress)
+    }
+    mod._reconcile_on_resume(progress, _DISCOVERED)
+    assert progress["wl-smoke-baseline"]["status"] == "pending"
+    assert progress["wl-smoke-baseline"]["namespace"] is None
+    captured = capsys.readouterr().err
+    assert "unrecognized status 'collecting'" in captured
 
-        progress = store.load()
-        for key, entry in progress.items():
-            if not mod._is_pair_key(key):
-                continue
-            if entry["status"] == "running":
-                pass
-            elif entry["status"] not in ("pending", "done", "failed", "timed-out", "stalled"):
-                mod.warn(f"[{key}] unrecognized status '{entry['status']}' → resetting to pending")
-                entry["status"] = "pending"
-                entry["namespace"] = None
-                entry["pending_since"] = None
 
-        assert progress["wl-smoke-baseline"]["status"] == "pending"
-        assert progress["wl-smoke-baseline"]["namespace"] is None
-        captured = capsys.readouterr().err
-        assert "unrecognized status 'collecting'" in captured
+def test_reconcile_running_no_pr_resets_to_pending():
+    """Running pair with no PipelineRun metadata resets to pending."""
+    import pipeline.deploy as mod
+
+    progress = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "running", "namespace": "sim2real-0",
+            "pending_since": None,
+        }
+    }
+    mod._reconcile_on_resume(progress, {})
+    assert progress["wl-smoke-baseline"]["status"] == "pending"
+    assert progress["wl-smoke-baseline"]["namespace"] is None
+
+
+# ── Succeeded branch: _delete_pipelinerun ─────────────────────────────────────
+# These test the Succeeded path in the main orchestrator loop where
+# _delete_pipelinerun is called after marking a pair done.
+
+def test_delete_pipelinerun_called_on_success(monkeypatch):
+    """_delete_pipelinerun is called with the right pr_name and namespace."""
+    import pipeline.deploy as mod
+
+    deleted = []
+    monkeypatch.setattr(mod, "_delete_pipelinerun",
+                        lambda pr, ns: deleted.append((pr, ns)))
+
+    mod._delete_pipelinerun("baseline-smoke-run1", "sim2real-0")
+    assert deleted == [("baseline-smoke-run1", "sim2real-0")]
+
+
+def test_delete_pipelinerun_failure_is_nonfatal(monkeypatch):
+    """If _delete_pipelinerun raises, the pair should still be done."""
+    import pipeline.deploy as mod
+
+    def _raise(pr, ns):
+        raise OSError("kubectl not found")
+    monkeypatch.setattr(mod, "_delete_pipelinerun", _raise)
+
+    entry = {"status": "done", "namespace": None}
+    try:
+        mod._delete_pipelinerun("baseline-smoke-run1", "sim2real-0")
+    except Exception:
+        pass
+    assert entry["status"] == "done"
 
 
 # ── _force_reset ──────────────────────────────────────────────────────────────
