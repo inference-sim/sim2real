@@ -512,3 +512,20 @@ def test_collect_unscoped_unchanged(tmp_path):
     assert len(extract_calls) == 1
     assert extract_calls[0]["workload"] is None
     assert sorted(extract_calls[0]["phases"]) == ["baseline", "treatment"]
+
+
+def test_collect_scoped_without_progress_exits(tmp_path):
+    """--workload without progress.json exits with error."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+
+    class Args:
+        only = None
+        workload = "smoke"
+        package = None
+        skip_logs = False
+
+    with pytest.raises(SystemExit):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})

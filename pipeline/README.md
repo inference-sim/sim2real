@@ -137,7 +137,7 @@ Common flags (all subcommands):
 ```bash
 python pipeline/deploy.py run     [flags]   # orchestrate parallel pool execution across namespace slots
 python pipeline/deploy.py status            # show progress snapshot of all (workload, package) pairs
-python pipeline/deploy.py collect [--package NAME…]
+python pipeline/deploy.py collect [flags]     # pull results from the cluster PVC
 python pipeline/deploy.py reset [flags]     # tear down cluster resources for failed/stalled pairs
 python pipeline/deploy.py pairs   [flags]   # list available pair keys, workloads, and packages
 ```
@@ -175,6 +175,15 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 | `--package NAME` | Filter by package name |
 
 **`deploy.py collect`** — extracts results from the cluster PVC and writes to `workspace/runs/<run>/results/{phase}/<workload>/`.
+
+| Flag | Description |
+|------|-------------|
+| `--only PAIR` | Scope to one specific pair key (`wl-` prefix optional) |
+| `--workload NAME` | Scope to pairs matching this workload |
+| `--package NAME…` | Collect only these packages (phase-level filter) |
+| `--skip-logs` | Skip vLLM and EPP log files, collect only traces |
+
+When `--only` or `--workload` is given, only matching workload subdirectories are pulled from the PVC (instead of entire phase directories). These pair-level flags compose with `--package` as AND: `--workload X --package baseline` pulls workload X from the baseline phase only. Requires `progress.json` to resolve pairs.
 
 **`deploy.py reset`** — removes cluster resources (PipelineRuns, Helm releases) for all non-pending pairs. Failed/running/timed-out pairs are reset to `pending` so they can be re-dispatched. Done pairs stay `done` — only their PipelineRun is deleted to free cluster resources.
 

@@ -621,6 +621,10 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
     scope_workload = getattr(args, "workload", None)
     scoped = scope_only is not None or scope_workload is not None
 
+    if scoped and not progress:
+        err("--only/--workload require progress.json to resolve pairs, but none was found.")
+        sys.exit(1)
+
     if scoped and progress:
         # Build a lightweight args namespace for _resolve_scope with only
         # pair-level filters (--only, --workload).  Collect's --package is
@@ -688,7 +692,9 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                     skip_logs=skip_logs, workload=wl_name)
             except RuntimeError as e:
                 warn(f"Extractor pod failed for workload {wl_name}: {e}")
-                failed.extend(phases_to_collect)
+                for p in phases_to_collect:
+                    if p not in failed:
+                        failed.append(p)
             else:
                 for phase, exc in errors.items():
                     if exc is None:
