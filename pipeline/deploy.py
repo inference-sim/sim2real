@@ -1675,7 +1675,8 @@ def _cmd_wipe(args, run_dir: Path,
         try:
             answer = input(prompt).strip().lower()
         except EOFError:
-            answer = ""
+            info("Aborted (non-interactive — use --yes to skip confirmation)")
+            return
         if answer != "y":
             info("Aborted")
             return

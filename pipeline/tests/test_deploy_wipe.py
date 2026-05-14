@@ -271,6 +271,8 @@ def test_wipe_eof_on_input_aborts(tmp_path, monkeypatch, capsys):
 
     saved = json.loads(progress_path.read_text())
     assert saved == _PROGRESS
+    captured = capsys.readouterr()
+    assert "--yes" in captured.out + captured.err
 
 
 def test_wipe_filter_mismatch_aborts(tmp_path, capsys):

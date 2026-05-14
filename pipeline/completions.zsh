@@ -105,7 +105,7 @@ _sim2real_deploy() {
                         '--workload[Scope to workload]:workload:_deploy_py_workloads' \
                         '--package[Scope to package]:package:_deploy_py_packages' \
                         '--status[Scope to status]:status:_deploy_py_statuses' \
-                        '--dry-run[Print what would be cleaned up]'
+                        '--dry-run[Print what would be reset]'
                     ;;
                 wipe)
                     _arguments \
