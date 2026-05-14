@@ -303,3 +303,212 @@ def test_collect_fallback_discovers_from_pipelinerun_files(tmp_path):
         deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
 
     assert collected_phases == ["b1", "b2"]
+
+
+def test_collect_with_workload_scope(tmp_path):
+    """--workload scopes extraction to matching workloads only."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    _write_progress(run_dir, {
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done"},
+        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done"},
+        "wl-load-baseline": {"workload": "load", "package": "baseline", "status": "done"},
+        "wl-load-treatment": {"workload": "load", "package": "treatment", "status": "done"},
+    })
+
+    class Args:
+        only = None
+        workload = "smoke"
+        package = None
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        extract_calls.append({"phases": phases, "workload": workload})
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert len(extract_calls) == 1
+    assert extract_calls[0]["workload"] == "smoke"
+    assert sorted(extract_calls[0]["phases"]) == ["baseline", "treatment"]
+
+
+def test_collect_with_only_scope(tmp_path):
+    """--only scopes extraction to one pair's workload and package."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    _write_progress(run_dir, {
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done"},
+        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done"},
+        "wl-load-baseline": {"workload": "load", "package": "baseline", "status": "done"},
+    })
+
+    class Args:
+        only = "wl-smoke-baseline"
+        workload = None
+        package = None
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        extract_calls.append({"phases": phases, "workload": workload})
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert len(extract_calls) == 1
+    assert extract_calls[0]["workload"] == "smoke"
+    assert extract_calls[0]["phases"] == ["baseline"]
+
+
+def test_collect_only_without_prefix(tmp_path):
+    """--only resolves wl- prefix automatically."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    _write_progress(run_dir, {
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done"},
+    })
+
+    class Args:
+        only = "smoke-baseline"
+        workload = None
+        package = None
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        extract_calls.append({"phases": phases, "workload": workload})
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert len(extract_calls) == 1
+    assert extract_calls[0]["workload"] == "smoke"
+
+
+def test_collect_workload_with_package_filter(tmp_path):
+    """--workload + --package compose: workload scopes within specified phases."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    _write_progress(run_dir, {
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done"},
+        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done"},
+        "wl-load-baseline": {"workload": "load", "package": "baseline", "status": "done"},
+    })
+
+    class Args:
+        only = None
+        workload = "smoke"
+        package = ["baseline"]
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        extract_calls.append({"phases": phases, "workload": workload})
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert len(extract_calls) == 1
+    assert extract_calls[0]["workload"] == "smoke"
+    assert extract_calls[0]["phases"] == ["baseline"]
+
+
+def test_collect_workload_no_match_exits(tmp_path):
+    """--workload with no matching pairs exits with error."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    _write_progress(run_dir, {
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done"},
+    })
+
+    class Args:
+        only = None
+        workload = "nonexistent"
+        package = None
+        skip_logs = False
+
+    with pytest.raises(SystemExit):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+
+def test_collect_warns_nondone_scoped_pairs(tmp_path):
+    """When scoped pairs include non-done entries, warn but continue with done ones."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    _write_progress(run_dir, {
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done"},
+        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "running"},
+    })
+
+    class Args:
+        only = None
+        workload = "smoke"
+        package = None
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        extract_calls.append({"phases": phases, "workload": workload})
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
+         patch.object(deploy, "warn") as mock_warn:
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert len(extract_calls) == 1
+    assert extract_calls[0]["phases"] == ["baseline"]
+    assert any("running" in str(c) for c in mock_warn.call_args_list)
+
+
+def test_collect_unscoped_unchanged(tmp_path):
+    """Without --only/--workload, collect behaves exactly as before (no workload param)."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    _write_progress(run_dir, {
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done"},
+        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done"},
+    })
+
+    class Args:
+        only = None
+        workload = None
+        package = None
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        extract_calls.append({"phases": phases, "workload": workload})
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert len(extract_calls) == 1
+    assert extract_calls[0]["workload"] is None
+    assert sorted(extract_calls[0]["phases"]) == ["baseline", "treatment"]
