@@ -616,3 +616,35 @@ def test_collect_scoped_per_phase_failure(tmp_path):
         deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
 
     assert any("tar failed" in str(c) for c in mock_warn.call_args_list)
+
+
+def test_collect_only_takes_precedence_over_workload(tmp_path):
+    """When both --only and --workload are given, --only takes precedence."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    _write_progress(run_dir, {
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done"},
+        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done"},
+        "wl-load-baseline": {"workload": "load", "package": "baseline", "status": "done"},
+    })
+
+    class Args:
+        only = "wl-smoke-baseline"
+        workload = "load"
+        package = None
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        extract_calls.append({"phases": phases, "workload": workload})
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert len(extract_calls) == 1
+    assert extract_calls[0]["workload"] == "smoke"
+    assert extract_calls[0]["phases"] == ["baseline"]

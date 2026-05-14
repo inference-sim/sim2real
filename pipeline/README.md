@@ -178,7 +178,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 | Flag | Description |
 |------|-------------|
-| `--only PAIR` | Scope to one specific pair key (`wl-` prefix optional) |
+| `--only PAIR` | Scope to one pair key — narrows both workload and package (`wl-` prefix optional; takes precedence over `--workload`) |
 | `--workload NAME` | Scope to pairs matching this workload |
 | `--package NAME…` | Collect only these packages (phase-level filter) |
 | `--skip-logs` | Skip vLLM and EPP log files, collect only traces |

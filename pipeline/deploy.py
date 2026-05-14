@@ -451,7 +451,8 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
       /data/{runName}/{phase}/{workloadName}/trace_data.csv
 
     When *workload* is set, only that workload's subdirectory is copied for
-    each phase (used by scoped ``collect --only/--workload``).
+    each phase (used by scoped ``collect --only/--workload`` and by the
+    orchestrator during inline collection).
     When *workload* is None (default), the entire phase directory is copied
     (used by unscoped ``deploy.py collect`` for bulk collection).
 
@@ -643,7 +644,9 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
             if isinstance(progress[k], dict) and progress[k].get("status") in ("done", "collecting")
         }
         for key in sorted(in_scope - collectible):
-            warn(f"Scoped pair {key} has status '{progress[key].get('status', '')}' — skipping")
+            entry = progress[key]
+            st = entry.get("status", "") if isinstance(entry, dict) else str(entry)
+            warn(f"Scoped pair {key} has status '{st}' — skipping")
 
         scoped_phases = sorted({
             progress[k].get("package", "") for k in collectible
