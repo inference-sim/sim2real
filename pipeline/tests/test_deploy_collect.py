@@ -195,8 +195,8 @@ def test_collect_corrupt_progress_warns_and_falls_back(tmp_path):
     assert any("Corrupt" in w for w in warnings)
 
 
-def test_collect_only_done_collecting_phases(tmp_path):
-    """Only phases with status done or collecting are included."""
+def test_collect_only_done_phases(tmp_path):
+    """Only phases with status done are included."""
     from pipeline import deploy
 
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
@@ -204,7 +204,7 @@ def test_collect_only_done_collecting_phases(tmp_path):
     _write_progress(run_dir, {
         "wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "done"},
         "wl-a-treatment": {"workload": "wl-a", "package": "treatment", "status": "pending"},
-        "wl-a-canary": {"workload": "wl-a", "package": "canary", "status": "collecting"},
+        "wl-a-canary": {"workload": "wl-a", "package": "canary", "status": "done"},
     })
 
     class Args:
@@ -220,7 +220,7 @@ def test_collect_only_done_collecting_phases(tmp_path):
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
         deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
 
-    # treatment is pending — excluded; baseline (done) and canary (collecting) included
+    # treatment is pending — excluded; baseline and canary are done — included
     assert sorted(collected_phases) == ["baseline", "canary"]
 
 

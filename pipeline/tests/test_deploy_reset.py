@@ -83,10 +83,10 @@ def test_reset_pair_running_cancels_first(monkeypatch):
 
 
 def test_reset_pair_none_namespace_resets_state(monkeypatch):
-    """Pairs with no namespace still get reset (e.g. collect-failed)."""
+    """Pairs with no namespace still get reset (e.g. failed without namespace)."""
     import pipeline.deploy as mod
 
-    entry = {"workload": "wl-load", "package": "baseline", "status": "collect-failed",
+    entry = {"workload": "wl-load", "package": "baseline", "status": "failed",
              "namespace": None, "retries": 2}
 
     result = mod._reset_pair("wl-load-baseline", entry, _DISCOVERED)

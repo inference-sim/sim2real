@@ -51,14 +51,14 @@ def test_bash_declares_subcommands():
 def test_zsh_handles_status_values():
     content = COMPLETIONS_ZSH.read_text()
     for val in ("pending", "running", "done", "failed", "timed-out",
-                "stalled", "collect-failed", "collecting"):
+                "stalled"):
         assert val in content
 
 
 def test_bash_handles_status_values():
     content = COMPLETIONS_BASH.read_text()
     for val in ("pending", "running", "done", "failed", "timed-out",
-                "stalled", "collect-failed", "collecting"):
+                "stalled"):
         assert val in content
 
 
