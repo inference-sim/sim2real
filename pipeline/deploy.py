@@ -1900,6 +1900,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="""
 Examples:
   python pipeline/deploy.py run                        # Build EPP + orchestrate all pairs
+  python pipeline/deploy.py run --remote               # Submit orchestrator as in-cluster Job
   python pipeline/deploy.py run --skip-build-epp       # Orchestrate without EPP build
   python pipeline/deploy.py status                     # Show progress snapshot
   python pipeline/deploy.py collect                    # Pull results for completed phases

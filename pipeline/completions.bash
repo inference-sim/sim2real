@@ -73,7 +73,7 @@ _sim2real_deploy() {
     if [[ "$cur" == -* ]]; then
         case "$subcmd" in
             run)
-                COMPREPLY=($(compgen -W "--only --workload --package --status --force --skip-build-epp --max-retries --poll-interval --gpu-resource-type --default-gpu-cost --pending-threshold --max-pending-stalls" -- "$cur"))
+                COMPREPLY=($(compgen -W "--remote --only --workload --package --status --force --skip-build-epp --max-retries --poll-interval --gpu-resource-type --default-gpu-cost --pending-threshold --max-pending-stalls --max-backoff" -- "$cur"))
                 ;;
             status)
                 COMPREPLY=($(compgen -W "--only --workload --package --status --remote" -- "$cur"))
