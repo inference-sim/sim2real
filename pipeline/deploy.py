@@ -442,17 +442,12 @@ def _fmt_size(b: int) -> str:
 
 def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                               run_dir: Path,
-                              skip_logs: bool = False,
-                              workload: "str | None" = None) -> dict[str, "Exception | None"]:
+                              skip_logs: bool = False) -> dict[str, "Exception | None"]:
     """Extract results for one or more phases from data-pvc using a single pod.
 
     Data layout on PVC (written by run-workload-blis-observe):
       /data/{runName}/{phase}/{workloadName}/trace_header.yaml
       /data/{runName}/{phase}/{workloadName}/trace_data.csv
-
-    When *workload* is set, only that workload's subdirectory is copied for
-    each phase.  When *workload* is None (default), the entire phase
-    directory is copied.
 
     When *skip_logs* is True, only trace files are copied (skipping vLLM and
     EPP log files which typically account for the bulk of the data).
@@ -519,20 +514,17 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                 # Selective copy: trace files + epp_logs via kubectl cp per
                 # workload; skips vLLM server_logs which dominate data volume.
                 # BusyBox tar doesn't handle large streaming well, so use cp.
-                if workload:
-                    wl_names = [workload]
-                else:
-                    list_result = run(
-                        ["kubectl", "exec", pod_name, f"-n={namespace}", "--",
-                         "sh", "-c",
-                         f"ls /data/{run_name}/{phase}/"],
-                        check=False, capture=True,
-                    )
-                    if list_result.returncode != 0:
-                        errors[phase] = RuntimeError(
-                            f"failed to list workloads: {list_result.stderr.strip()}")
-                        continue
-                    wl_names = list_result.stdout.strip().split() if list_result.stdout.strip() else []
+                list_result = run(
+                    ["kubectl", "exec", pod_name, f"-n={namespace}", "--",
+                     "sh", "-c",
+                     f"ls /data/{run_name}/{phase}/"],
+                    check=False, capture=True,
+                )
+                if list_result.returncode != 0:
+                    errors[phase] = RuntimeError(
+                        f"failed to list workloads: {list_result.stderr.strip()}")
+                    continue
+                wl_names = list_result.stdout.strip().split() if list_result.stdout.strip() else []
                 phase_errors = []
                 for wl_name in wl_names:
                     wl_dest = dest_dir / wl_name
@@ -554,21 +546,6 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                         phase_errors.append(f"{wl_name}/epp_logs: {r.stderr.strip()}")
                 if phase_errors:
                     errors[phase] = RuntimeError("; ".join(phase_errors))
-                else:
-                    errors[phase] = None
-            elif workload:
-                # Workload-scoped full copy: only this workload's subdirectory.
-                wl_dest = dest_dir / workload
-                wl_dest.mkdir(parents=True, exist_ok=True)
-                result = run(
-                    ["kubectl", "cp",
-                     f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{workload}/",
-                     str(wl_dest), "--retries=3"],
-                    check=False, capture=True,
-                )
-                if result.returncode != 0:
-                    errors[phase] = RuntimeError(
-                        f"kubectl cp failed: {result.stderr.strip()}")
                 else:
                     errors[phase] = None
             else:
@@ -1155,6 +1132,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 entry["status"] = "pending"
                 entry["namespace"] = None
                 entry["pending_since"] = None
+        elif entry["status"] not in ("pending", "done", "failed", "timed-out", "stalled"):
+            warn(f"[{key}] unrecognized status '{entry['status']}' — use --force to reset")
     store.save(progress)
 
     # Track which namespace is assigned to which pair
