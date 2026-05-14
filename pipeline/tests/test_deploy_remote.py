@@ -4,7 +4,7 @@ import argparse
 import json
 
 import pytest
-from unittest.mock import patch, call
+from unittest.mock import patch
 
 import pipeline.deploy as mod
 

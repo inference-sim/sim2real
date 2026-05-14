@@ -1831,7 +1831,7 @@ def _wait_for_job_pod(namespace: str, *, timeout: int = 120, poll: int = 5) -> N
 def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
     """Submit the orchestrator as an in-cluster Job."""
     from pipeline.lib.remote import (
-        build_run_inputs_configmap, build_orchestrator_job, JOB_NAME as _JOB,
+        build_run_inputs_configmap, build_orchestrator_job,
     )
 
     namespaces = setup_config.get("namespaces") or [setup_config.get("namespace", "")]
