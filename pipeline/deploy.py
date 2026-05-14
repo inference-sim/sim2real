@@ -442,12 +442,18 @@ def _fmt_size(b: int) -> str:
 
 def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                               run_dir: Path,
-                              skip_logs: bool = False) -> dict[str, "Exception | None"]:
+                              skip_logs: bool = False,
+                              workload: "str | None" = None) -> dict[str, "Exception | None"]:
     """Extract results for one or more phases from data-pvc using a single pod.
 
     Data layout on PVC (written by run-workload-blis-observe):
       /data/{runName}/{phase}/{workloadName}/trace_header.yaml
       /data/{runName}/{phase}/{workloadName}/trace_data.csv
+
+    When *workload* is set, only that workload's subdirectory is copied for
+    each phase (used by scoped ``collect --only/--workload``).
+    When *workload* is None (default), the entire phase directory is copied
+    (used by unscoped ``deploy.py collect`` for bulk collection).
 
     When *skip_logs* is True, only trace files are copied (skipping vLLM and
     EPP log files which typically account for the bulk of the data).
@@ -514,17 +520,20 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                 # Selective copy: trace files + epp_logs via kubectl cp per
                 # workload; skips vLLM server_logs which dominate data volume.
                 # BusyBox tar doesn't handle large streaming well, so use cp.
-                list_result = run(
-                    ["kubectl", "exec", pod_name, f"-n={namespace}", "--",
-                     "sh", "-c",
-                     f"ls /data/{run_name}/{phase}/"],
-                    check=False, capture=True,
-                )
-                if list_result.returncode != 0:
-                    errors[phase] = RuntimeError(
-                        f"failed to list workloads: {list_result.stderr.strip()}")
-                    continue
-                wl_names = list_result.stdout.strip().split() if list_result.stdout.strip() else []
+                if workload:
+                    wl_names = [workload]
+                else:
+                    list_result = run(
+                        ["kubectl", "exec", pod_name, f"-n={namespace}", "--",
+                         "sh", "-c",
+                         f"ls /data/{run_name}/{phase}/"],
+                        check=False, capture=True,
+                    )
+                    if list_result.returncode != 0:
+                        errors[phase] = RuntimeError(
+                            f"failed to list workloads: {list_result.stderr.strip()}")
+                        continue
+                    wl_names = list_result.stdout.strip().split() if list_result.stdout.strip() else []
                 phase_errors = []
                 for wl_name in wl_names:
                     wl_dest = dest_dir / wl_name
@@ -546,6 +555,20 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                         phase_errors.append(f"{wl_name}/epp_logs: {r.stderr.strip()}")
                 if phase_errors:
                     errors[phase] = RuntimeError("; ".join(phase_errors))
+                else:
+                    errors[phase] = None
+            elif workload:
+                wl_dest = dest_dir / workload
+                wl_dest.mkdir(parents=True, exist_ok=True)
+                result = run(
+                    ["kubectl", "cp",
+                     f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{workload}/",
+                     str(wl_dest), "--retries=3"],
+                    check=False, capture=True,
+                )
+                if result.returncode != 0:
+                    errors[phase] = RuntimeError(
+                        f"kubectl cp failed: {result.stderr.strip()}")
                 else:
                     errors[phase] = None
             else:
@@ -592,63 +615,150 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
     else:
         progress = None
 
-    if progress:
-        known_phases = sorted({
-            entry.get("package", "")
-            for entry in progress.values()
-            if isinstance(entry, dict) and entry.get("status") == "done"
+    # ── Pair-level scoping (--only / --workload) ──────────────────────────
+    scope_only = getattr(args, "only", None)
+    scope_workload = getattr(args, "workload", None)
+    scoped = scope_only is not None or scope_workload is not None
+
+    if scoped and not progress:
+        err("--only/--workload require progress.json to resolve pairs, but none was found.")
+        sys.exit(1)
+
+    if scoped and progress:
+        # Build a lightweight args namespace for _resolve_scope with only
+        # pair-level filters (--only, --workload).  Collect's --package is
+        # a phase-level filter (nargs="+") and must NOT be mixed in.
+        class _ScopeArgs:
+            only = scope_only
+            workload = scope_workload
+            package = None
+            status = None
+
+        in_scope = _resolve_scope(progress, _ScopeArgs())
+
+        # Filter to collectible pairs (done) and warn about the rest
+        collectible = {
+            k for k in in_scope
+            if isinstance(progress[k], dict) and progress[k].get("status") == "done"
+        }
+        for key in sorted(in_scope - collectible):
+            entry = progress[key]
+            st = entry.get("status", "") if isinstance(entry, dict) else str(entry)
+            warn(f"Scoped pair {key} has status '{st}' — skipping")
+
+        scoped_phases = sorted({
+            progress[k].get("package", "") for k in collectible
         } - {""})
-    else:
-        known_phases = []
+        scoped_workloads = sorted({
+            progress[k].get("workload", "") for k in collectible
+        } - {""})
 
-    if not known_phases:
-        cluster_dir = run_dir / "cluster"
-        known_phases = _discover_phases(cluster_dir)
-        if progress is None and not progress_path.exists():
-            warn(f"No progress.json found — discovered phases from cluster/: {known_phases}")
-        elif progress is not None:
-            warn(f"No done phases in progress — discovered from cluster/: {known_phases}")
-
-    if args.package:
-        valid = set(known_phases) | {"experiment"}
-        unknown = set(args.package) - valid
-        if unknown:
-            err(f"Unknown packages: {sorted(unknown)}. Valid: {sorted(valid)}")
-            sys.exit(1)
-        phases_to_collect: list[str] = []
-        for p in args.package:
-            if p == "experiment":
-                phases_to_collect.extend(known_phases)
-            else:
-                phases_to_collect.append(p)
-        seen: set[str] = set()
-        phases_to_collect = [p for p in phases_to_collect
-                             if not (p in seen or seen.add(p))]  # type: ignore[func-returns-value]
-    else:
-        phases_to_collect = list(known_phases)
-
-    step(1, "Collecting Results")
-
-    collected: list[str] = []
-    failed: list[str] = []
-
-    if phases_to_collect:
-        try:
-            skip_logs = getattr(args, "skip_logs", False)
-            errors = _extract_phases_from_pvc(
-                phases_to_collect, run_name, namespace, run_dir,
-                skip_logs=skip_logs)
-        except RuntimeError as e:
-            warn(f"Extractor pod failed: {e}")
-            failed.extend(phases_to_collect)
-        else:
-            for phase, exc in errors.items():
-                if exc is None:
-                    ok(f"Collected: {phase}")
-                    collected.append(phase)
+        if not scoped_phases:
+            warn("No done phases for scoped pairs.")
+            phases_to_collect: list[str] = []
+        elif args.package:
+            valid = set(scoped_phases) | {"experiment"}
+            unknown = set(args.package) - valid
+            if unknown:
+                err(f"Unknown packages: {sorted(unknown)}. Valid: {sorted(valid)}")
+                sys.exit(1)
+            phases_to_collect = []
+            for p in args.package:
+                if p == "experiment":
+                    phases_to_collect.extend(scoped_phases)
                 else:
-                    warn(f"Extraction failed for {phase}: {exc}")
-                    failed.append(phase)
+                    phases_to_collect.append(p)
+            seen: set[str] = set()
+            phases_to_collect = [p for p in phases_to_collect
+                                 if not (p in seen or seen.add(p))]  # type: ignore[func-returns-value]
+        else:
+            phases_to_collect = list(scoped_phases)
+
+        step(1, "Collecting Results")
+        collected: list[str] = []
+        failed: list[str] = []
+
+        for wl_name in scoped_workloads:
+            try:
+                skip_logs = getattr(args, "skip_logs", False)
+                errors = _extract_phases_from_pvc(
+                    phases_to_collect, run_name, namespace, run_dir,
+                    skip_logs=skip_logs, workload=wl_name)
+            except RuntimeError as e:
+                warn(f"Extractor pod failed for workload {wl_name}: {e}")
+                for p in phases_to_collect:
+                    if p not in failed:
+                        failed.append(p)
+            else:
+                for phase, exc in errors.items():
+                    if exc is None:
+                        ok(f"Collected: {phase}/{wl_name}")
+                        if phase not in collected:
+                            collected.append(phase)
+                    else:
+                        warn(f"Extraction failed for {phase}/{wl_name}: {exc}")
+                        if phase not in failed:
+                            failed.append(phase)
+
+        collected = [p for p in collected if p not in failed]
+    else:
+        # ── Unscoped path (no --only/--workload) ─────────────────────────
+        if progress:
+            known_phases = sorted({
+                entry.get("package", "")
+                for entry in progress.values()
+                if isinstance(entry, dict) and entry.get("status") == "done"
+            } - {""})
+        else:
+            known_phases = []
+
+        if not known_phases:
+            cluster_dir = run_dir / "cluster"
+            known_phases = _discover_phases(cluster_dir)
+            if progress is None and not progress_path.exists():
+                warn(f"No progress.json found — discovered phases from cluster/: {known_phases}")
+            elif progress is not None:
+                warn(f"No done phases in progress — discovered from cluster/: {known_phases}")
+
+        if args.package:
+            valid = set(known_phases) | {"experiment"}
+            unknown = set(args.package) - valid
+            if unknown:
+                err(f"Unknown packages: {sorted(unknown)}. Valid: {sorted(valid)}")
+                sys.exit(1)
+            phases_to_collect = []
+            for p in args.package:
+                if p == "experiment":
+                    phases_to_collect.extend(known_phases)
+                else:
+                    phases_to_collect.append(p)
+            seen = set()
+            phases_to_collect = [p for p in phases_to_collect
+                                 if not (p in seen or seen.add(p))]  # type: ignore[func-returns-value]
+        else:
+            phases_to_collect = list(known_phases)
+
+        step(1, "Collecting Results")
+        collected = []
+        failed = []
+
+        if phases_to_collect:
+            try:
+                skip_logs = getattr(args, "skip_logs", False)
+                errors = _extract_phases_from_pvc(
+                    phases_to_collect, run_name, namespace, run_dir,
+                    skip_logs=skip_logs)
+            except RuntimeError as e:
+                warn(f"Extractor pod failed: {e}")
+                failed.extend(phases_to_collect)
+            else:
+                for phase, exc in errors.items():
+                    if exc is None:
+                        ok(f"Collected: {phase}")
+                        collected.append(phase)
+                    else:
+                        warn(f"Extraction failed for {phase}: {exc}")
+                        failed.append(phase)
 
     # Print summary
     print(f"\n  Collected: {len(collected)}/{len(phases_to_collect)} phases")
@@ -1477,6 +1587,10 @@ Examples:
 
     sub = p.add_subparsers(dest="command")
     collect_p = sub.add_parser("collect", help="Pull results for completed packages")
+    collect_p.add_argument("--only",     metavar="PAIR",
+                           help="Scope to one specific pair key (wl- prefix optional)")
+    collect_p.add_argument("--workload", metavar="NAME",
+                           help="Scope to pairs matching this workload")
     collect_p.add_argument("--package", nargs="+", metavar="NAME",
                            help="Collect only these packages")
     collect_p.add_argument("--skip-logs", action="store_true", dest="skip_logs",
