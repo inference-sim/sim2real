@@ -14,6 +14,7 @@ Subcommands:
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -1634,15 +1635,11 @@ def _cmd_wipe(args, run_dir: Path) -> None:
         info("No pairs need wiping (all pending)")
         return
 
-    dry_run = getattr(args, "dry_run", False)
-    yes = getattr(args, "yes", False)
     total_pairs = sum(1 for k in progress if _is_pair_key(k))
     results_dir = run_dir / "results"
 
-    # Build targets from all scoped pairs for dir deletion;
-    # only actionable (non-pending) pairs get their status reset.
     targets = []
-    for key in sorted(_scope):
+    for key in sorted(actionable):
         entry = progress[key]
         pkg = entry.get("package", "")
         wl = entry.get("workload", "")
@@ -1651,56 +1648,56 @@ def _cmd_wipe(args, run_dir: Path) -> None:
             targets.append((key, pkg, wl, target_dir))
 
     info(f"Scope: {len(actionable)}/{total_pairs} pairs"
-         + (" [DRY-RUN]" if dry_run else ""))
+         + (" [DRY-RUN]" if args.dry_run else ""))
 
-    if dry_run:
+    if args.dry_run:
         for key, pkg, wl, target_dir in targets:
-            if key not in actionable:
-                continue
             exists = target_dir.exists()
             info(f"[DRY-RUN] {key}: would delete results/{pkg}/{wl}/"
                  + (" (exists)" if exists else " (not on disk)"))
             info(f"[DRY-RUN] {key}: would reset status to pending")
         return
 
-    if not yes:
-        dirs_on_disk = sum(1 for k, _, _, p in targets if k in actionable and p.exists())
-        prompt = f"Wipe {len(actionable)} pair(s) ({dirs_on_disk} with results on disk)? [y/N] "
-        if input(prompt).strip().lower() != "y":
+    if not args.yes:
+        dirs_on_disk = sum(1 for _, _, _, p in targets if p.exists())
+        prompt = f"Wipe {len(targets)} pair(s) ({dirs_on_disk} with results on disk)? [y/N] "
+        try:
+            answer = input(prompt).strip().lower()
+        except EOFError:
+            answer = ""
+        if answer != "y":
             info("Aborted")
             return
 
     wiped = 0
-    import shutil
-    touched_pkgs = set()
+    errors = 0
     for key, pkg, wl, target_dir in targets:
         if target_dir.exists():
-            shutil.rmtree(target_dir)
-            if key in actionable:
-                ok(f"Deleted: results/{pkg}/{wl}/")
-            touched_pkgs.add(pkg)
-        if key in actionable:
-            entry = progress[key]
-            entry["status"] = "pending"
-            entry["retries"] = 0
-            entry["pending_stalls"] = 0
-            entry["pending_since"] = None
-            entry["namespace"] = None
-            wiped += 1
-
-    # Remove package dirs whose tracked pairs are all now pending
-    for pkg in touched_pkgs:
-        pkg_dir = results_dir / pkg
-        if not pkg_dir.exists():
-            continue
-        active = [k for k, v in progress.items()
-                  if _is_pair_key(k) and v.get("package") == pkg
-                  and v.get("status") not in (None, "pending")]
-        if not active:
-            shutil.rmtree(pkg_dir)
+            try:
+                shutil.rmtree(target_dir)
+            except OSError as e:
+                warn(f"{key}: failed to delete results/{pkg}/{wl}/: {e}")
+                errors += 1
+                continue
+            ok(f"Deleted: results/{pkg}/{wl}/")
+            pkg_dir = results_dir / pkg
+            try:
+                pkg_dir.rmdir()
+            except OSError:
+                pass
+        entry = progress[key]
+        entry["status"] = "pending"
+        entry["retries"] = 0
+        entry["pending_stalls"] = 0
+        entry["pending_since"] = None
+        entry["namespace"] = None
+        wiped += 1
 
     store.save(progress)
-    ok(f"{wiped} pair(s) wiped")
+    msg = f"{wiped} pair(s) wiped"
+    if errors:
+        msg += f" ({errors} failed — check permissions)"
+    ok(msg)
 
 
 # ── Stop remote orchestrator ────────────────────────────────────────────────
