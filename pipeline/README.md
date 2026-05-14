@@ -115,7 +115,7 @@ Phase state is tracked per-run in `workspace/runs/<run>/.state.json`. Delete it 
 Builds the EPP image and orchestrates PipelineRun execution across namespace slots. Operates independently of `transfer.yaml` — driven by workspace files and `setup_config.json`.
 
 ```bash
-python pipeline/deploy.py {run|status|collect|reset|pairs} [flags]
+python pipeline/deploy.py {run|status|collect|stop|reset|pairs} [flags]
 ```
 
 Common flags (all subcommands):
@@ -138,6 +138,7 @@ Common flags (all subcommands):
 python pipeline/deploy.py run     [flags]   # orchestrate parallel pool execution across namespace slots
 python pipeline/deploy.py status            # show progress snapshot of all (workload, package) pairs
 python pipeline/deploy.py collect [--package NAME…]
+python pipeline/deploy.py stop               # stop the remote orchestrator Job
 python pipeline/deploy.py reset [flags]     # tear down cluster resources for failed/stalled pairs
 python pipeline/deploy.py pairs   [flags]   # list available pair keys, workloads, and packages
 ```
@@ -175,6 +176,8 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 | `--package NAME` | Filter by package name |
 
 **`deploy.py collect`** — extracts results from the cluster PVC and writes to `workspace/runs/<run>/results/{phase}/<workload>/`.
+
+**`deploy.py stop`** — deletes the `sim2real-orchestrator` Kubernetes Job (with cascading pod deletion) in the primary namespace. Only meaningful for remote execution (`run --remote`). Does not touch `progress.json` — pair state is left as-is. If no remote orchestrator Job exists, prints a message and returns. Use `reset` separately to clear failed/stalled pair state.
 
 **`deploy.py reset`** — removes cluster resources (PipelineRuns, Helm releases) for all non-pending pairs. Failed/running/timed-out pairs are reset to `pending` so they can be re-dispatched. Done pairs stay `done` — only their PipelineRun is deleted to free cluster resources.
 

@@ -1450,6 +1450,25 @@ def _cmd_reset(args, progress_path: Path, discovered: dict,
     ok(msg)
 
 
+# ── Stop remote orchestrator ────────────────────────────────────────────────
+
+JOB_NAME = "sim2real-orchestrator"
+
+
+def _cmd_stop(namespace: str) -> None:
+    """Stop the remote orchestrator Job."""
+    try:
+        run(["kubectl", "get", "job", JOB_NAME, "-n", namespace],
+            check=True, capture=True)
+    except subprocess.CalledProcessError:
+        info(f"No remote orchestrator started in {namespace}")
+        return
+
+    run(["kubectl", "delete", "job", JOB_NAME, "-n", namespace,
+         "--cascade=foreground"])
+    ok(f"Stopped {JOB_NAME} in {namespace}")
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1464,6 +1483,7 @@ Examples:
   python pipeline/deploy.py status                     # Show progress snapshot
   python pipeline/deploy.py collect                    # Pull results for completed phases
   python pipeline/deploy.py collect --skip-logs        # Collect traces only (skip large logs)
+  python pipeline/deploy.py stop                         # Stop remote orchestrator Job
   python pipeline/deploy.py reset                       # Reset stalled/failed pairs
   python pipeline/deploy.py reset --dry-run             # Preview what would be reset
   python pipeline/deploy.py pairs                       # List pairs with workloads and packages
@@ -1511,6 +1531,8 @@ Examples:
                        help="Max early reclaims before marking pair stalled [10]")
     run_p.add_argument("--max-backoff", type=int, default=600, dest="max_backoff",
                        help="Maximum backoff interval in seconds during GPU scarcity [600]")
+
+    sub.add_parser("stop", help="Stop the remote orchestrator Job")
 
     reset_p = sub.add_parser("reset", help="Tear down cluster resources for all non-pending pairs")
     reset_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key (wl- prefix optional)")
@@ -1563,6 +1585,13 @@ def main():
         _cmd_status(args, progress_path)
     elif cmd == "collect":
         _cmd_collect(args, run_dir, setup_config)
+    elif cmd == "stop":
+        namespaces = [ns for ns in (setup_config.get("namespaces") or
+                      [setup_config.get("namespace", "")]) if ns]
+        if not namespaces:
+            err("No namespaces configured. Run setup.py first.")
+            sys.exit(1)
+        _cmd_stop(namespace=namespaces[0])
     elif cmd == "reset":
         progress_path = run_dir / "progress.json"
         cluster_dir = run_dir / "cluster"
@@ -1578,7 +1607,7 @@ def main():
                    workloads_only=args.workloads_only,
                    packages_only=args.packages_only)
     else:
-        err("No subcommand specified. Use: deploy.py run | status | collect | reset | pairs")
+        err("No subcommand specified. Use: deploy.py run | status | collect | stop | reset | pairs")
         sys.exit(1)
 
 
