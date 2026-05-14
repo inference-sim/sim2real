@@ -7,6 +7,7 @@ Subcommands:
   collect  Pull results from cluster for completed phases
   stop     Stop the remote orchestrator Job
   reset    Tear down cluster resources for all non-pending pairs
+  wipe     Delete local results and reset pairs to pending
   pairs    List available pair keys, workloads, and packages
 """
 
@@ -1613,6 +1614,95 @@ def _cmd_reset(args, progress_path: Path, discovered: dict,
     ok(msg)
 
 
+def _cmd_wipe(args, run_dir: Path) -> None:
+    """Delete local results and reset wiped pairs to pending."""
+    from pipeline.lib.progress import LocalProgressStore
+    progress_path = run_dir / "progress.json"
+    store = LocalProgressStore(progress_path)
+    progress = store.load()
+
+    if not progress:
+        info("No progress data found — nothing to wipe")
+        return
+
+    _scope = _resolve_scope(progress, args)
+
+    actionable = {k for k in _scope
+                  if progress[k].get("status") not in (None, "pending")}
+
+    if not actionable:
+        info("No pairs need wiping (all pending)")
+        return
+
+    dry_run = getattr(args, "dry_run", False)
+    yes = getattr(args, "yes", False)
+    total_pairs = sum(1 for k in progress if _is_pair_key(k))
+    results_dir = run_dir / "results"
+
+    # Build targets from all scoped pairs for dir deletion;
+    # only actionable (non-pending) pairs get their status reset.
+    targets = []
+    for key in sorted(_scope):
+        entry = progress[key]
+        pkg = entry.get("package", "")
+        wl = entry.get("workload", "")
+        if pkg and wl:
+            target_dir = results_dir / pkg / wl
+            targets.append((key, pkg, wl, target_dir))
+
+    info(f"Scope: {len(actionable)}/{total_pairs} pairs"
+         + (" [DRY-RUN]" if dry_run else ""))
+
+    if dry_run:
+        for key, pkg, wl, target_dir in targets:
+            if key not in actionable:
+                continue
+            exists = target_dir.exists()
+            info(f"[DRY-RUN] {key}: would delete results/{pkg}/{wl}/"
+                 + (" (exists)" if exists else " (not on disk)"))
+            info(f"[DRY-RUN] {key}: would reset status to pending")
+        return
+
+    if not yes:
+        dirs_on_disk = sum(1 for k, _, _, p in targets if k in actionable and p.exists())
+        prompt = f"Wipe {len(actionable)} pair(s) ({dirs_on_disk} with results on disk)? [y/N] "
+        if input(prompt).strip().lower() != "y":
+            info("Aborted")
+            return
+
+    wiped = 0
+    import shutil
+    touched_pkgs = set()
+    for key, pkg, wl, target_dir in targets:
+        if target_dir.exists():
+            shutil.rmtree(target_dir)
+            if key in actionable:
+                ok(f"Deleted: results/{pkg}/{wl}/")
+            touched_pkgs.add(pkg)
+        if key in actionable:
+            entry = progress[key]
+            entry["status"] = "pending"
+            entry["retries"] = 0
+            entry["pending_stalls"] = 0
+            entry["pending_since"] = None
+            entry["namespace"] = None
+            wiped += 1
+
+    # Remove package dirs whose tracked pairs are all now pending
+    for pkg in touched_pkgs:
+        pkg_dir = results_dir / pkg
+        if not pkg_dir.exists():
+            continue
+        active = [k for k, v in progress.items()
+                  if _is_pair_key(k) and v.get("package") == pkg
+                  and v.get("status") not in (None, "pending")]
+        if not active:
+            shutil.rmtree(pkg_dir)
+
+    store.save(progress)
+    ok(f"{wiped} pair(s) wiped")
+
+
 # ── Stop remote orchestrator ────────────────────────────────────────────────
 
 JOB_NAME = "sim2real-orchestrator"
@@ -1657,6 +1747,9 @@ Examples:
   python pipeline/deploy.py stop                         # Stop remote orchestrator Job
   python pipeline/deploy.py reset                       # Reset stalled/failed pairs
   python pipeline/deploy.py reset --dry-run             # Preview what would be reset
+  python pipeline/deploy.py wipe                          # Wipe all results for current run
+  python pipeline/deploy.py wipe --workload sharegpt-32   # Wipe results for one workload
+  python pipeline/deploy.py wipe --dry-run                # Preview what would be wiped
   python pipeline/deploy.py pairs                       # List pairs with workloads and packages
   python pipeline/deploy.py pairs --keys-only           # Machine-readable: keys only
 """,
@@ -1718,6 +1811,15 @@ Examples:
     reset_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status")
     reset_p.add_argument("--dry-run",  action="store_true", dest="dry_run",
                          help="Print what would be reset without doing it")
+
+    wipe_p = sub.add_parser("wipe", help="Delete local results and reset pairs to pending")
+    wipe_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key (wl- prefix optional)")
+    wipe_p.add_argument("--workload", metavar="NAME",  help="Scope to pairs matching this workload")
+    wipe_p.add_argument("--package",  metavar="NAME",  help="Scope to pairs matching this package")
+    wipe_p.add_argument("--dry-run",  action="store_true", dest="dry_run",
+                         help="Print what would be wiped without doing it")
+    wipe_p.add_argument("--yes", "-y", action="store_true",
+                         help="Skip confirmation prompt")
 
     pairs_p = sub.add_parser("pairs", help="List available pair keys, workloads, and packages")
     pairs_group = pairs_p.add_mutually_exclusive_group()
@@ -1784,13 +1886,15 @@ def main():
         _cmd_reset(args, progress_path, discovered,
                    namespaces=namespaces or None,
                    setup_config=setup_config)
+    elif cmd == "wipe":
+        _cmd_wipe(args, run_dir)
     elif cmd == "pairs":
         cluster_dir = run_dir / "cluster"
         _cmd_pairs(cluster_dir, keys_only=args.keys_only,
                    workloads_only=args.workloads_only,
                    packages_only=args.packages_only)
     else:
-        err("No subcommand specified. Use: deploy.py run | status | collect | stop | reset | pairs")
+        err("No subcommand specified. Use: deploy.py run | status | collect | stop | reset | wipe | pairs")
         sys.exit(1)
 
 
