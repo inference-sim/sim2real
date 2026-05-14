@@ -1,0 +1,19 @@
+.git
+.github
+.gitignore
+.gitmodules
+.claude
+.venv
+__pycache__
+*.pyc
+workspace
+workspace */
+inference-sim
+tektonc-data-collection
+docs
+prompts
+*.md
+*.log
+.env
+.env.local
+.DS_Store
