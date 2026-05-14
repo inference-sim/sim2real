@@ -1162,7 +1162,9 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     """Orchestrate parallel pool execution across namespace slots."""
     import datetime as _dt
     import tempfile as _tmp
-    from pipeline.lib.progress import LocalProgressStore
+    from pipeline.lib.progress import (
+        LocalProgressStore, ConfigMapProgressStore, CompositeProgressStore,
+    )
     from pipeline.lib.backoff import BackoffController
     from pipeline.lib.capacity import (
         probe_free_gpus, derive_gpu_resource_type, load_defaults
@@ -1188,7 +1190,13 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
 
     cluster_dir = run_dir / "cluster"
     progress_path = run_dir / "progress.json"
-    store = LocalProgressStore(progress_path)
+    local_store = LocalProgressStore(progress_path)
+    primary_ns = setup_config.get("namespace") or (namespaces[0] if namespaces else "")
+    if primary_ns:
+        cm_store = ConfigMapProgressStore(primary_ns)
+        store = CompositeProgressStore(local_store, cm_store)
+    else:
+        store = local_store
 
     # Derive GPU resource type from baseline scenario
     # CLI --gpu-resource-type overrides auto-derivation when explicitly set
@@ -1512,10 +1520,19 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
 
 
 def _cmd_reset(args, progress_path: Path, discovered: dict,
-               namespaces: list[str] | None = None) -> None:
+               namespaces: list[str] | None = None,
+               setup_config: dict | None = None) -> None:
     """Tear down cluster resources for all non-pending pairs."""
-    from pipeline.lib.progress import LocalProgressStore
-    store = LocalProgressStore(progress_path)
+    from pipeline.lib.progress import (
+        LocalProgressStore, ConfigMapProgressStore, CompositeProgressStore,
+    )
+    local_store = LocalProgressStore(progress_path)
+    primary_ns = (setup_config or {}).get("namespace", "")
+    if primary_ns:
+        cm_store = ConfigMapProgressStore(primary_ns)
+        store = CompositeProgressStore(local_store, cm_store)
+    else:
+        store = local_store
     progress = store.load()
 
     if not progress:
@@ -1685,7 +1702,9 @@ def main():
                       [setup_config.get("namespace", "")]) if ns]
         if not namespaces:
             warn("No namespaces in setup_config — PipelineRun deletion for done pairs may be incomplete")
-        _cmd_reset(args, progress_path, discovered, namespaces=namespaces or None)
+        _cmd_reset(args, progress_path, discovered,
+                   namespaces=namespaces or None,
+                   setup_config=setup_config)
     elif cmd == "pairs":
         cluster_dir = run_dir / "cluster"
         _cmd_pairs(cluster_dir, keys_only=args.keys_only,
