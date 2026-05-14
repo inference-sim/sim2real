@@ -4,7 +4,12 @@ import json
 
 import pytest
 
-from pipeline.lib.remote import CONFIGMAP_NAME, build_run_inputs_configmap
+from pipeline.lib.remote import (
+    CONFIGMAP_NAME,
+    JOB_NAME,
+    build_orchestrator_job,
+    build_run_inputs_configmap,
+)
 
 
 @pytest.fixture()
@@ -81,3 +86,69 @@ def test_missing_run_metadata(workspace):
             run_dir=run_dir, workspace_dir=workspace_dir,
             namespace="ns", run_name="test-run",
         )
+
+
+# --- build_orchestrator_job tests ---
+
+RUN_NAME = "exp-001"
+NAMESPACE = "sim2real"
+IMAGE = "ghcr.io/inference-sim/sim2real-orchestrator:latest"
+
+
+def _build_job(**overrides):
+    defaults = dict(
+        namespace=NAMESPACE, image=IMAGE, run_name=RUN_NAME, run_flags=["--dry-run"],
+    )
+    defaults.update(overrides)
+    return build_orchestrator_job(**defaults)
+
+
+def test_job_name_matches_constant():
+    assert JOB_NAME == "sim2real-orchestrator"
+
+
+def test_job_structure():
+    job = _build_job()
+    assert job["kind"] == "Job"
+    assert job["metadata"]["name"] == JOB_NAME
+    assert job["metadata"]["namespace"] == NAMESPACE
+
+    spec = job["spec"]["template"]["spec"]
+    assert spec["serviceAccountName"] == "sim2real-runner"
+    assert spec["restartPolicy"] == "Never"
+
+    container = spec["containers"][0]
+    assert container["image"] == IMAGE
+    args = container["args"]
+    assert "--experiment-root" in args
+    assert "run" in args
+    assert "--skip-build-epp" in args
+    assert "--dry-run" in args
+
+
+def test_job_configmap_volume_mount():
+    job = _build_job()
+    spec = job["spec"]["template"]["spec"]
+
+    volume = spec["volumes"][0]
+    assert volume["configMap"]["name"] == CONFIGMAP_NAME
+
+    mount = spec["containers"][0]["volumeMounts"][0]
+    assert mount["mountPath"] == f"/data/workspace/runs/{RUN_NAME}"
+
+
+def test_job_experiment_root_matches_mount():
+    job = _build_job()
+    args = job["spec"]["template"]["spec"]["containers"][0]["args"]
+    idx = args.index("--experiment-root")
+    assert args[idx + 1] == "/data"
+
+
+def test_job_backoff_limit_zero():
+    job = _build_job()
+    assert job["spec"]["backoffLimit"] == 0
+
+
+def test_job_active_deadline():
+    job = _build_job()
+    assert job["spec"]["activeDeadlineSeconds"] == 18000

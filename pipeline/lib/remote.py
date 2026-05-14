@@ -3,6 +3,9 @@
 from pathlib import Path
 
 CONFIGMAP_NAME = "sim2real-run-inputs"
+JOB_NAME = "sim2real-orchestrator"
+SERVICE_ACCOUNT = "sim2real-runner"
+MOUNT_BASE = "/data"
 
 
 def build_run_inputs_configmap(
@@ -29,4 +32,48 @@ def build_run_inputs_configmap(
         "kind": "ConfigMap",
         "metadata": {"name": CONFIGMAP_NAME, "namespace": namespace},
         "data": data,
+    }
+
+
+def build_orchestrator_job(
+    *, namespace: str, image: str, run_name: str, run_flags: list[str]
+) -> dict:
+    mount_path = f"{MOUNT_BASE}/workspace/runs/{run_name}"
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {"name": JOB_NAME, "namespace": namespace},
+        "spec": {
+            "backoffLimit": 0,
+            "activeDeadlineSeconds": 18000,
+            "template": {
+                "spec": {
+                    "serviceAccountName": SERVICE_ACCOUNT,
+                    "restartPolicy": "Never",
+                    "containers": [
+                        {
+                            "name": "orchestrator",
+                            "image": image,
+                            "args": [
+                                "--experiment-root", MOUNT_BASE,
+                                "--run", run_name,
+                                "run", "--skip-build-epp",
+                            ] + run_flags,
+                            "volumeMounts": [
+                                {
+                                    "name": "run-inputs",
+                                    "mountPath": mount_path,
+                                },
+                            ],
+                        },
+                    ],
+                    "volumes": [
+                        {
+                            "name": "run-inputs",
+                            "configMap": {"name": CONFIGMAP_NAME},
+                        },
+                    ],
+                },
+            },
+        },
     }
