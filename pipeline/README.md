@@ -165,6 +165,8 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 **Pair statuses:** `pending` → `running` → `collecting` → `done` | `collect-failed`. Failure paths: `running` → `failed` (hard failure or non-recoverable pending), `running` → `timed-out` (4h timeout exceeded), `running` → `pending` (recoverable early reclaim, repeats up to `--max-pending-stalls` times) → `stalled`.
 
+**Auto-cleanup** — when a PipelineRun succeeds and results are collected, the orchestrator deletes the PipelineRun CR from the cluster. Failed PipelineRuns are left in place for debugging (`kubectl describe`, pod logs). Use `cleanup` to remove them when done.
+
 **`deploy.py status`** — prints the current state of all pairs from `workspace/runs/<run>/progress.json`. When the orchestrator is in backoff, an additional line shows the current state and backoff level.
 
 | Flag | Description |

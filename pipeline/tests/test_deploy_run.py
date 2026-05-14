@@ -570,6 +570,26 @@ def test_do_collect_skips_delete_on_interrupt(tmp_path, monkeypatch):
     assert deleted == []
 
 
+def test_do_collect_returns_true_when_delete_raises(tmp_path, monkeypatch):
+    """If _delete_pipelinerun raises OSError, _do_collect still returns True."""
+    import pipeline.deploy as mod
+    from pipeline.lib.progress import LocalProgressStore
+
+    monkeypatch.setattr(mod, "_collect_pair", lambda *a: True)
+    monkeypatch.setattr(mod, "_delete_pipelinerun",
+                        lambda pr, ns: (_ for _ in ()).throw(OSError("kubectl not found")))
+
+    entry = {"workload": "wl-x", "package": "baseline", "status": "collecting",
+             "namespace": "sim2real-0", "retries": 0}
+    progress = {"wl-x-baseline": entry}
+    store = LocalProgressStore(tmp_path / "progress.json")
+    store.save(progress)
+    result = mod._do_collect("wl-x-baseline", entry, tmp_path, store, progress,
+                             pr_name="baseline-x-run1")
+    assert result is True
+    assert entry["status"] == "done"
+
+
 # ── _force_reset ──────────────────────────────────────────────────────────────
 
 def _mock_run(monkeypatch):

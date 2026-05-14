@@ -195,7 +195,9 @@ def _delete_pipelinerun(pr_name: str, namespace: str) -> None:
         check=False, capture=True,
     )
     if result.returncode != 0:
-        warn(f"Failed to delete PipelineRun {pr_name!r} in {namespace}")
+        detail = result.stderr.strip() if result.stderr else ""
+        warn(f"Failed to delete PipelineRun {pr_name!r} in {namespace}" +
+             (f": {detail}" if detail else ""))
 
 
 # ── Deploy command ───────────────────────────────────────────────────────────
@@ -994,7 +996,10 @@ def _do_collect(pair_key: str, entry: dict, run_dir: Path, store, progress: dict
         entry["namespace"] = None
         store.save(progress)
     if ok and pr_name and namespace:
-        _delete_pipelinerun(pr_name, namespace)
+        try:
+            _delete_pipelinerun(pr_name, namespace)
+        except Exception as exc:
+            warn(f"Failed to delete PipelineRun {pr_name!r} in {namespace}: {exc}")
     return ok
 
 
