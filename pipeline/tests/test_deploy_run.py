@@ -1744,3 +1744,44 @@ def test_status_no_configmap_no_local_reports_no_run(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "0 pairs" in out
+
+def test_status_remote_no_namespace_warns(tmp_path, capsys):
+    """--remote with no namespace configured warns and falls back to local."""
+    from pipeline.deploy import _cmd_status
+
+    progress_path = tmp_path / "progress.json"
+    progress_path.write_text(json.dumps({
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "done", "namespace": None, "retries": 0,
+        },
+    }))
+
+    class _Args:
+        only = None; workload = None; package = None; status = None
+        remote = True
+
+    _cmd_status(_Args(), progress_path, setup_config={})
+
+    captured = capsys.readouterr()
+    assert "--remote requested but no namespace" in captured.err
+    assert "wl-smoke-baseline" in captured.out
+
+
+# ── _configmap_namespace helper ──────────────────────────────────────────────
+
+def test_configmap_namespace_from_setup_config():
+    """Primary namespace comes from setup_config['namespace']."""
+    from pipeline.deploy import _configmap_namespace
+    assert _configmap_namespace({"namespace": "sim2real-ns"}) == "sim2real-ns"
+
+def test_configmap_namespace_fallback_to_namespaces():
+    """Falls back to namespaces[0] when setup_config has no namespace."""
+    from pipeline.deploy import _configmap_namespace
+    assert _configmap_namespace({}, ["sim2real-0", "sim2real-1"]) == "sim2real-0"
+
+def test_configmap_namespace_empty():
+    """Returns '' when no namespace source is available."""
+    from pipeline.deploy import _configmap_namespace
+    assert _configmap_namespace({}) == ""
+    assert _configmap_namespace(None) == ""

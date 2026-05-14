@@ -97,8 +97,8 @@ class ConfigMapProgressStore(ProgressStore):
 class CompositeProgressStore(ProgressStore):
     """Write to all stores; read from the first that returns data.
 
-    Primary store failures propagate. Secondary store save failures
-    print a warning to stderr but do not raise.
+    Primary store failures propagate. Secondary store failures (both
+    save and load) print a warning to stderr but do not raise.
     """
 
     def __init__(self, primary: ProgressStore, *secondaries: ProgressStore) -> None:
@@ -114,7 +114,8 @@ class CompositeProgressStore(ProgressStore):
                 data = store.load()
                 if data:
                     return data
-            except Exception:
+            except Exception as exc:
+                print(f"[WARN] Secondary store load failed: {exc}", file=sys.stderr)
                 continue
         return {}
 

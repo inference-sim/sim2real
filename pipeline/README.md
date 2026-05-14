@@ -167,10 +167,11 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 **Auto-cleanup** — when a PipelineRun succeeds, the orchestrator deletes the PipelineRun CR from the cluster. Failed PipelineRuns are left in place for debugging (`kubectl describe`, pod logs). Use `reset` to remove them when done.
 
-**`deploy.py status`** — prints the current state of all pairs from `workspace/runs/<run>/progress.json`. When the orchestrator is in backoff, an additional line shows the current state and backoff level.
+**`deploy.py status`** — prints the current state of all pairs. By default reads from `workspace/runs/<run>/progress.json`. When the orchestrator runs remotely (in-cluster), use `--remote` to read from the `sim2real-progress` ConfigMap instead. The ConfigMap is also used automatically when the local `progress.json` is absent.
 
 | Flag | Description |
 |------|-------------|
+| `--remote` | Read progress from cluster ConfigMap instead of local file |
 | `--workload NAME` | Filter by workload name |
 | `--package NAME` | Filter by package name |
 
@@ -311,11 +312,14 @@ All paths are relative to the repo root and validated at Phase 1.
 
 ## Parallel Pool Execution
 
-`setup.py --namespaces NS1,NS2,...` provisions N namespace slots, each bootstrapped identically. `prepare.py` generates one shared Tekton Pipeline plus one PipelineRun per `(workload, package)` pair. `deploy.py run` orchestrates execution by assigning pairs to free slots, polling for completion, and retrying on timeout. Use `deploy.py collect` to pull results off-cluster. `deploy.py status` reads `workspace/runs/<run>/progress.json` and prints the current state of every pair.
+`setup.py --namespaces NS1,NS2,...` provisions N namespace slots, each bootstrapped identically. `prepare.py` generates one shared Tekton Pipeline plus one PipelineRun per `(workload, package)` pair. `deploy.py run` orchestrates execution by assigning pairs to free slots, polling for completion, and retrying on timeout. Use `deploy.py collect` to pull results off-cluster. `deploy.py status` reads progress from the local file or cluster ConfigMap.
 
 | Artifact | Written by | Read by |
 |----------|-----------|---------|
 | `runs/<run>/progress.json` | `deploy.py run` | `deploy.py status` |
+| ConfigMap `sim2real-progress` | `deploy.py run`, `deploy.py reset` | `deploy.py status --remote` |
+
+The orchestrator writes progress to both the local file and the `sim2real-progress` ConfigMap in the primary namespace on every poll cycle. This allows `deploy.py status --remote` to read progress directly from the cluster, which is required when the orchestrator runs as an in-cluster Job.
 
 ---
 

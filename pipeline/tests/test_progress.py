@@ -151,8 +151,8 @@ def test_composite_secondary_save_failure_warns(tmp_path, capsys):
     assert primary.load() == {"wl-x": {"status": "done"}}
     assert "kubectl fail" in capsys.readouterr().err
 
-def test_composite_secondary_load_failure_skipped(tmp_path):
-    """Secondary store load failure is skipped silently."""
+def test_composite_secondary_load_failure_warns(tmp_path, capsys):
+    """Secondary store load failure warns and is skipped."""
     primary = LocalProgressStore(tmp_path / "a.json")
 
     class FailStore(ProgressStore):
@@ -161,3 +161,4 @@ def test_composite_secondary_load_failure_skipped(tmp_path):
 
     store = CompositeProgressStore(primary, FailStore())
     assert store.load() == {}
+    assert "boom" in capsys.readouterr().err

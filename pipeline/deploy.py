@@ -62,6 +62,22 @@ def run(cmd: list[str], *, check: bool = True, capture: bool = False,
     return subprocess.run(cmd, check=check, text=True, capture_output=capture, cwd=cwd)
 
 
+# ── ConfigMap namespace resolution ──────────────────────────────────────────
+
+def _configmap_namespace(setup_config: dict | None,
+                         namespaces: list[str] | None = None) -> str:
+    """Return the namespace for the sim2real-progress ConfigMap.
+
+    Checks setup_config["namespace"] first, then falls back to namespaces[0].
+    """
+    ns = (setup_config or {}).get("namespace", "")
+    if ns:
+        return ns
+    if namespaces:
+        return namespaces[0]
+    return ""
+
+
 # ── Phase discovery ─────────────────────────────────────────────────────────
 
 def _discover_phases(cluster_dir: "Path") -> list[str]:
@@ -210,11 +226,13 @@ def _cmd_status(args, progress_path: Path,
     use_remote = getattr(args, "remote", False)
 
     if use_remote or not progress_path.exists():
-        primary_ns = (setup_config or {}).get("namespace", "")
+        primary_ns = _configmap_namespace(setup_config)
         if primary_ns:
             from pipeline.lib.progress import ConfigMapProgressStore
             store = ConfigMapProgressStore(primary_ns)
         else:
+            if use_remote:
+                warn("--remote requested but no namespace configured — falling back to local file")
             from pipeline.lib.progress import LocalProgressStore
             store = LocalProgressStore(progress_path)
     else:
@@ -1204,7 +1222,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     cluster_dir = run_dir / "cluster"
     progress_path = run_dir / "progress.json"
     local_store = LocalProgressStore(progress_path)
-    primary_ns = setup_config.get("namespace") or (namespaces[0] if namespaces else "")
+    primary_ns = _configmap_namespace(setup_config, namespaces)
     if primary_ns:
         cm_store = ConfigMapProgressStore(primary_ns)
         store = CompositeProgressStore(local_store, cm_store)
@@ -1540,7 +1558,7 @@ def _cmd_reset(args, progress_path: Path, discovered: dict,
         LocalProgressStore, ConfigMapProgressStore, CompositeProgressStore,
     )
     local_store = LocalProgressStore(progress_path)
-    primary_ns = (setup_config or {}).get("namespace", "")
+    primary_ns = _configmap_namespace(setup_config, namespaces)
     if primary_ns:
         cm_store = ConfigMapProgressStore(primary_ns)
         store = CompositeProgressStore(local_store, cm_store)
