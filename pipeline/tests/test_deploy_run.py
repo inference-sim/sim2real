@@ -477,36 +477,103 @@ def test_reconcile_running_no_pr_resets_to_pending():
     assert progress["wl-smoke-baseline"]["namespace"] is None
 
 
-# ── Succeeded branch: _delete_pipelinerun ─────────────────────────────────────
-# These test the Succeeded path in the main orchestrator loop where
-# _delete_pipelinerun is called after marking a pair done.
-
-def test_delete_pipelinerun_called_on_success(monkeypatch):
-    """_delete_pipelinerun is called with the right pr_name and namespace."""
+def test_reconcile_succeeded_deletes_pipelinerun(monkeypatch):
+    """On Succeeded, _reconcile_on_resume calls _delete_pipelinerun."""
     import pipeline.deploy as mod
 
+    monkeypatch.setattr(mod, "_check_pipelinerun_status", lambda pr, ns: "Succeeded")
     deleted = []
     monkeypatch.setattr(mod, "_delete_pipelinerun",
                         lambda pr, ns: deleted.append((pr, ns)))
 
-    mod._delete_pipelinerun("baseline-smoke-run1", "sim2real-0")
+    progress = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "running", "namespace": "sim2real-0",
+            "pending_since": "2026-01-01T00:00:00Z",
+        }
+    }
+    mod._reconcile_on_resume(progress, _DISCOVERED)
+    assert progress["wl-smoke-baseline"]["status"] == "done"
     assert deleted == [("baseline-smoke-run1", "sim2real-0")]
 
 
-def test_delete_pipelinerun_failure_is_nonfatal(monkeypatch):
-    """If _delete_pipelinerun raises, the pair should still be done."""
+def test_reconcile_succeeded_delete_failure_nonfatal(monkeypatch, capsys):
+    """If _delete_pipelinerun raises, the pair still transitions to done."""
+    import pipeline.deploy as mod
+
+    monkeypatch.setattr(mod, "_check_pipelinerun_status", lambda pr, ns: "Succeeded")
+    monkeypatch.setattr(mod, "_delete_pipelinerun",
+                        lambda pr, ns: (_ for _ in ()).throw(OSError("kubectl fail")))
+
+    progress = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "running", "namespace": "sim2real-0",
+            "pending_since": None,
+        }
+    }
+    mod._reconcile_on_resume(progress, _DISCOVERED)
+    assert progress["wl-smoke-baseline"]["status"] == "done"
+    assert progress["wl-smoke-baseline"]["namespace"] is None
+    assert "kubectl fail" in capsys.readouterr().err
+
+
+def test_reconcile_failed_sets_failed_retains_namespace(monkeypatch):
+    """On Failed, pair transitions to failed but namespace is retained for reset."""
+    import pipeline.deploy as mod
+
+    monkeypatch.setattr(mod, "_check_pipelinerun_status", lambda pr, ns: "Failed")
+
+    progress = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "running", "namespace": "sim2real-0",
+            "pending_since": "2026-01-01T00:00:00Z",
+        }
+    }
+    mod._reconcile_on_resume(progress, _DISCOVERED)
+    assert progress["wl-smoke-baseline"]["status"] == "failed"
+    assert progress["wl-smoke-baseline"]["namespace"] == "sim2real-0"
+
+
+def test_reconcile_unknown_resets_to_pending(monkeypatch, capsys):
+    """On Unknown (PR not found on cluster), pair resets to pending with warning."""
+    import pipeline.deploy as mod
+
+    monkeypatch.setattr(mod, "_check_pipelinerun_status", lambda pr, ns: "Unknown")
+
+    progress = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "running", "namespace": "sim2real-0",
+            "pending_since": None,
+        }
+    }
+    mod._reconcile_on_resume(progress, _DISCOVERED)
+    assert progress["wl-smoke-baseline"]["status"] == "pending"
+    assert progress["wl-smoke-baseline"]["namespace"] is None
+    assert "not found on cluster" in capsys.readouterr().err
+
+
+def test_reconcile_status_check_exception_skips_pair(monkeypatch, capsys):
+    """If _check_pipelinerun_status raises, the pair is skipped with a warning."""
     import pipeline.deploy as mod
 
     def _raise(pr, ns):
         raise OSError("kubectl not found")
-    monkeypatch.setattr(mod, "_delete_pipelinerun", _raise)
+    monkeypatch.setattr(mod, "_check_pipelinerun_status", _raise)
 
-    entry = {"status": "done", "namespace": None}
-    try:
-        mod._delete_pipelinerun("baseline-smoke-run1", "sim2real-0")
-    except Exception:
-        pass
-    assert entry["status"] == "done"
+    progress = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "running", "namespace": "sim2real-0",
+            "pending_since": None,
+        }
+    }
+    mod._reconcile_on_resume(progress, _DISCOVERED)
+    assert progress["wl-smoke-baseline"]["status"] == "running"
+    assert "failed to check PipelineRun status" in capsys.readouterr().err
 
 
 # ── _force_reset ──────────────────────────────────────────────────────────────

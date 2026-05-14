@@ -941,11 +941,19 @@ def _reconcile_on_resume(progress: dict, discovered: dict) -> None:
             pr_name = pr_meta.get("pr_name", "")
             ns = entry.get("namespace") or ""
             if pr_name and ns:
-                actual = _check_pipelinerun_status(pr_name, ns)
+                try:
+                    actual = _check_pipelinerun_status(pr_name, ns)
+                except Exception as exc:
+                    warn(f"[{key}] failed to check PipelineRun status: {exc}")
+                    continue
                 if actual == "Succeeded":
                     entry["status"] = "done"
-                    entry["namespace"] = None
                     entry["pending_since"] = None
+                    try:
+                        _delete_pipelinerun(pr_name, ns)
+                    except Exception as exc:
+                        warn(f"Failed to delete PipelineRun {pr_name!r} in {ns}: {exc}")
+                    entry["namespace"] = None
                 elif actual in ("Failed", "PipelineRunCancelled"):
                     entry["status"] = "failed"
                     entry["pending_since"] = None
