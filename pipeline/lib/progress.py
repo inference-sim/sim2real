@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json
 import subprocess
+import sys
 import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -91,3 +92,36 @@ class ConfigMapProgressStore(ProgressStore):
                 f"Failed to update ConfigMap {self.CONFIGMAP_NAME}: "
                 f"{result.stderr.strip()}"
             )
+
+
+class CompositeProgressStore(ProgressStore):
+    """Write to all stores; read from the first that returns data.
+
+    Primary store failures propagate. Secondary store save failures
+    print a warning to stderr but do not raise.
+    """
+
+    def __init__(self, primary: ProgressStore, *secondaries: ProgressStore) -> None:
+        self._primary = primary
+        self._secondaries = secondaries
+
+    def load(self) -> dict:
+        data = self._primary.load()
+        if data:
+            return data
+        for store in self._secondaries:
+            try:
+                data = store.load()
+                if data:
+                    return data
+            except Exception:
+                continue
+        return {}
+
+    def save(self, data: dict) -> None:
+        self._primary.save(data)
+        for store in self._secondaries:
+            try:
+                store.save(data)
+            except Exception as exc:
+                print(f"[WARN] ConfigMap save failed: {exc}", file=sys.stderr)
