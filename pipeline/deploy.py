@@ -230,33 +230,20 @@ def _delete_pipelinerun(pr_name: str, namespace: str) -> None:
 def _cmd_status(args, run_dir: Path,
                 setup_config: dict | None = None) -> None:
     """Print a snapshot table of all (workload, package) pair statuses."""
-    from pipeline.lib.progress import (
-        LocalProgressStore, ConfigMapProgressStore, CompositeProgressStore,
-    )
-    progress_path = run_dir / "progress.json"
-    local_store = LocalProgressStore(progress_path)
+    from pipeline.lib.progress import ConfigMapProgressStore
     primary_ns = _configmap_namespace(setup_config)
-    if primary_ns:
-        cm_store = ConfigMapProgressStore(primary_ns)
-        store = CompositeProgressStore(cm_store, local_store)
-    else:
-        store = local_store
-
+    if not primary_ns:
+        err("No namespace configured. Run setup.py first.")
+        sys.exit(1)
+    store = ConfigMapProgressStore(primary_ns)
     try:
         progress = store.load()
-    except (ValueError, RuntimeError, OSError) as exc:
-        warn(f"Failed to load progress from primary store: {exc}")
-        try:
-            progress = local_store.load()
-        except (ValueError, RuntimeError, OSError):
-            progress = {}
-        if progress:
-            warn("Using local progress data as fallback")
-        else:
-            warn("No local fallback available")
+    except (ValueError, RuntimeError) as exc:
+        err(f"Failed to load progress: {exc}")
+        progress = {}
 
     if not progress:
-        suffix = " (no progress data)" if not progress_path.exists() else ""
+        suffix = " (no progress data)"
         filters_given = any([
             getattr(args, "only", None) is not None,
             getattr(args, "workload", None) is not None,
@@ -726,30 +713,18 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
 
     run_name = run_dir.name
 
-    # Derive known phases from CompositeProgressStore (CM primary, local fallback)
-    from pipeline.lib.progress import (
-        LocalProgressStore, ConfigMapProgressStore, CompositeProgressStore,
-    )
-    progress_path = run_dir / "progress.json"
-    local_store = LocalProgressStore(progress_path)
+    # Derive known phases from ConfigMap
+    from pipeline.lib.progress import ConfigMapProgressStore
     primary_ns = _configmap_namespace(setup_config)
-    if primary_ns:
-        cm_store = ConfigMapProgressStore(primary_ns)
-        store = CompositeProgressStore(cm_store, local_store)
-    else:
-        store = local_store
+    if not primary_ns:
+        err("No namespace configured. Run setup.py first.")
+        sys.exit(1)
+    store = ConfigMapProgressStore(primary_ns)
     try:
         progress = store.load() or None
-    except (ValueError, RuntimeError, OSError) as exc:
-        warn(f"Failed to load progress from primary store: {exc}")
-        try:
-            progress = local_store.load() or None
-        except (ValueError, RuntimeError, OSError):
-            progress = None
-        if progress:
-            warn("Using local progress data as fallback")
-        else:
-            warn("No local fallback available — falling back to default phases")
+    except (ValueError, RuntimeError) as exc:
+        warn(f"Failed to load progress: {exc}")
+        progress = None
 
     # ── Pair-level scoping (--only / --workload) ──────────────────────────
     scope_only = getattr(args, "only", None)
@@ -865,9 +840,9 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
         if not known_phases:
             cluster_dir = run_dir / "cluster"
             known_phases = _discover_phases(cluster_dir)
-            if progress is None and not progress_path.exists():
+            if progress is None:
                 warn(f"No progress data found — discovered phases from cluster/: {known_phases}")
-            elif progress is not None:
+            else:
                 warn(f"No done phases in progress — discovered from cluster/: {known_phases}")
 
         if args.package:
@@ -1232,7 +1207,7 @@ def _reconcile_on_resume(progress: dict, discovered: dict) -> None:
 
     - running pairs: check PipelineRun status on cluster and update accordingly
     - unrecognized statuses (e.g. 'collecting' or 'collect-failed' from a
-      pre-#120 progress.json): reset to pending so they are re-dispatched.
+      pre-#120 progress data): reset to pending so they are re-dispatched.
       This is safe because both historical statuses imply the PipelineRun
       already succeeded.
     """
@@ -1357,9 +1332,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     """Orchestrate parallel pool execution across namespace slots."""
     import datetime as _dt
     import tempfile as _tmp
-    from pipeline.lib.progress import (
-        LocalProgressStore, ConfigMapProgressStore, CompositeProgressStore,
-    )
+    from pipeline.lib.progress import ConfigMapProgressStore
     from pipeline.lib.backoff import BackoffController
     from pipeline.lib.capacity import (
         probe_free_gpus, derive_gpu_resource_type, load_defaults
@@ -1384,14 +1357,10 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     max_pending_stalls = getattr(args, "max_pending_stalls", 10)
 
     cluster_dir = run_dir / "cluster"
-    progress_path = run_dir / "progress.json"
-    local_store = LocalProgressStore(progress_path)
     primary_ns = _configmap_namespace(setup_config, namespaces)
-    if primary_ns:
-        cm_store = ConfigMapProgressStore(primary_ns)
-        store = CompositeProgressStore(cm_store, local_store)
-    else:
-        store = local_store
+    if not primary_ns:
+        err("No namespace configured. Run setup.py first."); sys.exit(1)
+    store = ConfigMapProgressStore(primary_ns)
 
     # Derive GPU resource type from baseline scenario
     # CLI --gpu-resource-type overrides auto-derivation when explicitly set
@@ -1712,27 +1681,20 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             counts[v["status"]] = counts.get(v["status"], 0) + 1
     print()
     ok("Run complete: " + "  ".join(f"{v} {k}" for k, v in sorted(counts.items())))
-    if primary_ns:
-        print(f"  Progress: ConfigMap {ConfigMapProgressStore.CONFIGMAP_NAME} in {primary_ns}")
-    else:
-        print(f"  Progress: {progress_path}")
+    print(f"  Progress: ConfigMap {ConfigMapProgressStore.CONFIGMAP_NAME} in {primary_ns}")
     print()
 
 
-def _cmd_reset(args, progress_path: Path, discovered: dict,
+def _cmd_reset(args, run_dir: Path, discovered: dict,
                namespaces: list[str] | None = None,
                setup_config: dict | None = None) -> None:
     """Tear down cluster resources for all non-pending pairs."""
-    from pipeline.lib.progress import (
-        LocalProgressStore, ConfigMapProgressStore, CompositeProgressStore,
-    )
-    local_store = LocalProgressStore(progress_path)
+    from pipeline.lib.progress import ConfigMapProgressStore
     primary_ns = _configmap_namespace(setup_config, namespaces)
-    if primary_ns:
-        cm_store = ConfigMapProgressStore(primary_ns)
-        store = CompositeProgressStore(cm_store, local_store)
-    else:
-        store = local_store
+    if not primary_ns:
+        err("No namespace configured. Run setup.py first.")
+        sys.exit(1)
+    store = ConfigMapProgressStore(primary_ns)
     progress = store.load()
 
     if not progress:
@@ -1780,17 +1742,12 @@ def _cmd_reset(args, progress_path: Path, discovered: dict,
 def _cmd_wipe(args, run_dir: Path,
               setup_config: dict | None = None) -> None:
     """Delete local results and reset wiped pairs to pending."""
-    from pipeline.lib.progress import (
-        LocalProgressStore, ConfigMapProgressStore, CompositeProgressStore,
-    )
-    progress_path = run_dir / "progress.json"
-    local_store = LocalProgressStore(progress_path)
+    from pipeline.lib.progress import ConfigMapProgressStore
     primary_ns = _configmap_namespace(setup_config)
-    if primary_ns:
-        cm_store = ConfigMapProgressStore(primary_ns)
-        store = CompositeProgressStore(cm_store, local_store)
-    else:
-        store = local_store
+    if not primary_ns:
+        err("No namespace configured. Run setup.py first.")
+        sys.exit(1)
+    store = ConfigMapProgressStore(primary_ns)
     progress = store.load()
 
     if not progress:
@@ -2256,14 +2213,13 @@ def main():
     elif cmd == "collect":
         _cmd_collect(args, run_dir, setup_config)
     elif cmd == "reset":
-        progress_path = run_dir / "progress.json"
         cluster_dir = run_dir / "cluster"
         discovered = _load_pairs(cluster_dir)
         namespaces = [ns for ns in (setup_config.get("namespaces") or
                       [setup_config.get("namespace", "")]) if ns]
         if not namespaces:
             warn("No namespaces in setup_config — PipelineRun deletion for done pairs may be incomplete")
-        _cmd_reset(args, progress_path, discovered,
+        _cmd_reset(args, run_dir, discovered,
                    namespaces=namespaces or None,
                    setup_config=setup_config)
     elif cmd == "wipe":

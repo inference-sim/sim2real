@@ -24,7 +24,7 @@ from pipeline.lib.health import (
     RemediationTracker, get_pods, get_events, get_pod_logs,
     delete_pod, describe_pod, triage_pod,
 )
-from pipeline.lib.progress import LocalProgressStore
+from pipeline.lib.progress import ConfigMapProgressStore
 
 # ── Color helpers (mirrors deploy.py) ────────────────────────────────────────
 _tty = sys.stdout.isatty()
@@ -345,7 +345,15 @@ def main() -> None:
 
     report = HealthReport(run_dir / "health_report.md")
     tracker = RemediationTracker()
-    store = LocalProgressStore(run_dir / "progress.json")
+
+    ns = setup_config.get("namespace", "")
+    if not ns:
+        ns_list = setup_config.get("namespaces", [])
+        ns = ns_list[0] if ns_list else ""
+    if not ns:
+        err("No namespace configured in setup_config.json. Run setup.py first.")
+        sys.exit(1)
+    store = ConfigMapProgressStore(ns)
 
     info(f"Monitoring run '{run_name}' (interval: {args.interval}s)")
     info(f"Report: {run_dir}/health_report.md")
@@ -357,8 +365,8 @@ def main() -> None:
     while True:
         try:
             progress = store.load()
-        except ValueError as exc:
-            warn(f"progress.json unreadable ({exc}) — retrying next interval")
+        except (ValueError, RuntimeError) as exc:
+            warn(f"ConfigMap unreadable ({exc}) — retrying next interval")
             time.sleep(args.interval)
             continue
         if not _work_remaining(progress):
