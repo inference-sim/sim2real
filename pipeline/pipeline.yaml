@@ -30,6 +30,9 @@ spec:
       type: string
     - name: model
       type: string
+    - name: skipTeardown
+      type: string
+      default: "false"
   workspaces:
     - name: source
     - name: data-storage
@@ -113,6 +116,10 @@ spec:
 
   finally:
     - name: llmdbenchmark-teardown
+      when:
+        - input: "$(params.skipTeardown)"
+          operator: notin
+          values: ["true"]
       taskRef:
         name: llmdbenchmark-teardown
       workspaces:
