@@ -441,7 +441,32 @@ def test_reconcile_succeeded_sets_done_and_frees_namespace(monkeypatch):
     mod._reconcile_on_resume(progress, _DISCOVERED)
     assert progress["wl-smoke-baseline"]["status"] == "done"
     assert progress["wl-smoke-baseline"]["namespace"] is None
+    assert progress["wl-smoke-baseline"]["completed_namespace"] == "sim2real-0"
     assert progress["wl-smoke-baseline"]["pending_since"] is None
+
+
+def test_orchestrator_loop_sets_completed_namespace_on_success(monkeypatch):
+    """When a running slot's PipelineRun Succeeds, completed_namespace is set before namespace is cleared."""
+    import pipeline.deploy as mod
+
+    monkeypatch.setattr(mod, "_check_pipelinerun_status", lambda pr, ns: "Succeeded")
+    monkeypatch.setattr(mod, "_delete_pipelinerun", lambda pr, ns: None)
+
+    progress = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "running", "namespace": "sim2real-2",
+            "pending_since": None,
+        }
+    }
+    discovered = {
+        "wl-smoke-baseline": {"pr_name": "baseline-smoke-run1", "workload": "wl-smoke", "package": "baseline"}
+    }
+    mod._reconcile_on_resume(progress, discovered)
+    entry = progress["wl-smoke-baseline"]
+    assert entry["status"] == "done"
+    assert entry["namespace"] is None
+    assert entry["completed_namespace"] == "sim2real-2"
 
 
 def test_reconcile_unrecognized_status_resets_to_pending(capsys):

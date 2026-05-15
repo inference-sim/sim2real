@@ -1097,6 +1097,7 @@ def _reconcile_on_resume(progress: dict, discovered: dict) -> None:
                 if actual == "Succeeded":
                     entry["status"] = "done"
                     entry["pending_since"] = None
+                    entry["completed_namespace"] = ns
                     try:
                         _delete_pipelinerun(pr_name, ns)
                     except Exception as exc:
@@ -1355,6 +1356,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             if status == "Succeeded":
                 ok(f"[{pair_key}] Succeeded → done")
                 entry["status"] = "done"
+                entry["completed_namespace"] = ns
                 entry["namespace"] = None
                 store.save(progress)
                 try:
