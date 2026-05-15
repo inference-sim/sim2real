@@ -54,7 +54,7 @@ def test_collect_fallback_no_progress(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -182,7 +182,7 @@ def test_collect_corrupt_progress_warns_and_falls_back(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -295,7 +295,7 @@ def test_collect_fallback_discovers_from_pipelinerun_files(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
