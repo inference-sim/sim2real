@@ -11,7 +11,8 @@ from pipeline.lib.progress import ConfigMapProgressStore
 
 def _mock_cm(monkeypatch, data):
     """Monkeypatch ConfigMapProgressStore to return *data* on load and no-op on save."""
-    monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: data)
+    monkeypatch.setattr(ConfigMapProgressStore, "load",
+                        lambda self: json.loads(json.dumps(data)))
     monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
 
 

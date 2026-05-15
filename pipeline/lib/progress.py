@@ -27,12 +27,15 @@ class ConfigMapProgressStore(ProgressStore):
         self._namespace = namespace
 
     def load(self) -> dict:
-        result = subprocess.run(
-            ["kubectl", "get", "configmap", self.CONFIGMAP_NAME,
-             "-n", self._namespace,
-             "-o", f"jsonpath={{.data.{self.DATA_KEY}}}"],
-            check=False, text=True, capture_output=True,
-        )
+        try:
+            result = subprocess.run(
+                ["kubectl", "get", "configmap", self.CONFIGMAP_NAME,
+                 "-n", self._namespace,
+                 "-o", f"jsonpath={{.data.{self.DATA_KEY}}}"],
+                check=False, text=True, capture_output=True,
+            )
+        except OSError as exc:
+            raise RuntimeError(f"kubectl not available: {exc}") from exc
         if result.returncode != 0:
             if "(NotFound)" in result.stderr:
                 return {}
@@ -62,11 +65,16 @@ class ConfigMapProgressStore(ProgressStore):
                 self.DATA_KEY: json.dumps(data, indent=2),
             },
         }
-        result = subprocess.run(
-            ["kubectl", "apply", "-f", "-"],
-            input=json.dumps(cm),
-            check=False, text=True, capture_output=True,
-        )
+        try:
+            result = subprocess.run(
+                ["kubectl", "apply", "-f", "-"],
+                input=json.dumps(cm),
+                check=False, text=True, capture_output=True,
+            )
+        except OSError as exc:
+            raise RuntimeError(
+                f"Failed to update ConfigMap {self.CONFIGMAP_NAME}: {exc}"
+            ) from exc
         if result.returncode != 0:
             raise RuntimeError(
                 f"Failed to update ConfigMap {self.CONFIGMAP_NAME}: "

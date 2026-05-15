@@ -236,7 +236,11 @@ def _cmd_status(args, run_dir: Path,
         err("No namespace configured. Run setup.py first.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns)
-    progress = store.load()
+    try:
+        progress = store.load()
+    except (ValueError, RuntimeError) as exc:
+        err(f"Failed to load progress: {exc}")
+        progress = {}
 
     if not progress:
         suffix = " (no progress data)"
@@ -1355,7 +1359,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     cluster_dir = run_dir / "cluster"
     primary_ns = _configmap_namespace(setup_config, namespaces)
     if not primary_ns:
-        err("No namespace configured."); sys.exit(1)
+        err("No namespace configured. Run setup.py first."); sys.exit(1)
     store = ConfigMapProgressStore(primary_ns)
 
     # Derive GPU resource type from baseline scenario

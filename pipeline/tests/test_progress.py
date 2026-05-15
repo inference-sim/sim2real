@@ -91,3 +91,17 @@ def test_configmap_save_failure_raises():
         store = ConfigMapProgressStore("sim2real-ns")
         with pytest.raises(RuntimeError, match="Failed to update ConfigMap"):
             store.save({"x": 1})
+
+def test_configmap_load_missing_kubectl_raises():
+    """load() wraps OSError (missing kubectl) as RuntimeError."""
+    with patch("subprocess.run", side_effect=FileNotFoundError("kubectl")):
+        store = ConfigMapProgressStore("sim2real-ns")
+        with pytest.raises(RuntimeError, match="kubectl not available"):
+            store.load()
+
+def test_configmap_save_missing_kubectl_raises():
+    """save() wraps OSError (missing kubectl) as RuntimeError."""
+    with patch("subprocess.run", side_effect=FileNotFoundError("kubectl")):
+        store = ConfigMapProgressStore("sim2real-ns")
+        with pytest.raises(RuntimeError, match="Failed to update ConfigMap"):
+            store.save({"x": 1})

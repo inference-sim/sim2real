@@ -1713,8 +1713,8 @@ def test_status_reads_configmap_when_namespace_configured(tmp_path, capsys, monk
     out = capsys.readouterr().out
     assert "wl-smoke-baseline" in out
 
-def test_status_reads_configmap_when_no_local_file(tmp_path, capsys, monkeypatch):
-    """status reads ConfigMap even when no local file exists."""
+def test_status_reads_from_configmap(tmp_path, capsys, monkeypatch):
+    """status reads progress from ConfigMap."""
     from pipeline.deploy import _cmd_status
 
     progress_data = {
@@ -1736,8 +1736,8 @@ def test_status_reads_configmap_when_no_local_file(tmp_path, capsys, monkeypatch
     out = capsys.readouterr().out
     assert "wl-smoke-baseline" in out
 
-def test_status_no_configmap_no_local_reports_no_run(tmp_path, capsys, monkeypatch):
-    """No ConfigMap data reports '0 pairs'."""
+def test_status_empty_configmap_reports_no_run(tmp_path, capsys, monkeypatch):
+    """Empty ConfigMap reports '0 pairs'."""
     from pipeline.deploy import _cmd_status
     _mock_cm(monkeypatch, {})
 

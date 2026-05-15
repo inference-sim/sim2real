@@ -144,7 +144,7 @@ python pipeline/deploy.py wipe  [flags]     # delete local results and reset pai
 python pipeline/deploy.py pairs   [flags]   # list available pair keys, workloads, and packages
 ```
 
-**`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, and retries pairs that time out. Reads progress from the ConfigMap (primary) or local file (fallback) to resume interrupted runs. Use `deploy.py collect` to pull results off-cluster after runs complete.
+**`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, and retries pairs that time out. Reads progress from the `sim2real-progress` ConfigMap to resume interrupted runs. Requires a configured namespace. Use `deploy.py collect` to pull results off-cluster after runs complete.
 
 | Flag | Default | Description |
 |------|---------|-------------|
