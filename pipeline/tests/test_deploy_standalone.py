@@ -3,6 +3,8 @@
 import json
 from unittest.mock import patch
 
+from pipeline.lib.progress import ConfigMapProgressStore
+
 
 def test_build_parser_no_manifest_flag():
     """build_parser() does NOT expose a --manifest argument."""
@@ -24,12 +26,15 @@ def test_main_works_without_transfer_yaml(tmp_path, monkeypatch):
     # Set up minimal workspace structure
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     run_dir.mkdir(parents=True)
-    progress = {"wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "pending", "namespace": None, "retries": 0}}
-    (run_dir / "progress.json").write_text(json.dumps(progress))
 
     # setup_config.json with current_run
     ws = tmp_path / "workspace"
     (ws / "setup_config.json").write_text(json.dumps({"current_run": "test-run", "namespace": "ns-0"}))
+
+    # Mock ConfigMapProgressStore to return progress data
+    progress = {"wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "pending", "namespace": None, "retries": 0}}
+    monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: progress)
+    monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
 
     # Patch sys.argv to simulate CLI invocation
     monkeypatch.setattr("sys.argv", ["deploy.py", "--experiment-root", str(tmp_path), "status"])

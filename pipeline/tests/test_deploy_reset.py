@@ -1,6 +1,6 @@
 """Tests for deploy.py reset subcommand and _reset_pair helper."""
 
-import json
+from pipeline.lib.progress import ConfigMapProgressStore
 
 
 _PROGRESS = {
@@ -18,6 +18,24 @@ _DISCOVERED = {
     "wl-load-treatment":  {"pr_name": "treatment-load-run1",  "workload": "wl-load",  "package": "treatment"},
     "wl-heavy-baseline":  {"pr_name": "baseline-heavy-run1",  "workload": "wl-heavy", "package": "baseline"},
 }
+
+
+def _mock_cm(monkeypatch, data, capture_saves=None):
+    """Monkeypatch ConfigMapProgressStore to return a deep copy of *data* on load.
+
+    If *capture_saves* is a dict, saves are captured into it.
+    Otherwise saves are no-ops.
+    """
+    import json as _json
+    monkeypatch.setattr(ConfigMapProgressStore, "load",
+                        lambda self: _json.loads(_json.dumps(data)))
+    if capture_saves is not None:
+        def _save(self, d):
+            capture_saves.clear()
+            capture_saves.update(d)
+        monkeypatch.setattr(ConfigMapProgressStore, "save", _save)
+    else:
+        monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
 
 
 def test_reset_pair_failed_deletes_pr_and_helm(monkeypatch):
@@ -190,8 +208,8 @@ def test_cmd_reset_continues_on_exception(tmp_path, monkeypatch, capsys):
         "wl-b-baseline": {"workload": "wl-b", "package": "baseline", "status": "failed",
                           "namespace": "sim2real-1", "retries": 0},
     }
-    progress_path = tmp_path / "progress.json"
-    progress_path.write_text(json.dumps(progress))
+    saved_data = {}
+    _mock_cm(monkeypatch, progress, capture_saves=saved_data)
 
     call_count = []
 
@@ -206,17 +224,20 @@ def test_cmd_reset_continues_on_exception(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(mod, "_reset_pair", exploding_reset)
 
+    run_dir = tmp_path / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+
     class _Args:
         only = None; workload = None; package = None; status = None; dry_run = False
 
-    mod._cmd_reset(_Args(), progress_path, _DISCOVERED)
+    mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
+                   setup_config={"namespace": "sim2real-ns"})
 
     # Both pairs should have been attempted
     assert "wl-a-baseline" in call_count
     assert "wl-b-baseline" in call_count
     # Progress should still be saved (wl-b was reset)
-    saved = json.loads(progress_path.read_text())
-    assert saved["wl-b-baseline"]["status"] == "pending"
+    assert saved_data["wl-b-baseline"]["status"] == "pending"
 
 
 def test_reset_pair_done_deletes_pr_without_state_reset(monkeypatch):
@@ -256,17 +277,20 @@ def test_cmd_reset_skips_pending_only(tmp_path, monkeypatch, capsys):
     """reset acts on all non-pending pairs, including done."""
     import pipeline.deploy as mod
 
-    progress_path = tmp_path / "progress.json"
-    progress_path.write_text(json.dumps(_PROGRESS))
+    _mock_cm(monkeypatch, _PROGRESS)
 
     cleaned = []
     monkeypatch.setattr(mod, "_reset_pair",
                         lambda k, e, d, dry_run=False, namespaces=None: cleaned.append(k) or True)
 
+    run_dir = tmp_path / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+
     class _Args:
         only = None; workload = None; package = None; status = None; dry_run = False
 
-    mod._cmd_reset(_Args(), progress_path, _DISCOVERED)
+    mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
+                   setup_config={"namespace": "sim2real-ns"})
 
     # pending (wl-load-baseline) should be skipped
     assert "wl-load-baseline" not in cleaned
@@ -281,48 +305,53 @@ def test_cmd_reset_respects_only_filter(tmp_path, monkeypatch, capsys):
     """--only scopes reset to a single pair."""
     import pipeline.deploy as mod
 
-    progress_path = tmp_path / "progress.json"
-    progress_path.write_text(json.dumps(_PROGRESS))
+    _mock_cm(monkeypatch, _PROGRESS)
 
     cleaned = []
     monkeypatch.setattr(mod, "_reset_pair",
                         lambda k, e, d, dry_run=False, namespaces=None: cleaned.append(k) or True)
 
+    run_dir = tmp_path / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+
     class _Args:
         only = "wl-heavy-baseline"; workload = None; package = None; status = None; dry_run = False
 
-    mod._cmd_reset(_Args(), progress_path, _DISCOVERED)
+    mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
+                   setup_config={"namespace": "sim2real-ns"})
 
     assert cleaned == ["wl-heavy-baseline"]
 
 
 def test_cmd_reset_dry_run_does_not_save(tmp_path, monkeypatch, capsys):
-    """--dry-run does not mutate progress.json."""
+    """--dry-run does not persist to ConfigMap."""
     import pipeline.deploy as mod
 
-    progress_path = tmp_path / "progress.json"
-    progress_path.write_text(json.dumps(_PROGRESS))
+    saved_data = {}
+    _mock_cm(monkeypatch, _PROGRESS, capture_saves=saved_data)
 
     monkeypatch.setattr(mod, "_reset_pair",
                         lambda k, e, d, dry_run=False, namespaces=None: True)
 
+    run_dir = tmp_path / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+
     class _Args:
         only = None; workload = None; package = None; status = None; dry_run = True
 
-    mod._cmd_reset(_Args(), progress_path, _DISCOVERED)
+    mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
+                   setup_config={"namespace": "sim2real-ns"})
 
-    # Progress should not be modified
-    saved = json.loads(progress_path.read_text())
-    assert saved == _PROGRESS
+    # Progress should not be saved (capture_saves stays empty)
+    assert saved_data == {}
 
 
 def test_cmd_reset_saves_progress_on_success(tmp_path, monkeypatch, capsys):
-    """After reset, progress.json is updated with reset entries."""
+    """After reset, progress is saved via ConfigMapProgressStore."""
     import pipeline.deploy as mod
-    from pipeline.lib.progress import ConfigMapProgressStore
 
-    progress_path = tmp_path / "progress.json"
-    progress_path.write_text(json.dumps(_PROGRESS))
+    saved_data = {}
+    _mock_cm(monkeypatch, _PROGRESS, capture_saves=saved_data)
 
     def fake_run(cmd, *, check=True, capture=False, cwd=None):
         class _R:
@@ -335,25 +364,25 @@ def test_cmd_reset_saves_progress_on_success(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(mod, "run", fake_run)
     monkeypatch.setattr(mod, "_cancel_and_delete_pipelinerun", fake_cancel)
-    monkeypatch.setattr(ConfigMapProgressStore, "load",
-                        lambda self: json.loads(progress_path.read_text()))
-    monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, data: None)
+
+    run_dir = tmp_path / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
 
     class _Args:
         only = None; workload = None; package = None; status = None; dry_run = False
 
-    mod._cmd_reset(_Args(), progress_path, _DISCOVERED,
-                   namespaces=["sim2real-0", "sim2real-1", "sim2real-2"])
+    mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
+                   namespaces=["sim2real-0", "sim2real-1", "sim2real-2"],
+                   setup_config={"namespace": "sim2real-ns"})
 
-    saved = json.loads(progress_path.read_text())
     # Non-done pairs reset to pending
-    assert saved["wl-smoke-treatment"]["status"] == "pending"
-    assert saved["wl-load-treatment"]["status"] == "pending"
-    assert saved["wl-heavy-baseline"]["status"] == "pending"
+    assert saved_data["wl-smoke-treatment"]["status"] == "pending"
+    assert saved_data["wl-load-treatment"]["status"] == "pending"
+    assert saved_data["wl-heavy-baseline"]["status"] == "pending"
     # Done pair stays done (PipelineRun deleted but state preserved)
-    assert saved["wl-smoke-baseline"]["status"] == "done"
+    assert saved_data["wl-smoke-baseline"]["status"] == "done"
     # Pending pair unchanged
-    assert saved["wl-load-baseline"]["status"] == "pending"
+    assert saved_data["wl-load-baseline"]["status"] == "pending"
 
 
 def test_force_reset_calls_reset_for_non_pending_non_done(monkeypatch):
@@ -455,18 +484,21 @@ def test_force_reset_continues_on_exception(monkeypatch):
     assert progress["wl-b-baseline"]["status"] == "pending"
 
 
-def test_cmd_reset_aborts_on_filter_mismatch(tmp_path, capsys):
+def test_cmd_reset_aborts_on_filter_mismatch(tmp_path, monkeypatch, capsys):
     """reset exits with error when --only doesn't match any pair."""
     import pipeline.deploy as mod
 
-    progress_path = tmp_path / "progress.json"
-    progress_path.write_text(json.dumps(_PROGRESS))
+    _mock_cm(monkeypatch, _PROGRESS)
+
+    run_dir = tmp_path / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
 
     class _Args:
         only = "nonexistent"; workload = None; package = None; status = None; dry_run = False
 
     with __import__("pytest").raises(SystemExit) as exc_info:
-        mod._cmd_reset(_Args(), progress_path, _DISCOVERED)
+        mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
+                       setup_config={"namespace": "sim2real-ns"})
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
     assert "No pairs matched" in captured.out + captured.err
