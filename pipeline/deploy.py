@@ -716,11 +716,25 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
         collected: list[str] = []
         failed: list[str] = []
 
+        skip_logs = getattr(args, "skip_logs", False)
         for wl_name in scoped_workloads:
+            wl_ns = next(
+                (progress[k].get("completed_namespace")
+                 for k in collectible
+                 if isinstance(progress[k], dict)
+                 and progress[k].get("workload") == wl_name
+                 and progress[k].get("completed_namespace")),
+                None,
+            )
+            if not wl_ns:
+                warn(f"{wl_name}: completed_namespace missing — skipping (re-run the workload with a newer orchestrator to collect results)")
+                for p in phases_to_collect:
+                    if p not in failed:
+                        failed.append(p)
+                continue
             try:
-                skip_logs = getattr(args, "skip_logs", False)
                 errors = _extract_phases_from_pvc(
-                    phases_to_collect, run_name, namespace, run_dir,
+                    phases_to_collect, run_name, wl_ns, run_dir,
                     skip_logs=skip_logs, workload=wl_name)
             except RuntimeError as e:
                 warn(f"Extractor pod failed for workload {wl_name}: {e}")
@@ -781,22 +795,66 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
         failed = []
 
         if phases_to_collect:
-            try:
-                skip_logs = getattr(args, "skip_logs", False)
-                errors = _extract_phases_from_pvc(
-                    phases_to_collect, run_name, namespace, run_dir,
-                    skip_logs=skip_logs)
-            except RuntimeError as e:
-                warn(f"Extractor pod failed: {e}")
-                failed.extend(phases_to_collect)
-            else:
-                for phase, exc in errors.items():
-                    if exc is None:
-                        ok(f"Collected: {phase}")
-                        collected.append(phase)
+            skip_logs = getattr(args, "skip_logs", False)
+            if progress:
+                # Group done entries by completed_namespace.
+                # Entries without completed_namespace were written by an older
+                # version of the orchestrator that did not record it.
+                ns_phase_map: dict[str, list[str]] = {}
+                missing_ns_keys: list[str] = []
+                for key, pentry in progress.items():
+                    if not isinstance(pentry, dict):
+                        continue
+                    if pentry.get("status") != "done":
+                        continue
+                    pkg = pentry.get("package", "")
+                    if pkg not in phases_to_collect:
+                        continue
+                    ns = pentry.get("completed_namespace")
+                    if not ns:
+                        missing_ns_keys.append(key)
+                        continue
+                    if pkg not in ns_phase_map.setdefault(ns, []):
+                        ns_phase_map[ns].append(pkg)
+                for key in missing_ns_keys:
+                    warn(f"{key}: completed_namespace missing — skipping (re-run the workload with a newer orchestrator to collect results)")
+                for ns, ns_phases in sorted(ns_phase_map.items()):
+                    try:
+                        errors = _extract_phases_from_pvc(
+                            sorted(ns_phases), run_name, ns, run_dir,
+                            skip_logs=skip_logs)
+                    except RuntimeError as e:
+                        warn(f"Extractor pod failed in {ns}: {e}")
+                        for p in ns_phases:
+                            if p not in failed:
+                                failed.append(p)
                     else:
-                        warn(f"Extraction failed for {phase}: {exc}")
-                        failed.append(phase)
+                        for phase, exc in errors.items():
+                            if exc is None:
+                                ok(f"Collected: {phase}")
+                                if phase not in collected:
+                                    collected.append(phase)
+                            else:
+                                warn(f"Extraction failed for {phase}: {exc}")
+                                if phase not in failed:
+                                    failed.append(phase)
+            else:
+                # No progress.json — fallback to primary namespace.
+                try:
+                    errors = _extract_phases_from_pvc(
+                        phases_to_collect, run_name, namespace, run_dir,
+                        skip_logs=skip_logs)
+                except RuntimeError as e:
+                    warn(f"Extractor pod failed: {e}")
+                    failed.extend(phases_to_collect)
+                else:
+                    for phase, exc in errors.items():
+                        if exc is None:
+                            ok(f"Collected: {phase}")
+                            collected.append(phase)
+                        else:
+                            warn(f"Extraction failed for {phase}: {exc}")
+                            failed.append(phase)
 
     # Print summary
     print(f"\n  Collected: {len(collected)}/{len(phases_to_collect)} phases")
@@ -1097,6 +1155,7 @@ def _reconcile_on_resume(progress: dict, discovered: dict) -> None:
                 if actual == "Succeeded":
                     entry["status"] = "done"
                     entry["pending_since"] = None
+                    entry["completed_namespace"] = ns
                     try:
                         _delete_pipelinerun(pr_name, ns)
                     except Exception as exc:
@@ -1297,6 +1356,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 "package":  meta["package"],
                 "status":   "pending",
                 "namespace": None,
+                "completed_namespace": None,
                 "retries":  0,
                 "gpu_cost": pair_costs[key],
                 "pending_stalls": 0,
@@ -1354,6 +1414,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             if status == "Succeeded":
                 ok(f"[{pair_key}] Succeeded → done")
                 entry["status"] = "done"
+                entry["completed_namespace"] = ns
                 entry["namespace"] = None
                 store.save(progress)
                 try:

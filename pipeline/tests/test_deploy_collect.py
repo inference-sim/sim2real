@@ -19,8 +19,8 @@ def test_collect_with_progress_default(tmp_path):
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     (run_dir / "cluster").mkdir(parents=True)
     _write_progress(run_dir, {
-        "wl-smoke-baseline": {"workload": "wl-smoke", "package": "baseline", "status": "done"},
-        "wl-smoke-treatment": {"workload": "wl-smoke", "package": "treatment", "status": "done"},
+        "wl-smoke-baseline": {"workload": "wl-smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment": {"workload": "wl-smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
         "wl-load-baseline": {"workload": "wl-load", "package": "baseline", "status": "pending"},
     })
 
@@ -30,7 +30,7 @@ def test_collect_with_progress_default(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -54,7 +54,7 @@ def test_collect_fallback_no_progress(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -73,8 +73,8 @@ def test_collect_single_package_from_progress(tmp_path):
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     (run_dir / "cluster").mkdir(parents=True)
     _write_progress(run_dir, {
-        "wl-smoke-baseline": {"workload": "wl-smoke", "package": "baseline", "status": "done"},
-        "wl-smoke-treatment": {"workload": "wl-smoke", "package": "treatment", "status": "done"},
+        "wl-smoke-baseline": {"workload": "wl-smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment": {"workload": "wl-smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
     })
 
     class Args:
@@ -83,7 +83,7 @@ def test_collect_single_package_from_progress(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -100,9 +100,9 @@ def test_collect_experiment_expands_to_all_progress_phases(tmp_path):
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     (run_dir / "cluster").mkdir(parents=True)
     _write_progress(run_dir, {
-        "wl-smoke-baseline": {"workload": "wl-smoke", "package": "baseline", "status": "done"},
-        "wl-smoke-treatment": {"workload": "wl-smoke", "package": "treatment", "status": "done"},
-        "wl-smoke-canary": {"workload": "wl-smoke", "package": "canary", "status": "done"},
+        "wl-smoke-baseline": {"workload": "wl-smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment": {"workload": "wl-smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-canary": {"workload": "wl-smoke", "package": "canary", "status": "done", "completed_namespace": "ns-0"},
     })
 
     class Args:
@@ -111,7 +111,7 @@ def test_collect_experiment_expands_to_all_progress_phases(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -129,8 +129,8 @@ def test_collect_unknown_package_exits(tmp_path):
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     (run_dir / "cluster").mkdir(parents=True)
     _write_progress(run_dir, {
-        "wl-smoke-baseline": {"workload": "wl-smoke", "package": "baseline", "status": "done"},
-        "wl-smoke-treatment": {"workload": "wl-smoke", "package": "treatment", "status": "done"},
+        "wl-smoke-baseline": {"workload": "wl-smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment": {"workload": "wl-smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
     })
 
     class Args:
@@ -148,8 +148,8 @@ def test_collect_custom_package_in_progress(tmp_path):
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     (run_dir / "cluster").mkdir(parents=True)
     _write_progress(run_dir, {
-        "wl-smoke-baseline": {"workload": "wl-smoke", "package": "baseline", "status": "done"},
-        "wl-smoke-canary": {"workload": "wl-smoke", "package": "canary", "status": "done"},
+        "wl-smoke-baseline": {"workload": "wl-smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-canary": {"workload": "wl-smoke", "package": "canary", "status": "done", "completed_namespace": "ns-0"},
     })
 
     class Args:
@@ -158,7 +158,7 @@ def test_collect_custom_package_in_progress(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -182,7 +182,7 @@ def test_collect_corrupt_progress_warns_and_falls_back(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -202,9 +202,9 @@ def test_collect_only_done_phases(tmp_path):
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     (run_dir / "cluster").mkdir(parents=True)
     _write_progress(run_dir, {
-        "wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "done"},
+        "wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
         "wl-a-treatment": {"workload": "wl-a", "package": "treatment", "status": "pending"},
-        "wl-a-canary": {"workload": "wl-a", "package": "canary", "status": "done"},
+        "wl-a-canary": {"workload": "wl-a", "package": "canary", "status": "done", "completed_namespace": "ns-0"},
     })
 
     class Args:
@@ -213,7 +213,7 @@ def test_collect_only_done_phases(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -231,7 +231,7 @@ def test_collect_missing_package_key_skipped(tmp_path):
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     (run_dir / "cluster").mkdir(parents=True)
     _write_progress(run_dir, {
-        "wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "done"},
+        "wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
         "wl-b-broken": {"workload": "wl-b", "status": "done"},
     })
 
@@ -241,7 +241,7 @@ def test_collect_missing_package_key_skipped(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -258,9 +258,9 @@ def test_collect_with_multi_baseline_progress(tmp_path):
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     (run_dir / "cluster").mkdir(parents=True)
     _write_progress(run_dir, {
-        "wl-smoke-b1": {"workload": "wl-smoke", "package": "b1", "status": "done"},
-        "wl-smoke-b2": {"workload": "wl-smoke", "package": "b2", "status": "done"},
-        "wl-smoke-ac1": {"workload": "wl-smoke", "package": "ac1", "status": "done"},
+        "wl-smoke-b1": {"workload": "wl-smoke", "package": "b1", "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-b2": {"workload": "wl-smoke", "package": "b2", "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-ac1": {"workload": "wl-smoke", "package": "ac1", "status": "done", "completed_namespace": "ns-0"},
     })
 
     class Args:
@@ -269,7 +269,7 @@ def test_collect_with_multi_baseline_progress(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -295,7 +295,7 @@ def test_collect_fallback_discovers_from_pipelinerun_files(tmp_path):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -312,10 +312,10 @@ def test_collect_with_workload_scope(tmp_path):
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     (run_dir / "cluster").mkdir(parents=True)
     _write_progress(run_dir, {
-        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done"},
-        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done"},
-        "wl-load-baseline": {"workload": "load", "package": "baseline", "status": "done"},
-        "wl-load-treatment": {"workload": "load", "package": "treatment", "status": "done"},
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
+        "wl-load-baseline": {"workload": "load", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
+        "wl-load-treatment": {"workload": "load", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
     })
 
     class Args:
@@ -345,9 +345,9 @@ def test_collect_with_only_scope(tmp_path):
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     (run_dir / "cluster").mkdir(parents=True)
     _write_progress(run_dir, {
-        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done"},
-        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done"},
-        "wl-load-baseline": {"workload": "load", "package": "baseline", "status": "done"},
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
+        "wl-load-baseline": {"workload": "load", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
     })
 
     class Args:
@@ -377,7 +377,7 @@ def test_collect_only_without_prefix(tmp_path):
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     (run_dir / "cluster").mkdir(parents=True)
     _write_progress(run_dir, {
-        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done"},
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
     })
 
     class Args:
@@ -406,9 +406,9 @@ def test_collect_workload_with_package_filter(tmp_path):
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     (run_dir / "cluster").mkdir(parents=True)
     _write_progress(run_dir, {
-        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done"},
-        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done"},
-        "wl-load-baseline": {"workload": "load", "package": "baseline", "status": "done"},
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
+        "wl-load-baseline": {"workload": "load", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
     })
 
     class Args:
@@ -438,7 +438,7 @@ def test_collect_workload_no_match_exits(tmp_path):
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     (run_dir / "cluster").mkdir(parents=True)
     _write_progress(run_dir, {
-        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done"},
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
     })
 
     class Args:
@@ -458,7 +458,7 @@ def test_collect_warns_nondone_scoped_pairs(tmp_path):
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     (run_dir / "cluster").mkdir(parents=True)
     _write_progress(run_dir, {
-        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done"},
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
         "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "running"},
     })
 
@@ -490,8 +490,8 @@ def test_collect_unscoped_unchanged(tmp_path):
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     (run_dir / "cluster").mkdir(parents=True)
     _write_progress(run_dir, {
-        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done"},
-        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done"},
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
     })
 
     class Args:
@@ -569,7 +569,7 @@ def test_collect_scoped_runtime_error(tmp_path):
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     (run_dir / "cluster").mkdir(parents=True)
     _write_progress(run_dir, {
-        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done"},
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
     })
 
     class Args:
@@ -595,8 +595,8 @@ def test_collect_scoped_per_phase_failure(tmp_path):
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     (run_dir / "cluster").mkdir(parents=True)
     _write_progress(run_dir, {
-        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done"},
-        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done"},
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
     })
 
     class Args:
@@ -625,9 +625,9 @@ def test_collect_only_takes_precedence_over_workload(tmp_path):
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     (run_dir / "cluster").mkdir(parents=True)
     _write_progress(run_dir, {
-        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done"},
-        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done"},
-        "wl-load-baseline": {"workload": "load", "package": "baseline", "status": "done"},
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
+        "wl-load-baseline": {"workload": "load", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
     })
 
     class Args:
@@ -648,3 +648,136 @@ def test_collect_only_takes_precedence_over_workload(tmp_path):
     assert len(extract_calls) == 1
     assert extract_calls[0]["workload"] == "smoke"
     assert extract_calls[0]["phases"] == ["baseline"]
+
+
+def test_collect_unscoped_multi_namespace_dispatch(tmp_path):
+    """Unscoped collect dispatches one extract call per distinct completed_namespace."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    (run_dir / "progress.json").write_text(json.dumps({
+        "wl-smoke-baseline":   {"workload": "smoke", "package": "baseline",  "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment":  {"workload": "smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
+        "wl-load-baseline":    {"workload": "load",  "package": "baseline",  "status": "done", "completed_namespace": "ns-1"},
+        "wl-load-treatment":   {"workload": "load",  "package": "treatment", "status": "done", "completed_namespace": "ns-1"},
+    }))
+
+    class Args:
+        package = None
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        extract_calls.append({"namespace": namespace, "phases": sorted(phases), "workload": workload})
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert len(extract_calls) == 2
+    by_ns = {c["namespace"]: c for c in extract_calls}
+    assert set(by_ns.keys()) == {"ns-0", "ns-1"}
+    assert by_ns["ns-0"]["phases"] == ["baseline", "treatment"]
+    assert by_ns["ns-1"]["phases"] == ["baseline", "treatment"]
+    # Unscoped path passes no workload restriction
+    assert all(c["workload"] is None for c in extract_calls)
+
+
+def test_collect_unscoped_missing_completed_namespace_warns_and_skips(tmp_path):
+    """Done entries without completed_namespace emit a warning and are skipped."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    (run_dir / "progress.json").write_text(json.dumps({
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done"},
+        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done"},
+    }))
+
+    class Args:
+        package = None
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        extract_calls.append(phases)
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
+         patch.object(deploy, "warn") as mock_warn:
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    # No extraction — all entries missing completed_namespace
+    assert extract_calls == []
+    warnings = [str(c) for c in mock_warn.call_args_list]
+    assert any("completed_namespace" in w for w in warnings)
+
+
+def test_collect_scoped_multi_namespace_dispatch(tmp_path):
+    """Scoped collect uses each workload's completed_namespace, not primary."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    (run_dir / "progress.json").write_text(json.dumps({
+        "wl-smoke-baseline":  {"workload": "smoke", "package": "baseline",  "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
+        "wl-load-baseline":   {"workload": "load",  "package": "baseline",  "status": "done", "completed_namespace": "ns-1"},
+        "wl-load-treatment":  {"workload": "load",  "package": "treatment", "status": "done", "completed_namespace": "ns-1"},
+    }))
+
+    class Args:
+        only = None
+        workload = "smoke"
+        package = None
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        extract_calls.append({"namespace": namespace, "phases": sorted(phases), "workload": workload})
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-primary"})
+
+    assert len(extract_calls) == 1
+    # Must use smoke's completed_namespace (ns-0), NOT the primary namespace
+    assert extract_calls[0]["namespace"] == "ns-0"
+    assert extract_calls[0]["workload"] == "smoke"
+    assert sorted(extract_calls[0]["phases"]) == ["baseline", "treatment"]
+
+
+def test_collect_scoped_missing_completed_namespace_warns_and_skips(tmp_path):
+    """Scoped collect warns and skips workloads whose done pairs lack completed_namespace."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    (run_dir / "progress.json").write_text(json.dumps({
+        "wl-smoke-baseline":  {"workload": "smoke", "package": "baseline",  "status": "done"},
+        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done"},
+    }))
+
+    class Args:
+        only = None
+        workload = "smoke"
+        package = None
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        extract_calls.append(phases)
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
+         patch.object(deploy, "warn") as mock_warn:
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert extract_calls == []
+    warnings = [str(c) for c in mock_warn.call_args_list]
+    assert any("completed_namespace" in w for w in warnings)
