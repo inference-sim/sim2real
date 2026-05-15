@@ -1788,7 +1788,7 @@ def test_configmap_namespace_empty():
 # ── ConfigMapProgressStore wiring in _cmd_run / _cmd_reset ─────────────────
 
 def test_cmd_run_uses_configmap_store(monkeypatch, tmp_path):
-    """_cmd_run uses ConfigMapProgressStore directly (not CompositeProgressStore)."""
+    """_cmd_run uses ConfigMapProgressStore directly."""
     import pipeline.deploy as mod
 
     _mock_cm(monkeypatch, {})
@@ -1811,9 +1811,6 @@ def test_cmd_run_uses_configmap_store(monkeypatch, tmp_path):
     with pytest.raises(SystemExit):
         mod._cmd_run(args, run_dir, setup)
 
-    # If we got this far without ImportError on CompositeProgressStore, the
-    # subcommand is using ConfigMapProgressStore directly (since
-    # CompositeProgressStore no longer exists).
 
 def test_cmd_reset_uses_configmap_store(monkeypatch, tmp_path):
     """_cmd_reset uses ConfigMapProgressStore directly."""
