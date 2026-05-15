@@ -1,7 +1,7 @@
 """Tests for deploy.py _cmd_collect phase selection logic."""
 
 import json
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -168,7 +168,7 @@ def test_collect_custom_package_in_progress(tmp_path):
     assert collected_phases == ["canary"]
 
 
-def test_collect_corrupt_progress_warns_and_falls_back(tmp_path):
+def test_collect_corrupt_progress_warns_and_falls_back(tmp_path, capsys):
     """Corrupt progress.json warns with correct message and falls back."""
     from pipeline import deploy
 
@@ -186,13 +186,14 @@ def test_collect_corrupt_progress_warns_and_falls_back(tmp_path):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
-    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
-         patch.object(deploy, "warn") as mock_warn:
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
         deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
 
     assert collected_phases == ["baseline", "treatment"]
-    warnings = [str(c) for c in mock_warn.call_args_list]
-    assert any("Corrupt" in w for w in warnings)
+    # The corrupt-file warning goes through CompositeProgressStore's secondary
+    # error path, which prints directly to stderr rather than through deploy.warn.
+    captured = capsys.readouterr()
+    assert "Corrupt" in captured.err
 
 
 def test_collect_only_done_phases(tmp_path):
@@ -781,3 +782,34 @@ def test_collect_scoped_missing_completed_namespace_warns_and_skips(tmp_path):
     assert extract_calls == []
     warnings = [str(c) for c in mock_warn.call_args_list]
     assert any("completed_namespace" in w for w in warnings)
+
+
+def test_collect_reads_from_configmap_when_no_local_file(tmp_path):
+    """collect uses CompositeProgressStore to read from ConfigMap when no local file."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+
+    cm_data = {
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
+    }
+
+    class Args:
+        package = None
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        extract_calls.append({"phases": phases, "workload": workload})
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
+         patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(cm_data))
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert len(extract_calls) == 1
+    assert sorted(extract_calls[0]["phases"]) == ["baseline", "treatment"]

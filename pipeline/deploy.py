@@ -638,19 +638,22 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
 
     run_name = run_dir.name
 
-    # Derive known phases from progress.json, fall back to _discover_phases()
+    # Derive known phases from CompositeProgressStore (CM primary, local fallback)
+    from pipeline.lib.progress import (
+        LocalProgressStore, ConfigMapProgressStore, CompositeProgressStore,
+    )
     progress_path = run_dir / "progress.json"
-    if progress_path.exists():
-        try:
-            progress = json.loads(progress_path.read_text())
-        except json.JSONDecodeError:
-            warn(f"Corrupt progress.json at {progress_path} — falling back to default phases")
-            progress = None
-        else:
-            if not isinstance(progress, dict):
-                warn("progress.json is not a JSON object — falling back to default phases")
-                progress = None
+    local_store = LocalProgressStore(progress_path)
+    primary_ns = _configmap_namespace(setup_config)
+    if primary_ns:
+        cm_store = ConfigMapProgressStore(primary_ns)
+        store = CompositeProgressStore(cm_store, local_store)
     else:
+        store = local_store
+    try:
+        progress = store.load() or None
+    except (ValueError, RuntimeError) as exc:
+        warn(f"Failed to load progress: {exc} — falling back to default phases")
         progress = None
 
     # ── Pair-level scoping (--only / --workload) ──────────────────────────
@@ -659,7 +662,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
     scoped = scope_only is not None or scope_workload is not None
 
     if scoped and not progress:
-        err("--only/--workload require progress.json to resolve pairs, but none was found.")
+        err("--only/--workload require progress data to resolve pairs, but none was found.")
         sys.exit(1)
 
     if scoped and progress:
