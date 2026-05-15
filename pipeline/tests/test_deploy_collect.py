@@ -714,3 +714,70 @@ def test_collect_unscoped_missing_completed_namespace_warns_and_skips(tmp_path):
     assert extract_calls == []
     warnings = [str(c) for c in mock_warn.call_args_list]
     assert any("completed_namespace" in w for w in warnings)
+
+
+def test_collect_scoped_multi_namespace_dispatch(tmp_path):
+    """Scoped collect uses each workload's completed_namespace, not primary."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    (run_dir / "progress.json").write_text(json.dumps({
+        "wl-smoke-baseline":  {"workload": "smoke", "package": "baseline",  "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
+        "wl-load-baseline":   {"workload": "load",  "package": "baseline",  "status": "done", "completed_namespace": "ns-1"},
+        "wl-load-treatment":  {"workload": "load",  "package": "treatment", "status": "done", "completed_namespace": "ns-1"},
+    }))
+
+    class Args:
+        only = None
+        workload = "smoke"
+        package = None
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        extract_calls.append({"namespace": namespace, "phases": sorted(phases), "workload": workload})
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-primary"})
+
+    assert len(extract_calls) == 1
+    # Must use smoke's completed_namespace (ns-0), NOT the primary namespace
+    assert extract_calls[0]["namespace"] == "ns-0"
+    assert extract_calls[0]["workload"] == "smoke"
+    assert sorted(extract_calls[0]["phases"]) == ["baseline", "treatment"]
+
+
+def test_collect_scoped_missing_completed_namespace_warns_and_skips(tmp_path):
+    """Scoped collect warns and skips workloads whose done pairs lack completed_namespace."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    (run_dir / "progress.json").write_text(json.dumps({
+        "wl-smoke-baseline":  {"workload": "smoke", "package": "baseline",  "status": "done"},
+        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done"},
+    }))
+
+    class Args:
+        only = None
+        workload = "smoke"
+        package = None
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        extract_calls.append(phases)
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
+         patch.object(deploy, "warn") as mock_warn:
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert extract_calls == []
+    warnings = [str(c) for c in mock_warn.call_args_list]
+    assert any("completed_namespace" in w for w in warnings)

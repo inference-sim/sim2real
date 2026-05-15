@@ -716,11 +716,26 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
         collected: list[str] = []
         failed: list[str] = []
 
+        skip_logs = getattr(args, "skip_logs", False)
         for wl_name in scoped_workloads:
+            wl_ns = next(
+                (progress[k].get("completed_namespace")
+                 for k in collectible
+                 if isinstance(progress[k], dict)
+                 and progress[k].get("workload") == wl_name
+                 and progress[k].get("completed_namespace")),
+                None,
+            )
+            if not wl_ns:
+                warn(f"{wl_name}: completed_namespace missing — skipping "
+                     f"(add completed_namespace to progress.json to collect this pair)")
+                for p in phases_to_collect:
+                    if p not in failed:
+                        failed.append(p)
+                continue
             try:
-                skip_logs = getattr(args, "skip_logs", False)
                 errors = _extract_phases_from_pvc(
-                    phases_to_collect, run_name, namespace, run_dir,
+                    phases_to_collect, run_name, wl_ns, run_dir,
                     skip_logs=skip_logs, workload=wl_name)
             except RuntimeError as e:
                 warn(f"Extractor pod failed for workload {wl_name}: {e}")
