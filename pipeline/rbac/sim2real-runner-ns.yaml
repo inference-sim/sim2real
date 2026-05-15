@@ -6,6 +6,9 @@ metadata:
   name: sim2real-runner-ns
   namespace: ${NAMESPACE}
 rules:
+  - apiGroups: ["tekton.dev"]
+    resources: ["pipelineruns"]
+    verbs: ["create", "get", "watch", "list", "delete", "patch"]
   - apiGroups: [""]
     resources: ["persistentvolumeclaims", "secrets"]
     verbs: ["get"]
