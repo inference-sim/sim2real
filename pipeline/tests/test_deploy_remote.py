@@ -82,6 +82,46 @@ def test_run_parser_skip_teardown_default_false():
     assert args.skip_teardown is False
 
 
+# ── skip-teardown param injection tests ────────────────────────────────────
+
+def _inject_skip_teardown(pr_data):
+    """Simulate the injection logic from deploy.py _cmd_run."""
+    params = pr_data.setdefault("spec", {}).setdefault("params", [])
+    for param in params:
+        if param["name"] == "skipTeardown":
+            param["value"] = "true"
+            break
+    else:
+        params.append({"name": "skipTeardown", "value": "true"})
+    return pr_data
+
+
+def test_skip_teardown_injection_appends_new_param():
+    pr_data = {"spec": {"params": [{"name": "namespace", "value": "ns1"}]}}
+    _inject_skip_teardown(pr_data)
+    names = {p["name"]: p["value"] for p in pr_data["spec"]["params"]}
+    assert names["skipTeardown"] == "true"
+    assert names["namespace"] == "ns1"
+
+
+def test_skip_teardown_injection_updates_existing_param():
+    pr_data = {"spec": {"params": [{"name": "skipTeardown", "value": "false"}]}}
+    _inject_skip_teardown(pr_data)
+    assert pr_data["spec"]["params"][0]["value"] == "true"
+
+
+def test_skip_teardown_injection_missing_spec():
+    pr_data = {}
+    _inject_skip_teardown(pr_data)
+    assert pr_data["spec"]["params"] == [{"name": "skipTeardown", "value": "true"}]
+
+
+def test_skip_teardown_injection_missing_params():
+    pr_data = {"spec": {}}
+    _inject_skip_teardown(pr_data)
+    assert pr_data["spec"]["params"] == [{"name": "skipTeardown", "value": "true"}]
+
+
 # ── _check_existing_job tests ──────────────────────────────────────────────
 
 def test_check_existing_job_active(monkeypatch):

@@ -1637,8 +1637,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                     param["value"] = ns
 
             if getattr(args, "skip_teardown", False):
-                spec = pr_data.get("spec") or {}
-                params = spec.setdefault("params", [])
+                params = pr_data.setdefault("spec", {}).setdefault("params", [])
                 for param in params:
                     if param["name"] == "skipTeardown":
                         param["value"] = "true"

@@ -153,7 +153,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 | `--workload NAME` | — | Scope execution to pairs matching this workload |
 | `--package NAME` | — | Scope execution to pairs matching this package |
 | `--status STATE` | — | Scope execution to pairs with this status (e.g. `failed`, `timed-out`) |
-| `--skip-teardown` | — | Skip teardown after PipelineRun completes, leaving namespace intact for debugging |
+| `--skip-teardown` | — | Skip the Tekton teardown task, leaving namespace resources intact for debugging |
 | `--force` | — | Reset non-pending pairs to `pending`, cleaning cluster resources (PipelineRuns + Helm) for pairs with assigned namespaces |
 | `--max-retries N` | 2 | Max retries for timed-out pairs |
 | `--poll-interval N` | 30 | Seconds between status polls |
@@ -169,7 +169,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 **Pair statuses:** `pending` → `running` → `done`. Failure paths: `running` → `failed` (hard failure or non-recoverable pending), `running` → `timed-out` (4h timeout exceeded), `running` → `pending` (recoverable early reclaim, repeats up to `--max-pending-stalls` times) → `stalled`.
 
-**Auto-cleanup** — when a PipelineRun succeeds, the orchestrator deletes the PipelineRun CR from the cluster. Failed PipelineRuns are left in place for debugging (`kubectl describe`, pod logs). Use `reset` to remove them when done.
+**Auto-cleanup** — when a PipelineRun succeeds, the orchestrator deletes the PipelineRun CR from the cluster. Failed PipelineRuns are left in place for debugging (`kubectl describe`, pod logs). Use `reset` to remove them when done. Note: `--skip-teardown` only suppresses the Tekton `llmdbenchmark-teardown` task (Helm-level resource cleanup); PipelineRun CR deletion by the orchestrator is unaffected.
 
 **Remote mode** — `deploy.py run --remote` submits the orchestrator as a Kubernetes Job (`sim2real-orchestrator`) instead of running locally. The launcher builds the EPP image locally, packs workspace files into a ConfigMap, applies the Job, and waits for the pod to reach Running. Use `stop` to cancel, `status` to check progress, and `collect` to pull results after completion. Requires `orchestrator_image` in `setup_config.json`.
 
