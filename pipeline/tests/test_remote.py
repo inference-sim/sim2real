@@ -115,6 +115,15 @@ def test_configmap_items_cluster_yaml_nested():
     assert "runs/exp-1/cluster/pipelinerun-a.yaml" in paths
 
 
+def test_configmap_items_warns_on_unrecognized_key(capsys):
+    """Unrecognized keys produce a warning and are not mounted."""
+    data = {"setup_config.json": "{}", "unknown_file.txt": "data"}
+    items = _configmap_items(data, "run1")
+    keys = [i["key"] for i in items]
+    assert "unknown_file.txt" not in keys
+    assert "Unrecognized" in capsys.readouterr().err
+
+
 # --- build_orchestrator_job tests ---
 
 RUN_NAME = "exp-001"
@@ -159,23 +168,40 @@ def test_job_structure():
     assert "--dry-run" in args
 
 
-def test_job_volume_mount_at_workspace():
-    """Volume mounts at /data/workspace (not /data/workspace/runs/<name>)."""
+def test_job_workspace_is_writable_emptydir():
+    """Orchestrator mounts a writable emptyDir at /data/workspace."""
     job = _build_job()
-    mount = job["spec"]["template"]["spec"]["containers"][0]["volumeMounts"][0]
+    spec = job["spec"]["template"]["spec"]
+    mount = spec["containers"][0]["volumeMounts"][0]
+    assert mount["name"] == "workspace"
     assert mount["mountPath"] == "/data/workspace"
+    ws_vol = next(v for v in spec["volumes"] if v["name"] == "workspace")
+    assert ws_vol == {"name": "workspace", "emptyDir": {}}
 
 
-def test_job_volume_has_items_spec():
-    """Volume uses items to map keys to correct filesystem paths."""
+def test_job_configmap_volume_is_read_only():
+    """ConfigMap is mounted read-only at /data/config with items spec."""
     job = _build_job()
-    vol = job["spec"]["template"]["spec"]["volumes"][0]
-    assert vol["configMap"]["name"] == CONFIGMAP_NAME
-    items = vol["configMap"]["items"]
+    spec = job["spec"]["template"]["spec"]
+    cfg_vol = next(v for v in spec["volumes"] if v["name"] == "config")
+    assert cfg_vol["configMap"]["name"] == CONFIGMAP_NAME
+    items = cfg_vol["configMap"]["items"]
     paths = {i["path"] for i in items}
     assert "setup_config.json" in paths
     assert f"runs/{RUN_NAME}/run_metadata.json" in paths
     assert f"runs/{RUN_NAME}/cluster/baseline.yaml" in paths
+
+
+def test_job_has_init_container_that_copies_inputs():
+    """initContainer copies ConfigMap contents to the writable workspace."""
+    job = _build_job()
+    spec = job["spec"]["template"]["spec"]
+    init = spec["initContainers"][0]
+    assert init["name"] == "copy-inputs"
+    assert init["command"] == ["cp", "-r", "/data/config/.", "/data/workspace"]
+    mounts = {m["name"]: m for m in init["volumeMounts"]}
+    assert mounts["config"]["readOnly"] is True
+    assert "workspace" in mounts
 
 
 def test_job_experiment_root_matches_mount():

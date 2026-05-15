@@ -1796,7 +1796,11 @@ def _check_existing_job(namespace: str) -> "str | None":
             return None
         err(f"Failed to check for orchestrator Job: {stderr}")
         sys.exit(1)
-    data = json.loads(result.stdout)
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        err(f"kubectl get job returned invalid JSON: {result.stdout[:200]}")
+        sys.exit(1)
     if data.get("status", {}).get("active", 0) > 0:
         return "active"
     return "completed"
@@ -1826,7 +1830,15 @@ def _wait_for_job_pod(namespace: str, *, timeout: int = 120, poll: int = 5) -> N
                 sys.exit(1)
         else:
             consecutive_failures = 0
-            data = json.loads(result.stdout)
+            try:
+                data = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                warn("kubectl returned invalid JSON — retrying")
+                if time.time() >= deadline:
+                    err(f"Timed out waiting for {JOB_NAME} pod in {namespace}")
+                    sys.exit(1)
+                time.sleep(poll)
+                continue
             for pod in data.get("items", []):
                 phase = pod.get("status", {}).get("phase", "")
                 if phase in ("Running", "Succeeded"):
@@ -1888,10 +1900,16 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
     workspace_dir = EXPERIMENT_ROOT / "workspace"
     run_name = run_dir.name
 
-    cm = build_run_inputs_configmap(
-        run_dir=run_dir, workspace_dir=workspace_dir,
-        namespace=namespace, run_name=run_name,
-    )
+    try:
+        cm = build_run_inputs_configmap(
+            run_dir=run_dir, workspace_dir=workspace_dir,
+            namespace=namespace, run_name=run_name,
+        )
+    except FileNotFoundError as exc:
+        err(f"{exc} — run setup.py and prepare.py first")
+        sys.exit(1)
+    # subprocess.run used directly because the module's run() helper doesn't
+    # support stdin input, which kubectl apply -f - requires.
     info("Applying run-inputs ConfigMap")
     result = subprocess.run(
         ["kubectl", "apply", "-f", "-"],

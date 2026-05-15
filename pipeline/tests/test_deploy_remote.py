@@ -301,8 +301,8 @@ def test_run_remote_creates_configmap_and_job(monkeypatch, tmp_path):
     assert apply_inputs[1]["kind"] == "Job"
 
 
-def test_run_remote_job_has_items_spec(monkeypatch, tmp_path):
-    """Job volume uses items to map ConfigMap keys to correct filesystem paths."""
+def test_run_remote_job_uses_initcontainer_and_emptydir(monkeypatch, tmp_path):
+    """Job uses initContainer to copy ConfigMap to a writable emptyDir."""
     run_dir = _setup_run_dir(tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
@@ -322,9 +322,14 @@ def test_run_remote_job_has_items_spec(monkeypatch, tmp_path):
         mod._cmd_run_remote(args, run_dir, setup_config)
 
     job = apply_inputs[1]
-    vol = job["spec"]["template"]["spec"]["volumes"][0]
-    assert "items" in vol["configMap"]
-    mount = job["spec"]["template"]["spec"]["containers"][0]["volumeMounts"][0]
+    spec = job["spec"]["template"]["spec"]
+    vols = {v["name"]: v for v in spec["volumes"]}
+    assert "config" in vols
+    assert "items" in vols["config"]["configMap"]
+    assert vols["workspace"] == {"name": "workspace", "emptyDir": {}}
+    assert spec["initContainers"][0]["name"] == "copy-inputs"
+    mount = spec["containers"][0]["volumeMounts"][0]
+    assert mount["name"] == "workspace"
     assert mount["mountPath"] == "/data/workspace"
 
 

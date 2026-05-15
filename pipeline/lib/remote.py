@@ -1,5 +1,6 @@
 """Remote run support — Kubernetes resource generation for --remote mode."""
 
+import sys
 from pathlib import Path
 
 CONFIGMAP_NAME = "sim2real-run-inputs"
@@ -46,6 +47,9 @@ def _configmap_items(data: dict, run_name: str) -> list[dict]:
         elif key.startswith("cluster--"):
             filename = key[len("cluster--"):]
             items.append({"key": key, "path": f"runs/{run_name}/cluster/{filename}"})
+        else:
+            print(f"[WARN] Unrecognized ConfigMap key '{key}' — will not be mounted",
+                  file=sys.stderr)
     return items
 
 
@@ -53,8 +57,16 @@ def build_orchestrator_job(
     *, namespace: str, image: str, run_name: str, run_flags: list[str],
     configmap_data: dict,
 ) -> dict:
-    mount_path = f"{MOUNT_BASE}/workspace"
+    workspace_path = f"{MOUNT_BASE}/workspace"
+    config_path = f"{MOUNT_BASE}/config"
     items = _configmap_items(configmap_data, run_name)
+
+    args = [
+        "--experiment-root", MOUNT_BASE,
+        "--run", run_name,
+        "run", "--skip-build-epp",
+    ] + run_flags
+
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -66,30 +78,34 @@ def build_orchestrator_job(
                 "spec": {
                     "serviceAccountName": SERVICE_ACCOUNT,
                     "restartPolicy": "Never",
-                    "containers": [
-                        {
-                            "name": "orchestrator",
-                            "image": image,
-                            "args": [
-                                "--experiment-root", MOUNT_BASE,
-                                "--run", run_name,
-                                "run", "--skip-build-epp",
-                            ] + run_flags,
-                            "volumeMounts": [
-                                {
-                                    "name": "run-inputs",
-                                    "mountPath": mount_path,
-                                },
-                            ],
-                        },
-                    ],
+                    "initContainers": [{
+                        "name": "copy-inputs",
+                        "image": image,
+                        "command": ["cp", "-r", f"{config_path}/.", workspace_path],
+                        "volumeMounts": [
+                            {"name": "config", "mountPath": config_path, "readOnly": True},
+                            {"name": "workspace", "mountPath": workspace_path},
+                        ],
+                    }],
+                    "containers": [{
+                        "name": "orchestrator",
+                        "image": image,
+                        "args": args,
+                        "volumeMounts": [
+                            {"name": "workspace", "mountPath": workspace_path},
+                        ],
+                    }],
                     "volumes": [
                         {
-                            "name": "run-inputs",
+                            "name": "config",
                             "configMap": {
                                 "name": CONFIGMAP_NAME,
                                 "items": items,
                             },
+                        },
+                        {
+                            "name": "workspace",
+                            "emptyDir": {},
                         },
                     ],
                 },
