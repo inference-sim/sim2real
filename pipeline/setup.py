@@ -383,6 +383,7 @@ def step_rbac(cfg: SetupConfig) -> None:
         TEKTONC_DIR / "tekton" / "roles.yaml",
         TEKTONC_DIR / "tekton" / "rbac" / "sim2real-runner.yaml",
         REPO_ROOT / "pipeline" / "rbac" / "sim2real-runner-cluster.yaml",
+        REPO_ROOT / "pipeline" / "rbac" / "sim2real-runner-ns.yaml",
     ]:
         if not yaml_path.exists():
             err(f"{yaml_path.name} not found at {yaml_path} — did submodule init fail?"); sys.exit(1)
