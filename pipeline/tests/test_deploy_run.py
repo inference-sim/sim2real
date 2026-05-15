@@ -17,8 +17,8 @@ _PROGRESS = {
 
 def test_status_output_contains_all_pairs(tmp_path, capsys):
     from pipeline.deploy import _cmd_status
-    progress_path = tmp_path / "progress.json"
-    progress_path.write_text(json.dumps(_PROGRESS))
+    run_dir = tmp_path
+    (run_dir / "progress.json").write_text(json.dumps(_PROGRESS))
 
     class _Args:
         only = None
@@ -27,7 +27,7 @@ def test_status_output_contains_all_pairs(tmp_path, capsys):
         status = None
         live = False
 
-    _cmd_status(_Args(), progress_path)
+    _cmd_status(_Args(), run_dir)
     out = capsys.readouterr().out
     for key in _PROGRESS:
         if not key.startswith("_"):
@@ -36,8 +36,8 @@ def test_status_output_contains_all_pairs(tmp_path, capsys):
 
 def test_status_filter_by_workload(tmp_path, capsys):
     from pipeline.deploy import _cmd_status
-    progress_path = tmp_path / "progress.json"
-    progress_path.write_text(json.dumps(_PROGRESS))
+    run_dir = tmp_path
+    (run_dir / "progress.json").write_text(json.dumps(_PROGRESS))
 
     class _Args:
         only = None
@@ -46,7 +46,7 @@ def test_status_filter_by_workload(tmp_path, capsys):
         status = None
         live = False
 
-    _cmd_status(_Args(), progress_path)
+    _cmd_status(_Args(), run_dir)
     out = capsys.readouterr().out
     assert "wl-smoke-baseline" in out
     assert "wl-smoke-treatment" in out
@@ -55,8 +55,8 @@ def test_status_filter_by_workload(tmp_path, capsys):
 
 def test_status_filter_by_package(tmp_path, capsys):
     from pipeline.deploy import _cmd_status
-    progress_path = tmp_path / "progress.json"
-    progress_path.write_text(json.dumps(_PROGRESS))
+    run_dir = tmp_path
+    (run_dir / "progress.json").write_text(json.dumps(_PROGRESS))
 
     class _Args:
         only = None
@@ -65,7 +65,7 @@ def test_status_filter_by_package(tmp_path, capsys):
         status = None
         live = False
 
-    _cmd_status(_Args(), progress_path)
+    _cmd_status(_Args(), run_dir)
     out = capsys.readouterr().out
     assert "wl-smoke-treatment" in out
     assert "wl-load-treatment" in out
@@ -74,8 +74,8 @@ def test_status_filter_by_package(tmp_path, capsys):
 
 def test_status_summary_line(tmp_path, capsys):
     from pipeline.deploy import _cmd_status
-    progress_path = tmp_path / "progress.json"
-    progress_path.write_text(json.dumps(_PROGRESS))
+    run_dir = tmp_path
+    (run_dir / "progress.json").write_text(json.dumps(_PROGRESS))
 
     class _Args:
         only = None
@@ -84,7 +84,7 @@ def test_status_summary_line(tmp_path, capsys):
         status = None
         live = False
 
-    _cmd_status(_Args(), progress_path)
+    _cmd_status(_Args(), run_dir)
     out = capsys.readouterr().out
     assert "5 pairs" in out
     assert "1 done" in out
@@ -102,7 +102,7 @@ def test_status_missing_progress_file(tmp_path, capsys):
         status = None
         live = False
 
-    _cmd_status(_Args(), tmp_path / "missing.json")
+    _cmd_status(_Args(), tmp_path / "missing-run-dir")
     out = capsys.readouterr().out
     assert "0 pairs" in out
 
@@ -110,13 +110,13 @@ def test_status_missing_progress_file(tmp_path, capsys):
 def test_status_filter_by_only(tmp_path, capsys):
     """status subcommand supports --only filter."""
     from pipeline.deploy import _cmd_status
-    progress_path = tmp_path / "progress.json"
-    progress_path.write_text(json.dumps(_PROGRESS))
+    run_dir = tmp_path
+    (run_dir / "progress.json").write_text(json.dumps(_PROGRESS))
 
     class _Args:
         only = "wl-smoke-baseline"; workload = None; package = None; status = None; live = False
 
-    _cmd_status(_Args(), progress_path)
+    _cmd_status(_Args(), run_dir)
     out = capsys.readouterr().out
     assert "wl-smoke-baseline" in out
     assert "wl-load-baseline" not in out
@@ -125,13 +125,13 @@ def test_status_filter_by_only(tmp_path, capsys):
 def test_status_filter_by_status(tmp_path, capsys):
     """status subcommand supports --status filter."""
     from pipeline.deploy import _cmd_status
-    progress_path = tmp_path / "progress.json"
-    progress_path.write_text(json.dumps(_PROGRESS))
+    run_dir = tmp_path
+    (run_dir / "progress.json").write_text(json.dumps(_PROGRESS))
 
     class _Args:
         only = None; workload = None; package = None; status = "running"; live = False
 
-    _cmd_status(_Args(), progress_path)
+    _cmd_status(_Args(), run_dir)
     out = capsys.readouterr().out
     assert "wl-smoke-treatment" in out
     assert "wl-load-baseline" not in out
@@ -141,14 +141,14 @@ def test_status_mismatch_shows_valid_values(tmp_path, capsys):
     """status subcommand shows valid values on filter mismatch."""
     import pytest
     from pipeline.deploy import _cmd_status
-    progress_path = tmp_path / "progress.json"
-    progress_path.write_text(json.dumps(_PROGRESS))
+    run_dir = tmp_path
+    (run_dir / "progress.json").write_text(json.dumps(_PROGRESS))
 
     class _Args:
         only = None; workload = "nonexistent"; package = None; status = None; live = False
 
     with pytest.raises(SystemExit) as exc_info:
-        _cmd_status(_Args(), progress_path)
+        _cmd_status(_Args(), run_dir)
     assert exc_info.value.code == 1
     captured = capsys.readouterr().err
     assert "No pairs matched" in captured
@@ -158,13 +158,13 @@ def test_status_mismatch_shows_valid_values(tmp_path, capsys):
 def test_status_empty_progress_with_filters(tmp_path, capsys):
     """status with empty progress and active filters warns filters are ignored."""
     from pipeline.deploy import _cmd_status
-    progress_path = tmp_path / "progress.json"
-    progress_path.write_text("{}")
+    run_dir = tmp_path
+    (run_dir / "progress.json").write_text("{}")
 
     class _Args:
         only = None; workload = "foo"; package = None; status = None; live = False
 
-    _cmd_status(_Args(), progress_path)
+    _cmd_status(_Args(), run_dir)
     out = capsys.readouterr().out
     assert "0 pairs" in out
     assert "filters ignored" in out
@@ -1341,12 +1341,12 @@ def test_status_ignores_orchestrator_metadata_as_pair(tmp_path, capsys):
         "wl-foo-baseline": {"workload": "foo", "package": "baseline", "status": "running", "namespace": "ns-1", "retries": 0},
         "_orchestrator": {"state": "backing_off", "backoff_level": 2, "last_probe_free_gpus": 0},
     }
-    pf = tmp_path / "progress.json"
-    pf.write_text(json.dumps(progress))
+    run_dir = tmp_path
+    (run_dir / "progress.json").write_text(json.dumps(progress))
 
     from pipeline.deploy import _cmd_status
     args = argparse.Namespace(only=None, workload=None, package=None, status=None)
-    _cmd_status(args, pf)
+    _cmd_status(args, run_dir)
     out = capsys.readouterr().out
     assert "wl-foo-baseline" in out
     lines = out.strip().split("\n")
@@ -1361,12 +1361,12 @@ def test_status_shows_orchestrator_state_backing_off(tmp_path, capsys):
         "wl-foo-baseline": {"workload": "foo", "package": "baseline", "status": "running", "namespace": "ns-1", "retries": 0},
         "_orchestrator": {"state": "backing_off", "backoff_level": 2, "last_probe_free_gpus": 0, "last_scarcity_time": "2026-05-08T14:32:00+00:00"},
     }
-    pf = tmp_path / "progress.json"
-    pf.write_text(json.dumps(progress))
+    run_dir = tmp_path
+    (run_dir / "progress.json").write_text(json.dumps(progress))
 
     from pipeline.deploy import _cmd_status
     args = argparse.Namespace(only=None, workload=None, package=None, status=None)
-    _cmd_status(args, pf)
+    _cmd_status(args, run_dir)
     out = capsys.readouterr().out
     assert "backing_off" in out
     assert "level 2" in out
@@ -1378,12 +1378,12 @@ def test_status_no_orchestrator_section_when_normal(tmp_path, capsys):
         "wl-foo-baseline": {"workload": "foo", "package": "baseline", "status": "running", "namespace": "ns-1", "retries": 0},
         "_orchestrator": {"state": "normal", "backoff_level": 0, "last_probe_free_gpus": 8},
     }
-    pf = tmp_path / "progress.json"
-    pf.write_text(json.dumps(progress))
+    run_dir = tmp_path
+    (run_dir / "progress.json").write_text(json.dumps(progress))
 
     from pipeline.deploy import _cmd_status
     args = argparse.Namespace(only=None, workload=None, package=None, status=None)
-    _cmd_status(args, pf)
+    _cmd_status(args, run_dir)
     out = capsys.readouterr().out
     assert "backing_off" not in out
 
@@ -1418,11 +1418,11 @@ def test_status_empty_pairs_only_orchestrator(tmp_path, capsys):
     progress = {
         "_orchestrator": {"state": "backing_off", "backoff_level": 3, "last_probe_free_gpus": 0},
     }
-    pf = tmp_path / "progress.json"
-    pf.write_text(json.dumps(progress))
+    run_dir = tmp_path
+    (run_dir / "progress.json").write_text(json.dumps(progress))
     from pipeline.deploy import _cmd_status
     args = argparse.Namespace(only=None, workload=None, package=None, status=None)
-    _cmd_status(args, pf)
+    _cmd_status(args, run_dir)
     out = capsys.readouterr().out
     assert "0 pairs" in out
 
@@ -1685,24 +1685,18 @@ def test_init_progress_per_pair_heterogeneous_cost(tmp_path):
     assert progress["wl-b-treatment"]["gpu_cost"] == 2
 
 
-# ── status --remote / ConfigMap fallback ─────────────────────────────────────
+# ── status ConfigMap / composite store behavior ───────────────────────────────
 
-def test_status_parser_has_remote_flag():
-    """status subcommand should accept --remote flag."""
+def test_status_parser_has_no_remote_flag():
+    """status subcommand does NOT accept --remote (flag removed)."""
+    import argparse as _argparse
     from pipeline.deploy import build_parser
     parser = build_parser()
-    args = parser.parse_args(["status", "--remote"])
-    assert args.remote is True
+    with pytest.raises(SystemExit):
+        parser.parse_args(["status", "--remote"])
 
-def test_status_parser_remote_default_false():
-    """--remote defaults to False."""
-    from pipeline.deploy import build_parser
-    parser = build_parser()
-    args = parser.parse_args(["status"])
-    assert args.remote is False
-
-def test_status_remote_reads_configmap(tmp_path, capsys):
-    """status --remote reads from ConfigMap instead of local file."""
+def test_status_reads_configmap_when_namespace_configured(tmp_path, capsys):
+    """status reads from ConfigMap (CM primary) when namespace is configured."""
     from unittest.mock import patch, MagicMock
     from pipeline.deploy import _cmd_status
 
@@ -1715,20 +1709,19 @@ def test_status_remote_reads_configmap(tmp_path, capsys):
 
     class _Args:
         only = None; workload = None; package = None; status = None
-        remote = True
 
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(
             returncode=0, stdout=json.dumps(progress_data),
         )
-        _cmd_status(_Args(), tmp_path / "progress.json",
+        _cmd_status(_Args(), tmp_path,
                     setup_config={"namespace": "sim2real-ns"})
 
     out = capsys.readouterr().out
     assert "wl-smoke-baseline" in out
 
-def test_status_fallback_to_configmap_when_no_local(tmp_path, capsys):
-    """status reads ConfigMap when local progress.json doesn't exist."""
+def test_status_reads_configmap_when_no_local_file(tmp_path, capsys):
+    """status reads ConfigMap even when local progress.json doesn't exist."""
     from unittest.mock import patch, MagicMock
     from pipeline.deploy import _cmd_status
 
@@ -1741,14 +1734,14 @@ def test_status_fallback_to_configmap_when_no_local(tmp_path, capsys):
 
     class _Args:
         only = None; workload = None; package = None; status = None
-        remote = False
 
-    missing_path = tmp_path / "nonexistent" / "progress.json"
+    run_dir = tmp_path / "nonexistent-run"
+    run_dir.mkdir()
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(
             returncode=0, stdout=json.dumps(progress_data),
         )
-        _cmd_status(_Args(), missing_path,
+        _cmd_status(_Args(), run_dir,
                     setup_config={"namespace": "sim2real-ns"})
 
     out = capsys.readouterr().out
@@ -1761,25 +1754,24 @@ def test_status_no_configmap_no_local_reports_no_run(tmp_path, capsys):
 
     class _Args:
         only = None; workload = None; package = None; status = None
-        remote = True
 
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(
             returncode=1, stdout="",
             stderr='Error from server (NotFound): configmaps "sim2real-progress" not found',
         )
-        _cmd_status(_Args(), tmp_path / "missing.json",
+        _cmd_status(_Args(), tmp_path,
                     setup_config={"namespace": "sim2real-ns"})
 
     out = capsys.readouterr().out
     assert "0 pairs" in out
 
-def test_status_remote_no_namespace_warns(tmp_path, capsys):
-    """--remote with no namespace configured warns and falls back to local."""
+def test_status_no_namespace_uses_local_only(tmp_path, capsys):
+    """status with no namespace configured reads only local progress.json."""
     from pipeline.deploy import _cmd_status
 
-    progress_path = tmp_path / "progress.json"
-    progress_path.write_text(json.dumps({
+    run_dir = tmp_path
+    (run_dir / "progress.json").write_text(json.dumps({
         "wl-smoke-baseline": {
             "workload": "wl-smoke", "package": "baseline",
             "status": "done", "namespace": None, "retries": 0,
@@ -1788,13 +1780,11 @@ def test_status_remote_no_namespace_warns(tmp_path, capsys):
 
     class _Args:
         only = None; workload = None; package = None; status = None
-        remote = True
 
-    _cmd_status(_Args(), progress_path, setup_config={})
+    _cmd_status(_Args(), run_dir, setup_config={})
 
-    captured = capsys.readouterr()
-    assert "--remote requested but no namespace" in captured.err
-    assert "wl-smoke-baseline" in captured.out
+    out = capsys.readouterr().out
+    assert "wl-smoke-baseline" in out
 
 
 # ── _configmap_namespace helper ──────────────────────────────────────────────
@@ -1892,16 +1882,16 @@ def test_cmd_reset_creates_composite_store_when_namespace_available(monkeypatch,
     assert "LocalProgressStore" in secondary_types
 
 
-# ── --remote with existing local file ────────────────────────────────────────
-
-def test_status_remote_prefers_configmap_over_existing_local(tmp_path, capsys):
-    """--remote reads from ConfigMap even when local progress.json exists."""
+def test_status_always_uses_composite_store(tmp_path, capsys):
+    """status always uses CompositeProgressStore with CM primary."""
     from unittest.mock import patch, MagicMock
     from pipeline.deploy import _cmd_status
 
     local_data = {"wl-local-baseline": {"workload": "wl-local", "package": "baseline",
                                         "status": "done", "namespace": None, "retries": 0}}
-    progress_path = tmp_path / "progress.json"
+    run_dir = tmp_path / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+    progress_path = run_dir / "progress.json"
     progress_path.write_text(json.dumps(local_data))
 
     remote_data = {"wl-remote-baseline": {"workload": "wl-remote", "package": "baseline",
@@ -1909,11 +1899,10 @@ def test_status_remote_prefers_configmap_over_existing_local(tmp_path, capsys):
 
     class _Args:
         only = None; workload = None; package = None; status = None
-        remote = True
 
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(remote_data))
-        _cmd_status(_Args(), progress_path, setup_config={"namespace": "sim2real-ns"})
+        _cmd_status(_Args(), run_dir, setup_config={"namespace": "sim2real-ns"})
 
     out = capsys.readouterr().out
     assert "wl-remote-baseline" in out

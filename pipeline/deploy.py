@@ -227,24 +227,20 @@ def _delete_pipelinerun(pr_name: str, namespace: str) -> None:
 
 # ── Status command ───────────────────────────────────────────────────────────
 
-def _cmd_status(args, progress_path: Path,
+def _cmd_status(args, run_dir: Path,
                 setup_config: dict | None = None) -> None:
     """Print a snapshot table of all (workload, package) pair statuses."""
-    use_remote = getattr(args, "remote", False)
-
-    if use_remote or not progress_path.exists():
-        primary_ns = _configmap_namespace(setup_config)
-        if primary_ns:
-            from pipeline.lib.progress import ConfigMapProgressStore
-            store = ConfigMapProgressStore(primary_ns)
-        else:
-            if use_remote:
-                warn("--remote requested but no namespace configured — falling back to local file")
-            from pipeline.lib.progress import LocalProgressStore
-            store = LocalProgressStore(progress_path)
+    from pipeline.lib.progress import (
+        LocalProgressStore, ConfigMapProgressStore, CompositeProgressStore,
+    )
+    progress_path = run_dir / "progress.json"
+    local_store = LocalProgressStore(progress_path)
+    primary_ns = _configmap_namespace(setup_config)
+    if primary_ns:
+        cm_store = ConfigMapProgressStore(primary_ns)
+        store = CompositeProgressStore(cm_store, local_store)
     else:
-        from pipeline.lib.progress import LocalProgressStore
-        store = LocalProgressStore(progress_path)
+        store = local_store
 
     progress = store.load()
 
@@ -2055,8 +2051,6 @@ Examples:
     status_p.add_argument("--workload", metavar="NAME",  help="Scope to pairs matching this workload")
     status_p.add_argument("--package",  metavar="NAME",  help="Scope to pairs matching this package")
     status_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status (e.g. running, done, failed)")
-    status_p.add_argument("--remote", action="store_true", default=False,
-                           help="Read progress from cluster ConfigMap instead of local file")
 
     run_p = sub.add_parser("run", help="Orchestrate parallel pool execution")
     run_p.add_argument("--remote", action="store_true", default=False,
@@ -2156,8 +2150,7 @@ def main():
         else:
             _cmd_run(args, run_dir, setup_config)
     elif cmd == "status":
-        progress_path = run_dir / "progress.json"
-        _cmd_status(args, progress_path, setup_config=setup_config)
+        _cmd_status(args, run_dir, setup_config=setup_config)
     elif cmd == "collect":
         _cmd_collect(args, run_dir, setup_config)
     elif cmd == "reset":
