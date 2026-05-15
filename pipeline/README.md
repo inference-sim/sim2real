@@ -172,7 +172,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 **Remote mode** — `deploy.py run --remote` submits the orchestrator as a Kubernetes Job (`sim2real-orchestrator`) instead of running locally. The launcher builds the EPP image locally, packs workspace files into a ConfigMap, applies the Job, and waits for the pod to reach Running. Use `stop` to cancel, `status` to check progress, and `collect` to pull results after completion. Requires `orchestrator_image` in `setup_config.json`.
 
-**`deploy.py status`** — prints the current state of all pairs. Always reads from the `sim2real-progress` ConfigMap first (primary), falling back to the local `progress.json` if the ConfigMap is empty or the namespace is not configured.
+**`deploy.py status`** — prints the current state of all pairs. Reads from the `sim2real-progress` ConfigMap. Requires a configured namespace.
 
 | Flag | Description |
 |------|-------------|
@@ -192,7 +192,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 When `--only` or `--workload` is given, only matching workload subdirectories are pulled from the PVC (instead of entire phase directories). These pair-level flags compose with `--package` as AND: `--workload X --package baseline` pulls workload X from the baseline phase only. Requires progress data to resolve pairs.
 
-**`deploy.py stop`** — deletes the `sim2real-orchestrator` Kubernetes Job (with cascading pod deletion) in the primary namespace. Only meaningful when the orchestrator runs as an in-cluster Job. Does not touch `progress.json` — pair state is left as-is. If no remote orchestrator Job exists, prints a message and returns. Use `reset` separately to clear failed/stalled pair state.
+**`deploy.py stop`** — deletes the `sim2real-orchestrator` Kubernetes Job (with cascading pod deletion) in the primary namespace. Only meaningful when the orchestrator runs as an in-cluster Job. Pair state is left as-is. If no remote orchestrator Job exists, prints a message and returns. Use `reset` separately to clear failed/stalled pair state.
 
 **`deploy.py reset`** — removes cluster resources (PipelineRuns, Helm releases) for all non-pending pairs. Failed/running/timed-out pairs are reset to `pending` so they can be re-dispatched. Done pairs stay `done` — only their PipelineRun is deleted to free cluster resources.
 
@@ -206,7 +206,7 @@ When `--only` or `--workload` is given, only matching workload subdirectories ar
 
 **Safety:** Results in `workspace/runs/<run>/results/` are preserved — only cluster resources are removed. For `done` pairs, only the PipelineRun is deleted (Tekton already tore down Helm releases).
 
-**`deploy.py wipe`** — deletes local results (`results/<package>/<workload>/`) for non-pending pairs and resets their status to `pending` in `progress.json`. Use when reusing a run name and stale results from prior executions need to be cleared before re-executing. Pending pairs are skipped (nothing to wipe). Empty package directories are cleaned up automatically.
+**`deploy.py wipe`** — deletes local results (`results/<package>/<workload>/`) for non-pending pairs and resets their status to `pending` in the ConfigMap. Use when reusing a run name and stale results from prior executions need to be cleared before re-executing. Pending pairs are skipped (nothing to wipe). Empty package directories are cleaned up automatically.
 
 | Flag | Description |
 |------|-------------|
@@ -218,7 +218,7 @@ When `--only` or `--workload` is given, only matching workload subdirectories ar
 
 **Interaction with `collect`:** Wiping resets pair status to `pending`, which makes any PVC data unreachable via `collect` (collect only pulls `done` pairs). Re-executing the pairs writes fresh data to the PVC.
 
-**`deploy.py pairs`** — lists available pair keys, workloads, and packages by scanning `cluster/pipelinerun-*.yaml`. Works without `progress.json`.
+**`deploy.py pairs`** — lists available pair keys, workloads, and packages by scanning `cluster/pipelinerun-*.yaml`.
 
 | Flag | Description |
 |------|-------------|
@@ -332,14 +332,13 @@ All paths are relative to the repo root and validated at Phase 1.
 
 ## Parallel Pool Execution
 
-`setup.py --namespaces NS1,NS2,...` provisions N namespace slots, each bootstrapped identically. `prepare.py` generates one shared Tekton Pipeline plus one PipelineRun per `(workload, package)` pair. `deploy.py run` orchestrates execution by assigning pairs to free slots, polling for completion, and retrying on timeout. Use `deploy.py collect` to pull results off-cluster. `deploy.py status` reads progress from the ConfigMap (primary) or local file (fallback).
+`setup.py --namespaces NS1,NS2,...` provisions N namespace slots, each bootstrapped identically. `prepare.py` generates one shared Tekton Pipeline plus one PipelineRun per `(workload, package)` pair. `deploy.py run` orchestrates execution by assigning pairs to free slots, polling for completion, and retrying on timeout. Use `deploy.py collect` to pull results off-cluster. `deploy.py status` reads progress from the ConfigMap.
 
 | Artifact | Written by | Read by |
 |----------|-----------|---------|
-| ConfigMap `sim2real-progress` | `deploy.py run`, `deploy.py reset` | All subcommands (primary) |
-| `runs/<run>/progress.json` | `deploy.py run` | All subcommands (fallback) |
+| ConfigMap `sim2real-progress` | `deploy.py run`, `deploy.py reset` | All subcommands |
 
-The orchestrator writes progress to both the `sim2real-progress` ConfigMap and the local file on every poll cycle. All subcommands (`status`, `collect`, `run`, `reset`, `wipe`) read from the ConfigMap first, falling back to the local file when the ConfigMap is empty or the namespace is not configured.
+All subcommands (`status`, `collect`, `run`, `reset`, `wipe`) use the `sim2real-progress` ConfigMap as the sole progress store. A configured namespace is required.
 
 ---
 
