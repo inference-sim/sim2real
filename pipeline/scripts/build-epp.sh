@@ -13,6 +13,11 @@ ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 err()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
+cleanup() {
+  kubectl delete pod source-copy -n "${NAMESPACE}" --ignore-not-found --force --grace-period=0 2>/dev/null || true
+}
+trap cleanup EXIT
+
 # ── Parse args ─────────────────────────────────────────────────────
 RUN_DIR=""
 RUN_NAME=""

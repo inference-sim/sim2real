@@ -225,6 +225,57 @@ class TestBuildParser:
         args = parser.parse_args([])
         assert args.pipeline_yaml is None
 
+    def test_orchestrator_image_flag_exists(self):
+        from pipeline.setup import build_parser
+        parser = build_parser()
+        args = parser.parse_args(["--orchestrator-image", "ghcr.io/inference-sim/sim2real/orchestrator:latest"])
+        assert args.orchestrator_image == "ghcr.io/inference-sim/sim2real/orchestrator:latest"
+
+    def test_orchestrator_image_defaults_to_none(self):
+        from pipeline.setup import build_parser
+        parser = build_parser()
+        args = parser.parse_args([])
+        assert args.orchestrator_image is None
+
+
+class TestOrchestratorImageConfig:
+    """setup_config.json includes orchestrator_image key."""
+
+    def test_config_output_includes_orchestrator_image(self, tmp_path):
+        """step_config_output writes orchestrator_image to setup_config.json."""
+        from pipeline.setup import step_config_output
+        import pipeline.setup as setup_module
+
+        original = setup_module.EXPERIMENT_ROOT
+        setup_module.EXPERIMENT_ROOT = tmp_path
+        try:
+            run_dir = tmp_path / "workspace" / "runs" / "test-run"
+            run_dir.mkdir(parents=True)
+            cfg = _make_config(orchestrator_image="ghcr.io/inference-sim/sim2real/orchestrator:abc123")
+            step_config_output(cfg, run_dir, "podman")
+            data = json.loads((tmp_path / "workspace" / "setup_config.json").read_text())
+            assert data["orchestrator_image"] == "ghcr.io/inference-sim/sim2real/orchestrator:abc123"
+        finally:
+            setup_module.EXPERIMENT_ROOT = original
+
+    def test_config_output_orchestrator_image_empty(self, tmp_path):
+        """orchestrator_image written as empty string when not set."""
+        from pipeline.setup import step_config_output
+        import pipeline.setup as setup_module
+
+        original = setup_module.EXPERIMENT_ROOT
+        setup_module.EXPERIMENT_ROOT = tmp_path
+        try:
+            run_dir = tmp_path / "workspace" / "runs" / "test-run"
+            run_dir.mkdir(parents=True)
+            cfg = _make_config()
+            step_config_output(cfg, run_dir, "podman")
+            data = json.loads((tmp_path / "workspace" / "setup_config.json").read_text())
+            assert "orchestrator_image" in data
+            assert data["orchestrator_image"] == ""
+        finally:
+            setup_module.EXPERIMENT_ROOT = original
+
 
 class TestRedeployTasksPipeline:
     """--redeploy-tasks also applies Pipeline YAML."""

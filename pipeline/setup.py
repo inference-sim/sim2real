@@ -26,6 +26,7 @@ class SetupConfig:
     is_openshift: bool
     no_cluster: bool
     pipeline_yaml: str | None = None
+    orchestrator_image: str = ""
 
 # ── Repo layout ──────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -91,6 +92,9 @@ Examples:
                                        help="Auto-accept test push prompt")
     p.add_argument("--test-push-tag",  metavar="TAG",   default="_test-image-push",
                                        help="Image tag for test push [%(default)s]")
+    p.add_argument("--orchestrator-image", metavar="IMAGE",
+                                       help="Orchestrator container image for --remote mode "
+                                            "(e.g. ghcr.io/inference-sim/sim2real/orchestrator:latest)")
     return p
 
 def run(cmd: list[str], *, check: bool = True, capture: bool = False,
@@ -312,6 +316,18 @@ def collect_config(args: argparse.Namespace) -> tuple[SetupConfig, Path, str]:
     # Auto-detect container runtime (not prompted)
     container_rt = _detect_container_runtime()
 
+    # Orchestrator image — only required for --remote
+    _orch_default = (
+        defaults.get("orchestrator_image", "")
+        or "ghcr.io/inference-sim/sim2real/orchestrator:latest"
+    )
+    orchestrator_image = args.orchestrator_image or prompt(
+        "orchestrator_image",
+        "Orchestrator image for --remote mode (press Enter to accept default)",
+        default=_orch_default,
+        env_var="ORCHESTRATOR_IMAGE",
+    )
+
     cfg = SetupConfig(
         namespace=namespace, namespaces=namespaces, registry=registry, repo_name=repo_name,
         run_name=run_name, hf_token=hf_token, github_token=gh_token,
@@ -319,6 +335,7 @@ def collect_config(args: argparse.Namespace) -> tuple[SetupConfig, Path, str]:
         storage_class=storage_class, is_openshift=is_openshift,
         no_cluster=args.no_cluster,
         pipeline_yaml=args.pipeline_yaml,
+        orchestrator_image=orchestrator_image,
     )
     ns_display = ",".join(namespaces) if len(namespaces) > 1 else namespace
     ok(f"Configuration complete (namespace={ns_display}, registry={registry or '(none)'})")
@@ -665,6 +682,7 @@ def step_config_output(cfg: SetupConfig, run_dir: Path, container_rt: str) -> No
         "tektonc_dir": str(TEKTONC_DIR),
         "sim2real_root": str(REPO_ROOT),
         "pipeline_yaml": cfg.pipeline_yaml,
+        "orchestrator_image": cfg.orchestrator_image,
         "container_runtime": container_rt,
         "current_run": cfg.run_name,
         "setup_timestamp": now_iso,
