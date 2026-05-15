@@ -71,6 +71,7 @@ _sim2real_deploy() {
             case "${line[1]}" in
                 run)
                     _arguments \
+                        '--remote[Submit as in-cluster Job]' \
                         '--only[Scope to one pair key]:pair key:_deploy_py_pair_keys' \
                         '--workload[Scope to workload]:workload:_deploy_py_workloads' \
                         '--package[Scope to package]:package:_deploy_py_packages' \
@@ -82,7 +83,8 @@ _sim2real_deploy() {
                         '--gpu-resource-type[GPU resource type]:type:' \
                         '--default-gpu-cost[GPU cost per pod]:cost:' \
                         '--pending-threshold[Pending timeout in seconds]:seconds:' \
-                        '--max-pending-stalls[Max stall cycles]:count:'
+                        '--max-pending-stalls[Max stall cycles]:count:' \
+                        '--max-backoff[Max backoff interval]:seconds:'
                     ;;
                 status)
                     _arguments \

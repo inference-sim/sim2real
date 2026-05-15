@@ -1718,7 +1718,7 @@ def _cmd_wipe(args, run_dir: Path,
 
 # ── Stop remote orchestrator ────────────────────────────────────────────────
 
-JOB_NAME = "sim2real-orchestrator"
+from pipeline.lib.remote import JOB_NAME
 
 
 def _cmd_stop(namespace: str) -> None:
@@ -1743,6 +1743,208 @@ def _cmd_stop(namespace: str) -> None:
     ok(f"Stopped {JOB_NAME} in {namespace}")
 
 
+# ── Remote run ──────────────────────────────────────────────────────────────
+
+_FAIL_FAST_REASONS = {
+    "ImagePullBackOff",
+    "ErrImagePull",
+    "CrashLoopBackOff",
+    "CreateContainerConfigError",
+    "InvalidImageName",
+    "RunContainerError",
+    "ContainerCannotRun",
+}
+
+
+def _collect_run_flags(args) -> list[str]:
+    """Collect run subcommand flags to forward to the in-cluster Job."""
+    flags: list[str] = []
+    for name in ("only", "workload", "package", "status"):
+        val = getattr(args, name)
+        if val is not None:
+            flags.extend([f"--{name}", str(val)])
+    if getattr(args, "force"):
+        flags.append("--force")
+    _defaults = {
+        "max_retries": 2,
+        "poll_interval": 30,
+        "gpu_resource_type": None,
+        "default_gpu_cost": 1,
+        "pending_threshold": 600,
+        "max_pending_stalls": 10,
+        "max_backoff": 600,
+    }
+    for attr, default in _defaults.items():
+        val = getattr(args, attr)
+        if val != default:
+            flag = f"--{attr.replace('_', '-')}"
+            flags.extend([flag, str(val)])
+    return flags
+
+
+def _check_existing_job(namespace: str) -> "str | None":
+    """Check whether the orchestrator Job already exists.
+
+    Returns "active" if the Job has active pods, "completed" if it exists
+    but is not active, or None if the Job doesn't exist.
+    """
+    result = run(["kubectl", "get", "job", JOB_NAME, "-n", namespace,
+                   "-o", "json"], check=False, capture=True)
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        if "(NotFound)" in stderr:
+            return None
+        err(f"Failed to check for orchestrator Job: {stderr}")
+        sys.exit(1)
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        err(f"kubectl get job returned invalid JSON: {result.stdout[:200]}")
+        sys.exit(1)
+    if data.get("status", {}).get("active", 0) > 0:
+        return "active"
+    return "completed"
+
+
+def _wait_for_job_pod(namespace: str, *, timeout: int = 120, poll: int = 5) -> None:
+    """Poll until the orchestrator pod reaches Running or Succeeded.
+
+    Fails fast on unrecoverable container states (ImagePullBackOff, etc.)
+    and on pod phase Failed. Exits early if kubectl fails 3 times in a row.
+    """
+    deadline = time.time() + timeout
+    consecutive_failures = 0
+    last_error = ""
+    while True:
+        result = run(
+            ["kubectl", "get", "pods",
+             "-l", f"job-name={JOB_NAME}",
+             "-n", namespace, "-o", "json"],
+            check=False, capture=True,
+        )
+        if result.returncode != 0:
+            consecutive_failures += 1
+            last_error = (result.stderr or "").strip()
+            if consecutive_failures >= 3:
+                err(f"kubectl failed {consecutive_failures} times: {last_error}")
+                sys.exit(1)
+        else:
+            try:
+                data = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    err("kubectl returned invalid JSON 3 times in a row")
+                    sys.exit(1)
+                warn("kubectl returned invalid JSON — retrying")
+                if time.time() >= deadline:
+                    err(f"Timed out waiting for {JOB_NAME} pod in {namespace}")
+                    sys.exit(1)
+                time.sleep(poll)
+                continue
+            consecutive_failures = 0
+            for pod in data.get("items", []):
+                phase = pod.get("status", {}).get("phase", "")
+                if phase in ("Running", "Succeeded"):
+                    return
+                if phase == "Failed":
+                    msg = pod.get("status", {}).get("message", "unknown reason")
+                    err(f"Orchestrator pod failed: {msg}")
+                    sys.exit(1)
+                all_statuses = (pod.get("status", {}).get("initContainerStatuses", [])
+                                + pod.get("status", {}).get("containerStatuses", []))
+                for cs in all_statuses:
+                    waiting = cs.get("state", {}).get("waiting", {})
+                    reason = waiting.get("reason", "")
+                    if reason in _FAIL_FAST_REASONS:
+                        err(f"Pod failed: {reason} — {waiting.get('message', '')}")
+                        sys.exit(1)
+        if time.time() >= deadline:
+            err(f"Timed out waiting for {JOB_NAME} pod in {namespace}")
+            sys.exit(1)
+        time.sleep(poll)
+
+
+def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
+    """Submit the orchestrator as an in-cluster Job."""
+    from pipeline.lib.remote import (
+        build_run_inputs_configmap, build_orchestrator_job,
+    )
+
+    namespaces = setup_config.get("namespaces") or [setup_config.get("namespace", "")]
+    namespace = namespaces[0] if namespaces else ""
+    if not namespace:
+        err("No namespaces configured. Run setup.py with --namespaces.")
+        sys.exit(1)
+
+    orchestrator_image = setup_config.get("orchestrator_image")
+    if not orchestrator_image:
+        err("orchestrator_image not set in setup_config.json — add it before using --remote.")
+        sys.exit(1)
+
+    status = _check_existing_job(namespace)
+    if status == "active":
+        err(f"Orchestrator Job already running in {namespace}. Use 'deploy.py stop' first.")
+        sys.exit(1)
+    elif status == "completed":
+        info(f"Deleting completed orchestrator Job in {namespace}")
+        result = run(["kubectl", "delete", "job", JOB_NAME, "-n", namespace],
+                     check=False, capture=True)
+        if result.returncode != 0:
+            detail = (result.stderr or "").strip()
+            err(f"Failed to delete completed Job: {detail}")
+            sys.exit(1)
+
+    epp_action = _resolve_epp_action(run_dir, args.skip_build_epp)
+    if epp_action.startswith("error:"):
+        err(epp_action[len("error:"):]); sys.exit(1)
+    elif epp_action == "skip":
+        info("No component_image in run metadata — skipping EPP build")
+    else:
+        _build_epp_image(run_dir, run_dir.name, namespace)
+
+    workspace_dir = EXPERIMENT_ROOT / "workspace"
+    run_name = run_dir.name
+
+    try:
+        cm = build_run_inputs_configmap(
+            run_dir=run_dir, workspace_dir=workspace_dir,
+            namespace=namespace, run_name=run_name,
+        )
+    except OSError as exc:
+        err(f"{exc} — run setup.py and prepare.py first")
+        sys.exit(1)
+    # subprocess.run used directly because the module's run() helper doesn't
+    # support stdin input, which kubectl apply -f - requires.
+    info("Applying run-inputs ConfigMap")
+    result = subprocess.run(
+        ["kubectl", "apply", "-f", "-"],
+        input=json.dumps(cm), text=True, check=False, capture_output=True,
+    )
+    if result.returncode != 0:
+        err(f"Failed to apply ConfigMap: {(result.stderr or '').strip()}")
+        sys.exit(1)
+
+    run_flags = _collect_run_flags(args)
+    job = build_orchestrator_job(
+        namespace=namespace, image=orchestrator_image,
+        run_name=run_name, run_flags=run_flags,
+        configmap_data=cm["data"],
+    )
+    info("Applying orchestrator Job")
+    result = subprocess.run(
+        ["kubectl", "apply", "-f", "-"],
+        input=json.dumps(job), text=True, check=False, capture_output=True,
+    )
+    if result.returncode != 0:
+        err(f"Failed to apply Job: {(result.stderr or '').strip()}")
+        sys.exit(1)
+
+    _wait_for_job_pod(namespace)
+    ok("Orchestrator pod is running")
+    info(f"Tail logs: kubectl logs -f job/{JOB_NAME} -n {namespace}")
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1753,6 +1955,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="""
 Examples:
   python pipeline/deploy.py run                        # Build EPP + orchestrate all pairs
+  python pipeline/deploy.py run --remote               # Submit orchestrator as in-cluster Job
   python pipeline/deploy.py run --skip-build-epp       # Orchestrate without EPP build
   python pipeline/deploy.py status                     # Show progress snapshot
   python pipeline/deploy.py collect                    # Pull results for completed phases
@@ -1792,6 +1995,8 @@ Examples:
                            help="Read progress from cluster ConfigMap instead of local file")
 
     run_p = sub.add_parser("run", help="Orchestrate parallel pool execution")
+    run_p.add_argument("--remote", action="store_true", default=False,
+                       help="Submit orchestrator as in-cluster Job instead of running locally")
     run_p.add_argument("--skip-build-epp", action="store_true", dest="skip_build_epp",
                        help="Skip EPP image build")
     run_p.add_argument("--only",         metavar="PAIR",  help="Scope execution to one specific pair key (wl- prefix optional)")
@@ -1882,7 +2087,10 @@ def main():
         sys.exit(1)
 
     if cmd == "run":
-        _cmd_run(args, run_dir, setup_config)
+        if getattr(args, "remote", False):
+            _cmd_run_remote(args, run_dir, setup_config)
+        else:
+            _cmd_run(args, run_dir, setup_config)
     elif cmd == "status":
         progress_path = run_dir / "progress.json"
         _cmd_status(args, progress_path, setup_config=setup_config)

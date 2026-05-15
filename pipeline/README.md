@@ -148,6 +148,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--remote` | — | Submit orchestrator as in-cluster Job instead of running locally |
 | `--only PAIR` | — | Scope execution to one specific pair key (`wl-` prefix optional) |
 | `--workload NAME` | — | Scope execution to pairs matching this workload |
 | `--package NAME` | — | Scope execution to pairs matching this package |
@@ -168,6 +169,8 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 **Pair statuses:** `pending` → `running` → `done`. Failure paths: `running` → `failed` (hard failure or non-recoverable pending), `running` → `timed-out` (4h timeout exceeded), `running` → `pending` (recoverable early reclaim, repeats up to `--max-pending-stalls` times) → `stalled`.
 
 **Auto-cleanup** — when a PipelineRun succeeds, the orchestrator deletes the PipelineRun CR from the cluster. Failed PipelineRuns are left in place for debugging (`kubectl describe`, pod logs). Use `reset` to remove them when done.
+
+**Remote mode** — `deploy.py run --remote` submits the orchestrator as a Kubernetes Job (`sim2real-orchestrator`) instead of running locally. The launcher builds the EPP image locally, packs workspace files into a ConfigMap, applies the Job, and waits for the pod to reach Running. Use `stop` to cancel, `status --remote` to check progress, and `collect` to pull results after completion. Requires `orchestrator_image` in `setup_config.json`.
 
 **`deploy.py status`** — prints the current state of all pairs. By default reads from `workspace/runs/<run>/progress.json`. When the orchestrator runs remotely (in-cluster), use `--remote` to read from the `sim2real-progress` ConfigMap instead. The ConfigMap is also used automatically when the local `progress.json` is absent.
 
