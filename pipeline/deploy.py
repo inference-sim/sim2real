@@ -502,17 +502,21 @@ def _probe_remote_mtimes(pod_name: str, phase_path: str, namespace: str) -> dict
         if result.returncode != 0:
             warn(f"mtime probe failed (rc={result.returncode}): "
                  f"{result.stderr.strip()} — falling back to full copy")
+        else:
+            info(f"mtime probe: no trace_data.csv found in {phase_path}")
         return {}
     if result.stderr.strip():
         warn(f"mtime probe had errors: {result.stderr.strip()}")
     mtimes: dict[str, float] = {}
     for line in result.stdout.strip().splitlines():
         parts = line.split(None, 1)
-        if len(parts) == 2:
-            try:
-                mtimes[Path(parts[1]).parent.name] = float(parts[0])
-            except (ValueError, IndexError):
-                warn(f"mtime probe: unparseable line: {line!r}")
+        if len(parts) != 2:
+            warn(f"mtime probe: unparseable line: {line!r}")
+            continue
+        try:
+            mtimes[Path(parts[1]).parent.name] = float(parts[0])
+        except ValueError:
+            warn(f"mtime probe: unparseable line: {line!r}")
     return mtimes
 
 
@@ -522,7 +526,8 @@ def _is_up_to_date(local_csv: Path, remote_mtime: "float | None") -> bool:
         return False
     try:
         return local_csv.exists() and local_csv.stat().st_mtime >= remote_mtime
-    except OSError:
+    except OSError as exc:
+        warn(f"stat failed for {local_csv}: {exc} — will re-download")
         return False
 
 
@@ -538,8 +543,9 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
 
     When *workload* is set, only that workload's subdirectory is copied for
     each phase (used by scoped ``collect --only/--workload``).
-    When *workload* is None (default), the entire phase directory is copied
-    (used by unscoped ``deploy.py collect`` for bulk collection).
+    When *workload* is None (default), workloads are discovered via ``ls`` and
+    copied individually, skipping those whose local ``trace_data.csv`` is
+    already up to date (used by unscoped ``deploy.py collect``).
 
     When *skip_logs* is True, only trace files are copied (skipping vLLM and
     EPP log files which typically account for the bulk of the data).
@@ -703,17 +709,6 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                     if result.returncode != 0:
                         phase_errors.append(f"{wl_name}: {result.stderr.strip()}")
                 errors[phase] = RuntimeError("; ".join(phase_errors)) if phase_errors else None
-                result = run(
-                    ["kubectl", "cp",
-                     f"{namespace}/{pod_name}:/data/{run_name}/{phase}/",
-                     str(dest_dir), "--retries=3"],
-                    check=False, capture=True,
-                )
-                if result.returncode != 0:
-                    errors[phase] = RuntimeError(
-                        f"kubectl cp failed: {result.stderr.strip()}")
-                else:
-                    errors[phase] = None
     finally:
         run(["kubectl", "delete", "pod", pod_name, "-n", namespace,
              "--ignore-not-found", "--force", "--grace-period=0"],
