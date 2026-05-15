@@ -445,8 +445,8 @@ def test_reconcile_succeeded_sets_done_and_frees_namespace(monkeypatch):
     assert progress["wl-smoke-baseline"]["pending_since"] is None
 
 
-def test_orchestrator_loop_sets_completed_namespace_on_success(monkeypatch):
-    """When a running slot's PipelineRun Succeeds, completed_namespace is set before namespace is cleared."""
+def test_reconcile_on_resume_sets_completed_namespace_on_success(monkeypatch):
+    """In _reconcile_on_resume, when a running pair's PipelineRun Succeeds, completed_namespace is recorded before namespace is cleared."""
     import pipeline.deploy as mod
 
     monkeypatch.setattr(mod, "_check_pipelinerun_status", lambda pr, ns: "Succeeded")
