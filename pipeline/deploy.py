@@ -781,22 +781,67 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
         failed = []
 
         if phases_to_collect:
-            try:
-                skip_logs = getattr(args, "skip_logs", False)
-                errors = _extract_phases_from_pvc(
-                    phases_to_collect, run_name, namespace, run_dir,
-                    skip_logs=skip_logs)
-            except RuntimeError as e:
-                warn(f"Extractor pod failed: {e}")
-                failed.extend(phases_to_collect)
-            else:
-                for phase, exc in errors.items():
-                    if exc is None:
-                        ok(f"Collected: {phase}")
-                        collected.append(phase)
+            skip_logs = getattr(args, "skip_logs", False)
+            if progress:
+                # Group done entries by completed_namespace.
+                # Entries without completed_namespace were written by an older
+                # version of the orchestrator that did not record it.
+                ns_phase_map: dict[str, list[str]] = {}
+                missing_ns_keys: list[str] = []
+                for key, pentry in progress.items():
+                    if not isinstance(pentry, dict):
+                        continue
+                    if pentry.get("status") != "done":
+                        continue
+                    pkg = pentry.get("package", "")
+                    if pkg not in phases_to_collect:
+                        continue
+                    ns = pentry.get("completed_namespace")
+                    if not ns:
+                        missing_ns_keys.append(key)
+                        continue
+                    if pkg not in ns_phase_map.setdefault(ns, []):
+                        ns_phase_map[ns].append(pkg)
+                for key in missing_ns_keys:
+                    warn(f"{key}: completed_namespace missing — skipping "
+                         f"(add completed_namespace to progress.json to collect this pair)")
+                for ns, ns_phases in sorted(ns_phase_map.items()):
+                    try:
+                        errors = _extract_phases_from_pvc(
+                            sorted(ns_phases), run_name, ns, run_dir,
+                            skip_logs=skip_logs)
+                    except RuntimeError as e:
+                        warn(f"Extractor pod failed in {ns}: {e}")
+                        for p in ns_phases:
+                            if p not in failed:
+                                failed.append(p)
                     else:
-                        warn(f"Extraction failed for {phase}: {exc}")
-                        failed.append(phase)
+                        for phase, exc in errors.items():
+                            if exc is None:
+                                ok(f"Collected: {phase}")
+                                if phase not in collected:
+                                    collected.append(phase)
+                            else:
+                                warn(f"Extraction failed for {phase}: {exc}")
+                                if phase not in failed:
+                                    failed.append(phase)
+            else:
+                # No progress.json — fallback to primary namespace.
+                try:
+                    errors = _extract_phases_from_pvc(
+                        phases_to_collect, run_name, namespace, run_dir,
+                        skip_logs=skip_logs)
+                except RuntimeError as e:
+                    warn(f"Extractor pod failed: {e}")
+                    failed.extend(phases_to_collect)
+                else:
+                    for phase, exc in errors.items():
+                        if exc is None:
+                            ok(f"Collected: {phase}")
+                            collected.append(phase)
+                        else:
+                            warn(f"Extraction failed for {phase}: {exc}")
+                            failed.append(phase)
 
     # Print summary
     print(f"\n  Collected: {len(collected)}/{len(phases_to_collect)} phases")
