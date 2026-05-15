@@ -242,10 +242,19 @@ def _cmd_status(args, run_dir: Path,
     else:
         store = local_store
 
-    progress = store.load()
+    try:
+        progress = store.load()
+    except (ValueError, RuntimeError) as exc:
+        warn(f"Failed to load progress from primary store: {exc}")
+        try:
+            progress = local_store.load()
+        except (ValueError, RuntimeError):
+            progress = {}
+        if progress:
+            warn("Using local progress data as fallback")
 
     if not progress:
-        suffix = " (no progress file)" if not progress_path.exists() else ""
+        suffix = " (no progress data)" if not progress_path.exists() else ""
         filters_given = any([
             getattr(args, "only", None) is not None,
             getattr(args, "workload", None) is not None,
@@ -649,8 +658,15 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
     try:
         progress = store.load() or None
     except (ValueError, RuntimeError) as exc:
-        warn(f"Failed to load progress: {exc} — falling back to default phases")
-        progress = None
+        warn(f"Failed to load progress from primary store: {exc}")
+        try:
+            progress = local_store.load() or None
+        except (ValueError, RuntimeError):
+            progress = None
+        if progress:
+            warn("Using local progress data as fallback")
+        else:
+            warn("No local fallback available — falling back to default phases")
 
     # ── Pair-level scoping (--only / --workload) ──────────────────────────
     scope_only = getattr(args, "only", None)
@@ -767,7 +783,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
             cluster_dir = run_dir / "cluster"
             known_phases = _discover_phases(cluster_dir)
             if progress is None and not progress_path.exists():
-                warn(f"No progress.json found — discovered phases from cluster/: {known_phases}")
+                warn(f"No progress data found — discovered phases from cluster/: {known_phases}")
             elif progress is not None:
                 warn(f"No done phases in progress — discovered from cluster/: {known_phases}")
 
@@ -838,7 +854,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                                 if phase not in failed:
                                     failed.append(phase)
             else:
-                # No progress.json — fallback to primary namespace.
+                # No progress data — fallback to primary namespace.
                 try:
                     errors = _extract_phases_from_pvc(
                         phases_to_collect, run_name, namespace, run_dir,
@@ -1613,7 +1629,10 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             counts[v["status"]] = counts.get(v["status"], 0) + 1
     print()
     ok("Run complete: " + "  ".join(f"{v} {k}" for k, v in sorted(counts.items())))
-    print(f"  Progress: {progress_path}")
+    if primary_ns:
+        print(f"  Progress: ConfigMap {ConfigMapProgressStore.CONFIGMAP_NAME} in {primary_ns}")
+    else:
+        print(f"  Progress: {progress_path}")
     print()
 
 

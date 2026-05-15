@@ -170,13 +170,12 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 **Auto-cleanup** — when a PipelineRun succeeds, the orchestrator deletes the PipelineRun CR from the cluster. Failed PipelineRuns are left in place for debugging (`kubectl describe`, pod logs). Use `reset` to remove them when done.
 
-**Remote mode** — `deploy.py run --remote` submits the orchestrator as a Kubernetes Job (`sim2real-orchestrator`) instead of running locally. The launcher builds the EPP image locally, packs workspace files into a ConfigMap, applies the Job, and waits for the pod to reach Running. Use `stop` to cancel, `status --remote` to check progress, and `collect` to pull results after completion. Requires `orchestrator_image` in `setup_config.json`.
+**Remote mode** — `deploy.py run --remote` submits the orchestrator as a Kubernetes Job (`sim2real-orchestrator`) instead of running locally. The launcher builds the EPP image locally, packs workspace files into a ConfigMap, applies the Job, and waits for the pod to reach Running. Use `stop` to cancel, `status` to check progress, and `collect` to pull results after completion. Requires `orchestrator_image` in `setup_config.json`.
 
-**`deploy.py status`** — prints the current state of all pairs. By default reads from `workspace/runs/<run>/progress.json`. When the orchestrator runs remotely (in-cluster), use `--remote` to read from the `sim2real-progress` ConfigMap instead. The ConfigMap is also used automatically when the local `progress.json` is absent.
+**`deploy.py status`** — prints the current state of all pairs. Always reads from the `sim2real-progress` ConfigMap first (primary), falling back to the local `progress.json` if the ConfigMap is empty or the namespace is not configured.
 
 | Flag | Description |
 |------|-------------|
-| `--remote` | Read progress from cluster ConfigMap instead of local file |
 | `--workload NAME` | Filter by workload name |
 | `--package NAME` | Filter by package name |
 
@@ -331,14 +330,14 @@ All paths are relative to the repo root and validated at Phase 1.
 
 ## Parallel Pool Execution
 
-`setup.py --namespaces NS1,NS2,...` provisions N namespace slots, each bootstrapped identically. `prepare.py` generates one shared Tekton Pipeline plus one PipelineRun per `(workload, package)` pair. `deploy.py run` orchestrates execution by assigning pairs to free slots, polling for completion, and retrying on timeout. Use `deploy.py collect` to pull results off-cluster. `deploy.py status` reads progress from the local file or cluster ConfigMap.
+`setup.py --namespaces NS1,NS2,...` provisions N namespace slots, each bootstrapped identically. `prepare.py` generates one shared Tekton Pipeline plus one PipelineRun per `(workload, package)` pair. `deploy.py run` orchestrates execution by assigning pairs to free slots, polling for completion, and retrying on timeout. Use `deploy.py collect` to pull results off-cluster. `deploy.py status` reads progress from the ConfigMap (primary) or local file (fallback).
 
 | Artifact | Written by | Read by |
 |----------|-----------|---------|
-| `runs/<run>/progress.json` | `deploy.py run` | `deploy.py status` |
-| ConfigMap `sim2real-progress` | `deploy.py run`, `deploy.py reset` | `deploy.py status --remote` |
+| ConfigMap `sim2real-progress` | `deploy.py run`, `deploy.py reset` | All subcommands (primary) |
+| `runs/<run>/progress.json` | `deploy.py run` | All subcommands (fallback) |
 
-The orchestrator writes progress to both the local file and the `sim2real-progress` ConfigMap in the primary namespace on every poll cycle. This allows `deploy.py status --remote` to read progress directly from the cluster, which is required when the orchestrator runs as an in-cluster Job.
+The orchestrator writes progress to both the `sim2real-progress` ConfigMap and the local file on every poll cycle. All subcommands (`status`, `collect`, `run`, `reset`, `wipe`) read from the ConfigMap first, falling back to the local file when the ConfigMap is empty or the namespace is not configured.
 
 ---
 
