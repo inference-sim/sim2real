@@ -495,11 +495,16 @@ def _probe_remote_mtimes(pod_name: str, phase_path: str, namespace: str) -> dict
     result = run(
         ["kubectl", "exec", pod_name, f"-n={namespace}", "--", "sh", "-c",
          f"find {phase_path} -name 'trace_data.csv'"
-         " -exec stat -c '%Y %n' {} \\; 2>/dev/null"],
+         " -exec stat -c '%Y %n' {} \\;"],
         check=False, capture=True,
     )
     if result.returncode != 0 or not result.stdout.strip():
+        if result.returncode != 0:
+            warn(f"mtime probe failed (rc={result.returncode}): "
+                 f"{result.stderr.strip()} — falling back to full copy")
         return {}
+    if result.stderr.strip():
+        warn(f"mtime probe had errors: {result.stderr.strip()}")
     mtimes: dict[str, float] = {}
     for line in result.stdout.strip().splitlines():
         parts = line.split(None, 1)
@@ -507,17 +512,18 @@ def _probe_remote_mtimes(pod_name: str, phase_path: str, namespace: str) -> dict
             try:
                 mtimes[Path(parts[1]).parent.name] = float(parts[0])
             except (ValueError, IndexError):
-                pass
+                warn(f"mtime probe: unparseable line: {line!r}")
     return mtimes
 
 
 def _is_up_to_date(local_csv: Path, remote_mtime: "float | None") -> bool:
     """Return True if local trace_data.csv is at least as new as the remote copy."""
-    return (
-        remote_mtime is not None
-        and local_csv.exists()
-        and local_csv.stat().st_mtime >= remote_mtime
-    )
+    if remote_mtime is None:
+        return False
+    try:
+        return local_csv.exists() and local_csv.stat().st_mtime >= remote_mtime
+    except OSError:
+        return False
 
 
 def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
@@ -605,8 +611,6 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                 # BusyBox tar doesn't handle large streaming well, so use cp.
                 if workload:
                     wl_names = [workload]
-                elif remote_mtimes:
-                    wl_names = list(remote_mtimes.keys())
                 else:
                     list_result = run(
                         ["kubectl", "exec", pod_name, f"-n={namespace}", "--",
@@ -665,10 +669,27 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                             f"kubectl cp failed: {result.stderr.strip()}")
                     else:
                         errors[phase] = None
-            elif remote_mtimes:
+            else:
+                # Unscoped full copy: discover workloads via ls, skip
+                # up-to-date ones using remote_mtimes when available.
+                list_result = run(
+                    ["kubectl", "exec", pod_name, f"-n={namespace}", "--",
+                     "sh", "-c",
+                     f"ls /data/{run_name}/{phase}/"],
+                    check=False, capture=True,
+                )
+                if list_result.returncode != 0:
+                    errors[phase] = RuntimeError(
+                        f"failed to list workloads: {list_result.stderr.strip()}")
+                    continue
+                wl_names = list_result.stdout.strip().split() if list_result.stdout.strip() else []
+                if not wl_names:
+                    errors[phase] = None
+                    continue
                 phase_errors = []
-                for wl_name, remote_mtime in remote_mtimes.items():
-                    if _is_up_to_date(dest_dir / wl_name / "trace_data.csv", remote_mtime):
+                for wl_name in wl_names:
+                    if _is_up_to_date(dest_dir / wl_name / "trace_data.csv",
+                                      remote_mtimes.get(wl_name)):
                         info(f"[{phase}/{wl_name}] up to date — skipping")
                         continue
                     wl_dest = dest_dir / wl_name
@@ -682,7 +703,6 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                     if result.returncode != 0:
                         phase_errors.append(f"{wl_name}: {result.stderr.strip()}")
                 errors[phase] = RuntimeError("; ".join(phase_errors)) if phase_errors else None
-            else:
                 result = run(
                     ["kubectl", "cp",
                      f"{namespace}/{pod_name}:/data/{run_name}/{phase}/",

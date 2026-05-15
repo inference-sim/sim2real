@@ -1,6 +1,7 @@
 """Tests for deploy.py _cmd_collect phase selection logic."""
 
 import json
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -892,21 +893,59 @@ def test_probe_remote_mtimes_parses_output():
 
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(
-            returncode=0, stdout=stat_output)
+            returncode=0, stdout=stat_output, stderr="")
         result = _probe_remote_mtimes("pod", "/data/run1/baseline", "ns-0")
 
     assert result == {"wl-smoke": 1715800000.0, "wl-load": 1715800100.0}
 
 
 def test_probe_remote_mtimes_returns_empty_on_failure():
-    """_probe_remote_mtimes returns {} when kubectl exec fails."""
+    """_probe_remote_mtimes returns {} and warns when kubectl exec fails."""
+    from pipeline import deploy
     from pipeline.deploy import _probe_remote_mtimes
 
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=1, stdout="")
+    with patch("subprocess.run") as mock_run, \
+         patch.object(deploy, "warn") as mock_warn:
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="exec failed")
         result = _probe_remote_mtimes("pod", "/data/run1/baseline", "ns-0")
 
     assert result == {}
+    assert any("mtime probe failed" in str(c) for c in mock_warn.call_args_list)
+
+
+def test_probe_remote_mtimes_warns_on_stderr():
+    """_probe_remote_mtimes warns when stderr has content but command succeeds."""
+    from pipeline import deploy
+    from pipeline.deploy import _probe_remote_mtimes
+
+    stat_output = "1715800000 /data/run1/baseline/wl-smoke/trace_data.csv\n"
+
+    with patch("subprocess.run") as mock_run, \
+         patch.object(deploy, "warn") as mock_warn:
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout=stat_output,
+            stderr="stat: /data/run1/baseline/wl-broken/trace_data.csv: No such file")
+        result = _probe_remote_mtimes("pod", "/data/run1/baseline", "ns-0")
+
+    assert result == {"wl-smoke": 1715800000.0}
+    assert any("mtime probe had errors" in str(c) for c in mock_warn.call_args_list)
+
+
+def test_probe_remote_mtimes_warns_on_unparseable_line():
+    """_probe_remote_mtimes warns per unparseable line."""
+    from pipeline import deploy
+    from pipeline.deploy import _probe_remote_mtimes
+
+    stat_output = "garbage line\n1715800000 /data/run1/baseline/wl-smoke/trace_data.csv\n"
+
+    with patch("subprocess.run") as mock_run, \
+         patch.object(deploy, "warn") as mock_warn:
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout=stat_output, stderr="")
+        result = _probe_remote_mtimes("pod", "/data/run1/baseline", "ns-0")
+
+    assert result == {"wl-smoke": 1715800000.0}
+    assert any("unparseable" in str(c) for c in mock_warn.call_args_list)
 
 
 def test_is_up_to_date_true_when_local_newer(tmp_path):
@@ -949,3 +988,14 @@ def test_is_up_to_date_false_when_remote_mtime_none(tmp_path):
     local_csv.write_text("data")
 
     assert _is_up_to_date(local_csv, None) is False
+
+
+def test_is_up_to_date_false_on_os_error(tmp_path):
+    """_is_up_to_date returns False (re-download) when stat raises OSError."""
+    from pipeline.deploy import _is_up_to_date
+
+    local_csv = tmp_path / "trace_data.csv"
+    local_csv.write_text("data")
+
+    with patch.object(Path, "stat", side_effect=OSError("permission denied")):
+        assert _is_up_to_date(local_csv, 1715800000.0) is False
