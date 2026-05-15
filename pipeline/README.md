@@ -153,6 +153,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 | `--workload NAME` | — | Scope execution to pairs matching this workload |
 | `--package NAME` | — | Scope execution to pairs matching this package |
 | `--status STATE` | — | Scope execution to pairs with this status (e.g. `failed`, `timed-out`) |
+| `--skip-teardown` | — | Skip teardown after PipelineRun completes, leaving namespace intact for debugging |
 | `--force` | — | Reset non-pending pairs to `pending`, cleaning cluster resources (PipelineRuns + Helm) for pairs with assigned namespaces |
 | `--max-retries N` | 2 | Max retries for timed-out pairs |
 | `--poll-interval N` | 30 | Seconds between status polls |

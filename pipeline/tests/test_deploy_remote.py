@@ -11,12 +11,14 @@ import pipeline.deploy as mod
 
 def _make_run_args(*, remote=False, workload=None, only=None, package=None,
                    status=None, force=False, skip_build_epp=False,
+                   skip_teardown=False,
                    max_retries=2, poll_interval=30, gpu_resource_type=None,
                    default_gpu_cost=1, pending_threshold=600,
                    max_pending_stalls=10, max_backoff=600):
     return argparse.Namespace(
         remote=remote, workload=workload, only=only, package=package,
         status=status, force=force, skip_build_epp=skip_build_epp,
+        skip_teardown=skip_teardown,
         max_retries=max_retries, poll_interval=poll_interval,
         gpu_resource_type=gpu_resource_type, default_gpu_cost=default_gpu_cost,
         pending_threshold=pending_threshold, max_pending_stalls=max_pending_stalls,
@@ -56,6 +58,28 @@ def test_collect_run_flags_force():
 def test_collect_run_flags_non_default_retries():
     args = _make_run_args(max_retries=5)
     assert mod._collect_run_flags(args) == ["--max-retries", "5"]
+
+
+def test_collect_run_flags_skip_teardown():
+    args = _make_run_args(skip_teardown=True)
+    assert "--skip-teardown" in mod._collect_run_flags(args)
+
+
+def test_collect_run_flags_skip_teardown_absent_by_default():
+    args = _make_run_args()
+    assert "--skip-teardown" not in mod._collect_run_flags(args)
+
+
+# ── skip-teardown parser tests ─────────────────────────────────────────────
+
+def test_run_parser_skip_teardown_flag():
+    args = mod.build_parser().parse_args(["run", "--skip-teardown"])
+    assert args.skip_teardown is True
+
+
+def test_run_parser_skip_teardown_default_false():
+    args = mod.build_parser().parse_args(["run"])
+    assert args.skip_teardown is False
 
 
 # ── _check_existing_job tests ──────────────────────────────────────────────
