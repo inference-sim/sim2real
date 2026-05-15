@@ -1568,7 +1568,7 @@ def _cmd_reset(args, progress_path: Path, discovered: dict,
     primary_ns = _configmap_namespace(setup_config, namespaces)
     if primary_ns:
         cm_store = ConfigMapProgressStore(primary_ns)
-        store = CompositeProgressStore(local_store, cm_store)
+        store = CompositeProgressStore(cm_store, local_store)
     else:
         store = local_store
     progress = store.load()
@@ -1626,7 +1626,7 @@ def _cmd_wipe(args, run_dir: Path,
     primary_ns = _configmap_namespace(setup_config)
     if primary_ns:
         cm_store = ConfigMapProgressStore(primary_ns)
-        store = CompositeProgressStore(local_store, cm_store)
+        store = CompositeProgressStore(cm_store, local_store)
     else:
         store = local_store
     progress = store.load()

@@ -319,6 +319,7 @@ def test_cmd_reset_dry_run_does_not_save(tmp_path, monkeypatch, capsys):
 def test_cmd_reset_saves_progress_on_success(tmp_path, monkeypatch, capsys):
     """After reset, progress.json is updated with reset entries."""
     import pipeline.deploy as mod
+    from pipeline.lib.progress import ConfigMapProgressStore
 
     progress_path = tmp_path / "progress.json"
     progress_path.write_text(json.dumps(_PROGRESS))
@@ -334,6 +335,9 @@ def test_cmd_reset_saves_progress_on_success(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(mod, "run", fake_run)
     monkeypatch.setattr(mod, "_cancel_and_delete_pipelinerun", fake_cancel)
+    monkeypatch.setattr(ConfigMapProgressStore, "load",
+                        lambda self: json.loads(progress_path.read_text()))
+    monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, data: None)
 
     class _Args:
         only = None; workload = None; package = None; status = None; dry_run = False
