@@ -18,7 +18,7 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: sim2real-runner
-    namespace: ${NAMESPACE}
+    namespace: ${PRIMARY_NAMESPACE}
 roleRef:
   kind: Role
   name: sim2real-runner-ns

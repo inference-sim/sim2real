@@ -378,7 +378,8 @@ def step_rbac(cfg: SetupConfig) -> None:
     if cfg.no_cluster:
         ok("RBAC (skipped — --no-cluster)"); return
 
-    env = {**os.environ, "NAMESPACE": cfg.namespace}
+    primary_ns = cfg.namespaces[0]
+    env = {**os.environ, "NAMESPACE": cfg.namespace, "PRIMARY_NAMESPACE": primary_ns}
     for yaml_path in [
         TEKTONC_DIR / "tekton" / "roles.yaml",
         TEKTONC_DIR / "tekton" / "rbac" / "sim2real-runner.yaml",
@@ -388,7 +389,7 @@ def step_rbac(cfg: SetupConfig) -> None:
         if not yaml_path.exists():
             err(f"{yaml_path.name} not found at {yaml_path} — did submodule init fail?"); sys.exit(1)
         subst = subprocess.run(
-            ["envsubst", "$NAMESPACE"],
+            ["envsubst", "$NAMESPACE $PRIMARY_NAMESPACE"],
             input=yaml_path.read_text(), capture_output=True, text=True, env=env, check=True,
         )
         run(["kubectl", "apply", "-f", "-"], input=subst.stdout)
@@ -784,6 +785,7 @@ def main() -> int:
             is_openshift=cfg.is_openshift,
             no_cluster=cfg.no_cluster,
             pipeline_yaml=cfg.pipeline_yaml,
+            orchestrator_image=cfg.orchestrator_image,
         )
         if len(cfg.namespaces) > 1:
             print(_c("36", f"\n  ── Provisioning namespace: {ns} ──"))
