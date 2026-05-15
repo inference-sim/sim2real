@@ -378,16 +378,18 @@ def step_rbac(cfg: SetupConfig) -> None:
     if cfg.no_cluster:
         ok("RBAC (skipped — --no-cluster)"); return
 
-    roles_yaml = TEKTONC_DIR / "tekton" / "roles.yaml"
-    if not roles_yaml.exists():
-        err(f"roles.yaml not found at {roles_yaml} — did submodule init fail?"); sys.exit(1)
-
     env = {**os.environ, "NAMESPACE": cfg.namespace}
-    subst = subprocess.run(
-        ["envsubst", "$NAMESPACE"],
-        input=roles_yaml.read_text(), capture_output=True, text=True, env=env, check=True,
-    )
-    run(["kubectl", "apply", "-f", "-"], input=subst.stdout)
+    for yaml_path in [
+        TEKTONC_DIR / "tekton" / "roles.yaml",
+        TEKTONC_DIR / "tekton" / "rbac" / "sim2real-runner.yaml",
+    ]:
+        if not yaml_path.exists():
+            err(f"{yaml_path.name} not found at {yaml_path} — did submodule init fail?"); sys.exit(1)
+        subst = subprocess.run(
+            ["envsubst", "$NAMESPACE"],
+            input=yaml_path.read_text(), capture_output=True, text=True, env=env, check=True,
+        )
+        run(["kubectl", "apply", "-f", "-"], input=subst.stdout)
 
     if cfg.is_openshift:
         warn("OpenShift: adding SCC policies")
