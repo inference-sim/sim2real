@@ -1785,6 +1785,29 @@ def test_status_no_namespace_uses_local_only(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "wl-smoke-baseline" in out
 
+def test_status_cm_failure_falls_back_to_local(tmp_path, capsys):
+    """When CM primary raises, status falls back to local progress.json."""
+    from unittest.mock import patch, MagicMock
+    from pipeline.deploy import _cmd_status
+
+    run_dir = tmp_path / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+
+    local_data = {"wl-local-baseline": {"workload": "wl-local", "package": "baseline",
+                                        "status": "done", "namespace": None, "retries": 0}}
+    (run_dir / "progress.json").write_text(json.dumps(local_data))
+
+    class _Args:
+        only = None; workload = None; package = None; status = None
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=1, stderr="Unable to connect to the server: dial tcp: no such host")
+        _cmd_status(_Args(), run_dir, setup_config={"namespace": "sim2real-ns"})
+
+    out = capsys.readouterr().out
+    assert "wl-local-baseline" in out
+
 
 # ── _configmap_namespace helper ──────────────────────────────────────────────
 
@@ -1815,7 +1838,7 @@ def test_configmap_namespace_empty():
 def test_cmd_run_creates_composite_store_when_namespace_available(monkeypatch, tmp_path):
     """_cmd_run creates CompositeProgressStore with ConfigMap as primary."""
     import pipeline.deploy as mod
-    from pipeline.lib.progress import CompositeProgressStore
+    from pipeline.lib.progress import CompositeProgressStore, ConfigMapProgressStore
 
     stores_created = []
     _original_init = CompositeProgressStore.__init__
@@ -1825,6 +1848,8 @@ def test_cmd_run_creates_composite_store_when_namespace_available(monkeypatch, t
         _original_init(self, primary, *secondaries)
 
     monkeypatch.setattr(CompositeProgressStore, "__init__", track)
+    monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
+    monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, data: None)
     monkeypatch.setattr(mod, "_resolve_epp_action", lambda *a: "skip")
     monkeypatch.setattr(mod, "_load_pairs", lambda d: {})
 

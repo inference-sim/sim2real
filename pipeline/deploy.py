@@ -244,14 +244,16 @@ def _cmd_status(args, run_dir: Path,
 
     try:
         progress = store.load()
-    except (ValueError, RuntimeError) as exc:
+    except (ValueError, RuntimeError, OSError) as exc:
         warn(f"Failed to load progress from primary store: {exc}")
         try:
             progress = local_store.load()
-        except (ValueError, RuntimeError):
+        except (ValueError, RuntimeError, OSError):
             progress = {}
         if progress:
             warn("Using local progress data as fallback")
+        else:
+            warn("No local fallback available")
 
     if not progress:
         suffix = " (no progress data)" if not progress_path.exists() else ""
@@ -657,7 +659,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
         store = local_store
     try:
         progress = store.load() or None
-    except (ValueError, RuntimeError) as exc:
+    except (ValueError, RuntimeError, OSError) as exc:
         warn(f"Failed to load progress from primary store: {exc}")
         try:
             progress = local_store.load() or None

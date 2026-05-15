@@ -128,7 +128,7 @@ Common flags (all subcommands):
 
 **Pair discovery** — `deploy.py run` discovers `pipelinerun-*.yaml` files at the `cluster/` root. Each file's pair key is derived as `wl-` + filename stem minus the `pipelinerun-` prefix.
 
-**Collection phases** — `deploy.py collect` derives valid phases dynamically from `progress.json` (packages with status `done`). Falls back to `[baseline, treatment]` when no progress exists. Use `--package` to filter, or `--package experiment` to collect all known phases.
+**Collection phases** — `deploy.py collect` derives valid phases dynamically from progress data (packages with status `done`). Falls back to `[baseline, treatment]` when no progress exists. Use `--package` to filter, or `--package experiment` to collect all known phases.
 
 **`--skip-build-epp`** — skips the image build; use when resubmitting after a failed PipelineRun without changing the scorer.
 
@@ -144,7 +144,7 @@ python pipeline/deploy.py wipe  [flags]     # delete local results and reset pai
 python pipeline/deploy.py pairs   [flags]   # list available pair keys, workloads, and packages
 ```
 
-**`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, and retries pairs that time out. Reads `progress.json` to resume interrupted runs. Use `deploy.py collect` to pull results off-cluster after runs complete.
+**`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, and retries pairs that time out. Reads progress from the ConfigMap (primary) or local file (fallback) to resume interrupted runs. Use `deploy.py collect` to pull results off-cluster after runs complete.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -164,7 +164,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 **Early reclaim** — on each poll cycle, pods in `Running`/`Started` PipelineRuns are checked for scheduling failures. Recoverable reasons (e.g. `Insufficient nvidia.com/gpu`) trigger early reclaim after `--pending-threshold` seconds. Non-recoverable reasons (e.g. node affinity mismatch, PVC not found) fail the pair immediately. Each early reclaim increments `pending_stalls`; at `--max-pending-stalls` the pair transitions to `stalled` (terminal).
 
-**Backoff controller** — when the capacity probe shows `free_gpus < min(pending workload GPU costs)`, the orchestrator enters exponential backoff: poll interval doubles each cycle (capped at `--max-backoff`), and dispatch is skipped until capacity returns. Backoff is also triggered when 3 early reclaims (recoverable only) occur within 10 minutes. The controller resets to normal when a pod successfully schedules or the probe shows sufficient capacity for the largest pending workload. Already-running slots continue to be monitored during backoff. Orchestrator state is persisted in `progress.json` under the `_orchestrator` metadata key.
+**Backoff controller** — when the capacity probe shows `free_gpus < min(pending workload GPU costs)`, the orchestrator enters exponential backoff: poll interval doubles each cycle (capped at `--max-backoff`), and dispatch is skipped until capacity returns. Backoff is also triggered when 3 early reclaims (recoverable only) occur within 10 minutes. The controller resets to normal when a pod successfully schedules or the probe shows sufficient capacity for the largest pending workload. Already-running slots continue to be monitored during backoff. Orchestrator state is persisted in the progress store under the `_orchestrator` metadata key.
 
 **Pair statuses:** `pending` → `running` → `done`. Failure paths: `running` → `failed` (hard failure or non-recoverable pending), `running` → `timed-out` (4h timeout exceeded), `running` → `pending` (recoverable early reclaim, repeats up to `--max-pending-stalls` times) → `stalled`.
 
@@ -176,8 +176,10 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 | Flag | Description |
 |------|-------------|
+| `--only PAIR` | Scope to one pair key (`wl-` prefix optional) |
 | `--workload NAME` | Filter by workload name |
 | `--package NAME` | Filter by package name |
+| `--status STATE` | Filter by status (e.g. `running`, `done`, `failed`) |
 
 **`deploy.py collect`** — extracts results from the cluster PVC and writes to `workspace/runs/<run>/results/{phase}/<workload>/`.
 
@@ -188,7 +190,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 | `--package NAME…` | Collect only these packages (phase-level filter) |
 | `--skip-logs` | Skip vLLM and EPP log files, collect only traces |
 
-When `--only` or `--workload` is given, only matching workload subdirectories are pulled from the PVC (instead of entire phase directories). These pair-level flags compose with `--package` as AND: `--workload X --package baseline` pulls workload X from the baseline phase only. Requires `progress.json` to resolve pairs.
+When `--only` or `--workload` is given, only matching workload subdirectories are pulled from the PVC (instead of entire phase directories). These pair-level flags compose with `--package` as AND: `--workload X --package baseline` pulls workload X from the baseline phase only. Requires progress data to resolve pairs.
 
 **`deploy.py stop`** — deletes the `sim2real-orchestrator` Kubernetes Job (with cascading pod deletion) in the primary namespace. Only meaningful when the orchestrator runs as an in-cluster Job. Does not touch `progress.json` — pair state is left as-is. If no remote orchestrator Job exists, prints a message and returns. Use `reset` separately to clear failed/stalled pair state.
 
