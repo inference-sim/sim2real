@@ -1814,7 +1814,7 @@ def test_configmap_namespace_empty():
 # ── Composite store wiring in _cmd_run / _cmd_reset ─────────────────────────
 
 def test_cmd_run_creates_composite_store_when_namespace_available(monkeypatch, tmp_path):
-    """_cmd_run creates CompositeProgressStore with ConfigMap secondary."""
+    """_cmd_run creates CompositeProgressStore with ConfigMap as primary."""
     import pipeline.deploy as mod
     from pipeline.lib.progress import CompositeProgressStore
 
@@ -1822,7 +1822,7 @@ def test_cmd_run_creates_composite_store_when_namespace_available(monkeypatch, t
     _original_init = CompositeProgressStore.__init__
 
     def track(self, primary, *secondaries):
-        stores_created.append([type(s).__name__ for s in secondaries])
+        stores_created.append((type(primary).__name__, [type(s).__name__ for s in secondaries]))
         _original_init(self, primary, *secondaries)
 
     monkeypatch.setattr(CompositeProgressStore, "__init__", track)
@@ -1846,7 +1846,9 @@ def test_cmd_run_creates_composite_store_when_namespace_available(monkeypatch, t
         mod._cmd_run(args, run_dir, setup)
 
     assert len(stores_created) == 1
-    assert "ConfigMapProgressStore" in stores_created[0]
+    primary_type, secondary_types = stores_created[0]
+    assert primary_type == "ConfigMapProgressStore"
+    assert "LocalProgressStore" in secondary_types
 
 def test_cmd_reset_creates_composite_store_when_namespace_available(monkeypatch, tmp_path):
     """_cmd_reset creates CompositeProgressStore with ConfigMap as primary."""

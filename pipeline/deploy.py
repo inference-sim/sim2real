@@ -1290,7 +1290,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     primary_ns = _configmap_namespace(setup_config, namespaces)
     if primary_ns:
         cm_store = ConfigMapProgressStore(primary_ns)
-        store = CompositeProgressStore(local_store, cm_store)
+        store = CompositeProgressStore(cm_store, local_store)
     else:
         store = local_store
 
