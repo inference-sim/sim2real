@@ -1636,6 +1636,15 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 if param["name"] == "namespace":
                     param["value"] = ns
 
+            if getattr(args, "skip_teardown", False):
+                params = pr_data.setdefault("spec", {}).setdefault("params", [])
+                for param in params:
+                    if param["name"] == "skipTeardown":
+                        param["value"] = "true"
+                        break
+                else:
+                    params.append({"name": "skipTeardown", "value": "true"})
+
             tf_path = None
             try:
                 with _tmp.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tf:
@@ -1884,6 +1893,8 @@ def _collect_run_flags(args) -> list[str]:
             flags.extend([f"--{name}", str(val)])
     if getattr(args, "force"):
         flags.append("--force")
+    if getattr(args, "skip_teardown", False):
+        flags.append("--skip-teardown")
     _defaults = {
         "max_retries": 2,
         "poll_interval": 30,
@@ -2122,6 +2133,8 @@ Examples:
     run_p.add_argument("--status",       metavar="STATE", help="Scope execution to pairs with this status (e.g. failed, timed-out)")
     run_p.add_argument("--force",        action="store_true",
                        help="Reset non-pending pairs to pending, cleaning cluster resources for pairs with assigned namespaces")
+    run_p.add_argument("--skip-teardown", action="store_true", dest="skip_teardown",
+                       help="Skip teardown after PipelineRun completes (keeps namespace intact for debugging)")
     run_p.add_argument("--max-retries",  type=int, default=2, dest="max_retries",
                        help="Max retries for timed-out pairs [2]")
     run_p.add_argument("--poll-interval", type=int, default=30, dest="poll_interval",
