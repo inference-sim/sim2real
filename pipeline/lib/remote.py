@@ -98,6 +98,7 @@ def build_orchestrator_job(
                         "name": "orchestrator",
                         "image": image,
                         "args": args,
+                        "env": [{"name": "PYTHONUNBUFFERED", "value": "1"}],
                         "volumeMounts": [
                             {"name": "workspace", "mountPath": workspace_path},
                         ],

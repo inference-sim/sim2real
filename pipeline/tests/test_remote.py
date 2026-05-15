@@ -194,6 +194,13 @@ def test_job_structure():
     assert "--dry-run" in args
 
 
+def test_job_orchestrator_unbuffered():
+    job = _build_job()
+    container = job["spec"]["template"]["spec"]["containers"][0]
+    env = {e["name"]: e["value"] for e in container["env"]}
+    assert env["PYTHONUNBUFFERED"] == "1"
+
+
 def test_job_workspace_is_writable_emptydir():
     """Orchestrator mounts a writable emptyDir at /data/workspace."""
     job = _build_job()
