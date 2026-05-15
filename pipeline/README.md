@@ -128,7 +128,7 @@ Common flags (all subcommands):
 
 **Pair discovery** — `deploy.py run` discovers `pipelinerun-*.yaml` files at the `cluster/` root. Each file's pair key is derived as `wl-` + filename stem minus the `pipelinerun-` prefix.
 
-**Collection phases** — `deploy.py collect` derives valid phases dynamically from `progress.json` (packages with status `done`). Falls back to `[baseline, treatment]` when no progress exists. Use `--package` to filter, or `--package experiment` to collect all known phases.
+**Collection phases** — `deploy.py collect` derives valid phases dynamically from progress data (packages with status `done`). Falls back to `[baseline, treatment]` when no progress exists. Use `--package` to filter, or `--package experiment` to collect all known phases.
 
 **`--skip-build-epp`** — skips the image build; use when resubmitting after a failed PipelineRun without changing the scorer.
 
@@ -144,7 +144,7 @@ python pipeline/deploy.py wipe  [flags]     # delete local results and reset pai
 python pipeline/deploy.py pairs   [flags]   # list available pair keys, workloads, and packages
 ```
 
-**`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, and retries pairs that time out. Reads `progress.json` to resume interrupted runs. Use `deploy.py collect` to pull results off-cluster after runs complete.
+**`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, and retries pairs that time out. Reads progress from the ConfigMap (primary) or local file (fallback) to resume interrupted runs. Use `deploy.py collect` to pull results off-cluster after runs complete.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -164,21 +164,22 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 **Early reclaim** — on each poll cycle, pods in `Running`/`Started` PipelineRuns are checked for scheduling failures. Recoverable reasons (e.g. `Insufficient nvidia.com/gpu`) trigger early reclaim after `--pending-threshold` seconds. Non-recoverable reasons (e.g. node affinity mismatch, PVC not found) fail the pair immediately. Each early reclaim increments `pending_stalls`; at `--max-pending-stalls` the pair transitions to `stalled` (terminal).
 
-**Backoff controller** — when the capacity probe shows `free_gpus < min(pending workload GPU costs)`, the orchestrator enters exponential backoff: poll interval doubles each cycle (capped at `--max-backoff`), and dispatch is skipped until capacity returns. Backoff is also triggered when 3 early reclaims (recoverable only) occur within 10 minutes. The controller resets to normal when a pod successfully schedules or the probe shows sufficient capacity for the largest pending workload. Already-running slots continue to be monitored during backoff. Orchestrator state is persisted in `progress.json` under the `_orchestrator` metadata key.
+**Backoff controller** — when the capacity probe shows `free_gpus < min(pending workload GPU costs)`, the orchestrator enters exponential backoff: poll interval doubles each cycle (capped at `--max-backoff`), and dispatch is skipped until capacity returns. Backoff is also triggered when 3 early reclaims (recoverable only) occur within 10 minutes. The controller resets to normal when a pod successfully schedules or the probe shows sufficient capacity for the largest pending workload. Already-running slots continue to be monitored during backoff. Orchestrator state is persisted in the progress store under the `_orchestrator` metadata key.
 
 **Pair statuses:** `pending` → `running` → `done`. Failure paths: `running` → `failed` (hard failure or non-recoverable pending), `running` → `timed-out` (4h timeout exceeded), `running` → `pending` (recoverable early reclaim, repeats up to `--max-pending-stalls` times) → `stalled`.
 
 **Auto-cleanup** — when a PipelineRun succeeds, the orchestrator deletes the PipelineRun CR from the cluster. Failed PipelineRuns are left in place for debugging (`kubectl describe`, pod logs). Use `reset` to remove them when done.
 
-**Remote mode** — `deploy.py run --remote` submits the orchestrator as a Kubernetes Job (`sim2real-orchestrator`) instead of running locally. The launcher builds the EPP image locally, packs workspace files into a ConfigMap, applies the Job, and waits for the pod to reach Running. Use `stop` to cancel, `status --remote` to check progress, and `collect` to pull results after completion. Requires `orchestrator_image` in `setup_config.json`.
+**Remote mode** — `deploy.py run --remote` submits the orchestrator as a Kubernetes Job (`sim2real-orchestrator`) instead of running locally. The launcher builds the EPP image locally, packs workspace files into a ConfigMap, applies the Job, and waits for the pod to reach Running. Use `stop` to cancel, `status` to check progress, and `collect` to pull results after completion. Requires `orchestrator_image` in `setup_config.json`.
 
-**`deploy.py status`** — prints the current state of all pairs. By default reads from `workspace/runs/<run>/progress.json`. When the orchestrator runs remotely (in-cluster), use `--remote` to read from the `sim2real-progress` ConfigMap instead. The ConfigMap is also used automatically when the local `progress.json` is absent.
+**`deploy.py status`** — prints the current state of all pairs. Always reads from the `sim2real-progress` ConfigMap first (primary), falling back to the local `progress.json` if the ConfigMap is empty or the namespace is not configured.
 
 | Flag | Description |
 |------|-------------|
-| `--remote` | Read progress from cluster ConfigMap instead of local file |
+| `--only PAIR` | Scope to one pair key (`wl-` prefix optional) |
 | `--workload NAME` | Filter by workload name |
 | `--package NAME` | Filter by package name |
+| `--status STATE` | Filter by status (e.g. `running`, `done`, `failed`) |
 
 **`deploy.py collect`** — extracts results from the cluster PVC and writes to `workspace/runs/<run>/results/{phase}/<workload>/`.
 
@@ -189,7 +190,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 | `--package NAME…` | Collect only these packages (phase-level filter) |
 | `--skip-logs` | Skip vLLM and EPP log files, collect only traces |
 
-When `--only` or `--workload` is given, only matching workload subdirectories are pulled from the PVC (instead of entire phase directories). These pair-level flags compose with `--package` as AND: `--workload X --package baseline` pulls workload X from the baseline phase only. Requires `progress.json` to resolve pairs.
+When `--only` or `--workload` is given, only matching workload subdirectories are pulled from the PVC (instead of entire phase directories). These pair-level flags compose with `--package` as AND: `--workload X --package baseline` pulls workload X from the baseline phase only. Requires progress data to resolve pairs.
 
 **`deploy.py stop`** — deletes the `sim2real-orchestrator` Kubernetes Job (with cascading pod deletion) in the primary namespace. Only meaningful when the orchestrator runs as an in-cluster Job. Does not touch `progress.json` — pair state is left as-is. If no remote orchestrator Job exists, prints a message and returns. Use `reset` separately to clear failed/stalled pair state.
 
@@ -331,14 +332,14 @@ All paths are relative to the repo root and validated at Phase 1.
 
 ## Parallel Pool Execution
 
-`setup.py --namespaces NS1,NS2,...` provisions N namespace slots, each bootstrapped identically. `prepare.py` generates one shared Tekton Pipeline plus one PipelineRun per `(workload, package)` pair. `deploy.py run` orchestrates execution by assigning pairs to free slots, polling for completion, and retrying on timeout. Use `deploy.py collect` to pull results off-cluster. `deploy.py status` reads progress from the local file or cluster ConfigMap.
+`setup.py --namespaces NS1,NS2,...` provisions N namespace slots, each bootstrapped identically. `prepare.py` generates one shared Tekton Pipeline plus one PipelineRun per `(workload, package)` pair. `deploy.py run` orchestrates execution by assigning pairs to free slots, polling for completion, and retrying on timeout. Use `deploy.py collect` to pull results off-cluster. `deploy.py status` reads progress from the ConfigMap (primary) or local file (fallback).
 
 | Artifact | Written by | Read by |
 |----------|-----------|---------|
-| `runs/<run>/progress.json` | `deploy.py run` | `deploy.py status` |
-| ConfigMap `sim2real-progress` | `deploy.py run`, `deploy.py reset` | `deploy.py status --remote` |
+| ConfigMap `sim2real-progress` | `deploy.py run`, `deploy.py reset` | All subcommands (primary) |
+| `runs/<run>/progress.json` | `deploy.py run` | All subcommands (fallback) |
 
-The orchestrator writes progress to both the local file and the `sim2real-progress` ConfigMap in the primary namespace on every poll cycle. This allows `deploy.py status --remote` to read progress directly from the cluster, which is required when the orchestrator runs as an in-cluster Job.
+The orchestrator writes progress to both the `sim2real-progress` ConfigMap and the local file on every poll cycle. All subcommands (`status`, `collect`, `run`, `reset`, `wipe`) read from the ConfigMap first, falling back to the local file when the ConfigMap is empty or the namespace is not configured.
 
 ---
 

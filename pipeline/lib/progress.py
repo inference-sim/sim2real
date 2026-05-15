@@ -121,7 +121,7 @@ class CompositeProgressStore(ProgressStore):
                 data = store.load()
                 if data:
                     return data
-            except Exception as exc:
+            except (ValueError, RuntimeError, OSError) as exc:
                 print(f"[WARN] Secondary store load failed: {exc}", file=sys.stderr)
                 continue
         return {}
@@ -131,5 +131,5 @@ class CompositeProgressStore(ProgressStore):
         for store in self._secondaries:
             try:
                 store.save(data)
-            except Exception as exc:
+            except (ValueError, RuntimeError, OSError) as exc:
                 print(f"[WARN] {type(store).__name__} save failed: {exc}", file=sys.stderr)

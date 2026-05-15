@@ -39,12 +39,12 @@ def test_main_works_without_transfer_yaml(tmp_path, monkeypatch):
 
     status_called = []
 
-    def mock_status(args, progress_path, setup_config=None):
-        status_called.append(progress_path)
+    def mock_status(args, run_dir, setup_config=None):
+        status_called.append(run_dir)
 
     with patch.object(deploy, "_cmd_status", mock_status):
         with patch.object(deploy, "_load_setup_config", return_value={"current_run": "test-run", "namespace": "ns-0"}):
             deploy.main()
 
     assert len(status_called) == 1
-    assert status_called[0] == run_dir / "progress.json"
+    assert status_called[0] == run_dir

@@ -227,29 +227,36 @@ def _delete_pipelinerun(pr_name: str, namespace: str) -> None:
 
 # ── Status command ───────────────────────────────────────────────────────────
 
-def _cmd_status(args, progress_path: Path,
+def _cmd_status(args, run_dir: Path,
                 setup_config: dict | None = None) -> None:
     """Print a snapshot table of all (workload, package) pair statuses."""
-    use_remote = getattr(args, "remote", False)
-
-    if use_remote or not progress_path.exists():
-        primary_ns = _configmap_namespace(setup_config)
-        if primary_ns:
-            from pipeline.lib.progress import ConfigMapProgressStore
-            store = ConfigMapProgressStore(primary_ns)
-        else:
-            if use_remote:
-                warn("--remote requested but no namespace configured — falling back to local file")
-            from pipeline.lib.progress import LocalProgressStore
-            store = LocalProgressStore(progress_path)
+    from pipeline.lib.progress import (
+        LocalProgressStore, ConfigMapProgressStore, CompositeProgressStore,
+    )
+    progress_path = run_dir / "progress.json"
+    local_store = LocalProgressStore(progress_path)
+    primary_ns = _configmap_namespace(setup_config)
+    if primary_ns:
+        cm_store = ConfigMapProgressStore(primary_ns)
+        store = CompositeProgressStore(cm_store, local_store)
     else:
-        from pipeline.lib.progress import LocalProgressStore
-        store = LocalProgressStore(progress_path)
+        store = local_store
 
-    progress = store.load()
+    try:
+        progress = store.load()
+    except (ValueError, RuntimeError, OSError) as exc:
+        warn(f"Failed to load progress from primary store: {exc}")
+        try:
+            progress = local_store.load()
+        except (ValueError, RuntimeError, OSError):
+            progress = {}
+        if progress:
+            warn("Using local progress data as fallback")
+        else:
+            warn("No local fallback available")
 
     if not progress:
-        suffix = " (no progress file)" if not progress_path.exists() else ""
+        suffix = " (no progress data)" if not progress_path.exists() else ""
         filters_given = any([
             getattr(args, "only", None) is not None,
             getattr(args, "workload", None) is not None,
@@ -638,20 +645,30 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
 
     run_name = run_dir.name
 
-    # Derive known phases from progress.json, fall back to _discover_phases()
+    # Derive known phases from CompositeProgressStore (CM primary, local fallback)
+    from pipeline.lib.progress import (
+        LocalProgressStore, ConfigMapProgressStore, CompositeProgressStore,
+    )
     progress_path = run_dir / "progress.json"
-    if progress_path.exists():
-        try:
-            progress = json.loads(progress_path.read_text())
-        except json.JSONDecodeError:
-            warn(f"Corrupt progress.json at {progress_path} — falling back to default phases")
-            progress = None
-        else:
-            if not isinstance(progress, dict):
-                warn("progress.json is not a JSON object — falling back to default phases")
-                progress = None
+    local_store = LocalProgressStore(progress_path)
+    primary_ns = _configmap_namespace(setup_config)
+    if primary_ns:
+        cm_store = ConfigMapProgressStore(primary_ns)
+        store = CompositeProgressStore(cm_store, local_store)
     else:
-        progress = None
+        store = local_store
+    try:
+        progress = store.load() or None
+    except (ValueError, RuntimeError, OSError) as exc:
+        warn(f"Failed to load progress from primary store: {exc}")
+        try:
+            progress = local_store.load() or None
+        except (ValueError, RuntimeError, OSError):
+            progress = None
+        if progress:
+            warn("Using local progress data as fallback")
+        else:
+            warn("No local fallback available — falling back to default phases")
 
     # ── Pair-level scoping (--only / --workload) ──────────────────────────
     scope_only = getattr(args, "only", None)
@@ -659,7 +676,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
     scoped = scope_only is not None or scope_workload is not None
 
     if scoped and not progress:
-        err("--only/--workload require progress.json to resolve pairs, but none was found.")
+        err("--only/--workload require progress data to resolve pairs, but none was found.")
         sys.exit(1)
 
     if scoped and progress:
@@ -768,7 +785,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
             cluster_dir = run_dir / "cluster"
             known_phases = _discover_phases(cluster_dir)
             if progress is None and not progress_path.exists():
-                warn(f"No progress.json found — discovered phases from cluster/: {known_phases}")
+                warn(f"No progress data found — discovered phases from cluster/: {known_phases}")
             elif progress is not None:
                 warn(f"No done phases in progress — discovered from cluster/: {known_phases}")
 
@@ -839,7 +856,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                                 if phase not in failed:
                                     failed.append(phase)
             else:
-                # No progress.json — fallback to primary namespace.
+                # No progress data — fallback to primary namespace.
                 try:
                     errors = _extract_phases_from_pvc(
                         phases_to_collect, run_name, namespace, run_dir,
@@ -1291,7 +1308,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     primary_ns = _configmap_namespace(setup_config, namespaces)
     if primary_ns:
         cm_store = ConfigMapProgressStore(primary_ns)
-        store = CompositeProgressStore(local_store, cm_store)
+        store = CompositeProgressStore(cm_store, local_store)
     else:
         store = local_store
 
@@ -1614,7 +1631,10 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             counts[v["status"]] = counts.get(v["status"], 0) + 1
     print()
     ok("Run complete: " + "  ".join(f"{v} {k}" for k, v in sorted(counts.items())))
-    print(f"  Progress: {progress_path}")
+    if primary_ns:
+        print(f"  Progress: ConfigMap {ConfigMapProgressStore.CONFIGMAP_NAME} in {primary_ns}")
+    else:
+        print(f"  Progress: {progress_path}")
     print()
 
 
@@ -2052,8 +2072,6 @@ Examples:
     status_p.add_argument("--workload", metavar="NAME",  help="Scope to pairs matching this workload")
     status_p.add_argument("--package",  metavar="NAME",  help="Scope to pairs matching this package")
     status_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status (e.g. running, done, failed)")
-    status_p.add_argument("--remote", action="store_true", default=False,
-                           help="Read progress from cluster ConfigMap instead of local file")
 
     run_p = sub.add_parser("run", help="Orchestrate parallel pool execution")
     run_p.add_argument("--remote", action="store_true", default=False,
@@ -2153,8 +2171,7 @@ def main():
         else:
             _cmd_run(args, run_dir, setup_config)
     elif cmd == "status":
-        progress_path = run_dir / "progress.json"
-        _cmd_status(args, progress_path, setup_config=setup_config)
+        _cmd_status(args, run_dir, setup_config=setup_config)
     elif cmd == "collect":
         _cmd_collect(args, run_dir, setup_config)
     elif cmd == "reset":
