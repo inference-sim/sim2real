@@ -1689,7 +1689,6 @@ def test_init_progress_per_pair_heterogeneous_cost(tmp_path):
 
 def test_status_parser_has_no_remote_flag():
     """status subcommand does NOT accept --remote (flag removed)."""
-    import argparse as _argparse
     from pipeline.deploy import build_parser
     parser = build_parser()
     with pytest.raises(SystemExit):
