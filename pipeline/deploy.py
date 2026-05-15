@@ -1297,6 +1297,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 "package":  meta["package"],
                 "status":   "pending",
                 "namespace": None,
+                "completed_namespace": None,
                 "retries":  0,
                 "gpu_cost": pair_costs[key],
                 "pending_stalls": 0,
