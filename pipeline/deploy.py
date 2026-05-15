@@ -1353,7 +1353,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
 
             status = _check_pipelinerun_status(pr_name, ns) if pr_name else "Unknown"
 
-            if status == "Succeeded":  # integration-tested via test_cmd_run_*
+            if status == "Succeeded":
                 ok(f"[{pair_key}] Succeeded → done")
                 entry["status"] = "done"
                 entry["completed_namespace"] = ns
