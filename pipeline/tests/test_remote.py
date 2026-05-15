@@ -28,6 +28,7 @@ def _write_defaults(workspace_dir, run_dir):
     (workspace_dir / "setup_config.json").write_text(json.dumps(setup))
     meta = {"run_name": "test-run"}
     (run_dir / "run_metadata.json").write_text(json.dumps(meta))
+    (run_dir / "cluster" / "pipelinerun-smoke-baseline.yaml").write_text("kind: PipelineRun")
 
 
 def test_setup_config_packed(workspace):
@@ -83,6 +84,33 @@ def test_missing_run_metadata(workspace):
     workspace_dir, run_dir = workspace
     (workspace_dir / "setup_config.json").write_text("{}")
     with pytest.raises(FileNotFoundError, match="run_metadata.json"):
+        build_run_inputs_configmap(
+            run_dir=run_dir, workspace_dir=workspace_dir,
+            namespace="ns", run_name="test-run",
+        )
+
+
+def test_empty_cluster_dir_raises(workspace):
+    """Empty cluster/ directory raises FileNotFoundError."""
+    workspace_dir, run_dir = workspace
+    (workspace_dir / "setup_config.json").write_text("{}")
+    (run_dir / "run_metadata.json").write_text("{}")
+    with pytest.raises(FileNotFoundError, match="No cluster YAML"):
+        build_run_inputs_configmap(
+            run_dir=run_dir, workspace_dir=workspace_dir,
+            namespace="ns", run_name="test-run",
+        )
+
+
+def test_missing_cluster_dir_raises(tmp_path):
+    """Missing cluster/ directory raises FileNotFoundError."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    run_dir = workspace_dir / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+    (workspace_dir / "setup_config.json").write_text("{}")
+    (run_dir / "run_metadata.json").write_text("{}")
+    with pytest.raises(FileNotFoundError, match="No cluster YAML"):
         build_run_inputs_configmap(
             run_dir=run_dir, workspace_dir=workspace_dir,
             namespace="ns", run_name="test-run",

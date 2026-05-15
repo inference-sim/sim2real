@@ -1911,7 +1911,7 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
             run_dir=run_dir, workspace_dir=workspace_dir,
             namespace=namespace, run_name=run_name,
         )
-    except FileNotFoundError as exc:
+    except OSError as exc:
         err(f"{exc} — run setup.py and prepare.py first")
         sys.exit(1)
     # subprocess.run used directly because the module's run() helper doesn't
