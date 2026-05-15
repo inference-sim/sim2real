@@ -100,9 +100,7 @@ def test_wait_for_pod_running(monkeypatch):
         class _R:
             returncode = 0
             stdout = json.dumps({
-                "items": [{
-                    "status": {"phase": "Running", "containerStatuses": []},
-                }],
+                "items": [{"status": {"phase": "Running", "containerStatuses": []}}],
             })
             stderr = ""
         return _R()
@@ -115,19 +113,13 @@ def test_wait_for_pod_image_pull_backoff(monkeypatch):
         class _R:
             returncode = 0
             stdout = json.dumps({
-                "items": [{
-                    "status": {
-                        "phase": "Pending",
-                        "containerStatuses": [{
-                            "state": {
-                                "waiting": {
-                                    "reason": "ImagePullBackOff",
-                                    "message": "Back-off pulling image",
-                                },
-                            },
-                        }],
-                    },
-                }],
+                "items": [{"status": {
+                    "phase": "Pending",
+                    "containerStatuses": [{"state": {"waiting": {
+                        "reason": "ImagePullBackOff",
+                        "message": "Back-off pulling image",
+                    }}}],
+                }}],
             })
             stderr = ""
         return _R()
@@ -151,9 +143,7 @@ def test_wait_for_pod_no_pods_retries(monkeypatch):
         class _Running:
             returncode = 0
             stdout = json.dumps({
-                "items": [{
-                    "status": {"phase": "Running", "containerStatuses": []},
-                }],
+                "items": [{"status": {"phase": "Running", "containerStatuses": []}}],
             })
             stderr = ""
         return _Running()
@@ -162,6 +152,41 @@ def test_wait_for_pod_no_pods_retries(monkeypatch):
     monkeypatch.setattr(mod.time, "sleep", lambda _: None)
     mod._wait_for_job_pod("ns", timeout=300, poll=1)
     assert call_count[0] == 3
+
+
+def test_wait_for_pod_failed_phase_exits(monkeypatch):
+    """Pod with phase=Failed triggers immediate exit."""
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = json.dumps({
+                "items": [{"status": {
+                    "phase": "Failed",
+                    "message": "OOMKilled",
+                    "containerStatuses": [],
+                }}],
+            })
+            stderr = ""
+        return _R()
+    monkeypatch.setattr(mod, "run", fake_run)
+    with pytest.raises(SystemExit) as exc_info:
+        mod._wait_for_job_pod("ns", timeout=10, poll=1)
+    assert exc_info.value.code == 1
+
+
+def test_wait_for_pod_consecutive_kubectl_failures_exits(monkeypatch):
+    """Three consecutive kubectl failures trigger early exit."""
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 1
+            stdout = ""
+            stderr = "connection refused"
+        return _R()
+    monkeypatch.setattr(mod, "run", fake_run)
+    monkeypatch.setattr(mod.time, "sleep", lambda _: None)
+    with pytest.raises(SystemExit) as exc_info:
+        mod._wait_for_job_pod("ns", timeout=300, poll=1)
+    assert exc_info.value.code == 1
 
 
 # ── _cmd_run_remote tests ──────────────────────────────────────────────────
@@ -178,6 +203,10 @@ def _setup_run_dir(tmp_path):
     }))
     (cluster_dir / "pipelinerun-baseline.yaml").write_text("apiVersion: v1")
     return run_dir
+
+
+def _mock_subprocess_ok(cmd, *, input=None, text=True, check=False, capture_output=True, **kw):
+    return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
 
 def test_run_remote_refuses_when_active(monkeypatch, tmp_path):
@@ -213,8 +242,7 @@ def test_run_remote_deletes_completed_job(monkeypatch, tmp_path):
 
     monkeypatch.setattr(mod, "run", fake_run)
 
-    with patch("subprocess.run") as mock_sp:
-        mock_sp.return_value = type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    with patch("subprocess.run", side_effect=_mock_subprocess_ok):
         args = _make_run_args(remote=True, skip_build_epp=True)
         setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
         mod._cmd_run_remote(args, run_dir, setup_config)
@@ -222,6 +250,31 @@ def test_run_remote_deletes_completed_job(monkeypatch, tmp_path):
     delete_calls = [c for c in calls if "delete" in c]
     assert len(delete_calls) == 1
     assert "sim2real-orchestrator" in delete_calls[0]
+
+
+def test_run_remote_completed_delete_failure_exits(monkeypatch, tmp_path, capsys):
+    """If deleting a completed Job fails, exit with error."""
+    run_dir = _setup_run_dir(tmp_path)
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "_check_existing_job", lambda ns: "completed")
+    monkeypatch.setattr(mod, "_resolve_epp_action", lambda *a: "skip")
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 1
+            stdout = ""
+            stderr = "error: forbidden"
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    args = _make_run_args(remote=True, skip_build_epp=True)
+    setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
+
+    with pytest.raises(SystemExit) as exc_info:
+        mod._cmd_run_remote(args, run_dir, setup_config)
+    assert exc_info.value.code == 1
+    assert "forbidden" in capsys.readouterr().err.lower()
 
 
 def test_run_remote_creates_configmap_and_job(monkeypatch, tmp_path):
@@ -233,7 +286,7 @@ def test_run_remote_creates_configmap_and_job(monkeypatch, tmp_path):
 
     apply_inputs = []
 
-    def fake_subprocess_run(cmd, *, input=None, text=True, check=True, capture_output=True, **kw):
+    def fake_subprocess_run(cmd, *, input=None, text=True, check=False, capture_output=True, **kw):
         if input:
             apply_inputs.append(json.loads(input))
         return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
@@ -248,6 +301,33 @@ def test_run_remote_creates_configmap_and_job(monkeypatch, tmp_path):
     assert apply_inputs[1]["kind"] == "Job"
 
 
+def test_run_remote_job_has_items_spec(monkeypatch, tmp_path):
+    """Job volume uses items to map ConfigMap keys to correct filesystem paths."""
+    run_dir = _setup_run_dir(tmp_path)
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
+    monkeypatch.setattr(mod, "_resolve_epp_action", lambda *a: "skip")
+    monkeypatch.setattr(mod, "_wait_for_job_pod", lambda *a, **kw: None)
+
+    apply_inputs = []
+
+    def fake_subprocess_run(cmd, *, input=None, text=True, check=False, capture_output=True, **kw):
+        if input:
+            apply_inputs.append(json.loads(input))
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    with patch("subprocess.run", side_effect=fake_subprocess_run):
+        args = _make_run_args(remote=True, skip_build_epp=True)
+        setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
+        mod._cmd_run_remote(args, run_dir, setup_config)
+
+    job = apply_inputs[1]
+    vol = job["spec"]["template"]["spec"]["volumes"][0]
+    assert "items" in vol["configMap"]
+    mount = job["spec"]["template"]["spec"]["containers"][0]["volumeMounts"][0]
+    assert mount["mountPath"] == "/data/workspace"
+
+
 def test_run_remote_passes_scoping_flags(monkeypatch, tmp_path):
     run_dir = _setup_run_dir(tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
@@ -257,7 +337,7 @@ def test_run_remote_passes_scoping_flags(monkeypatch, tmp_path):
 
     apply_inputs = []
 
-    def fake_subprocess_run(cmd, *, input=None, text=True, check=True, capture_output=True, **kw):
+    def fake_subprocess_run(cmd, *, input=None, text=True, check=False, capture_output=True, **kw):
         if input:
             apply_inputs.append(json.loads(input))
         return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
@@ -283,6 +363,25 @@ def test_run_remote_no_image_exits(monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as exc_info:
         mod._cmd_run_remote(args, run_dir, setup_config)
     assert exc_info.value.code == 1
+
+
+def test_run_remote_configmap_apply_failure_exits(monkeypatch, tmp_path, capsys):
+    """kubectl apply for ConfigMap failing exits with error."""
+    run_dir = _setup_run_dir(tmp_path)
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
+    monkeypatch.setattr(mod, "_resolve_epp_action", lambda *a: "skip")
+
+    def fake_subprocess_run(cmd, *, input=None, text=True, check=False, capture_output=True, **kw):
+        return type("R", (), {"returncode": 1, "stdout": "", "stderr": "forbidden"})()
+
+    with patch("subprocess.run", side_effect=fake_subprocess_run):
+        args = _make_run_args(remote=True, skip_build_epp=True)
+        setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
+        with pytest.raises(SystemExit) as exc_info:
+            mod._cmd_run_remote(args, run_dir, setup_config)
+    assert exc_info.value.code == 1
+    assert "configmap" in capsys.readouterr().err.lower()
 
 
 # ── main() routing tests ───────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-"""Tests for remote run support (ConfigMap packing)."""
+"""Tests for remote run support (ConfigMap packing + Job generation)."""
 
 import json
 
@@ -9,6 +9,7 @@ from pipeline.lib.remote import (
     JOB_NAME,
     build_orchestrator_job,
     build_run_inputs_configmap,
+    _configmap_items,
 )
 
 
@@ -88,16 +89,48 @@ def test_missing_run_metadata(workspace):
         )
 
 
+# --- _configmap_items tests ---
+
+
+def test_configmap_items_setup_config_at_root():
+    """setup_config.json maps to workspace root."""
+    data = {"setup_config.json": "{}"}
+    items = _configmap_items(data, "run1")
+    assert {"key": "setup_config.json", "path": "setup_config.json"} in items
+
+
+def test_configmap_items_run_metadata_under_run():
+    """run_metadata.json maps under runs/<name>/."""
+    data = {"run_metadata.json": "{}"}
+    items = _configmap_items(data, "run1")
+    assert {"key": "run_metadata.json", "path": "runs/run1/run_metadata.json"} in items
+
+
+def test_configmap_items_cluster_yaml_nested():
+    """cluster--foo.yaml maps to runs/<name>/cluster/foo.yaml."""
+    data = {"cluster--baseline.yaml": "x", "cluster--pipelinerun-a.yaml": "y"}
+    items = _configmap_items(data, "exp-1")
+    paths = {i["path"] for i in items}
+    assert "runs/exp-1/cluster/baseline.yaml" in paths
+    assert "runs/exp-1/cluster/pipelinerun-a.yaml" in paths
+
+
 # --- build_orchestrator_job tests ---
 
 RUN_NAME = "exp-001"
 NAMESPACE = "sim2real"
 IMAGE = "ghcr.io/inference-sim/sim2real-orchestrator:latest"
+SAMPLE_DATA = {
+    "setup_config.json": "{}",
+    "run_metadata.json": "{}",
+    "cluster--baseline.yaml": "x",
+}
 
 
 def _build_job(**overrides):
     defaults = dict(
-        namespace=NAMESPACE, image=IMAGE, run_name=RUN_NAME, run_flags=["--dry-run"],
+        namespace=NAMESPACE, image=IMAGE, run_name=RUN_NAME,
+        run_flags=["--dry-run"], configmap_data=SAMPLE_DATA,
     )
     defaults.update(overrides)
     return build_orchestrator_job(**defaults)
@@ -126,15 +159,23 @@ def test_job_structure():
     assert "--dry-run" in args
 
 
-def test_job_configmap_volume_mount():
+def test_job_volume_mount_at_workspace():
+    """Volume mounts at /data/workspace (not /data/workspace/runs/<name>)."""
     job = _build_job()
-    spec = job["spec"]["template"]["spec"]
+    mount = job["spec"]["template"]["spec"]["containers"][0]["volumeMounts"][0]
+    assert mount["mountPath"] == "/data/workspace"
 
-    volume = spec["volumes"][0]
-    assert volume["configMap"]["name"] == CONFIGMAP_NAME
 
-    mount = spec["containers"][0]["volumeMounts"][0]
-    assert mount["mountPath"] == f"/data/workspace/runs/{RUN_NAME}"
+def test_job_volume_has_items_spec():
+    """Volume uses items to map keys to correct filesystem paths."""
+    job = _build_job()
+    vol = job["spec"]["template"]["spec"]["volumes"][0]
+    assert vol["configMap"]["name"] == CONFIGMAP_NAME
+    items = vol["configMap"]["items"]
+    paths = {i["path"] for i in items}
+    assert "setup_config.json" in paths
+    assert f"runs/{RUN_NAME}/run_metadata.json" in paths
+    assert f"runs/{RUN_NAME}/cluster/baseline.yaml" in paths
 
 
 def test_job_experiment_root_matches_mount():

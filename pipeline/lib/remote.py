@@ -35,10 +35,26 @@ def build_run_inputs_configmap(
     }
 
 
+def _configmap_items(data: dict, run_name: str) -> list[dict]:
+    """Build the items list that maps ConfigMap keys to filesystem paths."""
+    items = []
+    for key in sorted(data):
+        if key == "setup_config.json":
+            items.append({"key": key, "path": key})
+        elif key == "run_metadata.json":
+            items.append({"key": key, "path": f"runs/{run_name}/{key}"})
+        elif key.startswith("cluster--"):
+            filename = key[len("cluster--"):]
+            items.append({"key": key, "path": f"runs/{run_name}/cluster/{filename}"})
+    return items
+
+
 def build_orchestrator_job(
-    *, namespace: str, image: str, run_name: str, run_flags: list[str]
+    *, namespace: str, image: str, run_name: str, run_flags: list[str],
+    configmap_data: dict,
 ) -> dict:
-    mount_path = f"{MOUNT_BASE}/workspace/runs/{run_name}"
+    mount_path = f"{MOUNT_BASE}/workspace"
+    items = _configmap_items(configmap_data, run_name)
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -70,7 +86,10 @@ def build_orchestrator_job(
                     "volumes": [
                         {
                             "name": "run-inputs",
-                            "configMap": {"name": CONFIGMAP_NAME},
+                            "configMap": {
+                                "name": CONFIGMAP_NAME,
+                                "items": items,
+                            },
                         },
                     ],
                 },

@@ -1718,7 +1718,7 @@ def _cmd_wipe(args, run_dir: Path,
 
 # ── Stop remote orchestrator ────────────────────────────────────────────────
 
-JOB_NAME = "sim2real-orchestrator"
+from pipeline.lib.remote import JOB_NAME
 
 
 def _cmd_stop(namespace: str) -> None:
@@ -1751,6 +1751,8 @@ _FAIL_FAST_REASONS = {
     "CrashLoopBackOff",
     "CreateContainerConfigError",
     "InvalidImageName",
+    "RunContainerError",
+    "ContainerCannotRun",
 }
 
 
@@ -1801,8 +1803,14 @@ def _check_existing_job(namespace: str) -> "str | None":
 
 
 def _wait_for_job_pod(namespace: str, *, timeout: int = 120, poll: int = 5) -> None:
-    """Poll until the orchestrator pod reaches Running or Succeeded."""
+    """Poll until the orchestrator pod reaches Running or Succeeded.
+
+    Fails fast on unrecoverable container states (ImagePullBackOff, etc.)
+    and on pod phase Failed. Exits early if kubectl fails 3 times in a row.
+    """
     deadline = time.time() + timeout
+    consecutive_failures = 0
+    last_error = ""
     while True:
         result = run(
             ["kubectl", "get", "pods",
@@ -1810,12 +1818,23 @@ def _wait_for_job_pod(namespace: str, *, timeout: int = 120, poll: int = 5) -> N
              "-n", namespace, "-o", "json"],
             check=False, capture=True,
         )
-        if result.returncode == 0:
+        if result.returncode != 0:
+            consecutive_failures += 1
+            last_error = (result.stderr or "").strip()
+            if consecutive_failures >= 3:
+                err(f"kubectl failed {consecutive_failures} times: {last_error}")
+                sys.exit(1)
+        else:
+            consecutive_failures = 0
             data = json.loads(result.stdout)
             for pod in data.get("items", []):
                 phase = pod.get("status", {}).get("phase", "")
                 if phase in ("Running", "Succeeded"):
                     return
+                if phase == "Failed":
+                    msg = pod.get("status", {}).get("message", "unknown reason")
+                    err(f"Orchestrator pod failed: {msg}")
+                    sys.exit(1)
                 for cs in pod.get("status", {}).get("containerStatuses", []):
                     waiting = cs.get("state", {}).get("waiting", {})
                     reason = waiting.get("reason", "")
@@ -1851,7 +1870,12 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
         sys.exit(1)
     elif status == "completed":
         info(f"Deleting completed orchestrator Job in {namespace}")
-        run(["kubectl", "delete", "job", JOB_NAME, "-n", namespace], check=False, capture=True)
+        result = run(["kubectl", "delete", "job", JOB_NAME, "-n", namespace],
+                     check=False, capture=True)
+        if result.returncode != 0:
+            detail = (result.stderr or "").strip()
+            err(f"Failed to delete completed Job: {detail}")
+            sys.exit(1)
 
     epp_action = _resolve_epp_action(run_dir, args.skip_build_epp)
     if epp_action.startswith("error:"):
@@ -1869,21 +1893,28 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
         namespace=namespace, run_name=run_name,
     )
     info("Applying run-inputs ConfigMap")
-    subprocess.run(
+    result = subprocess.run(
         ["kubectl", "apply", "-f", "-"],
-        input=json.dumps(cm), text=True, check=True, capture_output=True,
+        input=json.dumps(cm), text=True, check=False, capture_output=True,
     )
+    if result.returncode != 0:
+        err(f"Failed to apply ConfigMap: {(result.stderr or '').strip()}")
+        sys.exit(1)
 
     run_flags = _collect_run_flags(args)
     job = build_orchestrator_job(
         namespace=namespace, image=orchestrator_image,
         run_name=run_name, run_flags=run_flags,
+        configmap_data=cm["data"],
     )
     info("Applying orchestrator Job")
-    subprocess.run(
+    result = subprocess.run(
         ["kubectl", "apply", "-f", "-"],
-        input=json.dumps(job), text=True, check=True, capture_output=True,
+        input=json.dumps(job), text=True, check=False, capture_output=True,
     )
+    if result.returncode != 0:
+        err(f"Failed to apply Job: {(result.stderr or '').strip()}")
+        sys.exit(1)
 
     _wait_for_job_pod(namespace)
     ok("Orchestrator pod is running")
