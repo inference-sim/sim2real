@@ -115,13 +115,11 @@ def test_configmap_items_cluster_yaml_nested():
     assert "runs/exp-1/cluster/pipelinerun-a.yaml" in paths
 
 
-def test_configmap_items_warns_on_unrecognized_key(capsys):
-    """Unrecognized keys produce a warning and are not mounted."""
+def test_configmap_items_raises_on_unrecognized_key():
+    """Unrecognized keys raise ValueError (producer/consumer mismatch)."""
     data = {"setup_config.json": "{}", "unknown_file.txt": "data"}
-    items = _configmap_items(data, "run1")
-    keys = [i["key"] for i in items]
-    assert "unknown_file.txt" not in keys
-    assert "Unrecognized" in capsys.readouterr().err
+    with pytest.raises(ValueError, match="Unrecognized"):
+        _configmap_items(data, "run1")
 
 
 # --- build_orchestrator_job tests ---

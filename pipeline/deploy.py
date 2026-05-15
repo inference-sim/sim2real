@@ -1760,10 +1760,10 @@ def _collect_run_flags(args) -> list[str]:
     """Collect run subcommand flags to forward to the in-cluster Job."""
     flags: list[str] = []
     for name in ("only", "workload", "package", "status"):
-        val = getattr(args, name, None)
+        val = getattr(args, name)
         if val is not None:
             flags.extend([f"--{name}", str(val)])
-    if getattr(args, "force", False):
+    if getattr(args, "force"):
         flags.append("--force")
     _defaults = {
         "max_retries": 2,
@@ -1775,7 +1775,7 @@ def _collect_run_flags(args) -> list[str]:
         "max_backoff": 600,
     }
     for attr, default in _defaults.items():
-        val = getattr(args, attr, default)
+        val = getattr(args, attr)
         if val != default:
             flag = f"--{attr.replace('_', '-')}"
             flags.extend([flag, str(val)])
@@ -1829,16 +1829,20 @@ def _wait_for_job_pod(namespace: str, *, timeout: int = 120, poll: int = 5) -> N
                 err(f"kubectl failed {consecutive_failures} times: {last_error}")
                 sys.exit(1)
         else:
-            consecutive_failures = 0
             try:
                 data = json.loads(result.stdout)
             except json.JSONDecodeError:
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    err("kubectl returned invalid JSON 3 times in a row")
+                    sys.exit(1)
                 warn("kubectl returned invalid JSON — retrying")
                 if time.time() >= deadline:
                     err(f"Timed out waiting for {JOB_NAME} pod in {namespace}")
                     sys.exit(1)
                 time.sleep(poll)
                 continue
+            consecutive_failures = 0
             for pod in data.get("items", []):
                 phase = pod.get("status", {}).get("phase", "")
                 if phase in ("Running", "Succeeded"):
@@ -1847,7 +1851,9 @@ def _wait_for_job_pod(namespace: str, *, timeout: int = 120, poll: int = 5) -> N
                     msg = pod.get("status", {}).get("message", "unknown reason")
                     err(f"Orchestrator pod failed: {msg}")
                     sys.exit(1)
-                for cs in pod.get("status", {}).get("containerStatuses", []):
+                all_statuses = (pod.get("status", {}).get("initContainerStatuses", [])
+                                + pod.get("status", {}).get("containerStatuses", []))
+                for cs in all_statuses:
                     waiting = cs.get("state", {}).get("waiting", {})
                     reason = waiting.get("reason", "")
                     if reason in _FAIL_FAST_REASONS:
@@ -1873,7 +1879,7 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
 
     orchestrator_image = setup_config.get("orchestrator_image")
     if not orchestrator_image:
-        err("orchestrator_image not set in setup_config.json. Re-run setup.py with --orchestrator-image.")
+        err("orchestrator_image not set in setup_config.json — add it before using --remote.")
         sys.exit(1)
 
     status = _check_existing_job(namespace)

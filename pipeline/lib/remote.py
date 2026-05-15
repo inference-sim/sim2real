@@ -1,6 +1,5 @@
 """Remote run support — Kubernetes resource generation for --remote mode."""
 
-import sys
 from pathlib import Path
 
 CONFIGMAP_NAME = "sim2real-run-inputs"
@@ -48,8 +47,10 @@ def _configmap_items(data: dict, run_name: str) -> list[dict]:
             filename = key[len("cluster--"):]
             items.append({"key": key, "path": f"runs/{run_name}/cluster/{filename}"})
         else:
-            print(f"[WARN] Unrecognized ConfigMap key '{key}' — will not be mounted",
-                  file=sys.stderr)
+            raise ValueError(
+                f"Unrecognized ConfigMap key '{key}' — update _configmap_items "
+                f"to handle this key or remove it from build_run_inputs_configmap"
+            )
     return items
 
 

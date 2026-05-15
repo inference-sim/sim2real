@@ -189,6 +189,31 @@ def test_wait_for_pod_consecutive_kubectl_failures_exits(monkeypatch):
     assert exc_info.value.code == 1
 
 
+def test_wait_for_pod_init_container_image_pull_exits(monkeypatch):
+    """ImagePullBackOff in initContainerStatuses triggers fail-fast."""
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = json.dumps({
+                "items": [{"status": {
+                    "phase": "Pending",
+                    "initContainerStatuses": [{
+                        "state": {"waiting": {
+                            "reason": "ImagePullBackOff",
+                            "message": "Back-off pulling image",
+                        }},
+                    }],
+                    "containerStatuses": [],
+                }}],
+            })
+            stderr = ""
+        return _R()
+    monkeypatch.setattr(mod, "run", fake_run)
+    with pytest.raises(SystemExit) as exc_info:
+        mod._wait_for_job_pod("ns", timeout=10, poll=1)
+    assert exc_info.value.code == 1
+
+
 # ── _cmd_run_remote tests ──────────────────────────────────────────────────
 
 def _setup_run_dir(tmp_path):
