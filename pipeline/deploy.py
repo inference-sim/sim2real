@@ -727,8 +727,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                 None,
             )
             if not wl_ns:
-                warn(f"{wl_name}: completed_namespace missing — skipping "
-                     f"(add completed_namespace to progress.json to collect this pair)")
+                warn(f"{wl_name}: completed_namespace missing — skipping (re-run the workload with a newer orchestrator to collect results)")
                 for p in phases_to_collect:
                     if p not in failed:
                         failed.append(p)
@@ -818,8 +817,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                     if pkg not in ns_phase_map.setdefault(ns, []):
                         ns_phase_map[ns].append(pkg)
                 for key in missing_ns_keys:
-                    warn(f"{key}: completed_namespace missing — skipping "
-                         f"(add completed_namespace to progress.json to collect this pair)")
+                    warn(f"{key}: completed_namespace missing — skipping (re-run the workload with a newer orchestrator to collect results)")
                 for ns, ns_phases in sorted(ns_phase_map.items()):
                     try:
                         errors = _extract_phases_from_pvc(
