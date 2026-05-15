@@ -1871,6 +1871,7 @@ def test_cmd_reset_creates_composite_store_when_namespace_available(monkeypatch,
         _original_init(self, primary, *secondaries)
 
     monkeypatch.setattr(CompositeProgressStore, "__init__", track)
+    monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
     monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, data: None)
 
     progress_path = tmp_path / "progress.json"
