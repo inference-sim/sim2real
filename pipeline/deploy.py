@@ -999,6 +999,8 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
         info(f"[DRY-RUN] {key}: would delete pipelinerun {pr_name or '(unknown)'} in {target}")
         if not is_done:
             info(f"[DRY-RUN] {key}: would uninstall all helm releases in {target}")
+        elif entry.get("completed_namespace"):
+            info(f"[DRY-RUN] {key}: would check for orphaned helm releases in {entry['completed_namespace']}")
         return True
 
     # Delete PipelineRun
@@ -1028,8 +1030,23 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
     else:
         warn(f"{key}: no namespace and no namespace slots — cannot delete pipelinerun {pr_name}")
 
-    # For done pairs, Tekton finally task already tore down Helm releases
+    # For done pairs, Tekton finally task should have torn down Helm releases,
+    # but check completed_namespace for orphans in case teardown failed.
     if is_done:
+        completed_ns = entry.get("completed_namespace")
+        if completed_ns:
+            result = run(["helm", "list", "-n", completed_ns, "-q"],
+                         check=False, capture=True)
+            if result.returncode != 0:
+                warn(f"{key}: helm list failed in {completed_ns}")
+            elif result.stdout.strip():
+                for release in result.stdout.strip().splitlines():
+                    ur = run(["helm", "uninstall", release, "-n", completed_ns],
+                             check=False, capture=True)
+                    if ur.returncode == 0:
+                        ok(f"Uninstalled: {release} (ns: {completed_ns})")
+                    else:
+                        warn(f"Failed to uninstall {release} in {completed_ns}")
         return True
 
     if ns and not pr_deleted and pr_name:
