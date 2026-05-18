@@ -502,3 +502,163 @@ def test_cmd_reset_aborts_on_filter_mismatch(tmp_path, monkeypatch, capsys):
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
     assert "No pairs matched" in captured.out + captured.err
+
+
+def test_reset_pair_done_uninstalls_helm_in_completed_namespace(monkeypatch):
+    """Done pairs get orphaned helm releases uninstalled in completed_namespace."""
+    import pipeline.deploy as mod
+
+    entry = {"workload": "wl-smoke", "package": "baseline", "status": "done",
+             "namespace": None, "completed_namespace": "sim2real-0", "retries": 0}
+    calls = []
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        calls.append(cmd)
+        class _R:
+            returncode = 0
+            stdout = "orphaned-release\n" if cmd[:2] == ["helm", "list"] else ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    result = mod._reset_pair("wl-smoke-baseline", entry, _DISCOVERED,
+                             namespaces=["sim2real-0", "sim2real-1"])
+
+    assert result is True
+    assert entry["status"] == "done"
+
+    helm_lists = [c for c in calls if c[:2] == ["helm", "list"]]
+    assert len(helm_lists) == 1
+    assert "-n" in helm_lists[0] and "sim2real-0" in helm_lists[0]
+
+    helm_uninstalls = [c for c in calls if c[:2] == ["helm", "uninstall"]]
+    assert len(helm_uninstalls) == 1
+    assert "orphaned-release" in helm_uninstalls[0]
+
+
+def test_reset_pair_done_no_completed_ns_skips_helm(monkeypatch):
+    """Done pairs without completed_namespace skip helm cleanup gracefully."""
+    import pipeline.deploy as mod
+
+    entry = {"workload": "wl-smoke", "package": "baseline", "status": "done",
+             "namespace": None, "retries": 0}
+    calls = []
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        calls.append(cmd)
+        class _R:
+            returncode = 0
+            stdout = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    result = mod._reset_pair("wl-smoke-baseline", entry, _DISCOVERED,
+                             namespaces=["sim2real-0", "sim2real-1"])
+
+    assert result is True
+    helm_calls = [c for c in calls if c[0] == "helm"]
+    assert helm_calls == []
+
+
+def test_reset_pair_done_no_releases_is_noop(monkeypatch):
+    """Done pairs with no helm releases found skip uninstall."""
+    import pipeline.deploy as mod
+
+    entry = {"workload": "wl-smoke", "package": "baseline", "status": "done",
+             "namespace": None, "completed_namespace": "sim2real-0", "retries": 0}
+    calls = []
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        calls.append(cmd)
+        class _R:
+            returncode = 0
+            stdout = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    result = mod._reset_pair("wl-smoke-baseline", entry, _DISCOVERED,
+                             namespaces=["sim2real-0", "sim2real-1"])
+
+    assert result is True
+    helm_lists = [c for c in calls if c[:2] == ["helm", "list"]]
+    assert len(helm_lists) == 1
+    helm_uninstalls = [c for c in calls if c[:2] == ["helm", "uninstall"]]
+    assert helm_uninstalls == []
+
+
+def test_reset_pair_done_helm_list_failure_warns(monkeypatch, capsys):
+    """Done pair with helm list failure still returns True but warns."""
+    import pipeline.deploy as mod
+
+    entry = {"workload": "wl-smoke", "package": "baseline", "status": "done",
+             "namespace": None, "completed_namespace": "sim2real-0", "retries": 0}
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 1 if cmd[:2] == ["helm", "list"] else 0
+            stdout = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    result = mod._reset_pair("wl-smoke-baseline", entry, _DISCOVERED,
+                             namespaces=["sim2real-0", "sim2real-1"])
+
+    assert result is True
+    assert entry["status"] == "done"
+    err = capsys.readouterr().err
+    assert "helm list failed" in err
+
+
+def test_reset_pair_done_helm_uninstall_failure_warns(monkeypatch, capsys):
+    """Done pair with helm uninstall failure still returns True but warns."""
+    import pipeline.deploy as mod
+
+    entry = {"workload": "wl-smoke", "package": "baseline", "status": "done",
+             "namespace": None, "completed_namespace": "sim2real-0", "retries": 0}
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 1 if cmd[:2] == ["helm", "uninstall"] else 0
+            stdout = "stuck-release\n" if cmd[:2] == ["helm", "list"] else ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    result = mod._reset_pair("wl-smoke-baseline", entry, _DISCOVERED,
+                             namespaces=["sim2real-0", "sim2real-1"])
+
+    assert result is True
+    assert entry["status"] == "done"
+    err = capsys.readouterr().err
+    assert "Failed to uninstall" in err
+
+
+def test_reset_pair_done_no_pr_name_still_cleans_helm(monkeypatch):
+    """Done pair with no pr_name in discovered still checks completed_namespace for orphans."""
+    import pipeline.deploy as mod
+
+    entry = {"workload": "wl-smoke", "package": "baseline", "status": "done",
+             "namespace": None, "completed_namespace": "sim2real-0", "retries": 0}
+    calls = []
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        calls.append(cmd)
+        class _R:
+            returncode = 0
+            stdout = "orphaned-release\n" if cmd[:2] == ["helm", "list"] else ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    # Empty discovered — simulates PipelineRun already deleted
+    result = mod._reset_pair("wl-smoke-baseline", entry, {})
+
+    assert result is True
+    helm_lists = [c for c in calls if c[:2] == ["helm", "list"]]
+    assert len(helm_lists) == 1
+    assert "sim2real-0" in helm_lists[0]
+    helm_uninstalls = [c for c in calls if c[:2] == ["helm", "uninstall"]]
+    assert len(helm_uninstalls) == 1
