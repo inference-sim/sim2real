@@ -1257,7 +1257,7 @@ def _reconcile_on_resume(progress: dict, discovered: dict) -> None:
                 except Exception as exc:
                     warn(f"[{key}] failed to check PipelineRun status: {exc}")
                     continue
-                if actual == "Succeeded":
+                if actual in ("Succeeded", "Completed"):
                     entry["status"] = "done"
                     entry["pending_since"] = None
                     entry["completed_namespace"] = ns
@@ -1510,8 +1510,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
 
             status = _check_pipelinerun_status(pr_name, ns) if pr_name else "Unknown"
 
-            if status == "Succeeded":
-                ok(f"[{pair_key}] Succeeded → done")
+            if status in ("Succeeded", "Completed"):
+                ok(f"[{pair_key}] {status} → done")
                 entry["status"] = "done"
                 entry["completed_namespace"] = ns
                 entry["namespace"] = None

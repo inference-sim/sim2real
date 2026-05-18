@@ -446,6 +446,27 @@ def test_reconcile_succeeded_sets_done_and_frees_namespace(monkeypatch):
     assert progress["wl-smoke-baseline"]["pending_since"] is None
 
 
+def test_reconcile_completed_sets_done_and_frees_namespace(monkeypatch):
+    """Tekton v0.44+ returns 'Completed' for success — treat same as 'Succeeded'."""
+    import pipeline.deploy as mod
+
+    monkeypatch.setattr(mod, "_check_pipelinerun_status", lambda pr, ns: "Completed")
+    monkeypatch.setattr(mod, "_delete_pipelinerun", lambda pr, ns: None)
+
+    progress = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "running", "namespace": "sim2real-0",
+            "pending_since": "2026-01-01T00:00:00Z",
+        }
+    }
+    mod._reconcile_on_resume(progress, _DISCOVERED)
+    assert progress["wl-smoke-baseline"]["status"] == "done"
+    assert progress["wl-smoke-baseline"]["namespace"] is None
+    assert progress["wl-smoke-baseline"]["completed_namespace"] == "sim2real-0"
+    assert progress["wl-smoke-baseline"]["pending_since"] is None
+
+
 def test_reconcile_on_resume_sets_completed_namespace_on_success(monkeypatch):
     """In _reconcile_on_resume, when a running pair's PipelineRun Succeeds, completed_namespace is recorded before namespace is cleared."""
     import pipeline.deploy as mod
