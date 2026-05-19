@@ -6,7 +6,7 @@ Subcommands:
   status   Show progress of all (workload, package) pairs
   collect  Pull results from cluster for completed phases
   stop     Stop the remote orchestrator Job
-  reset    Tear down cluster resources for all non-pending pairs
+  reset    Reset all non-pending pairs to pending (with cluster cleanup)
   wipe     Delete local result files for non-pending pairs
   pairs    List available pair keys, workloads, and packages
 """
@@ -989,12 +989,12 @@ def _uninstall_orphaned_helm(key: str, namespace: str) -> None:
 
 
 def _reset_pair(key: str, entry: dict, discovered: dict, *,
-                dry_run: bool = False, namespaces: list[str] | None = None) -> bool:
-    """Delete PipelineRun and Helm releases for a pair.
+                dry_run: bool = False, namespaces: list[str] | None = None,
+                preserve_done_status: bool = False) -> bool:
+    """Delete PipelineRun and Helm releases for a pair, then reset state to pending.
 
-    For non-done pairs: also resets state to pending.
-    For done pairs: deletes PipelineRun and uninstalls any orphaned Helm
-    releases found in completed_namespace.
+    For done pairs with preserve_done_status=True: cluster cleanup only,
+    status stays done.
 
     Returns True if reset was performed, False if it failed and state was NOT reset.
     """
@@ -1004,11 +1004,6 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
 
     # No namespace and no pr_name — just reset state
     if not ns and not pr_name:
-        if not dry_run and not is_done:
-            entry["status"] = "pending"
-            entry["retries"] = 0
-            entry["pending_stalls"] = 0
-            entry["pending_since"] = None
         if is_done:
             completed_ns = entry.get("completed_namespace")
             if completed_ns:
@@ -1016,6 +1011,11 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
                     info(f"[DRY-RUN] {key}: would check for orphaned helm releases in {completed_ns}")
                 else:
                     _uninstall_orphaned_helm(key, completed_ns)
+        if not dry_run and not (is_done and preserve_done_status):
+            entry["status"] = "pending"
+            entry["retries"] = 0
+            entry["pending_stalls"] = 0
+            entry["pending_since"] = None
         return True
 
     if dry_run:
@@ -1062,6 +1062,12 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
         completed_ns = entry.get("completed_namespace")
         if completed_ns:
             _uninstall_orphaned_helm(key, completed_ns)
+        if not preserve_done_status:
+            entry["status"] = "pending"
+            entry["namespace"] = None
+            entry["retries"] = 0
+            entry["pending_stalls"] = 0
+            entry["pending_since"] = None
         return True
 
     if ns and not pr_deleted and pr_name:
@@ -1098,7 +1104,7 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
 
 def _force_reset(progress: dict, scope: set, discovered: dict | None = None,
                  namespaces: list[str] | None = None) -> int:
-    """Reset non-pending, non-done pairs in scope to pending.
+    """Reset all non-pending pairs in scope to pending.
 
     Calls _reset_pair for cluster teardown when possible. Pairs where
     reset fails are skipped (not counted, state preserved).
@@ -1106,7 +1112,7 @@ def _force_reset(progress: dict, scope: set, discovered: dict | None = None,
     reset = 0
     for key in scope:
         entry = progress.get(key, {})
-        if entry.get("status") not in (None, "pending", "done"):
+        if entry.get("status") not in (None, "pending"):
             try:
                 if _reset_pair(key, entry, discovered or {},
                               namespaces=namespaces):
@@ -1729,7 +1735,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
 def _cmd_reset(args, run_dir: Path, discovered: dict,
                namespaces: list[str] | None = None,
                setup_config: dict | None = None) -> None:
-    """Tear down cluster resources for all non-pending pairs."""
+    """Reset all non-pending pairs to pending (with cluster cleanup)."""
     from pipeline.lib.progress import ConfigMapProgressStore
     primary_ns = _configmap_namespace(setup_config, namespaces)
     if not primary_ns:
@@ -1753,6 +1759,7 @@ def _cmd_reset(args, run_dir: Path, discovered: dict,
         return
 
     dry_run = getattr(args, "dry_run", False)
+    preserve_done = getattr(args, "preserve_done_status", False)
     total_pairs = sum(1 for k in progress if _is_pair_key(k))
     info(f"Scope: {len(actionable)}/{total_pairs} pairs"
          + (" [DRY-RUN]" if dry_run else ""))
@@ -1763,7 +1770,8 @@ def _cmd_reset(args, run_dir: Path, discovered: dict,
         entry = progress[key]
         try:
             if _reset_pair(key, entry, discovered, dry_run=dry_run,
-                          namespaces=namespaces):
+                          namespaces=namespaces,
+                          preserve_done_status=preserve_done):
                 cleaned += 1
             else:
                 errors += 1
@@ -2176,11 +2184,13 @@ Examples:
 
     sub.add_parser("stop", help="Stop the remote orchestrator Job")
 
-    reset_p = sub.add_parser("reset", help="Tear down cluster resources for all non-pending pairs")
+    reset_p = sub.add_parser("reset", help="Reset all non-pending pairs to pending (with cluster cleanup)")
     reset_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key (wl- prefix optional)")
     reset_p.add_argument("--workload", metavar="NAME",  help="Scope to pairs matching this workload")
     reset_p.add_argument("--package",  metavar="NAME",  help="Scope to pairs matching this package")
     reset_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status")
+    reset_p.add_argument("--preserve-done-status", action="store_true", dest="preserve_done_status",
+                         help="Keep done pairs' status unchanged (cluster cleanup only)")
     reset_p.add_argument("--dry-run",  action="store_true", dest="dry_run",
                          help="Print what would be reset without doing it")
 

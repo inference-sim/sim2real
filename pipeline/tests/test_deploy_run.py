@@ -658,19 +658,18 @@ def _mock_run(monkeypatch):
     monkeypatch.setattr(mod, "run", fake_run)
 
 
-def test_force_reset_resets_non_pending_non_done_pairs(monkeypatch):
+def test_force_reset_resets_all_non_pending_pairs(monkeypatch):
     from pipeline.deploy import _force_reset
     _mock_run(monkeypatch)
     progress = dict(_PROGRESS)
     scope = set(progress.keys())
     n = _force_reset(progress, scope)
-    # running, timed-out, failed are reset; done and pending are skipped
-    assert n == 3
-    for key in ("wl-smoke-treatment", "wl-load-treatment", "wl-heavy-baseline"):
+    # running, timed-out, failed, AND done are reset; only pending is skipped
+    assert n == 4
+    for key in ("wl-smoke-baseline", "wl-smoke-treatment", "wl-load-treatment", "wl-heavy-baseline"):
         assert progress[key]["status"] == "pending"
         assert progress[key]["namespace"] is None
         assert progress[key]["retries"] == 0
-    assert progress["wl-smoke-baseline"]["status"] == "done"
 
 
 def test_force_reset_leaves_pending_pairs_unchanged(monkeypatch):
