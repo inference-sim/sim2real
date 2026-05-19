@@ -109,8 +109,6 @@ spec:
         - name: data
           workspace: data-storage
       params:
-        - name: modelLabel
-          value: "sim2real-$(params.experimentId)"
         - name: resultsDir
           value: "$(params.runName)/$(params.phase)/$(params.workloadName)"
         - name: namespace
