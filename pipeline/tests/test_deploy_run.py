@@ -546,6 +546,27 @@ def test_reconcile_succeeded_deletes_pipelinerun(monkeypatch):
     assert deleted == [("baseline-smoke-run1", "sim2real-0")]
 
 
+def test_reconcile_preserve_pipelineruns_skips_deletion(monkeypatch):
+    """With preserve_pipelineruns=True, _delete_pipelinerun is not called."""
+    import pipeline.deploy as mod
+
+    monkeypatch.setattr(mod, "_check_pipelinerun_status", lambda pr, ns: "Succeeded")
+    deleted = []
+    monkeypatch.setattr(mod, "_delete_pipelinerun",
+                        lambda pr, ns: deleted.append((pr, ns)))
+
+    progress = {
+        "wl-smoke-baseline": {
+            "workload": "wl-smoke", "package": "baseline",
+            "status": "running", "namespace": "sim2real-0",
+            "pending_since": "2026-01-01T00:00:00Z",
+        }
+    }
+    mod._reconcile_on_resume(progress, _DISCOVERED, preserve_pipelineruns=True)
+    assert progress["wl-smoke-baseline"]["status"] == "done"
+    assert deleted == []
+
+
 def test_reconcile_succeeded_delete_failure_nonfatal(monkeypatch, capsys):
     """If _delete_pipelinerun raises, the pair still transitions to done."""
     import pipeline.deploy as mod

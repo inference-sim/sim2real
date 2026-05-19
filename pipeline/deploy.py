@@ -1240,7 +1240,8 @@ def _check_slot_ready(namespace: str, hf_secret_name: str = "hf-secret") -> tupl
     return len(failures) == 0, failures
 
 
-def _reconcile_on_resume(progress: dict, discovered: dict) -> None:
+def _reconcile_on_resume(progress: dict, discovered: dict, *,
+                         preserve_pipelineruns: bool = False) -> None:
     """Reconcile pair statuses against cluster state when resuming an interrupted run.
 
     - running pairs: check PipelineRun status on cluster and update accordingly
@@ -1267,10 +1268,11 @@ def _reconcile_on_resume(progress: dict, discovered: dict) -> None:
                     entry["status"] = "done"
                     entry["pending_since"] = None
                     entry["completed_namespace"] = ns
-                    try:
-                        _delete_pipelinerun(pr_name, ns)
-                    except Exception as exc:
-                        warn(f"Failed to delete PipelineRun {pr_name!r} in {ns}: {exc}")
+                    if not preserve_pipelineruns:
+                        try:
+                            _delete_pipelinerun(pr_name, ns)
+                        except Exception as exc:
+                            warn(f"Failed to delete PipelineRun {pr_name!r} in {ns}: {exc}")
                     entry["namespace"] = None
                 elif actual in ("Failed", "PipelineRunCancelled",
                                "PipelineRunCouldntGetPipeline",
@@ -1481,7 +1483,9 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             info("--force: no non-pending pairs found in scope — nothing reset")
         store.save(progress)
 
-    _reconcile_on_resume(progress, discovered)
+    preserve_pipelineruns = getattr(args, "preserve_pipelineruns", False)
+    _reconcile_on_resume(progress, discovered,
+                         preserve_pipelineruns=preserve_pipelineruns)
     store.save(progress)
 
     # Track which namespace is assigned to which pair
@@ -1522,10 +1526,11 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 entry["completed_namespace"] = ns
                 entry["namespace"] = None
                 store.save(progress)
-                try:
-                    _delete_pipelinerun(pr_name, ns)
-                except Exception as exc:
-                    warn(f"Failed to delete PipelineRun {pr_name!r} in {ns}: {exc}")
+                if not preserve_pipelineruns:
+                    try:
+                        _delete_pipelinerun(pr_name, ns)
+                    except Exception as exc:
+                        warn(f"Failed to delete PipelineRun {pr_name!r} in {ns}: {exc}")
                 del slots_busy[ns]
 
             elif status in ("Failed", "PipelineRunCancelled", "PipelineRunCouldntGetPipeline",
@@ -1927,6 +1932,8 @@ def _collect_run_flags(args) -> list[str]:
         flags.append("--force")
     if getattr(args, "skip_teardown", False):
         flags.append("--skip-teardown")
+    if getattr(args, "preserve_pipelineruns", False):
+        flags.append("--preserve-pipelineruns")
     _defaults = {
         "max_retries": 2,
         "poll_interval": 30,
@@ -2167,6 +2174,8 @@ Examples:
                        help="Reset non-pending pairs to pending, cleaning cluster resources for pairs with assigned namespaces")
     run_p.add_argument("--skip-teardown", action="store_true", dest="skip_teardown",
                        help="Skip teardown after PipelineRun completes (keeps namespace intact for debugging)")
+    run_p.add_argument("--preserve-pipelineruns", action="store_true", dest="preserve_pipelineruns",
+                       help="Do not delete PipelineRun objects after completion (keeps TaskRun logs for debugging)")
     run_p.add_argument("--max-retries",  type=int, default=2, dest="max_retries",
                        help="Max retries for timed-out pairs [2]")
     run_p.add_argument("--poll-interval", type=int, default=30, dest="poll_interval",
