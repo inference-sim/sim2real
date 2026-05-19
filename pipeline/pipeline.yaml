@@ -79,6 +79,8 @@ spec:
           value: "$(params.specContent)"
         - name: plans_dir
           value: "$(params.runName)/plans/$(params.phase)/$(params.workloadName)"
+        - name: smoketest_delay
+          value: "30"
 
     - name: run-workload-blis-observe-binary
       runAfter: ["llmdbenchmark-standup", "install-blis"]
