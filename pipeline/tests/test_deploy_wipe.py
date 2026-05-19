@@ -388,3 +388,24 @@ def test_wipe_warns_on_missing_package_workload(tmp_path, monkeypatch, capsys):
 
     captured = capsys.readouterr()
     assert "missing package/workload" in (captured.out + captured.err).lower()
+
+
+def test_wipe_does_not_save_progress(tmp_path, monkeypatch):
+    """Wipe must never persist progress changes — it only deletes files."""
+    import pipeline.deploy as mod
+
+    run_dir = tmp_path / "run1"
+    run_dir.mkdir()
+    save_called = []
+    monkeypatch.setattr(ConfigMapProgressStore, "load",
+                        lambda self: json.loads(json.dumps(_PROGRESS)))
+    monkeypatch.setattr(ConfigMapProgressStore, "save",
+                        lambda self, d: save_called.append(True))
+    _setup_results(run_dir)
+
+    class _Args:
+        only = None; workload = None; package = None; dry_run = False; yes = True
+
+    mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
+
+    assert save_called == [], "wipe must not call store.save()"

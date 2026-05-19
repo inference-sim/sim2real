@@ -207,7 +207,7 @@ When `--only` or `--workload` is given, only matching workload subdirectories ar
 
 **Safety:** Results in `workspace/runs/<run>/results/` are preserved — only cluster resources are removed. For `done` pairs, only the PipelineRun is deleted (Tekton already tore down Helm releases).
 
-**`deploy.py wipe`** — deletes local result files (`results/<package>/<workload>/`) for non-pending pairs. Does **not** modify pair status in the ConfigMap — use `reset` afterward to re-queue pairs for dispatch. Pending pairs are skipped (nothing to wipe). Empty package directories are cleaned up automatically.
+**`deploy.py wipe`** — deletes local result files (`results/<package>/<workload>/`) for non-pending pairs. Does **not** modify pair status in the ConfigMap. Pending pairs are skipped (nothing to wipe). Empty package directories are cleaned up automatically.
 
 | Flag | Description |
 |------|-------------|
@@ -217,7 +217,7 @@ When `--only` or `--workload` is given, only matching workload subdirectories ar
 | `--dry-run` | Print what would be wiped without acting |
 | `--yes` / `-y` | Skip confirmation prompt |
 
-**Re-running wiped pairs:** `wipe` only removes files; to re-dispatch, follow with `reset` to move pairs back to `pending`.
+**Re-running wiped pairs:** `wipe` only removes files; to re-dispatch, follow with `reset` to move pairs back to `pending`. Note: `reset` currently skips `done` pairs — see [#172](https://github.com/inference-sim/sim2real/issues/172) for enabling `reset` to handle all statuses.
 
 **`deploy.py pairs`** — lists available pair keys, workloads, and packages by scanning `cluster/pipelinerun-*.yaml`.
 
