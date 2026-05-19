@@ -1250,6 +1250,114 @@ def test_early_reclaim_pods_running_clears_pending_since(monkeypatch):
     assert entry["pending_since"] is None
 
 
+def test_pending_to_running_signals_backoff_reset(monkeypatch):
+    """When pods transition Pending→Running, caller should signal backoff reset."""
+    import json
+    import pipeline.deploy as mod
+    from pipeline.lib.backoff import BackoffController
+
+    pods_json_running = {
+        "items": [{
+            "status": {
+                "phase": "Running",
+                "conditions": [{"type": "Ready", "status": "True"}],
+            },
+        }],
+    }
+
+    entry = {
+        "workload": "wl-smoke", "package": "baseline", "status": "running",
+        "namespace": "sim2real-0", "retries": 0, "gpu_cost": 1,
+        "pending_stalls": 0,
+        "pending_since": "2026-05-09T12:00:00+00:00",
+    }
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = json.dumps(pods_json_running)
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    bc = BackoffController(base_interval=30, max_backoff=600)
+    bc.signal_scarcity(free_gpus=0, min_cost=8)
+    assert bc.state == "backing_off"
+
+    had_pending = entry.get("pending_since") is not None
+    reclaimed = mod._handle_pending_pods(
+        pr_name="baseline-smoke-run1",
+        namespace="sim2real-0",
+        entry=entry,
+        pending_threshold=600,
+        max_pending_stalls=10,
+    )
+
+    assert reclaimed is False
+    assert entry["pending_since"] is None
+    assert had_pending is True
+
+    # This mirrors the logic now in deploy.py's orchestrator loop
+    if had_pending and entry.get("pending_since") is None and not reclaimed:
+        bc.signal_scheduling_success()
+
+    assert bc.state == "normal"
+    assert bc.backoff_level == 0
+
+
+def test_no_backoff_signal_when_never_pending(monkeypatch):
+    """Pods that were never pending should NOT trigger backoff reset."""
+    import json
+    import pipeline.deploy as mod
+    from pipeline.lib.backoff import BackoffController
+
+    pods_json_running = {
+        "items": [{
+            "status": {
+                "phase": "Running",
+                "conditions": [{"type": "Ready", "status": "True"}],
+            },
+        }],
+    }
+
+    entry = {
+        "workload": "wl-smoke", "package": "baseline", "status": "running",
+        "namespace": "sim2real-0", "retries": 0, "gpu_cost": 1,
+        "pending_stalls": 0,
+        "pending_since": None,
+    }
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = json.dumps(pods_json_running)
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    bc = BackoffController(base_interval=30, max_backoff=600)
+    bc.signal_scarcity(free_gpus=0, min_cost=8)
+    assert bc.state == "backing_off"
+
+    had_pending = entry.get("pending_since") is not None
+    reclaimed = mod._handle_pending_pods(
+        pr_name="baseline-smoke-run1",
+        namespace="sim2real-0",
+        entry=entry,
+        pending_threshold=600,
+        max_pending_stalls=10,
+    )
+
+    assert reclaimed is False
+    assert had_pending is False
+
+    # Caller logic: no signal because had_pending is False
+    if had_pending and entry.get("pending_since") is None and not reclaimed:
+        bc.signal_scheduling_success()
+
+    assert bc.state == "backing_off"  # Unchanged
+
+
 def test_early_reclaim_malformed_pending_since_resets_timer(monkeypatch, capsys):
     """Malformed pending_since resets timer instead of crashing."""
     import json
