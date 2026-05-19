@@ -139,7 +139,7 @@ python pipeline/deploy.py run     [flags]   # orchestrate parallel pool executio
 python pipeline/deploy.py status            # show progress snapshot of all (workload, package) pairs
 python pipeline/deploy.py collect [flags]     # pull results from the cluster PVC
 python pipeline/deploy.py stop               # stop the remote orchestrator Job
-python pipeline/deploy.py reset [flags]     # tear down cluster resources for failed/stalled pairs
+python pipeline/deploy.py reset [flags]     # reset all non-pending pairs to pending (with cluster cleanup)
 python pipeline/deploy.py wipe  [flags]     # delete local result files for non-pending pairs
 python pipeline/deploy.py pairs   [flags]   # list available pair keys, workloads, and packages
 ```
@@ -195,7 +195,7 @@ When `--only` or `--workload` is given, only matching workload subdirectories ar
 
 **`deploy.py stop`** — deletes the `sim2real-orchestrator` Kubernetes Job (with cascading pod deletion) in the primary namespace. Only meaningful when the orchestrator runs as an in-cluster Job. Pair state is left as-is. If no remote orchestrator Job exists, prints a message and returns. Use `reset` separately to clear failed/stalled pair state.
 
-**`deploy.py reset`** — removes cluster resources (PipelineRuns, Helm releases) for all non-pending pairs. Failed/running/timed-out pairs are reset to `pending` so they can be re-dispatched. Done pairs stay `done` — only their PipelineRun is deleted to free cluster resources.
+**`deploy.py reset`** — resets all non-pending pairs to `pending` and removes their cluster resources (PipelineRuns, Helm releases). This includes `done` pairs — use `--preserve-done-status` to clean up cluster resources for done pairs without re-queuing them.
 
 | Flag | Description |
 |------|-------------|
@@ -203,9 +203,10 @@ When `--only` or `--workload` is given, only matching workload subdirectories ar
 | `--workload NAME` | Scope reset to pairs matching this workload |
 | `--package NAME` | Scope reset to pairs matching this package |
 | `--status STATE` | Scope reset to pairs with this status |
+| `--preserve-done-status` | Keep done pairs' status unchanged (cluster cleanup only) |
 | `--dry-run` | Print what would be reset without acting |
 
-**Safety:** Results in `workspace/runs/<run>/results/` are preserved — only cluster resources are removed. For `done` pairs, only the PipelineRun is deleted (Tekton already tore down Helm releases).
+**Safety:** Results in `workspace/runs/<run>/results/` are preserved — only cluster resources and ConfigMap status are affected.
 
 **`deploy.py wipe`** — deletes local result files (`results/<package>/<workload>/`) for non-pending pairs. Does **not** modify pair status in the ConfigMap. Pending pairs are skipped (nothing to wipe). Empty package directories are cleaned up automatically.
 
@@ -217,7 +218,7 @@ When `--only` or `--workload` is given, only matching workload subdirectories ar
 | `--dry-run` | Print what would be wiped without acting |
 | `--yes` / `-y` | Skip confirmation prompt |
 
-**Re-running wiped pairs:** `wipe` only removes files; to re-dispatch, follow with `reset` to move pairs back to `pending`. Note: `reset` currently skips `done` pairs — see [#172](https://github.com/inference-sim/sim2real/issues/172) for enabling `reset` to handle all statuses.
+**Re-running wiped pairs:** `wipe` only removes files; to re-dispatch, follow with `reset` to move pairs back to `pending`.
 
 **`deploy.py pairs`** — lists available pair keys, workloads, and packages by scanning `cluster/pipelinerun-*.yaml`.
 

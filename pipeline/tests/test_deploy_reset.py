@@ -213,7 +213,7 @@ def test_cmd_reset_continues_on_exception(tmp_path, monkeypatch, capsys):
 
     call_count = []
 
-    def exploding_reset(key, entry, disc, dry_run=False, namespaces=None):
+    def exploding_reset(key, entry, disc, dry_run=False, namespaces=None, preserve_done_status=False):
         call_count.append(key)
         if key == "wl-a-baseline":
             raise RuntimeError("kubectl not found")
@@ -229,6 +229,7 @@ def test_cmd_reset_continues_on_exception(tmp_path, monkeypatch, capsys):
 
     class _Args:
         only = None; workload = None; package = None; status = None; dry_run = False
+        preserve_done_status = False
 
     mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
                    setup_config={"namespace": "sim2real-ns"})
@@ -240,8 +241,8 @@ def test_cmd_reset_continues_on_exception(tmp_path, monkeypatch, capsys):
     assert saved_data["wl-b-baseline"]["status"] == "pending"
 
 
-def test_reset_pair_done_deletes_pr_without_state_reset(monkeypatch):
-    """Done pairs get PipelineRun deleted but stay in done state."""
+def test_reset_pair_done_resets_state_by_default(monkeypatch):
+    """Done pairs get PipelineRun deleted AND state reset to pending."""
     import pipeline.deploy as mod
 
     entry = {"workload": "wl-smoke", "package": "baseline", "status": "done",
@@ -261,16 +262,41 @@ def test_reset_pair_done_deletes_pr_without_state_reset(monkeypatch):
                              namespaces=["sim2real-0", "sim2real-1"])
 
     assert result is True
-    # State stays done
-    assert entry["status"] == "done"
+    # State reset to pending
+    assert entry["status"] == "pending"
+    assert entry["namespace"] is None
     # PipelineRun deleted across all namespace slots
     kubectl_deletes = [c for c in calls if "delete" in c and "pipelinerun" in c]
     assert len(kubectl_deletes) == 2
-    assert "sim2real-0" in kubectl_deletes[0]
-    assert "sim2real-1" in kubectl_deletes[1]
-    # No helm operations for done pairs
-    helm_calls = [c for c in calls if c[0] == "helm"]
-    assert helm_calls == []
+
+
+def test_reset_pair_done_preserves_status_with_flag(monkeypatch):
+    """Done pairs with preserve_done_status=True get cleanup but stay done."""
+    import pipeline.deploy as mod
+
+    entry = {"workload": "wl-smoke", "package": "baseline", "status": "done",
+             "namespace": None, "retries": 0}
+    calls = []
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        calls.append(cmd)
+        class _R:
+            returncode = 0
+            stdout = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    result = mod._reset_pair("wl-smoke-baseline", entry, _DISCOVERED,
+                             namespaces=["sim2real-0", "sim2real-1"],
+                             preserve_done_status=True)
+
+    assert result is True
+    # State stays done
+    assert entry["status"] == "done"
+    # PipelineRun still deleted
+    kubectl_deletes = [c for c in calls if "delete" in c and "pipelinerun" in c]
+    assert len(kubectl_deletes) == 2
 
 
 def test_cmd_reset_skips_pending_only(tmp_path, monkeypatch, capsys):
@@ -281,13 +307,14 @@ def test_cmd_reset_skips_pending_only(tmp_path, monkeypatch, capsys):
 
     cleaned = []
     monkeypatch.setattr(mod, "_reset_pair",
-                        lambda k, e, d, dry_run=False, namespaces=None: cleaned.append(k) or True)
+                        lambda k, e, d, dry_run=False, namespaces=None, preserve_done_status=False: cleaned.append(k) or True)
 
     run_dir = tmp_path / "runs" / "test-run"
     run_dir.mkdir(parents=True)
 
     class _Args:
         only = None; workload = None; package = None; status = None; dry_run = False
+        preserve_done_status = False
 
     mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
                    setup_config={"namespace": "sim2real-ns"})
@@ -309,13 +336,14 @@ def test_cmd_reset_respects_only_filter(tmp_path, monkeypatch, capsys):
 
     cleaned = []
     monkeypatch.setattr(mod, "_reset_pair",
-                        lambda k, e, d, dry_run=False, namespaces=None: cleaned.append(k) or True)
+                        lambda k, e, d, dry_run=False, namespaces=None, preserve_done_status=False: cleaned.append(k) or True)
 
     run_dir = tmp_path / "runs" / "test-run"
     run_dir.mkdir(parents=True)
 
     class _Args:
         only = "wl-heavy-baseline"; workload = None; package = None; status = None; dry_run = False
+        preserve_done_status = False
 
     mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
                    setup_config={"namespace": "sim2real-ns"})
@@ -331,13 +359,14 @@ def test_cmd_reset_dry_run_does_not_save(tmp_path, monkeypatch, capsys):
     _mock_cm(monkeypatch, _PROGRESS, capture_saves=saved_data)
 
     monkeypatch.setattr(mod, "_reset_pair",
-                        lambda k, e, d, dry_run=False, namespaces=None: True)
+                        lambda k, e, d, dry_run=False, namespaces=None, preserve_done_status=False: True)
 
     run_dir = tmp_path / "runs" / "test-run"
     run_dir.mkdir(parents=True)
 
     class _Args:
         only = None; workload = None; package = None; status = None; dry_run = True
+        preserve_done_status = False
 
     mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
                    setup_config={"namespace": "sim2real-ns"})
@@ -370,23 +399,23 @@ def test_cmd_reset_saves_progress_on_success(tmp_path, monkeypatch, capsys):
 
     class _Args:
         only = None; workload = None; package = None; status = None; dry_run = False
+        preserve_done_status = False
 
     mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
                    namespaces=["sim2real-0", "sim2real-1", "sim2real-2"],
                    setup_config={"namespace": "sim2real-ns"})
 
-    # Non-done pairs reset to pending
+    # All non-pending pairs reset to pending (including done)
+    assert saved_data["wl-smoke-baseline"]["status"] == "pending"
     assert saved_data["wl-smoke-treatment"]["status"] == "pending"
     assert saved_data["wl-load-treatment"]["status"] == "pending"
     assert saved_data["wl-heavy-baseline"]["status"] == "pending"
-    # Done pair stays done (PipelineRun deleted but state preserved)
-    assert saved_data["wl-smoke-baseline"]["status"] == "done"
     # Pending pair unchanged
     assert saved_data["wl-load-baseline"]["status"] == "pending"
 
 
-def test_force_reset_calls_reset_for_non_pending_non_done(monkeypatch):
-    """_force_reset resets non-pending, non-done pairs via _reset_pair."""
+def test_force_reset_resets_all_non_pending_including_done(monkeypatch):
+    """_force_reset resets all non-pending pairs including done."""
     import pipeline.deploy as mod
 
     progress = {
@@ -421,14 +450,13 @@ def test_force_reset_calls_reset_for_non_pending_non_done(monkeypatch):
     n = mod._force_reset(progress, scope, discovered,
                          namespaces=["sim2real-0", "sim2real-1"])
 
-    # Pending and done should be skipped
+    # Only pending should be skipped
     assert "wl-a-treatment" not in cleaned
-    assert "wl-c-baseline" not in cleaned
-    # Failed and timed-out should be reset
+    # Failed, timed-out, AND done should all be reset
     assert "wl-a-baseline" in cleaned
     assert "wl-b-baseline" in cleaned
-    assert n == 2
-    assert progress["wl-c-baseline"]["status"] == "done"
+    assert "wl-c-baseline" in cleaned
+    assert n == 3
 
 
 def test_force_reset_skips_count_on_reset_failure(monkeypatch):
@@ -495,6 +523,7 @@ def test_cmd_reset_aborts_on_filter_mismatch(tmp_path, monkeypatch, capsys):
 
     class _Args:
         only = "nonexistent"; workload = None; package = None; status = None; dry_run = False
+        preserve_done_status = False
 
     with __import__("pytest").raises(SystemExit) as exc_info:
         mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
@@ -525,7 +554,7 @@ def test_reset_pair_done_uninstalls_helm_in_completed_namespace(monkeypatch):
                              namespaces=["sim2real-0", "sim2real-1"])
 
     assert result is True
-    assert entry["status"] == "done"
+    assert entry["status"] == "pending"
 
     helm_lists = [c for c in calls if c[:2] == ["helm", "list"]]
     assert len(helm_lists) == 1
@@ -607,7 +636,7 @@ def test_reset_pair_done_helm_list_failure_warns(monkeypatch, capsys):
                              namespaces=["sim2real-0", "sim2real-1"])
 
     assert result is True
-    assert entry["status"] == "done"
+    assert entry["status"] == "pending"
     err = capsys.readouterr().err
     assert "helm list failed" in err
 
@@ -631,7 +660,7 @@ def test_reset_pair_done_helm_uninstall_failure_warns(monkeypatch, capsys):
                              namespaces=["sim2real-0", "sim2real-1"])
 
     assert result is True
-    assert entry["status"] == "done"
+    assert entry["status"] == "pending"
     err = capsys.readouterr().err
     assert "Failed to uninstall" in err
 
