@@ -5,7 +5,6 @@ from pathlib import Path
 
 from pipeline.lib.progress import ConfigMapProgressStore
 
-
 _PROGRESS = {
     "wl-smoke-baseline":   {"workload": "wl-smoke",  "package": "baseline",  "status": "done",      "namespace": "sim2real-0", "retries": 0, "pending_stalls": 0, "pending_since": None},
     "wl-smoke-treatment":  {"workload": "wl-smoke",  "package": "treatment", "status": "done",      "namespace": "sim2real-1", "retries": 0, "pending_stalls": 0, "pending_since": None},
@@ -15,30 +14,11 @@ _PROGRESS = {
 }
 
 
-def _mock_cm(monkeypatch, data, capture_saves=None):
-    """Monkeypatch ConfigMapProgressStore to return a deep copy of *data* on load.
-
-    If *capture_saves* is a dict, saves are captured into it.
-    Otherwise saves are no-ops.
-    """
+def _mock_cm(monkeypatch, data):
+    """Monkeypatch ConfigMapProgressStore to return a deep copy of *data* on load."""
     monkeypatch.setattr(ConfigMapProgressStore, "load",
                         lambda self: json.loads(json.dumps(data)))
-    if capture_saves is not None:
-        def _save(self, d):
-            capture_saves.clear()
-            capture_saves.update(d)
-        monkeypatch.setattr(ConfigMapProgressStore, "save", _save)
-    else:
-        monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
-
-
-def _assert_reset(entry: dict) -> None:
-    """Assert all fields are reset to their pending-state values."""
-    assert entry["status"] == "pending"
-    assert entry["retries"] == 0
-    assert entry["pending_stalls"] == 0
-    assert entry["pending_since"] is None
-    assert entry["namespace"] is None
+    monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
 
 
 def _setup_results(run_dir: Path) -> None:
@@ -51,14 +31,13 @@ def _setup_results(run_dir: Path) -> None:
             (d / "trace_data.csv").write_text("data")
 
 
-def test_wipe_all_deletes_results_and_resets(tmp_path, monkeypatch):
-    """Unscoped wipe deletes results for non-pending pairs and resets them."""
+def test_wipe_all_deletes_results(tmp_path, monkeypatch):
+    """Unscoped wipe deletes results for non-pending pairs without resetting status."""
     import pipeline.deploy as mod
 
     run_dir = tmp_path / "run1"
     run_dir.mkdir()
-    saved_data = {}
-    _mock_cm(monkeypatch, _PROGRESS, capture_saves=saved_data)
+    _mock_cm(monkeypatch, _PROGRESS)
     _setup_results(run_dir)
 
     class _Args:
@@ -66,12 +45,6 @@ def test_wipe_all_deletes_results_and_resets(tmp_path, monkeypatch):
 
     mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
 
-    _assert_reset(saved_data["wl-smoke-baseline"])
-    _assert_reset(saved_data["wl-smoke-treatment"])
-    _assert_reset(saved_data["wl-load-treatment"])
-    _assert_reset(saved_data["wl-heavy-baseline"])
-    # Already-pending pair unchanged
-    assert saved_data["wl-load-baseline"]["status"] == "pending"
     # Non-pending workload dirs deleted
     assert not (run_dir / "results" / "baseline" / "wl-smoke").exists()
     assert not (run_dir / "results" / "baseline" / "wl-heavy").exists()
@@ -87,8 +60,7 @@ def test_wipe_scoped_by_workload(tmp_path, monkeypatch):
 
     run_dir = tmp_path / "run1"
     run_dir.mkdir()
-    saved_data = {}
-    _mock_cm(monkeypatch, _PROGRESS, capture_saves=saved_data)
+    _mock_cm(monkeypatch, _PROGRESS)
     _setup_results(run_dir)
 
     class _Args:
@@ -96,11 +68,6 @@ def test_wipe_scoped_by_workload(tmp_path, monkeypatch):
 
     mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
 
-    _assert_reset(saved_data["wl-smoke-baseline"])
-    _assert_reset(saved_data["wl-smoke-treatment"])
-    # Out-of-scope pairs unchanged
-    assert saved_data["wl-load-treatment"]["status"] == "failed"
-    assert saved_data["wl-heavy-baseline"]["status"] == "timed-out"
     # Only wl-smoke directories deleted
     assert not (run_dir / "results" / "baseline" / "wl-smoke").exists()
     assert not (run_dir / "results" / "treatment" / "wl-smoke").exists()
@@ -114,8 +81,7 @@ def test_wipe_scoped_by_only(tmp_path, monkeypatch):
 
     run_dir = tmp_path / "run1"
     run_dir.mkdir()
-    saved_data = {}
-    _mock_cm(monkeypatch, _PROGRESS, capture_saves=saved_data)
+    _mock_cm(monkeypatch, _PROGRESS)
     _setup_results(run_dir)
 
     class _Args:
@@ -123,9 +89,6 @@ def test_wipe_scoped_by_only(tmp_path, monkeypatch):
 
     mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
 
-    _assert_reset(saved_data["wl-heavy-baseline"])
-    # Other pairs unchanged
-    assert saved_data["wl-smoke-baseline"]["status"] == "done"
     # Only wl-heavy/baseline deleted
     assert not (run_dir / "results" / "baseline" / "wl-heavy").exists()
     assert (run_dir / "results" / "baseline" / "wl-smoke").exists()
@@ -137,8 +100,7 @@ def test_wipe_scoped_by_package(tmp_path, monkeypatch):
 
     run_dir = tmp_path / "run1"
     run_dir.mkdir()
-    saved_data = {}
-    _mock_cm(monkeypatch, _PROGRESS, capture_saves=saved_data)
+    _mock_cm(monkeypatch, _PROGRESS)
     _setup_results(run_dir)
 
     class _Args:
@@ -146,11 +108,6 @@ def test_wipe_scoped_by_package(tmp_path, monkeypatch):
 
     mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
 
-    _assert_reset(saved_data["wl-smoke-treatment"])
-    _assert_reset(saved_data["wl-load-treatment"])
-    # Baseline pairs unchanged
-    assert saved_data["wl-smoke-baseline"]["status"] == "done"
-    assert saved_data["wl-heavy-baseline"]["status"] == "timed-out"
     # Only treatment directories deleted
     assert not (run_dir / "results" / "treatment" / "wl-smoke").exists()
     assert (run_dir / "results" / "baseline" / "wl-smoke").exists()
@@ -162,8 +119,7 @@ def test_wipe_dry_run_does_not_delete(tmp_path, monkeypatch, capsys):
 
     run_dir = tmp_path / "run1"
     run_dir.mkdir()
-    saved_data = {}
-    _mock_cm(monkeypatch, _PROGRESS, capture_saves=saved_data)
+    _mock_cm(monkeypatch, _PROGRESS)
     _setup_results(run_dir)
 
     class _Args:
@@ -173,8 +129,6 @@ def test_wipe_dry_run_does_not_delete(tmp_path, monkeypatch, capsys):
 
     # Nothing deleted
     assert (run_dir / "results" / "baseline" / "wl-smoke").exists()
-    # Progress not saved (capture_saves stays empty)
-    assert saved_data == {}
     # DRY-RUN mentioned in output
     captured = capsys.readouterr()
     assert "DRY-RUN" in captured.out + captured.err
@@ -190,17 +144,15 @@ def test_wipe_skips_pending_pairs(tmp_path, monkeypatch, capsys):
         "wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "pending",
                           "namespace": None, "retries": 0, "pending_stalls": 0, "pending_since": None},
     }
-    saved_data = {}
-    _mock_cm(monkeypatch, progress, capture_saves=saved_data)
+    _mock_cm(monkeypatch, progress)
 
     class _Args:
         only = None; workload = None; package = None; dry_run = False; yes = True
 
     mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
 
-    # Nothing wiped — all pending
-    # saved_data may or may not have been written; the important check is status
-    # The function should report "no pairs need wiping" and return early
+    captured = capsys.readouterr()
+    assert "no pairs need wiping" in (captured.out + captured.err).lower()
 
 
 def test_wipe_no_progress_reports_nothing(tmp_path, monkeypatch, capsys):
@@ -226,8 +178,7 @@ def test_wipe_confirmation_abort(tmp_path, monkeypatch, capsys):
 
     run_dir = tmp_path / "run1"
     run_dir.mkdir()
-    saved_data = {}
-    _mock_cm(monkeypatch, _PROGRESS, capture_saves=saved_data)
+    _mock_cm(monkeypatch, _PROGRESS)
     _setup_results(run_dir)
 
     monkeypatch.setattr("builtins.input", lambda _: "n")
@@ -237,8 +188,7 @@ def test_wipe_confirmation_abort(tmp_path, monkeypatch, capsys):
 
     mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
 
-    # Nothing changed
-    assert saved_data == {}
+    # Nothing deleted
     assert (run_dir / "results" / "baseline" / "wl-smoke").exists()
 
 
@@ -248,8 +198,7 @@ def test_wipe_confirmation_accept(tmp_path, monkeypatch):
 
     run_dir = tmp_path / "run1"
     run_dir.mkdir()
-    saved_data = {}
-    _mock_cm(monkeypatch, _PROGRESS, capture_saves=saved_data)
+    _mock_cm(monkeypatch, _PROGRESS)
     _setup_results(run_dir)
 
     monkeypatch.setattr("builtins.input", lambda _: "y")
@@ -259,7 +208,6 @@ def test_wipe_confirmation_accept(tmp_path, monkeypatch):
 
     mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
 
-    _assert_reset(saved_data["wl-smoke-baseline"])
     assert not (run_dir / "results" / "baseline" / "wl-smoke").exists()
 
 
@@ -269,8 +217,7 @@ def test_wipe_eof_on_input_aborts(tmp_path, monkeypatch, capsys):
 
     run_dir = tmp_path / "run1"
     run_dir.mkdir()
-    saved_data = {}
-    _mock_cm(monkeypatch, _PROGRESS, capture_saves=saved_data)
+    _mock_cm(monkeypatch, _PROGRESS)
     _setup_results(run_dir)
 
     def raise_eof(_):
@@ -283,7 +230,7 @@ def test_wipe_eof_on_input_aborts(tmp_path, monkeypatch, capsys):
 
     mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
 
-    assert saved_data == {}
+    assert (run_dir / "results" / "baseline" / "wl-smoke").exists()
     captured = capsys.readouterr()
     assert "--yes" in captured.out + captured.err
 
@@ -314,8 +261,7 @@ def test_wipe_cleans_empty_parent_dirs(tmp_path, monkeypatch):
         "wl-only-baseline": {"workload": "wl-only", "package": "baseline", "status": "done",
                              "namespace": None, "retries": 0, "pending_stalls": 0, "pending_since": None},
     }
-    saved_data = {}
-    _mock_cm(monkeypatch, progress, capture_saves=saved_data)
+    _mock_cm(monkeypatch, progress)
     d = run_dir / "results" / "baseline" / "wl-only"
     d.mkdir(parents=True)
     (d / "trace.csv").write_text("data")
@@ -329,7 +275,7 @@ def test_wipe_cleans_empty_parent_dirs(tmp_path, monkeypatch):
 
 
 def test_wipe_no_results_on_disk(tmp_path, monkeypatch, capsys):
-    """Wipe succeeds even when results directories don't exist on disk."""
+    """Wipe reports skip when results directories don't exist on disk."""
     import pipeline.deploy as mod
 
     run_dir = tmp_path / "run1"
@@ -338,16 +284,13 @@ def test_wipe_no_results_on_disk(tmp_path, monkeypatch, capsys):
         "wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "done",
                           "namespace": None, "retries": 0, "pending_stalls": 0, "pending_since": None},
     }
-    saved_data = {}
-    _mock_cm(monkeypatch, progress, capture_saves=saved_data)
-    # No results/ directory created
+    _mock_cm(monkeypatch, progress)
 
     class _Args:
         only = None; workload = None; package = None; dry_run = False; yes = True
 
     mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
 
-    _assert_reset(saved_data["wl-a-baseline"])
     captured = capsys.readouterr()
     assert "no results on disk" in (captured.out + captured.err).lower()
 
@@ -364,8 +307,7 @@ def test_wipe_parent_not_removed_when_siblings_remain(tmp_path, monkeypatch):
         "wl-b-baseline": {"workload": "wl-b", "package": "baseline", "status": "done",
                           "namespace": None, "retries": 0, "pending_stalls": 0, "pending_since": None},
     }
-    saved_data = {}
-    _mock_cm(monkeypatch, progress, capture_saves=saved_data)
+    _mock_cm(monkeypatch, progress)
     for wl in ("wl-a", "wl-b"):
         d = run_dir / "results" / "baseline" / wl
         d.mkdir(parents=True)
@@ -383,7 +325,7 @@ def test_wipe_parent_not_removed_when_siblings_remain(tmp_path, monkeypatch):
 
 
 def test_wipe_rmtree_failure_skips_pair(tmp_path, monkeypatch, capsys):
-    """When rmtree fails for one pair, that pair's status is preserved."""
+    """When rmtree fails for one pair, that pair is skipped and exit code is 1."""
     import shutil
     import pipeline.deploy as mod
 
@@ -395,8 +337,7 @@ def test_wipe_rmtree_failure_skips_pair(tmp_path, monkeypatch, capsys):
         "wl-b-baseline": {"workload": "wl-b", "package": "baseline", "status": "done",
                           "namespace": None, "retries": 0, "pending_stalls": 0, "pending_since": None},
     }
-    saved_data = {}
-    _mock_cm(monkeypatch, progress, capture_saves=saved_data)
+    _mock_cm(monkeypatch, progress)
     for wl in ("wl-a", "wl-b"):
         d = run_dir / "results" / "baseline" / wl
         d.mkdir(parents=True)
@@ -418,10 +359,9 @@ def test_wipe_rmtree_failure_skips_pair(tmp_path, monkeypatch, capsys):
         mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
     assert exc_info.value.code == 1
 
-    # wl-a: rmtree failed → status NOT reset
-    assert saved_data["wl-a-baseline"]["status"] == "done"
-    # wl-b: succeeded → status reset
-    _assert_reset(saved_data["wl-b-baseline"])
+    # wl-a still on disk (failed), wl-b deleted
+    assert (run_dir / "results" / "baseline" / "wl-a").exists()
+    assert not (run_dir / "results" / "baseline" / "wl-b").exists()
     # Error count in summary
     captured = capsys.readouterr()
     assert "1 failed" in captured.out + captured.err
@@ -439,16 +379,12 @@ def test_wipe_warns_on_missing_package_workload(tmp_path, monkeypatch, capsys):
         "wl-ok-baseline": {"workload": "wl-ok", "package": "baseline", "status": "done",
                            "namespace": None, "retries": 0, "pending_stalls": 0, "pending_since": None},
     }
-    saved_data = {}
-    _mock_cm(monkeypatch, progress, capture_saves=saved_data)
+    _mock_cm(monkeypatch, progress)
 
     class _Args:
         only = None; workload = None; package = None; dry_run = False; yes = True
 
     mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
 
-    _assert_reset(saved_data["wl-ok-baseline"])
-    # Broken entry was skipped — status unchanged
-    assert saved_data["wl-broken"]["status"] == "done"
     captured = capsys.readouterr()
     assert "missing package/workload" in (captured.out + captured.err).lower()

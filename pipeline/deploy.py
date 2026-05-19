@@ -7,7 +7,7 @@ Subcommands:
   collect  Pull results from cluster for completed phases
   stop     Stop the remote orchestrator Job
   reset    Tear down cluster resources for all non-pending pairs
-  wipe     Delete local results and reset pairs to pending
+  wipe     Delete local result files for non-pending pairs
   pairs    List available pair keys, workloads, and packages
 """
 
@@ -1782,7 +1782,7 @@ def _cmd_reset(args, run_dir: Path, discovered: dict,
 
 def _cmd_wipe(args, run_dir: Path,
               setup_config: dict | None = None) -> None:
-    """Delete local results and reset wiped pairs to pending."""
+    """Delete local result files for non-pending pairs."""
     from pipeline.lib.progress import ConfigMapProgressStore
     primary_ns = _configmap_namespace(setup_config)
     if not primary_ns:
@@ -1826,7 +1826,6 @@ def _cmd_wipe(args, run_dir: Path,
             exists = target_dir.exists()
             info(f"[DRY-RUN] {key}: would delete results/{pkg}/{wl}/"
                  + (" (exists)" if exists else " (not on disk)"))
-            info(f"[DRY-RUN] {key}: would reset status to pending")
         return
 
     if not args.yes:
@@ -1857,17 +1856,10 @@ def _cmd_wipe(args, run_dir: Path,
                 pkg_dir.rmdir()
             except OSError:
                 pass
+            wiped += 1
         else:
-            ok(f"Reset: {key} (no results on disk)")
-        entry = progress[key]
-        entry["status"] = "pending"
-        entry["retries"] = 0
-        entry["pending_stalls"] = 0
-        entry["pending_since"] = None
-        entry["namespace"] = None
-        wiped += 1
+            info(f"{key}: no results on disk — skipped")
 
-    store.save(progress)
     msg = f"{wiped} pair(s) wiped"
     if errors:
         msg += f" ({errors} failed — check permissions)"
@@ -2192,7 +2184,7 @@ Examples:
     reset_p.add_argument("--dry-run",  action="store_true", dest="dry_run",
                          help="Print what would be reset without doing it")
 
-    wipe_p = sub.add_parser("wipe", help="Delete local results and reset pairs to pending")
+    wipe_p = sub.add_parser("wipe", help="Delete local result files for non-pending pairs")
     wipe_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key (wl- prefix optional)")
     wipe_p.add_argument("--workload", metavar="NAME",  help="Scope to pairs matching this workload")
     wipe_p.add_argument("--package",  metavar="NAME",  help="Scope to pairs matching this package")

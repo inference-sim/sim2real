@@ -140,7 +140,7 @@ python pipeline/deploy.py status            # show progress snapshot of all (wor
 python pipeline/deploy.py collect [flags]     # pull results from the cluster PVC
 python pipeline/deploy.py stop               # stop the remote orchestrator Job
 python pipeline/deploy.py reset [flags]     # tear down cluster resources for failed/stalled pairs
-python pipeline/deploy.py wipe  [flags]     # delete local results and reset pairs to pending
+python pipeline/deploy.py wipe  [flags]     # delete local result files for non-pending pairs
 python pipeline/deploy.py pairs   [flags]   # list available pair keys, workloads, and packages
 ```
 
@@ -207,7 +207,7 @@ When `--only` or `--workload` is given, only matching workload subdirectories ar
 
 **Safety:** Results in `workspace/runs/<run>/results/` are preserved — only cluster resources are removed. For `done` pairs, only the PipelineRun is deleted (Tekton already tore down Helm releases).
 
-**`deploy.py wipe`** — deletes local results (`results/<package>/<workload>/`) for non-pending pairs and resets their status to `pending` in the ConfigMap. Use when reusing a run name and stale results from prior executions need to be cleared before re-executing. Pending pairs are skipped (nothing to wipe). Empty package directories are cleaned up automatically.
+**`deploy.py wipe`** — deletes local result files (`results/<package>/<workload>/`) for non-pending pairs. Does **not** modify pair status in the ConfigMap — use `reset` afterward to re-queue pairs for dispatch. Pending pairs are skipped (nothing to wipe). Empty package directories are cleaned up automatically.
 
 | Flag | Description |
 |------|-------------|
@@ -217,7 +217,7 @@ When `--only` or `--workload` is given, only matching workload subdirectories ar
 | `--dry-run` | Print what would be wiped without acting |
 | `--yes` / `-y` | Skip confirmation prompt |
 
-**Interaction with `collect`:** Wiping resets pair status to `pending`, which makes any PVC data unreachable via `collect` (collect only pulls `done` pairs). Re-executing the pairs writes fresh data to the PVC.
+**Re-running wiped pairs:** `wipe` only removes files; to re-dispatch, follow with `reset` to move pairs back to `pending`.
 
 **`deploy.py pairs`** — lists available pair keys, workloads, and packages by scanning `cluster/pipelinerun-*.yaml`.
 
