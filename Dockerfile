@@ -9,6 +9,7 @@ RUN apt-get update && \
     install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && \
     rm kubectl kubectl.sha256 && \
     HELM_VERSION=$(curl -fsSL https://api.github.com/repos/helm/helm/releases/latest | grep '"tag_name"' | sed 's/.*"v\(.*\)".*/\1/') && \
+    test -n "$HELM_VERSION" || { echo "ERROR: failed to determine helm version"; exit 1; } && \
     curl -fLO "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" && \
     curl -fLO "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz.sha256sum" && \
     sha256sum --check "helm-v${HELM_VERSION}-linux-amd64.tar.gz.sha256sum" && \
