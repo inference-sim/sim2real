@@ -1544,6 +1544,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
 
             elif status in ("Running", "Started"):
                 # Check for pending pods (before timeout)
+                had_pending = entry.get("pending_since") is not None
                 try:
                     reclaimed = _handle_pending_pods(
                         pr_name=pr_name, namespace=ns, entry=entry,
@@ -1568,6 +1569,13 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                     progress["_orchestrator"] = backoff.to_dict()
                     store.save(progress)
                     continue
+
+                if had_pending and entry.get("pending_since") is None:
+                    if backoff.state != "normal":
+                        backoff.signal_scheduling_success()
+                        info(f"[{pair_key}] Pending→Running → backoff reset")
+                        progress["_orchestrator"] = backoff.to_dict()
+                        store.save(progress)
 
                 # Check for timeout
                 ts_result = run(
@@ -1715,9 +1723,6 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             slots_busy[ns] = pair_key
             store.save(progress)
             ok(f"[{pair_key}] → {ns} ({pr_name})")
-            if backoff.state != "normal":
-                backoff.signal_scheduling_success()
-                info("Scheduling success → backoff reset")
 
         # Persist backoff state
         progress["_orchestrator"] = backoff.to_dict()
