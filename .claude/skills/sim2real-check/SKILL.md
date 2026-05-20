@@ -1,5 +1,4 @@
 ---
-name: sim2real-check
 description: Validate a sim2real translation bundle against its simulation bundle. Checks workloads, configs, signals, policies, and runtime health.
 ---
 
@@ -77,10 +76,11 @@ Run ALL checks below.
 For each workload in the real bundle, find the matching sim workload YAML in `<sim>/workloads/`.
 
 **1a. Arrival Rate (QPS)**
+- **Intended QPS**: compute from `trace_data.csv` `arrival_time_us` column: `num_requests / (max - min arrival)`. This is the rate the load generator *scheduled* requests at.
+- **Actual QPS**: compute from `trace_data.csv` `send_time_us` column: `num_requests / (max - min send_time)`. This is the rate requests were *actually sent* to the server. If actual QPS << intended QPS, the load generator hit a concurrency ceiling and requests queued client-side.
 - From sim: `aggregate_rate` in workload YAML
-- From real: compute from `trace_data.csv` arrival_time_us column: `num_requests / (max - min arrival)`
-- Tolerance: within 5%
-- Show: table with expected rate, actual rate, % difference
+- Tolerance: intended QPS within 5% of sim spec. If actual QPS is more than 5% below intended QPS, emit WARN — this means the load generator couldn't keep up with the schedule (likely concurrency ceiling or server backpressure), so the server saw less load than intended and results are not comparable to simulation.
+- Show: table with sim spec rate, intended QPS, actual QPS — all three columns so the reader can spot concurrency bottlenecks
 
 **1b. SLO Class Distribution**
 - From sim: each client's `rate_fraction`
@@ -245,11 +245,13 @@ Parse each server log's startup lines. Verify `non-default args` match expected 
 Extract: model, TP size, max_model_len, gpu_memory_utilization, enable_prefix_caching, max_num_seqs, max_num_batched_tokens.
 - Show: extracted values from log vs expected
 
-**5b. Instance Health**
-- Count requests per instance: group `trace_data.csv` by some proxy (or count server log files that show activity)
-- Check for even distribution (for random/round-robin routing): no instance should get <10% or >40% of total (for 4 instances, expect ~25% each)
+**5b. Instance Health & Request Distribution**
+- Count `/completions` requests per instance by grepping each server log file in `server_logs/` for `/completions` (or `/chat/completions` if chat API). This is the authoritative per-instance request count — `trace_data.csv` does not have an instance identifier column.
+- Compute total served requests (sum across instances), per-instance percentage, and spread (max-min as % of average).
+- Check for even distribution (for random/round-robin routing): no instance should get <10% or >40% of total (for 4 instances, expect ~25% each). Spread should be < 10%.
+- Compare total served vs total sent (from trace_data.csv row count) — the difference is requests shed by admission before reaching any instance.
 - Flag any instance that appears unhealthy (no requests, errors in logs)
-- Show: table with instance name, request count, percentage, health status
+- Show: table with instance name, `/completions` request count, percentage of total served, and a summary row with total served vs total sent and spread %
 
 **5c. Prefix Hit Ratio**
 If `enable_prefix_caching=True`, grep server logs for prefix cache hit metrics.
