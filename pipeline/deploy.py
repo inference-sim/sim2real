@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""sim2real deploy — Build EPP, orchestrate runs, collect results.
+"""sim2real deploy — Ensure images, orchestrate runs, collect results.
 
 Subcommands:
-  run      Build EPP image, submit PipelineRuns
+  build    Ensure all scenario images exist (pre-flight for run)
+  run      Ensure images + submit PipelineRuns
   status   Show progress of all (workload, package) pairs
   collect  Pull results from cluster for completed phases
   stop     Stop the remote orchestrator Job
@@ -2123,13 +2124,14 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="deploy.py",
-        description="sim2real deploy — Build EPP, orchestrate runs, collect results",
+        description="sim2real deploy — Ensure images, orchestrate runs, collect results",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python pipeline/deploy.py run                        # Build EPP + orchestrate all pairs
+  python pipeline/deploy.py build                      # Ensure all scenario images exist
+  python pipeline/deploy.py run                        # Ensure images + orchestrate all pairs
   python pipeline/deploy.py run --remote               # Submit orchestrator as in-cluster Job
-  python pipeline/deploy.py run --skip-build            # Orchestrate without image build
+  python pipeline/deploy.py run --skip-build           # Orchestrate without image build
   python pipeline/deploy.py status                     # Show progress snapshot
   python pipeline/deploy.py collect                    # Pull results for completed phases
   python pipeline/deploy.py collect --skip-logs        # Collect traces only (skip large logs)

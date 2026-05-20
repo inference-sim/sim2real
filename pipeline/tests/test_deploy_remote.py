@@ -10,14 +10,14 @@ import pipeline.deploy as mod
 
 
 def _make_run_args(*, remote=False, workload=None, only=None, package=None,
-                   status=None, force=False, skip_build_epp=False,
+                   status=None, force=False, skip_build=False,
                    skip_teardown=False,
                    max_retries=2, poll_interval=30, gpu_resource_type=None,
                    default_gpu_cost=1, pending_threshold=600,
                    max_pending_stalls=10, max_backoff=600):
     return argparse.Namespace(
         remote=remote, workload=workload, only=only, package=package,
-        status=status, force=force, skip_build_epp=skip_build_epp,
+        status=status, force=force, skip_build=skip_build,
         skip_teardown=skip_teardown,
         max_retries=max_retries, poll_interval=poll_interval,
         gpu_resource_type=gpu_resource_type, default_gpu_cost=default_gpu_cost,
@@ -302,9 +302,9 @@ def test_run_remote_refuses_when_active(monkeypatch, tmp_path):
     run_dir = _setup_run_dir(tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: "active")
-    monkeypatch.setattr(mod, "_resolve_epp_action", lambda *a: "skip")
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
 
-    args = _make_run_args(remote=True, skip_build_epp=True)
+    args = _make_run_args(remote=True, skip_build=True)
     setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
 
     with pytest.raises(SystemExit) as exc_info:
@@ -316,7 +316,7 @@ def test_run_remote_deletes_completed_job(monkeypatch, tmp_path):
     run_dir = _setup_run_dir(tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: "completed")
-    monkeypatch.setattr(mod, "_resolve_epp_action", lambda *a: "skip")
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_wait_for_job_pod", lambda *a, **kw: None)
 
     calls = []
@@ -332,7 +332,7 @@ def test_run_remote_deletes_completed_job(monkeypatch, tmp_path):
     monkeypatch.setattr(mod, "run", fake_run)
 
     with patch("subprocess.run", side_effect=_mock_subprocess_ok):
-        args = _make_run_args(remote=True, skip_build_epp=True)
+        args = _make_run_args(remote=True, skip_build=True)
         setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
         mod._cmd_run_remote(args, run_dir, setup_config)
 
@@ -346,7 +346,7 @@ def test_run_remote_completed_delete_failure_exits(monkeypatch, tmp_path, capsys
     run_dir = _setup_run_dir(tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: "completed")
-    monkeypatch.setattr(mod, "_resolve_epp_action", lambda *a: "skip")
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
 
     def fake_run(cmd, *, check=True, capture=False, cwd=None):
         class _R:
@@ -357,7 +357,7 @@ def test_run_remote_completed_delete_failure_exits(monkeypatch, tmp_path, capsys
 
     monkeypatch.setattr(mod, "run", fake_run)
 
-    args = _make_run_args(remote=True, skip_build_epp=True)
+    args = _make_run_args(remote=True, skip_build=True)
     setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
 
     with pytest.raises(SystemExit) as exc_info:
@@ -370,7 +370,7 @@ def test_run_remote_creates_configmap_and_job(monkeypatch, tmp_path):
     run_dir = _setup_run_dir(tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
-    monkeypatch.setattr(mod, "_resolve_epp_action", lambda *a: "skip")
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_wait_for_job_pod", lambda *a, **kw: None)
 
     apply_inputs = []
@@ -381,7 +381,7 @@ def test_run_remote_creates_configmap_and_job(monkeypatch, tmp_path):
         return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     with patch("subprocess.run", side_effect=fake_subprocess_run):
-        args = _make_run_args(remote=True, skip_build_epp=True)
+        args = _make_run_args(remote=True, skip_build=True)
         setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
         mod._cmd_run_remote(args, run_dir, setup_config)
 
@@ -395,7 +395,7 @@ def test_run_remote_job_uses_initcontainer_and_emptydir(monkeypatch, tmp_path):
     run_dir = _setup_run_dir(tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
-    monkeypatch.setattr(mod, "_resolve_epp_action", lambda *a: "skip")
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_wait_for_job_pod", lambda *a, **kw: None)
 
     apply_inputs = []
@@ -406,7 +406,7 @@ def test_run_remote_job_uses_initcontainer_and_emptydir(monkeypatch, tmp_path):
         return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     with patch("subprocess.run", side_effect=fake_subprocess_run):
-        args = _make_run_args(remote=True, skip_build_epp=True)
+        args = _make_run_args(remote=True, skip_build=True)
         setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
         mod._cmd_run_remote(args, run_dir, setup_config)
 
@@ -426,7 +426,7 @@ def test_run_remote_passes_scoping_flags(monkeypatch, tmp_path):
     run_dir = _setup_run_dir(tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
-    monkeypatch.setattr(mod, "_resolve_epp_action", lambda *a: "skip")
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_wait_for_job_pod", lambda *a, **kw: None)
 
     apply_inputs = []
@@ -437,7 +437,7 @@ def test_run_remote_passes_scoping_flags(monkeypatch, tmp_path):
         return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     with patch("subprocess.run", side_effect=fake_subprocess_run):
-        args = _make_run_args(remote=True, skip_build_epp=True, workload="wl-smoke")
+        args = _make_run_args(remote=True, skip_build=True, workload="wl-smoke")
         setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
         mod._cmd_run_remote(args, run_dir, setup_config)
 
@@ -451,7 +451,7 @@ def test_run_remote_no_image_exits(monkeypatch, tmp_path):
     run_dir = _setup_run_dir(tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
 
-    args = _make_run_args(remote=True, skip_build_epp=True)
+    args = _make_run_args(remote=True, skip_build=True)
     setup_config = {"namespaces": ["ns"]}
 
     with pytest.raises(SystemExit) as exc_info:
@@ -464,13 +464,13 @@ def test_run_remote_configmap_apply_failure_exits(monkeypatch, tmp_path, capsys)
     run_dir = _setup_run_dir(tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
-    monkeypatch.setattr(mod, "_resolve_epp_action", lambda *a: "skip")
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
 
     def fake_subprocess_run(cmd, *, input=None, text=True, check=False, capture_output=True, **kw):
         return type("R", (), {"returncode": 1, "stdout": "", "stderr": "forbidden"})()
 
     with patch("subprocess.run", side_effect=fake_subprocess_run):
-        args = _make_run_args(remote=True, skip_build_epp=True)
+        args = _make_run_args(remote=True, skip_build=True)
         setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
         with pytest.raises(SystemExit) as exc_info:
             mod._cmd_run_remote(args, run_dir, setup_config)

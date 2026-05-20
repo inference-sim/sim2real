@@ -71,7 +71,7 @@ def build_orchestrator_job(
     args = [
         "--experiment-root", MOUNT_BASE,
         "--run", run_name,
-        "run", "--skip-build-epp",
+        "run", "--skip-build",
     ] + run_flags
 
     return {
