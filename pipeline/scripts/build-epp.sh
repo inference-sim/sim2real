@@ -42,9 +42,7 @@ fi
 # ── Find repo root ─────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SIM2REAL_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-# llm-d-inference-scheduler lives in the experiment repo, not the framework.
 SCHEDULER_ROOT="${EXPERIMENT_ROOT:-${SIM2REAL_ROOT}}"
-SCHEDULER_DIR="${SCHEDULER_ROOT}/llm-d-inference-scheduler"
 
 # ── Step 1: Read metadata ─────────────────────────────────────────
 info "Reading run metadata..."
@@ -57,6 +55,7 @@ fi
 REGISTRY_HUB=$(python3 -c "import json; print(json.load(open('${METADATA}'))['registry'])")
 REPO_NAME=$(python3 -c "import json; print(json.load(open('${METADATA}')).get('repo_name','llm-d-inference-scheduler'))")
 FULL_IMAGE="${REGISTRY_HUB}/${REPO_NAME}:${RUN_NAME}"
+SCHEDULER_DIR="${SCHEDULER_ROOT}/${REPO_NAME}"
 info "Target image: ${FULL_IMAGE}"
 
 # ── Step 2: Check registry secret ─────────────────────────────────
@@ -79,7 +78,7 @@ fi
 ok "registry-secret found"
 
 # ── Step 3: Copy source to cluster ─────────────────────────────────
-info "Copying llm-d-inference-scheduler source to cluster..."
+info "Copying ${REPO_NAME} source to cluster..."
 
 # Clean up any leftover pod from a previous run
 kubectl delete pod source-copy -n "${NAMESPACE}" --ignore-not-found --force --grace-period=0 2>/dev/null || true
@@ -103,7 +102,7 @@ kubectl exec source-copy -n "${NAMESPACE}" -- sh -c "rm -rf /workspace/source/${
 
 info "Uploading source (this may take a minute)..."
 kubectl exec source-copy -n "${NAMESPACE}" -- mkdir -p "/workspace/source/${RUN_NAME}"
-kubectl cp "${SCHEDULER_DIR}/" "${NAMESPACE}/source-copy:/workspace/source/${RUN_NAME}/llm-d-inference-scheduler"
+kubectl cp "${SCHEDULER_DIR}/" "${NAMESPACE}/source-copy:/workspace/source/${RUN_NAME}/${REPO_NAME}"
 ok "Source uploaded"
 
 kubectl delete pod source-copy --namespace "${NAMESPACE}" --force --grace-period=0 2>/dev/null || true
@@ -132,9 +131,9 @@ spec:
         - build
         - --frontend=dockerfile.v0
         - --local
-        - context=/workspace/source/${RUN_NAME}/llm-d-inference-scheduler
+        - context=/workspace/source/${RUN_NAME}/${REPO_NAME}
         - --local
-        - dockerfile=/workspace/source/${RUN_NAME}/llm-d-inference-scheduler
+        - dockerfile=/workspace/source/${RUN_NAME}/${REPO_NAME}
         - --opt
         - filename=Dockerfile.epp
         - --opt
