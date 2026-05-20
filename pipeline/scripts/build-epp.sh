@@ -23,6 +23,8 @@ RUN_DIR=""
 RUN_NAME=""
 NAMESPACE=""
 EXPERIMENT_ROOT=""
+IMAGE_REF=""
+SOURCE_DIR=""
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -30,6 +32,8 @@ while [[ $# -gt 0 ]]; do
     --run-name)         RUN_NAME="$2"; shift 2 ;;
     --namespace)        NAMESPACE="$2"; shift 2 ;;
     --experiment-root)  EXPERIMENT_ROOT="$2"; shift 2 ;;
+    --image-ref)        IMAGE_REF="$2"; shift 2 ;;
+    --source-dir)       SOURCE_DIR="$2"; shift 2 ;;
     *) err "Unknown arg: $1"; exit 1 ;;
   esac
 done
@@ -44,19 +48,28 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SIM2REAL_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 SCHEDULER_ROOT="${EXPERIMENT_ROOT:-${SIM2REAL_ROOT}}"
 
-# ── Step 1: Read metadata ─────────────────────────────────────────
-info "Reading run metadata..."
+# ── Step 1: Resolve image ref and source dir ─────────────────────
+info "Resolving build parameters..."
 METADATA="${RUN_DIR}/run_metadata.json"
-if [ ! -f "${METADATA}" ]; then
-  err "run_metadata.json not found at ${METADATA}"
-  exit 1
+
+if [ -n "${IMAGE_REF}" ] && [ -n "${SOURCE_DIR}" ]; then
+  FULL_IMAGE="${IMAGE_REF}"
+  SCHEDULER_DIR="${SOURCE_DIR}"
+else
+  # Fallback: derive from run_metadata.json (backward compat)
+  if [ ! -f "${METADATA}" ]; then
+    err "run_metadata.json not found at ${METADATA}"
+    exit 1
+  fi
+  REGISTRY_HUB=$(python3 -c "import json; print(json.load(open('${METADATA}'))['registry'])")
+  REPO_NAME=$(python3 -c "import json; print(json.load(open('${METADATA}')).get('repo_name','llm-d-inference-scheduler'))")
+  FULL_IMAGE="${REGISTRY_HUB}/${REPO_NAME}:${RUN_NAME}"
+  SCHEDULER_DIR="${SCHEDULER_ROOT}/${REPO_NAME}"
 fi
 
-REGISTRY_HUB=$(python3 -c "import json; print(json.load(open('${METADATA}'))['registry'])")
-REPO_NAME=$(python3 -c "import json; print(json.load(open('${METADATA}')).get('repo_name','llm-d-inference-scheduler'))")
-FULL_IMAGE="${REGISTRY_HUB}/${REPO_NAME}:${RUN_NAME}"
-SCHEDULER_DIR="${SCHEDULER_ROOT}/${REPO_NAME}"
+DIR_BASENAME=$(basename "${SCHEDULER_DIR}")
 info "Target image: ${FULL_IMAGE}"
+info "Source dir: ${SCHEDULER_DIR}"
 
 # ── Step 2: Check registry secret ─────────────────────────────────
 info "Checking registry-secret..."
@@ -78,7 +91,7 @@ fi
 ok "registry-secret found"
 
 # ── Step 3: Copy source to cluster ─────────────────────────────────
-info "Copying ${REPO_NAME} source to cluster..."
+info "Copying ${DIR_BASENAME} source to cluster..."
 
 # Clean up any leftover pod from a previous run
 kubectl delete pod source-copy -n "${NAMESPACE}" --ignore-not-found --force --grace-period=0 2>/dev/null || true
@@ -102,7 +115,7 @@ kubectl exec source-copy -n "${NAMESPACE}" -- sh -c "rm -rf /workspace/source/${
 
 info "Uploading source (this may take a minute)..."
 kubectl exec source-copy -n "${NAMESPACE}" -- mkdir -p "/workspace/source/${RUN_NAME}"
-kubectl cp "${SCHEDULER_DIR}/" "${NAMESPACE}/source-copy:/workspace/source/${RUN_NAME}/${REPO_NAME}"
+kubectl cp "${SCHEDULER_DIR}/" "${NAMESPACE}/source-copy:/workspace/source/${RUN_NAME}/${DIR_BASENAME}"
 ok "Source uploaded"
 
 kubectl delete pod source-copy --namespace "${NAMESPACE}" --force --grace-period=0 2>/dev/null || true
@@ -131,9 +144,9 @@ spec:
         - build
         - --frontend=dockerfile.v0
         - --local
-        - context=/workspace/source/${RUN_NAME}/${REPO_NAME}
+        - context=/workspace/source/${RUN_NAME}/${DIR_BASENAME}
         - --local
-        - dockerfile=/workspace/source/${RUN_NAME}/${REPO_NAME}
+        - dockerfile=/workspace/source/${RUN_NAME}/${DIR_BASENAME}
         - --opt
         - filename=Dockerfile.epp
         - --opt
@@ -174,13 +187,15 @@ fi
 kubectl delete pod "${BUILD_POD}" -n "${NAMESPACE}" --ignore-not-found --force --grace-period=0 2>/dev/null || true
 
 # ── Step 7: Update metadata ───────────────────────────────────────
-python3 -c "
+if [ -z "${IMAGE_REF}" ] && [ -f "${METADATA}" ]; then
+  python3 -c "
 import json
 m = json.load(open('${METADATA}'))
 m['stages']['deploy']['last_completed_step'] = 'build_epp'
 m['epp_image'] = '${FULL_IMAGE}'
 json.dump(m, open('${METADATA}', 'w'), indent=2)
 "
+fi
 
 # ── Done ───────────────────────────────────────────────────────────
 echo
