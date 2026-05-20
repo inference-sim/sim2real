@@ -1574,56 +1574,39 @@ def test_status_empty_pairs_only_orchestrator(tmp_path, capsys, monkeypatch):
     assert "0 pairs" in out
 
 
-# ── EPP build decision (_resolve_epp_action) ──────────────────────────────────
+# ── Image build decision (_cmd_build) ──────────────────────────────────────────
 
-def test_epp_action_missing_metadata(tmp_path):
-    """Missing run_metadata.json → error."""
-    from pipeline.deploy import _resolve_epp_action
-    result = _resolve_epp_action(tmp_path, skip_build_epp=False)
-    assert result.startswith("error:")
-    assert "run_metadata.json not found" in result
-
-
-def test_epp_action_malformed_json(tmp_path):
-    """Corrupt run_metadata.json → error."""
-    from pipeline.deploy import _resolve_epp_action
-    (tmp_path / "run_metadata.json").write_text("{bad json")
-    result = _resolve_epp_action(tmp_path, skip_build_epp=False)
-    assert result.startswith("error:")
-    assert "not valid JSON" in result
+def test_cmd_build_missing_metadata(tmp_path):
+    """Missing run_metadata.json → sys.exit."""
+    from pipeline.deploy import _cmd_build
+    with pytest.raises(SystemExit):
+        _cmd_build(tmp_path, namespace="ns", skip_build=False)
 
 
-def test_epp_action_no_component_image(tmp_path):
+def test_cmd_build_no_component_image(tmp_path, capsys):
     """component_image absent → skip."""
-    from pipeline.deploy import _resolve_epp_action
+    from pipeline.deploy import _cmd_build
     (tmp_path / "run_metadata.json").write_text(json.dumps({"registry": "quay.io/me"}))
-    result = _resolve_epp_action(tmp_path, skip_build_epp=False)
+    result = _cmd_build(tmp_path, namespace="ns", skip_build=False)
     assert result == "skip"
 
 
-def test_epp_action_empty_component_image(tmp_path):
-    """component_image is empty string → error (misconfigured setup)."""
-    from pipeline.deploy import _resolve_epp_action
+def test_cmd_build_empty_component_image(tmp_path):
+    """component_image is empty string → sys.exit (misconfigured setup)."""
+    from pipeline.deploy import _cmd_build
     (tmp_path / "run_metadata.json").write_text(json.dumps({"component_image": ""}))
-    result = _resolve_epp_action(tmp_path, skip_build_epp=False)
-    assert result.startswith("error:")
-    assert "empty" in result
+    with pytest.raises(SystemExit):
+        _cmd_build(tmp_path, namespace="ns", skip_build=False)
 
 
-def test_epp_action_skip_build_flag(tmp_path):
-    """component_image present + --skip-build-epp → skip."""
-    from pipeline.deploy import _resolve_epp_action
-    (tmp_path / "run_metadata.json").write_text(json.dumps({"component_image": "quay.io/me/sched:run1"}))
-    result = _resolve_epp_action(tmp_path, skip_build_epp=True)
+def test_cmd_build_skip_flag(tmp_path, capsys):
+    """--skip-build returns skip."""
+    from pipeline.deploy import _cmd_build
+    (tmp_path / "run_metadata.json").write_text(
+        json.dumps({"component_image": "quay.io/me/sched:r1", "registry": "quay.io/me", "repo_name": "sched"})
+    )
+    result = _cmd_build(tmp_path, namespace="ns", skip_build=True)
     assert result == "skip"
-
-
-def test_epp_action_build(tmp_path):
-    """component_image present, no skip flag → build."""
-    from pipeline.deploy import _resolve_epp_action
-    (tmp_path / "run_metadata.json").write_text(json.dumps({"component_image": "quay.io/me/sched:run1"}))
-    result = _resolve_epp_action(tmp_path, skip_build_epp=False)
-    assert result == "build"
 
 
 # ── _check_slot_ready hf_secret_name parameter ──────────────────────────────
@@ -1941,7 +1924,7 @@ def test_cmd_run_uses_configmap_store(monkeypatch, tmp_path):
     import pipeline.deploy as mod
 
     _mock_cm(monkeypatch, {})
-    monkeypatch.setattr(mod, "_resolve_epp_action", lambda *a: "skip")
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_load_pairs", lambda d: {})
 
     run_dir = tmp_path / "runs" / "test-run"
@@ -1950,7 +1933,7 @@ def test_cmd_run_uses_configmap_store(monkeypatch, tmp_path):
     (run_dir / "cluster").mkdir()
 
     args = argparse.Namespace(
-        skip_build_epp=True, only=None, workload=None, package=None,
+        skip_build=True, only=None, workload=None, package=None,
         status=None, force=False, max_retries=2, poll_interval=30,
         gpu_resource_type=None, default_gpu_cost=1,
         pending_threshold=600, max_pending_stalls=10, max_backoff=600,

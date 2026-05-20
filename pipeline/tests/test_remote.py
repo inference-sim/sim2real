@@ -190,7 +190,7 @@ def test_job_structure():
     args = container["args"]
     assert "--experiment-root" in args
     assert "run" in args
-    assert "--skip-build-epp" in args
+    assert "--skip-build" in args
     assert "--dry-run" in args
 
 
