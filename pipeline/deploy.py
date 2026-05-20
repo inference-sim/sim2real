@@ -109,41 +109,58 @@ def _load_setup_config() -> dict:
     return {}
 
 
-# ── EPP build decision ─────────────────────────────────────────────────────────
+# ── Image build ───────────────────────────────────────────────────────────────
 
-def _resolve_epp_action(run_dir: Path, skip_build_epp: bool) -> str:
-    """Determine EPP build action based on run metadata.
+def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
+    """Ensure all required scenario images exist. Returns 'built', 'skip', or 'current'.
 
-    Returns one of: "build", "skip", "error:<message>"
+    This is the 'deploy build' logic. Called implicitly by 'deploy run' as pre-flight.
     """
+    from pipeline.lib.ensure_image import (
+        compute_source_hash, image_needs_build, save_source_hash,
+    )
+
     run_meta_path = run_dir / "run_metadata.json"
     if not run_meta_path.exists():
-        return "error:run_metadata.json not found — run setup.py first."
+        err("run_metadata.json not found — run setup.py first.")
+        sys.exit(1)
     try:
         run_meta = json.loads(run_meta_path.read_text())
     except json.JSONDecodeError as e:
-        return f"error:run_metadata.json is not valid JSON: {e}. Re-run setup.py."
+        err(f"run_metadata.json is not valid JSON: {e}. Re-run setup.py.")
+        sys.exit(1)
 
     component_image = run_meta.get("component_image")
-    if component_image is None:
-        return "skip"
     if not component_image:
-        return "error:component_image is empty in run_metadata.json. Re-run setup.py with a valid --registry."
-    if skip_build_epp:
+        info("No component_image in run metadata — skipping image build")
         return "skip"
-    return "build"
 
+    if skip_build:
+        info("--skip-build: skipping image build")
+        return "skip"
 
-# ── EPP Image build ─────────────────────────────────────────────────────────
+    step(1, "Ensure Images")
 
-def _build_epp_image(run_dir: Path, run_name: str, namespace: str) -> str:
-    """Build EPP image on-cluster. Returns the full image reference."""
-    step(1, "Build EPP Image")
+    registry = run_meta.get("registry", "")
+    repo_name = run_meta.get("repo_name", "llm-d-inference-scheduler")
+    run_name = run_dir.name
+    source_dir = EXPERIMENT_ROOT / repo_name
 
-    # Locate build-epp.sh
+    if not source_dir.exists():
+        err(f"Component source directory not found: {source_dir}")
+        sys.exit(1)
+
+    # Treatment image: tagged by run name
+    treatment_ref = f"{registry}/{repo_name}:{run_name}"
+
+    if not image_needs_build(run_dir, treatment_ref, source_dir):
+        ok(f"Treatment image current (hash unchanged): {treatment_ref}")
+        return "current"
+
+    info(f"Building treatment image: {treatment_ref}")
     build_script = REPO_ROOT / "pipeline" / "scripts" / "build-epp.sh"
     if not build_script.exists():
-        err(f"build-epp.sh not found at {build_script.relative_to(REPO_ROOT)} — ensure pipeline/scripts/build-epp.sh is present in the repo")
+        err(f"build-epp.sh not found at {build_script.relative_to(REPO_ROOT)}")
         sys.exit(1)
 
     result = run(
@@ -151,25 +168,20 @@ def _build_epp_image(run_dir: Path, run_name: str, namespace: str) -> str:
          "--run-dir", str(run_dir),
          "--run-name", run_name,
          "--namespace", namespace,
-         "--experiment-root", str(EXPERIMENT_ROOT)],
+         "--image-ref", treatment_ref,
+         "--source-dir", str(source_dir)],
         check=False,
         cwd=REPO_ROOT,
     )
     if result.returncode != 0:
-        err("EPP build failed — see output above")
+        err("Image build failed — see output above")
         sys.exit(1)
 
-    # Read image reference from run_metadata.json
-    meta_path = run_dir / "run_metadata.json"
-    if meta_path.exists():
-        meta = json.loads(meta_path.read_text())
-        full_image = meta.get("component_image", "")
-        if full_image:
-            ok(f"EPP image: {full_image}")
-            return full_image
-
-    err("EPP build completed but component_image not set in run_metadata.json")
-    sys.exit(1)
+    # Record source hash after successful build
+    current_hash = compute_source_hash(source_dir)
+    save_source_hash(run_dir, treatment_ref, current_hash)
+    ok(f"Image built and hash recorded: {treatment_ref}")
+    return "built"
 
 
 # ── PipelineRun helpers ──────────────────────────────────────────────────────
@@ -1382,14 +1394,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     if not namespaces or not namespaces[0]:
         err("No namespaces configured. Run setup.py with --namespaces."); sys.exit(1)
 
-    # Decide whether to build EPP image
-    epp_action = _resolve_epp_action(run_dir, args.skip_build_epp)
-    if epp_action.startswith("error:"):
-        err(epp_action[len("error:"):]); sys.exit(1)
-    elif epp_action == "skip":
-        info("No component_image in run metadata — skipping EPP build")
-    else:
-        _build_epp_image(run_dir, run_dir.name, namespaces[0])
+    _cmd_build(run_dir, namespace=namespaces[0], skip_build=args.skip_build)
 
     max_retries = getattr(args, "max_retries", 2)
     poll_interval = getattr(args, "poll_interval", 30)
@@ -2069,13 +2074,7 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
             err(f"Failed to delete completed Job: {detail}")
             sys.exit(1)
 
-    epp_action = _resolve_epp_action(run_dir, args.skip_build_epp)
-    if epp_action.startswith("error:"):
-        err(epp_action[len("error:"):]); sys.exit(1)
-    elif epp_action == "skip":
-        info("No component_image in run metadata — skipping EPP build")
-    else:
-        _build_epp_image(run_dir, run_dir.name, namespace)
+    _cmd_build(run_dir, namespace=namespace, skip_build=args.skip_build)
 
     workspace_dir = EXPERIMENT_ROOT / "workspace"
     run_name = run_dir.name
@@ -2130,7 +2129,7 @@ def build_parser() -> argparse.ArgumentParser:
 Examples:
   python pipeline/deploy.py run                        # Build EPP + orchestrate all pairs
   python pipeline/deploy.py run --remote               # Submit orchestrator as in-cluster Job
-  python pipeline/deploy.py run --skip-build-epp       # Orchestrate without EPP build
+  python pipeline/deploy.py run --skip-build            # Orchestrate without image build
   python pipeline/deploy.py status                     # Show progress snapshot
   python pipeline/deploy.py collect                    # Pull results for completed phases
   python pipeline/deploy.py collect --skip-logs        # Collect traces only (skip large logs)
@@ -2166,11 +2165,15 @@ Examples:
     status_p.add_argument("--package",  metavar="NAME",  help="Scope to pairs matching this package")
     status_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status (e.g. running, done, failed)")
 
+    build_p = sub.add_parser("build", help="Ensure all scenario images exist (pre-flight for run)")
+    build_p.add_argument("--skip-build", action="store_true", dest="skip_build",
+                         help="Skip image build entirely")
+
     run_p = sub.add_parser("run", help="Orchestrate parallel pool execution")
     run_p.add_argument("--remote", action="store_true", default=False,
                        help="Submit orchestrator as in-cluster Job instead of running locally")
-    run_p.add_argument("--skip-build-epp", action="store_true", dest="skip_build_epp",
-                       help="Skip EPP image build")
+    run_p.add_argument("--skip-build", action="store_true", dest="skip_build",
+                       help="Skip image build")
     run_p.add_argument("--only",         metavar="PAIR",  help="Scope execution to one specific pair key (wl- prefix optional)")
     run_p.add_argument("--workload",     metavar="NAME",  help="Scope execution to pairs matching this workload")
     run_p.add_argument("--package",      metavar="NAME",  help="Scope execution to pairs matching this package")
@@ -2263,6 +2266,14 @@ def main():
     if not run_dir.exists():
         err(f"Run directory not found: {run_dir}")
         sys.exit(1)
+
+    if cmd == "build":
+        namespaces = setup_config.get("namespaces") or [setup_config.get("namespace", "")]
+        if not namespaces or not namespaces[0]:
+            err("No namespaces configured. Run setup.py with --namespaces."); sys.exit(1)
+        _cmd_build(run_dir, namespace=namespaces[0],
+                   skip_build=getattr(args, "skip_build", False))
+        return
 
     if cmd == "run":
         if getattr(args, "remote", False):
