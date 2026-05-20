@@ -132,9 +132,12 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
         sys.exit(1)
 
     component_image = run_meta.get("component_image")
-    if not component_image:
+    if component_image is None:
         info("No component_image in run metadata — skipping image build")
         return "skip"
+    if not component_image:
+        err("component_image is empty in run_metadata.json — re-run setup.py with a valid --registry.")
+        sys.exit(1)
 
     if skip_build:
         info("--skip-build: skipping image build")
@@ -143,6 +146,9 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
     step(1, "Ensure Images")
 
     registry = run_meta.get("registry", "")
+    if not registry:
+        err("registry is empty in run_metadata.json — re-run setup.py with a valid --registry.")
+        sys.exit(1)
     repo_name = run_meta.get("repo_name", "llm-d-inference-scheduler")
     run_name = run_dir.name
     source_dir = EXPERIMENT_ROOT / repo_name

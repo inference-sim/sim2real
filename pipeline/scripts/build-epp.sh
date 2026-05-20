@@ -3,8 +3,10 @@ set -euo pipefail
 
 # ── Build EPP image on Kubernetes cluster ──────────────────────────
 # Usage: build-epp.sh --run-dir <path> --run-name <name> --namespace <ns>
+#          [--image-ref <ref>] [--source-dir <path>] [--experiment-root <path>]
 #
-# Reads registry/repo from run_metadata.json (created by /sim2real-setup).
+# When --image-ref and --source-dir are provided, uses them directly.
+# Otherwise reads registry/repo from run_metadata.json (created by /sim2real-setup).
 # Requires registry-secret in the namespace for push credentials.
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'

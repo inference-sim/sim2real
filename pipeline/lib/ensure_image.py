@@ -1,5 +1,6 @@
 """Ensure container images exist: source hash comparison and build dispatch."""
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -27,7 +28,9 @@ def save_source_hash(run_dir: Path, image_ref: str, source_hash: str) -> None:
     meta_path = run_dir / "run_metadata.json"
     meta = json.loads(meta_path.read_text())
     meta.setdefault("source_hashes", {})[image_ref] = source_hash
-    meta_path.write_text(json.dumps(meta, indent=2))
+    tmp_path = meta_path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(meta, indent=2))
+    os.replace(tmp_path, meta_path)
 
 
 def image_needs_build(run_dir: Path, image_ref: str, source_dir: Path) -> bool:
@@ -35,5 +38,8 @@ def image_needs_build(run_dir: Path, image_ref: str, source_dir: Path) -> bool:
     stored = load_source_hashes(run_dir).get(image_ref)
     if stored is None:
         return True
-    current = compute_source_hash(source_dir)
+    try:
+        current = compute_source_hash(source_dir)
+    except subprocess.CalledProcessError:
+        return True
     return current != stored

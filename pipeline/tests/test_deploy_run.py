@@ -1591,6 +1591,14 @@ def test_cmd_build_no_component_image(tmp_path, capsys):
     assert result == "skip"
 
 
+def test_cmd_build_empty_component_image(tmp_path):
+    """component_image is empty string → sys.exit (misconfigured setup)."""
+    from pipeline.deploy import _cmd_build
+    (tmp_path / "run_metadata.json").write_text(json.dumps({"component_image": ""}))
+    with pytest.raises(SystemExit):
+        _cmd_build(tmp_path, namespace="ns", skip_build=False)
+
+
 def test_cmd_build_skip_flag(tmp_path, capsys):
     """--skip-build returns skip."""
     from pipeline.deploy import _cmd_build
