@@ -1,9 +1,12 @@
 """Tests for pipeline/lib/ensure_image.py."""
 import json
 import subprocess
+import yaml
 from pathlib import Path
 
 from pipeline.lib.ensure_image import (
+    collect_scenario_images,
+    compute_baseline_ref,
     compute_source_hash,
     image_needs_build,
     load_source_hashes,
@@ -93,3 +96,80 @@ class TestImageNeedsBuild:
         meta = {"version": 1, "stages": {}, "source_hashes": {"img:tag": "stale_hash"}}
         (tmp_path / "run_metadata.json").write_text(json.dumps(meta))
         assert image_needs_build(tmp_path, "img:tag", src) is True
+
+
+class TestComputeBaselineRef:
+    def test_returns_short_sha_tag(self, tmp_path):
+        _init_git_repo(tmp_path)
+        full_hash = compute_source_hash(tmp_path)
+        result = compute_baseline_ref("ghcr.io/org/scheduler", tmp_path)
+        assert result == f"ghcr.io/org/scheduler:{full_hash[:8]}"
+
+    def test_uses_8_char_prefix(self, tmp_path):
+        _init_git_repo(tmp_path)
+        result = compute_baseline_ref("ghcr.io/org/scheduler", tmp_path)
+        tag = result.split(":")[-1]
+        assert len(tag) == 8
+        assert all(c in "0123456789abcdef" for c in tag)
+
+
+class TestCollectScenarioImages:
+    def test_extracts_images_from_scenarios(self, tmp_path):
+        cluster_dir = tmp_path / "cluster"
+        cluster_dir.mkdir()
+        baseline = {
+            "scenario": [{"name": "s1", "images": {
+                "inferenceScheduler": {"repository": "ghcr.io/org/scheduler", "tag": "abc1234"}
+            }}]
+        }
+        (cluster_dir / "base1.yaml").write_text(yaml.dump(baseline))
+        algo = {
+            "scenario": [{"name": "s1", "images": {
+                "inferenceScheduler": {"repository": "ghcr.io/org/scheduler", "tag": "r1"}
+            }}]
+        }
+        (cluster_dir / "algo1.yaml").write_text(yaml.dump(algo))
+
+        result = collect_scenario_images(cluster_dir)
+        refs = {r["image_ref"] for r in result}
+        assert "ghcr.io/org/scheduler:abc1234" in refs
+        assert "ghcr.io/org/scheduler:r1" in refs
+
+    def test_deduplicates_identical_refs(self, tmp_path):
+        cluster_dir = tmp_path / "cluster"
+        cluster_dir.mkdir()
+        scenario = {
+            "scenario": [{"name": "s1", "images": {
+                "inferenceScheduler": {"repository": "ghcr.io/org/sched", "tag": "v1"}
+            }}]
+        }
+        (cluster_dir / "base1.yaml").write_text(yaml.dump(scenario))
+        (cluster_dir / "base2.yaml").write_text(yaml.dump(scenario))
+
+        result = collect_scenario_images(cluster_dir)
+        assert len(result) == 1
+
+    def test_skips_pipelinerun_files(self, tmp_path):
+        cluster_dir = tmp_path / "cluster"
+        cluster_dir.mkdir()
+        pr = {"scenario": [{"name": "s", "images": {
+            "inferenceScheduler": {"repository": "r", "tag": "t"}
+        }}]}
+        (cluster_dir / "pipelinerun-wl1-base.yaml").write_text(yaml.dump(pr))
+
+        result = collect_scenario_images(cluster_dir)
+        assert result == []
+
+    def test_skips_scenarios_without_images(self, tmp_path):
+        cluster_dir = tmp_path / "cluster"
+        cluster_dir.mkdir()
+        scenario = {"scenario": [{"name": "s1"}]}
+        (cluster_dir / "base1.yaml").write_text(yaml.dump(scenario))
+
+        result = collect_scenario_images(cluster_dir)
+        assert result == []
+
+    def test_empty_cluster_dir(self, tmp_path):
+        cluster_dir = tmp_path / "cluster"
+        cluster_dir.mkdir()
+        assert collect_scenario_images(cluster_dir) == []

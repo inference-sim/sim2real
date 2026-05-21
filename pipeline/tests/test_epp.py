@@ -3,7 +3,7 @@
 import yaml
 
 from pipeline.lib.assemble import assemble_scenarios
-from pipeline.lib.epp import inject_epp_image
+from pipeline.lib.epp import inject_epp_image, inject_image_ref
 from pipeline.lib.tekton import make_pipelinerun_scenario
 
 
@@ -86,6 +86,31 @@ class TestInjectEppImage:
         inject_epp_image(scenario, "reg.io", "epp", "v2")
         assert scenario["scenario"][0]["images"]["vllm"] == {"repository": "vllm-r", "tag": "vllm-t"}
         assert scenario["scenario"][0]["images"]["inferenceScheduler"]["tag"] == "v2"
+
+
+class TestInjectImageRef:
+    def test_injects_complete_ref(self):
+        scenario = {"scenario": [{"name": "s1"}]}
+        result = inject_image_ref(scenario, "ghcr.io/org/scheduler", "abc12345")
+        assert result is True
+        img = scenario["scenario"][0]["images"]["inferenceScheduler"]
+        assert img["repository"] == "ghcr.io/org/scheduler"
+        assert img["tag"] == "abc12345"
+        assert img["pullPolicy"] == "Always"
+
+    def test_returns_false_for_empty_scenario(self):
+        scenario = {"scenario": []}
+        assert inject_image_ref(scenario, "r", "t") is False
+
+    def test_returns_false_for_missing_scenario_key(self):
+        scenario = {}
+        assert inject_image_ref(scenario, "r", "t") is False
+
+    def test_preserves_existing_images(self):
+        scenario = {"scenario": [{"name": "s1", "images": {"vllm": {"repository": "vllm-r", "tag": "vllm-t"}}}]}
+        inject_image_ref(scenario, "ghcr.io/org/scheduler", "tag1")
+        assert scenario["scenario"][0]["images"]["vllm"] == {"repository": "vllm-r", "tag": "vllm-t"}
+        assert scenario["scenario"][0]["images"]["inferenceScheduler"]["tag"] == "tag1"
 
 
 def _write(path, data):

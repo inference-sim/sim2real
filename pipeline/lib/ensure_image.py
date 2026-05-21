@@ -4,6 +4,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import yaml
+
 
 def compute_source_hash(source_dir: Path) -> str:
     """Return the HEAD commit hash of the git repo at source_dir."""
@@ -43,3 +45,49 @@ def image_needs_build(run_dir: Path, image_ref: str, source_dir: Path) -> bool:
     except subprocess.CalledProcessError:
         return True
     return current != stored
+
+
+def compute_baseline_ref(registry_repo: str, source_dir: Path) -> str:
+    """Return the baseline image ref tagged by the 8-char HEAD SHA of source_dir."""
+    sha = compute_source_hash(source_dir)
+    return f"{registry_repo}:{sha[:8]}"
+
+
+def collect_scenario_images(cluster_dir: Path) -> list[dict]:
+    """Extract unique image refs from resolved scenario YAMLs in cluster/.
+
+    Returns list of dicts: {"image_ref": "repo:tag", "package": "filename_stem"}
+    Skips pipelinerun-*.yaml files.
+    """
+    if not cluster_dir.exists():
+        return []
+
+    seen: set[str] = set()
+    results: list[dict] = []
+
+    for yaml_path in sorted(cluster_dir.glob("*.yaml")):
+        if yaml_path.name.startswith("pipelinerun-"):
+            continue
+        try:
+            data = yaml.safe_load(yaml_path.read_text()) or {}
+        except (OSError, yaml.YAMLError) as exc:
+            import warnings
+            warnings.warn(f"Skipping unreadable scenario file {yaml_path.name}: {exc}")
+            continue
+
+        for entry in data.get("scenario", []):
+            images = entry.get("images", {})
+            sched = images.get("inferenceScheduler")
+            if not sched:
+                continue
+            repo = sched.get("repository", "")
+            tag = sched.get("tag", "")
+            if not repo or not tag:
+                continue
+            ref = f"{repo}:{tag}"
+            if ref in seen:
+                continue
+            seen.add(ref)
+            results.append({"image_ref": ref, "package": yaml_path.stem})
+
+    return results

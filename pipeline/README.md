@@ -112,10 +112,10 @@ Phase state is tracked per-run in `workspace/runs/<run>/.state.json`. Delete it 
 
 ## deploy.py
 
-Builds the EPP image and orchestrates PipelineRun execution across namespace slots. Operates independently of `transfer.yaml` — driven by workspace files and `setup_config.json`.
+Ensures all scenario images exist and orchestrates PipelineRun execution across namespace slots. Operates independently of `transfer.yaml` — driven by workspace files and `setup_config.json`.
 
 ```bash
-python pipeline/deploy.py {run|status|collect|stop|reset|wipe|pairs} [flags]
+python pipeline/deploy.py {build|run|status|collect|stop|reset|wipe|pairs} [flags]
 ```
 
 Common flags (all subcommands):
@@ -124,18 +124,21 @@ Common flags (all subcommands):
 |------|---------|-------|
 | `--run NAME` | from `setup_config.json` | override active run |
 | `--experiment-root PATH` | cwd | path to experiment repo |
-| `--skip-build-epp` | false | reuse `epp_image` from `run_metadata.json` |
+| `--skip-build` | false | skip image build pre-flight |
+
+**Image build** — `deploy.py build` (called implicitly as pre-flight by `deploy.py run`) iterates over all resolved scenarios in `cluster/`, collects unique `images.inferenceScheduler` refs, and builds any that are stale. Baseline images are tagged by the component directory's HEAD SHA (8 chars); treatment images by the run name. Source hash comparison skips builds when the image is already current.
 
 **Pair discovery** — `deploy.py run` discovers `pipelinerun-*.yaml` files at the `cluster/` root. Each file's pair key is derived as `wl-` + filename stem minus the `pipelinerun-` prefix.
 
 **Collection phases** — `deploy.py collect` derives valid phases dynamically from progress data (packages with status `done`). Falls back to `[baseline, treatment]` when no progress exists. Use `--package` to filter, or `--package experiment` to collect all known phases.
 
-**`--skip-build-epp`** — skips the image build; use when resubmitting after a failed PipelineRun without changing the scorer.
+**`--skip-build`** — skips the image build; use when resubmitting after a failed PipelineRun without changing the scorer.
 
 **Subcommands:**
 
 ```bash
-python pipeline/deploy.py run     [flags]   # orchestrate parallel pool execution across namespace slots
+python pipeline/deploy.py build   [flags]   # ensure all scenario images exist (pre-flight for run)
+python pipeline/deploy.py run     [flags]   # ensure images + orchestrate parallel pool execution
 python pipeline/deploy.py status            # show progress snapshot of all (workload, package) pairs
 python pipeline/deploy.py collect [flags]     # pull results from the cluster PVC
 python pipeline/deploy.py stop               # stop the remote orchestrator Job
