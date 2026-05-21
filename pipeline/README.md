@@ -143,7 +143,7 @@ python pipeline/deploy.py status            # show progress snapshot of all (wor
 python pipeline/deploy.py collect [flags]     # pull results from the cluster PVC
 python pipeline/deploy.py stop               # stop the remote orchestrator Job
 python pipeline/deploy.py reset [flags]     # reset all non-pending pairs to pending (with cluster cleanup)
-python pipeline/deploy.py wipe  [flags]     # delete local result files for non-pending pairs
+python pipeline/deploy.py wipe  [flags]     # delete local result files for pairs in scope
 python pipeline/deploy.py pairs   [flags]   # list available pair keys, workloads, and packages
 ```
 
@@ -212,7 +212,7 @@ When `--only` or `--workload` is given, only matching workload subdirectories ar
 
 **Safety:** Results in `workspace/runs/<run>/results/` are preserved — only cluster resources and ConfigMap status are affected.
 
-**`deploy.py wipe`** — deletes local result files (`results/<package>/<workload>/`) for non-pending pairs. Does **not** modify pair status in the ConfigMap. Pending pairs are skipped (nothing to wipe). Empty package directories are cleaned up automatically.
+**`deploy.py wipe`** — deletes local result files (`results/<package>/<workload>/`) for all pairs in scope. Does **not** modify pair status in the ConfigMap. Pairs with no results on disk are skipped. Empty package directories are cleaned up automatically.
 
 | Flag | Description |
 |------|-------------|
@@ -222,7 +222,7 @@ When `--only` or `--workload` is given, only matching workload subdirectories ar
 | `--dry-run` | Print what would be wiped without acting |
 | `--yes` / `-y` | Skip confirmation prompt |
 
-**Re-running wiped pairs:** `wipe` only removes files; to re-dispatch, follow with `reset` to move pairs back to `pending`.
+**Re-running wiped pairs:** `wipe` only removes files. To re-dispatch wiped pairs, use `reset` to move them back to `pending`.
 
 **`deploy.py pairs`** — lists available pair keys, workloads, and packages by scanning `cluster/pipelinerun-*.yaml`.
 
