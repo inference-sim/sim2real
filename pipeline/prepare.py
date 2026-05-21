@@ -438,7 +438,7 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
         err(str(e))
         sys.exit(1)
 
-    # 4b.5: Inject EPP image into algorithm packages (only when translation occurred)
+    # 4b.5: Inject EPP images into packages (only when translation occurred)
     if translation_happened:
         meta_path = run_dir / "run_metadata.json"
         if not meta_path.exists():
@@ -463,6 +463,22 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
                 else:
                     err(f"{pkg.name} has no 'scenario' entries — EPP image cannot be injected.")
                     sys.exit(1)
+
+        # Inject baseline EPP image into baseline packages
+        component_path = manifest.get("component", {}).get("path", "")
+        if component_path:
+            comp_dir = EXPERIMENT_ROOT / component_path
+            if comp_dir.exists() and (comp_dir / ".git").exists():
+                from pipeline.lib.ensure_image import compute_source_hash
+                baseline_tag = compute_source_hash(comp_dir)[:8]
+                from pipeline.lib.epp import inject_image_ref
+                for pkg in packages:
+                    if pkg.kind == "baseline":
+                        injected = inject_image_ref(
+                            pkg.resolved, f"{registry}/{repo_name}", baseline_tag
+                        )
+                        if injected:
+                            ok(f"Baseline EPP image: {registry}/{repo_name}:{baseline_tag} → {pkg.name}")
 
     # 4b.6: Inject huggingface.secretName into all packages
     setup_config = _load_setup_config()
