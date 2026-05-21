@@ -8,7 +8,7 @@ Subcommands:
   collect  Pull results from cluster for completed phases
   stop     Stop the remote orchestrator Job
   reset    Reset all non-pending pairs to pending (with cluster cleanup)
-  wipe     Delete local result files for non-pending pairs
+  wipe     Delete local result files for pairs in scope
   pairs    List available pair keys, workloads, and packages
 """
 
@@ -2272,7 +2272,7 @@ Examples:
     reset_p.add_argument("--dry-run",  action="store_true", dest="dry_run",
                          help="Print what would be reset without doing it")
 
-    wipe_p = sub.add_parser("wipe", help="Delete local result files for non-pending pairs")
+    wipe_p = sub.add_parser("wipe", help="Delete local result files for pairs in scope")
     wipe_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key (wl- prefix optional)")
     wipe_p.add_argument("--workload", metavar="NAME",  help="Scope to pairs matching this workload")
     wipe_p.add_argument("--package",  metavar="NAME",  help="Scope to pairs matching this package")

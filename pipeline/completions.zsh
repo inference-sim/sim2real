@@ -60,7 +60,7 @@ _sim2real_deploy() {
                 'collect:Pull results for completed packages'
                 'stop:Stop the remote orchestrator Job'
                 'reset:Tear down cluster resources for all non-pending pairs'
-                'wipe:Delete local results and reset pairs to pending'
+                'wipe:Delete local result files for pairs in scope'
                 'pairs:List available pair keys, workloads, and packages'
             )
             _describe 'subcommand' subcommands
