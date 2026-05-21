@@ -962,7 +962,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                 # Entries without completed_namespace were written by an older
                 # version of the orchestrator that did not record it.
                 ns_phase_map: dict[str, list[str]] = {}
-                ns_workload_map: dict[str, set[str]] = {}
+                ns_pair_map: dict[str, set[tuple[str, str]]] = {}
                 missing_ns_keys: list[str] = []
                 for key, pentry in progress.items():
                     if not isinstance(pentry, dict):
@@ -980,7 +980,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                         ns_phase_map[ns].append(pkg)
                     wl = pentry.get("workload", "")
                     if wl:
-                        ns_workload_map.setdefault(ns, set()).add(wl)
+                        ns_pair_map.setdefault(ns, set()).add((pkg, wl))
 
                 total_pairs = sum(
                     1 for pentry in progress.values()
@@ -993,7 +993,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                 for key in missing_ns_keys:
                     warn(f"{key}: completed_namespace missing — skipping (re-run the workload with a newer orchestrator to collect results)")
                 for ns, ns_phases in sorted(ns_phase_map.items()):
-                    ns_workloads = sorted(ns_workload_map.get(ns, set()))
+                    pairs_in_ns = ns_pair_map.get(ns, set())
                     try:
                         errors = _extract_phases_from_pvc(
                             sorted(ns_phases), run_name, ns, run_dir,
@@ -1003,18 +1003,21 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                         for p in ns_phases:
                             if p not in failed:
                                 failed.append(p)
-                            for wl in ns_workloads:
-                                failed_pairs.append(f"{p}/{wl}")
+                            for pkg, wl in sorted(pairs_in_ns):
+                                if pkg == p:
+                                    failed_pairs.append(f"{p}/{wl}")
                     else:
                         for phase, exc in errors.items():
+                            wls_for_phase = sorted(
+                                wl for pkg, wl in pairs_in_ns if pkg == phase)
                             if exc is None:
-                                for wl in ns_workloads:
+                                for wl in wls_for_phase:
                                     ok(f"{phase}/{wl}    ({ns})")
                                     collected_pairs.append(f"{phase}/{wl}")
                                 if phase not in collected:
                                     collected.append(phase)
                             else:
-                                for wl in ns_workloads:
+                                for wl in wls_for_phase:
                                     warn(f"{phase}/{wl}    ({ns}): {exc}")
                                     failed_pairs.append(f"{phase}/{wl}")
                                 if phase not in failed:

@@ -1068,7 +1068,7 @@ def test_collect_unscoped_failure_reports_pair_count(tmp_path, monkeypatch, caps
     captured = capsys.readouterr()
     # 1 pair collected (baseline/smoke), 1 failed (treatment/smoke)
     assert "1/2 pairs" in captured.out
-    assert "1 pairs" in captured.out  # Failed count
+    assert "Failed:    1 pairs" in captured.out
 
 
 def test_collect_scoped_reports_namespace_context(tmp_path, monkeypatch, capsys):
@@ -1101,3 +1101,38 @@ def test_collect_scoped_reports_namespace_context(tmp_path, monkeypatch, capsys)
     assert "treatment/smoke" in output
     assert "(ns-slot-0)" in output
     assert "2/2 pairs" in output
+
+
+def test_collect_unscoped_no_cross_product_on_slot_reuse(tmp_path, monkeypatch, capsys):
+    """When a namespace slot is reused for different workloads, only actual pairs are reported."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    # ns-0 ran baseline/smoke and treatment/smoke, then was reused for baseline/load
+    # treatment/load does NOT exist in ns-0
+    data = {
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment": {"workload": "smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
+        "wl-load-baseline": {"workload": "load", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        package = None
+        skip_logs = False
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    captured = capsys.readouterr()
+    output = captured.out
+    # Should report exactly 3 pairs, not 4 (no phantom treatment/load)
+    assert "3/3 pairs" in output
+    assert "treatment/load" not in output
+    assert "baseline/smoke" in output
+    assert "baseline/load" in output
+    assert "treatment/smoke" in output
