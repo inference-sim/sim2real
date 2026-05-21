@@ -637,7 +637,7 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
         }
     })
     run(["kubectl", "run", pod_name, "--image=alpine:3.19", "--restart=Never",
-         "--overrides", overrides, "-n", namespace])
+         "--overrides", overrides, "-n", namespace], capture=True)
 
     result = run(
         ["kubectl", "wait", f"pod/{pod_name}", "--for=condition=Ready",
