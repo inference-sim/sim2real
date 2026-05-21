@@ -479,6 +479,10 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
                         )
                         if injected:
                             ok(f"Baseline EPP image: {registry}/{repo_name}:{baseline_tag} → {pkg.name}")
+            else:
+                info(f"Skipping baseline EPP injection: {component_path} not found or not a git repo")
+        else:
+            info("Skipping baseline EPP injection: no component.path in manifest")
 
     # 4b.6: Inject huggingface.secretName into all packages
     setup_config = _load_setup_config()
