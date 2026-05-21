@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 from pipeline.lib.ensure_image import (
+    compute_baseline_ref,
     compute_source_hash,
     image_needs_build,
     load_source_hashes,
@@ -93,3 +94,18 @@ class TestImageNeedsBuild:
         meta = {"version": 1, "stages": {}, "source_hashes": {"img:tag": "stale_hash"}}
         (tmp_path / "run_metadata.json").write_text(json.dumps(meta))
         assert image_needs_build(tmp_path, "img:tag", src) is True
+
+
+class TestComputeBaselineRef:
+    def test_returns_short_sha_tag(self, tmp_path):
+        _init_git_repo(tmp_path)
+        full_hash = compute_source_hash(tmp_path)
+        result = compute_baseline_ref("ghcr.io/org/scheduler", tmp_path)
+        assert result == f"ghcr.io/org/scheduler:{full_hash[:8]}"
+
+    def test_uses_8_char_prefix(self, tmp_path):
+        _init_git_repo(tmp_path)
+        result = compute_baseline_ref("ghcr.io/org/scheduler", tmp_path)
+        tag = result.split(":")[-1]
+        assert len(tag) == 8
+        assert all(c in "0123456789abcdef" for c in tag)
