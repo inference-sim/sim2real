@@ -19,3 +19,21 @@ def inject_epp_image(scenario_dict: dict, registry: str, repo_name: str, tag: st
     for entry in scenario_list:
         entry.setdefault("images", {})["inferenceScheduler"] = epp_img
     return True
+
+
+def inject_image_ref(scenario_dict: dict, repository: str, tag: str) -> bool:
+    """Inject inferenceScheduler image into all scenario entries.
+
+    Returns True if injection occurred, False if skipped (no scenarios).
+    """
+    scenario_list = scenario_dict.get("scenario", [])
+    if not scenario_list:
+        return False
+    img = {
+        "repository": repository,
+        "tag": tag,
+        "pullPolicy": "Always",
+    }
+    for entry in scenario_list:
+        entry.setdefault("images", {})["inferenceScheduler"] = img
+    return True
