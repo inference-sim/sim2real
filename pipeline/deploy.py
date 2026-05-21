@@ -164,7 +164,9 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
     scenario_images = collect_scenario_images(cluster_dir)
 
     if not scenario_images:
-        # Fallback: use the treatment ref from metadata (backward compat)
+        if cluster_dir.exists() and any(cluster_dir.glob("*.yaml")):
+            warn("cluster/ has scenario files but no images.inferenceScheduler found — "
+                 "falling back to treatment image only")
         treatment_ref = f"{registry}/{repo_name}:{run_name}"
         scenario_images = [{"image_ref": treatment_ref, "package": "treatment"}]
 
@@ -184,7 +186,11 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
     translation_output_path = run_dir / "translation_output.json"
     translation_output = None
     if translation_output_path.exists():
-        translation_output = json.loads(translation_output_path.read_text())
+        try:
+            translation_output = json.loads(translation_output_path.read_text())
+        except json.JSONDecodeError as e:
+            err(f"translation_output.json is not valid JSON: {e}. Re-run /sim2real-translate.")
+            sys.exit(1)
 
     build_script = REPO_ROOT / "pipeline" / "scripts" / "build-epp.sh"
     if not build_script.exists():
@@ -204,7 +210,11 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
         if translation_output and not is_treatment:
             from pipeline.lib.source_toggle import restore_baseline
             info(f"Restoring baseline state for: {ref}")
-            restore_baseline(source_dir, translation_output)
+            try:
+                restore_baseline(source_dir, translation_output)
+            except (subprocess.CalledProcessError, OSError) as exc:
+                err(f"Failed to restore baseline state in {source_dir}: {exc}")
+                sys.exit(1)
 
         info(f"Building image: {ref}")
         result = run(
@@ -221,7 +231,13 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
         # Restore treatment state after baseline build
         if translation_output and not is_treatment:
             from pipeline.lib.source_toggle import restore_treatment
-            restore_treatment(source_dir, generated_dir, translation_output)
+            try:
+                restore_treatment(source_dir, generated_dir, translation_output)
+            except (OSError, FileNotFoundError) as exc:
+                err(f"Failed to restore treatment state in {source_dir}: {exc}\n"
+                    f"  Working tree may be in baseline state. To recover:\n"
+                    f"  cd {source_dir} && git checkout -- .")
+                sys.exit(1)
 
         if result.returncode != 0:
             err(f"Image build failed for {ref} — see output above")
@@ -2354,7 +2370,7 @@ def main():
                    workloads_only=args.workloads_only,
                    packages_only=args.packages_only)
     else:
-        err("No subcommand specified. Use: deploy.py run | status | collect | stop | reset | wipe | pairs")
+        err("No subcommand specified. Use: deploy.py build | run | status | collect | stop | reset | wipe | pairs")
         sys.exit(1)
 
 

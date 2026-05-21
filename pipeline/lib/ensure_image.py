@@ -70,7 +70,9 @@ def collect_scenario_images(cluster_dir: Path) -> list[dict]:
             continue
         try:
             data = yaml.safe_load(yaml_path.read_text()) or {}
-        except (OSError, yaml.YAMLError):
+        except (OSError, yaml.YAMLError) as exc:
+            import warnings
+            warnings.warn(f"Skipping unreadable scenario file {yaml_path.name}: {exc}")
             continue
 
         for entry in data.get("scenario", []):

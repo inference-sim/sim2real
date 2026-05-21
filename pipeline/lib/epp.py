@@ -1,4 +1,4 @@
-"""EPP image injection for treatment scenarios."""
+"""EPP image injection utilities."""
 
 
 def inject_epp_image(scenario_dict: dict, registry: str, repo_name: str, tag: str) -> bool:
