@@ -115,10 +115,12 @@ def _load_setup_config() -> dict:
 def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
     """Ensure all required scenario images exist. Returns 'built', 'skip', or 'current'.
 
-    This is the 'deploy build' logic. Called implicitly by 'deploy run' as pre-flight.
+    Iterates over resolved scenarios in cluster/, extracts image refs,
+    and builds any that are stale (source hash mismatch).
     """
     from pipeline.lib.ensure_image import (
-        compute_source_hash, image_needs_build, save_source_hash,
+        collect_scenario_images, compute_source_hash,
+        image_needs_build, save_source_hash,
     )
 
     run_meta_path = run_dir / "run_metadata.json"
@@ -157,38 +159,80 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
         err(f"Component source directory not found: {source_dir}")
         sys.exit(1)
 
-    # Treatment image: tagged by run name
-    treatment_ref = f"{registry}/{repo_name}:{run_name}"
+    # Collect all unique image refs from resolved scenarios
+    cluster_dir = run_dir / "cluster"
+    scenario_images = collect_scenario_images(cluster_dir)
 
-    if not image_needs_build(run_dir, treatment_ref, source_dir):
-        ok(f"Treatment image current (hash unchanged): {treatment_ref}")
+    if not scenario_images:
+        # Fallback: use the treatment ref from metadata (backward compat)
+        treatment_ref = f"{registry}/{repo_name}:{run_name}"
+        scenario_images = [{"image_ref": treatment_ref, "package": "treatment"}]
+
+    # Determine which images need building
+    to_build = []
+    for img_info in scenario_images:
+        ref = img_info["image_ref"]
+        if image_needs_build(run_dir, ref, source_dir):
+            to_build.append(img_info)
+        else:
+            ok(f"Image current (hash unchanged): {ref}")
+
+    if not to_build:
         return "current"
 
-    info(f"Building treatment image: {treatment_ref}")
+    # Load translation output for source toggle (if available)
+    translation_output_path = run_dir / "translation_output.json"
+    translation_output = None
+    if translation_output_path.exists():
+        translation_output = json.loads(translation_output_path.read_text())
+
     build_script = REPO_ROOT / "pipeline" / "scripts" / "build-epp.sh"
     if not build_script.exists():
         err(f"build-epp.sh not found at {build_script.relative_to(REPO_ROOT)}")
         sys.exit(1)
 
-    result = run(
-        ["bash", str(build_script),
-         "--run-dir", str(run_dir),
-         "--run-name", run_name,
-         "--namespace", namespace,
-         "--image-ref", treatment_ref,
-         "--source-dir", str(source_dir)],
-        check=False,
-        cwd=REPO_ROOT,
-    )
-    if result.returncode != 0:
-        err("Image build failed — see output above")
-        sys.exit(1)
+    # Treatment ref for comparison (to distinguish baseline from treatment builds)
+    treatment_ref = f"{registry}/{repo_name}:{run_name}"
+    generated_dir = run_dir / "generated"
 
-    # Record source hash after successful build
-    current_hash = compute_source_hash(source_dir)
-    save_source_hash(run_dir, treatment_ref, current_hash)
-    ok(f"Image built and hash recorded: {treatment_ref}")
-    return "built"
+    built_any = False
+    for img_info in to_build:
+        ref = img_info["image_ref"]
+        is_treatment = (ref == treatment_ref)
+
+        # Source toggle: ensure working tree is in correct state for baseline builds
+        if translation_output and not is_treatment:
+            from pipeline.lib.source_toggle import restore_baseline
+            info(f"Restoring baseline state for: {ref}")
+            restore_baseline(source_dir, translation_output)
+
+        info(f"Building image: {ref}")
+        result = run(
+            ["bash", str(build_script),
+             "--run-dir", str(run_dir),
+             "--run-name", run_name,
+             "--namespace", namespace,
+             "--image-ref", ref,
+             "--source-dir", str(source_dir)],
+            check=False,
+            cwd=REPO_ROOT,
+        )
+
+        # Restore treatment state after baseline build
+        if translation_output and not is_treatment:
+            from pipeline.lib.source_toggle import restore_treatment
+            restore_treatment(source_dir, generated_dir, translation_output)
+
+        if result.returncode != 0:
+            err(f"Image build failed for {ref} — see output above")
+            sys.exit(1)
+
+        current_hash = compute_source_hash(source_dir)
+        save_source_hash(run_dir, ref, current_hash)
+        ok(f"Image built and hash recorded: {ref}")
+        built_any = True
+
+    return "built" if built_any else "current"
 
 
 # ── PipelineRun helpers ──────────────────────────────────────────────────────
