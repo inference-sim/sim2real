@@ -637,7 +637,7 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
         }
     })
     run(["kubectl", "run", pod_name, "--image=alpine:3.19", "--restart=Never",
-         "--overrides", overrides, "-n", namespace])
+         "--overrides", overrides, "-n", namespace], capture=True)
 
     result = run(
         ["kubectl", "wait", f"pod/{pod_name}", "--for=condition=Ready",
@@ -867,6 +867,9 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
         step(1, "Collecting Results")
         collected: list[str] = []
         failed: list[str] = []
+        collected_pairs: list[str] = []
+        failed_pairs: list[str] = []
+        total_pairs = len(collectible)
 
         skip_logs = getattr(args, "skip_logs", False)
         for wl_name in scoped_workloads:
@@ -883,6 +886,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                 for p in phases_to_collect:
                     if p not in failed:
                         failed.append(p)
+                    failed_pairs.append(f"{p}/{wl_name}")
                 continue
             try:
                 errors = _extract_phases_from_pvc(
@@ -893,16 +897,19 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                 for p in phases_to_collect:
                     if p not in failed:
                         failed.append(p)
+                    failed_pairs.append(f"{p}/{wl_name}")
             else:
                 for phase, exc in errors.items():
                     if exc is None:
-                        ok(f"Collected: {phase}/{wl_name}")
+                        ok(f"{phase}/{wl_name}    ({wl_ns})")
                         if phase not in collected:
                             collected.append(phase)
+                        collected_pairs.append(f"{phase}/{wl_name}")
                     else:
-                        warn(f"Extraction failed for {phase}/{wl_name}: {exc}")
+                        warn(f"{phase}/{wl_name}    ({wl_ns}): {exc}")
                         if phase not in failed:
                             failed.append(phase)
+                        failed_pairs.append(f"{phase}/{wl_name}")
 
         collected = [p for p in collected if p not in failed]
     else:
@@ -945,6 +952,8 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
         step(1, "Collecting Results")
         collected = []
         failed = []
+        collected_pairs: list[str] = []
+        failed_pairs: list[str] = []
 
         if phases_to_collect:
             skip_logs = getattr(args, "skip_logs", False)
@@ -953,6 +962,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                 # Entries without completed_namespace were written by an older
                 # version of the orchestrator that did not record it.
                 ns_phase_map: dict[str, list[str]] = {}
+                ns_pair_map: dict[str, set[tuple[str, str]]] = {}
                 missing_ns_keys: list[str] = []
                 for key, pentry in progress.items():
                     if not isinstance(pentry, dict):
@@ -968,9 +978,22 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                         continue
                     if pkg not in ns_phase_map.setdefault(ns, []):
                         ns_phase_map[ns].append(pkg)
+                    wl = pentry.get("workload", "")
+                    if wl:
+                        ns_pair_map.setdefault(ns, set()).add((pkg, wl))
+
+                total_pairs = sum(
+                    1 for pentry in progress.values()
+                    if isinstance(pentry, dict)
+                    and pentry.get("status") == "done"
+                    and pentry.get("package", "") in phases_to_collect
+                    and pentry.get("completed_namespace")
+                )
+
                 for key in missing_ns_keys:
                     warn(f"{key}: completed_namespace missing — skipping (re-run the workload with a newer orchestrator to collect results)")
                 for ns, ns_phases in sorted(ns_phase_map.items()):
+                    pairs_in_ns = ns_pair_map.get(ns, set())
                     try:
                         errors = _extract_phases_from_pvc(
                             sorted(ns_phases), run_name, ns, run_dir,
@@ -980,18 +1003,28 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                         for p in ns_phases:
                             if p not in failed:
                                 failed.append(p)
+                            for pkg, wl in sorted(pairs_in_ns):
+                                if pkg == p:
+                                    failed_pairs.append(f"{p}/{wl}")
                     else:
                         for phase, exc in errors.items():
+                            wls_for_phase = sorted(
+                                wl for pkg, wl in pairs_in_ns if pkg == phase)
                             if exc is None:
-                                ok(f"Collected: {phase}")
+                                for wl in wls_for_phase:
+                                    ok(f"{phase}/{wl}    ({ns})")
+                                    collected_pairs.append(f"{phase}/{wl}")
                                 if phase not in collected:
                                     collected.append(phase)
                             else:
-                                warn(f"Extraction failed for {phase}: {exc}")
+                                for wl in wls_for_phase:
+                                    warn(f"{phase}/{wl}    ({ns}): {exc}")
+                                    failed_pairs.append(f"{phase}/{wl}")
                                 if phase not in failed:
                                     failed.append(phase)
             else:
                 # No progress data — fallback to primary namespace.
+                total_pairs = len(phases_to_collect)
                 try:
                     errors = _extract_phases_from_pvc(
                         phases_to_collect, run_name, namespace, run_dir,
@@ -999,22 +1032,26 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                 except RuntimeError as e:
                     warn(f"Extractor pod failed: {e}")
                     failed.extend(phases_to_collect)
+                    failed_pairs.extend(phases_to_collect)
                 else:
                     for phase, exc in errors.items():
                         if exc is None:
-                            ok(f"Collected: {phase}")
+                            ok(f"{phase}    ({namespace})")
                             collected.append(phase)
+                            collected_pairs.append(phase)
                         else:
-                            warn(f"Extraction failed for {phase}: {exc}")
+                            warn(f"{phase}    ({namespace}): {exc}")
                             failed.append(phase)
+                            failed_pairs.append(phase)
+        else:
+            total_pairs = 0
 
     # Print summary
-    print(f"\n  Collected: {len(collected)}/{len(phases_to_collect)} phases")
-    if failed:
-        print(f"  Failed:    {', '.join(failed)}")
-    if collected:
-        dirs = "  ".join(f"results/{p}/" for p in collected)
-        print(f"  Results:   {run_dir}/{dirs}")
+    print(f"\n  Collected: {len(collected_pairs)}/{total_pairs} pairs")
+    if failed_pairs:
+        print(f"  Failed:    {len(failed_pairs)} pairs")
+    if collected_pairs:
+        print(f"  Results:   {run_dir / 'results'}/")
         print("\n  Next:      /sim2real-analyze")
     print()
 
