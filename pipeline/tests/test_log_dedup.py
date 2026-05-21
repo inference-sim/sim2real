@@ -121,6 +121,51 @@ class TestDispatchLogDedup:
         _log_dispatch(["a", "b"], ["a", "b", "c", "d"], 10, 5)
         assert len(messages) == 1
 
+    def test_zero_dispatch_warning_reemits_periodically(self):
+        """Stuck-dispatch warning re-emits every 10 iterations."""
+        messages, mock_warn = _make_info_collector()
+        _last_log_state = {}
+        _zero_dispatch_count = 0
+
+        def _log_zero_dispatch(n_pending, free_gpus, smallest):
+            nonlocal _zero_dispatch_count
+            state = ("zero", n_pending, free_gpus, smallest)
+            _zero_dispatch_count += 1
+            if state != _last_log_state.get("dispatch") or _zero_dispatch_count % 10 == 0:
+                mock_warn(f"Dispatching 0/{n_pending} pending pairs — smallest cost ({smallest}) exceeds free GPUs ({free_gpus})")
+                _last_log_state["dispatch"] = state
+
+        # First emission
+        _log_zero_dispatch(7, 2, 4)
+        assert len(messages) == 1
+
+        # Iterations 2-9: suppressed
+        for _ in range(8):
+            _log_zero_dispatch(7, 2, 4)
+        assert len(messages) == 1
+
+        # Iteration 10: re-emits
+        _log_zero_dispatch(7, 2, 4)
+        assert len(messages) == 2
+
+    def test_zero_dispatch_includes_smallest_in_state(self):
+        """Changed smallest GPU cost triggers new warning even if count/free unchanged."""
+        messages, mock_warn = _make_info_collector()
+        _last_log_state = {}
+        _zero_dispatch_count = 0
+
+        def _log_zero_dispatch(n_pending, free_gpus, smallest):
+            nonlocal _zero_dispatch_count
+            state = ("zero", n_pending, free_gpus, smallest)
+            _zero_dispatch_count += 1
+            if state != _last_log_state.get("dispatch") or _zero_dispatch_count % 10 == 0:
+                mock_warn(f"smallest cost ({smallest}) exceeds free GPUs ({free_gpus})")
+                _last_log_state["dispatch"] = state
+
+        _log_zero_dispatch(7, 2, 4)
+        _log_zero_dispatch(7, 2, 8)  # smallest changed
+        assert len(messages) == 2
+
     def test_dispatch_logs_on_change(self):
         messages, mock_info = _make_info_collector()
         _last_log_state = {}

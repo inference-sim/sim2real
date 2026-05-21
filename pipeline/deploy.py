@@ -1507,6 +1507,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     _probe_fail_count = 0
     _last_probe_error = ""
     _last_log_state: dict[str, object] = {}
+    _zero_dispatch_count = 0
 
     # Load or initialize progress
     progress = store.load()
@@ -1608,6 +1609,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 _last_log_state.pop("capacity", None)
                 _last_log_state.pop("dispatch", None)
                 _last_log_state.pop("backoff_skip", None)
+                _zero_dispatch_count = 0
 
             elif status in ("Failed", "PipelineRunCancelled", "PipelineRunCouldntGetPipeline",
                             "PipelineRunTimeout", "CreateRunFailed", "PipelineRunStopping",
@@ -1620,6 +1622,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 _last_log_state.pop("capacity", None)
                 _last_log_state.pop("dispatch", None)
                 _last_log_state.pop("backoff_skip", None)
+                _zero_dispatch_count = 0
 
             elif status in ("Running", "Started"):
                 # Check for pending pods (before timeout)
@@ -1648,6 +1651,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                     _last_log_state.pop("capacity", None)
                     _last_log_state.pop("dispatch", None)
                     _last_log_state.pop("backoff_skip", None)
+                    _zero_dispatch_count = 0
                     progress["_orchestrator"] = backoff.to_dict()
                     store.save(progress)
                     continue
@@ -1656,6 +1660,11 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                     if backoff.state != "normal":
                         backoff.signal_scheduling_success()
                         info(f"[{pair_key}] Pending→Running → backoff reset")
+                        _last_log_state.pop("capacity", None)
+                        _last_log_state.pop("dispatch", None)
+                        _last_log_state.pop("backoff_skip", None)
+                        _last_log_state.pop("backoff_level", None)
+                        _zero_dispatch_count = 0
                         progress["_orchestrator"] = backoff.to_dict()
                         store.save(progress)
 
@@ -1686,6 +1695,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                             _last_log_state.pop("capacity", None)
                             _last_log_state.pop("dispatch", None)
                             _last_log_state.pop("backoff_skip", None)
+                            _zero_dispatch_count = 0
                             store.save(progress)
                     except ValueError:
                         pass
@@ -1729,6 +1739,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             elif free_gpus >= max_cost:
                 if backoff.state != "normal":
                     info(f"Backoff probe: {free_gpus} free GPUs available → resuming normal dispatch")
+                    _last_log_state.pop("backoff_level", None)
+                    _last_log_state.pop("backoff_skip", None)
                 backoff.signal_capacity(free_gpus=free_gpus, max_cost=max_cost)
 
         # ── Assign pending work to free slots ────────────────────────────
@@ -1749,8 +1761,9 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 )
                 if len(dispatchable) == 0 and pending:
                     smallest = min(progress[k].get("gpu_cost", fallback_cost) for k in pending)
-                    _disp_state = ("zero", len(pending), free_gpus)
-                    if _disp_state != _last_log_state.get("dispatch"):
+                    _disp_state = ("zero", len(pending), free_gpus, smallest)
+                    _zero_dispatch_count += 1
+                    if _disp_state != _last_log_state.get("dispatch") or _zero_dispatch_count % 10 == 0:
                         warn(f"Dispatching 0/{len(pending)} pending pairs — smallest cost ({smallest}) exceeds free GPUs ({free_gpus})")
                         _last_log_state["dispatch"] = _disp_state
                 elif len(dispatchable) < len(pending):
@@ -1828,6 +1841,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             _last_log_state.pop("capacity", None)
             _last_log_state.pop("dispatch", None)
             _last_log_state.pop("backoff_skip", None)
+            _zero_dispatch_count = 0
 
         # Persist backoff state
         progress["_orchestrator"] = backoff.to_dict()
