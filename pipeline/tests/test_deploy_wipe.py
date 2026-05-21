@@ -32,7 +32,7 @@ def _setup_results(run_dir: Path) -> None:
 
 
 def test_wipe_all_deletes_results(tmp_path, monkeypatch):
-    """Unscoped wipe deletes results for non-pending pairs without resetting status."""
+    """Unscoped wipe deletes results for all pairs regardless of status."""
     import pipeline.deploy as mod
 
     run_dir = tmp_path / "run1"
@@ -45,13 +45,12 @@ def test_wipe_all_deletes_results(tmp_path, monkeypatch):
 
     mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
 
-    # Non-pending workload dirs deleted
+    # All pairs wiped regardless of status (including pending)
     assert not (run_dir / "results" / "baseline" / "wl-smoke").exists()
     assert not (run_dir / "results" / "baseline" / "wl-heavy").exists()
+    assert not (run_dir / "results" / "baseline" / "wl-load").exists()
     assert not (run_dir / "results" / "treatment" / "wl-smoke").exists()
     assert not (run_dir / "results" / "treatment" / "wl-load").exists()
-    # Pending pair's dir survives
-    assert (run_dir / "results" / "baseline" / "wl-load").exists()
 
 
 def test_wipe_scoped_by_workload(tmp_path, monkeypatch):
@@ -134,8 +133,8 @@ def test_wipe_dry_run_does_not_delete(tmp_path, monkeypatch, capsys):
     assert "DRY-RUN" in captured.out + captured.err
 
 
-def test_wipe_skips_pending_pairs(tmp_path, monkeypatch, capsys):
-    """Pending pairs are skipped (nothing to wipe)."""
+def test_wipe_includes_pending_pairs(tmp_path, monkeypatch):
+    """Pending pairs with results on disk are wiped like any other pair."""
     import pipeline.deploy as mod
 
     run_dir = tmp_path / "run1"
@@ -145,14 +144,16 @@ def test_wipe_skips_pending_pairs(tmp_path, monkeypatch, capsys):
                           "namespace": None, "retries": 0, "pending_stalls": 0, "pending_since": None},
     }
     _mock_cm(monkeypatch, progress)
+    d = run_dir / "results" / "baseline" / "wl-a"
+    d.mkdir(parents=True)
+    (d / "trace.csv").write_text("data")
 
     class _Args:
         only = None; workload = None; package = None; dry_run = False; yes = True
 
     mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
 
-    captured = capsys.readouterr()
-    assert "no pairs need wiping" in (captured.out + captured.err).lower()
+    assert not (run_dir / "results" / "baseline" / "wl-a").exists()
 
 
 def test_wipe_no_progress_reports_nothing(tmp_path, monkeypatch, capsys):
