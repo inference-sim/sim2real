@@ -601,7 +601,7 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                               run_dir: Path,
                               skip_logs: bool = False,
                               workload: "str | None" = None,
-                              allowed_workloads: "set[str] | None" = None) -> dict[str, "Exception | None"]:
+                              allowed_workloads: "dict[str, set[str]] | None" = None) -> dict[str, "Exception | None"]:
     """Extract results for one or more phases from data-pvc using a single pod.
 
     Data layout on PVC (written by run-workload-blis-observe):
@@ -614,9 +614,11 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
     copied individually, skipping those whose local ``trace_data.csv`` is
     already up to date (used by unscoped ``deploy.py collect``).
 
-    When *allowed_workloads* is set, the ``ls``-discovered list is filtered to
-    only include workloads in the set. Used by the parallel/sequential callers
-    to scope each slot to the workloads progress assigns to it.
+    When *allowed_workloads* is set (a dict mapping phase name to a set of
+    workload names), the ``ls``-discovered list for each phase is filtered to
+    only include workloads in that phase's set. Used by the parallel/sequential
+    callers to scope each slot to the exact (phase, workload) pairs that
+    progress assigns to it.
 
     When *skip_logs* is True, only trace files are copied (skipping vLLM and
     EPP log files which typically account for the bulk of the data).
@@ -701,7 +703,8 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                         continue
                     wl_names = list_result.stdout.strip().split() if list_result.stdout.strip() else []
                     if allowed_workloads is not None:
-                        wl_names = [w for w in wl_names if w in allowed_workloads]
+                        phase_allowed = allowed_workloads.get(phase, set())
+                        wl_names = [w for w in wl_names if w in phase_allowed]
                 phase_errors = []
                 for wl_name in wl_names:
                     if _is_up_to_date(dest_dir / wl_name / "trace_data.csv",
@@ -768,7 +771,8 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                     continue
                 wl_names = list_result.stdout.strip().split() if list_result.stdout.strip() else []
                 if allowed_workloads is not None:
-                    wl_names = [w for w in wl_names if w in allowed_workloads]
+                    phase_allowed = allowed_workloads.get(phase, set())
+                    wl_names = [w for w in wl_names if w in phase_allowed]
                 if not wl_names:
                     errors[phase] = None
                     continue
@@ -1047,7 +1051,9 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
 
                     def _extract_one_slot(ns, ns_phases):
                         pairs_in_ns = ns_pair_map.get(ns, set())
-                        allowed = {wl for _, wl in pairs_in_ns}
+                        allowed = {}
+                        for pkg, wl in pairs_in_ns:
+                            allowed.setdefault(pkg, set()).add(wl)
                         try:
                             errors = _extract_phases_from_pvc(
                                 sorted(ns_phases), run_name, ns, run_dir,
@@ -1073,7 +1079,9 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                 else:
                     for ns, ns_phases in ns_items:
                         pairs_in_ns = ns_pair_map.get(ns, set())
-                        allowed = {wl for _, wl in pairs_in_ns}
+                        allowed = {}
+                        for pkg, wl in pairs_in_ns:
+                            allowed.setdefault(pkg, set()).add(wl)
                         try:
                             errors = _extract_phases_from_pvc(
                                 sorted(ns_phases), run_name, ns, run_dir,
