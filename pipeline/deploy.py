@@ -1035,7 +1035,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                             errors = _extract_phases_from_pvc(
                                 sorted(ns_phases), run_name, ns, run_dir,
                                 skip_logs=skip_logs)
-                        except RuntimeError as e:
+                        except Exception as e:
                             return (ns, pairs_in_ns, e)
                         return (ns, pairs_in_ns, errors)
 
@@ -1045,7 +1045,12 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                             for ns, ns_phases in ns_items
                         }
                         for future in concurrent.futures.as_completed(futures):
-                            ns, pairs_in_ns, result = future.result()
+                            try:
+                                ns, pairs_in_ns, result = future.result()
+                            except Exception as e:
+                                ns = futures[future]
+                                pairs_in_ns = ns_pair_map.get(ns, set())
+                                result = e
                             _process_slot_result(ns, pairs_in_ns, result)
                 else:
                     for ns, ns_phases in ns_items:
