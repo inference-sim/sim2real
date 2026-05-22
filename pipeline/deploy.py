@@ -600,7 +600,8 @@ def _is_up_to_date(local_csv: Path, remote_mtime: "float | None") -> bool:
 def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                               run_dir: Path,
                               skip_logs: bool = False,
-                              workload: "str | None" = None) -> dict[str, "Exception | None"]:
+                              workload: "str | None" = None,
+                              allowed_workloads: "set[str] | None" = None) -> dict[str, "Exception | None"]:
     """Extract results for one or more phases from data-pvc using a single pod.
 
     Data layout on PVC (written by run-workload-blis-observe):
@@ -695,6 +696,8 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                             f"failed to list workloads: {list_result.stderr.strip()}")
                         continue
                     wl_names = list_result.stdout.strip().split() if list_result.stdout.strip() else []
+                    if allowed_workloads is not None:
+                        wl_names = [w for w in wl_names if w in allowed_workloads]
                 phase_errors = []
                 for wl_name in wl_names:
                     if _is_up_to_date(dest_dir / wl_name / "trace_data.csv",
@@ -760,6 +763,8 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                         f"failed to list workloads: {list_result.stderr.strip()}")
                     continue
                 wl_names = list_result.stdout.strip().split() if list_result.stdout.strip() else []
+                if allowed_workloads is not None:
+                    wl_names = [w for w in wl_names if w in allowed_workloads]
                 if not wl_names:
                     errors[phase] = None
                     continue
@@ -1038,10 +1043,12 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
 
                     def _extract_one_slot(ns, ns_phases):
                         pairs_in_ns = ns_pair_map.get(ns, set())
+                        allowed = {wl for _, wl in pairs_in_ns}
                         try:
                             errors = _extract_phases_from_pvc(
                                 sorted(ns_phases), run_name, ns, run_dir,
-                                skip_logs=skip_logs)
+                                skip_logs=skip_logs,
+                                allowed_workloads=allowed)
                         except Exception as e:
                             return (ns, pairs_in_ns, e)
                         return (ns, pairs_in_ns, errors)
@@ -1062,10 +1069,12 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                 else:
                     for ns, ns_phases in ns_items:
                         pairs_in_ns = ns_pair_map.get(ns, set())
+                        allowed = {wl for _, wl in pairs_in_ns}
                         try:
                             errors = _extract_phases_from_pvc(
                                 sorted(ns_phases), run_name, ns, run_dir,
-                                skip_logs=skip_logs)
+                                skip_logs=skip_logs,
+                                allowed_workloads=allowed)
                         except RuntimeError as e:
                             _process_slot_result(ns, pairs_in_ns, e)
                         else:
