@@ -614,6 +614,10 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
     copied individually, skipping those whose local ``trace_data.csv`` is
     already up to date (used by unscoped ``deploy.py collect``).
 
+    When *allowed_workloads* is set, the ``ls``-discovered list is filtered to
+    only include workloads in the set. Used by the parallel/sequential callers
+    to scope each slot to the workloads progress assigns to it.
+
     When *skip_logs* is True, only trace files are copied (skipping vLLM and
     EPP log files which typically account for the bulk of the data).
 

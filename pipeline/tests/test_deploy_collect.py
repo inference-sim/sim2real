@@ -1672,3 +1672,48 @@ def test_extract_phases_filters_by_allowed_workloads(tmp_path, monkeypatch):
     assert "wl-heavy" in copied_workloads, "wl-heavy should have been copied"
     assert "wl-load" not in copied_workloads, (
         "wl-load should NOT have been copied when allowed_workloads excludes it")
+
+
+def test_extract_phases_filters_by_allowed_workloads_skip_logs(tmp_path, monkeypatch):
+    """Same as above but with skip_logs=True — the --skip-logs discovery path
+    also respects allowed_workloads filtering."""
+    from pipeline import deploy
+    import subprocess
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+
+    copied_workloads = []
+
+    def mock_run(cmd, **kwargs):
+        mock = MagicMock(returncode=0, stdout="", stderr="")
+        cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+        if "exec" in cmd_str and "ls" in cmd_str:
+            mock.stdout = "wl-smoke\nwl-load\nwl-heavy"
+        elif "exec" in cmd_str and "stat" in cmd_str:
+            mock.stdout = ""
+        elif "cp" in cmd_str:
+            for wl in ("wl-smoke", "wl-load", "wl-heavy"):
+                if wl in cmd_str:
+                    copied_workloads.append(wl)
+                    dest = run_dir / "results" / "baseline" / wl
+                    dest.mkdir(parents=True, exist_ok=True)
+                    break
+        return mock
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    monkeypatch.setattr(deploy, "_probe_phase_sizes",
+                        lambda pod, rn, phases, ns: {p: 100 for p in phases})
+    monkeypatch.setattr(deploy, "_probe_remote_mtimes",
+                        lambda pod, path, ns: {})
+    monkeypatch.setattr(deploy, "_is_up_to_date", lambda local, remote: False)
+
+    deploy._extract_phases_from_pvc(
+        ["baseline"], "test-run", "ns-0", run_dir,
+        skip_logs=True, allowed_workloads={"wl-smoke", "wl-heavy"})
+
+    assert "wl-smoke" in copied_workloads, "wl-smoke should have been copied"
+    assert "wl-heavy" in copied_workloads, "wl-heavy should have been copied"
+    assert "wl-load" not in copied_workloads, (
+        "wl-load should NOT have been copied in skip-logs mode when excluded")
