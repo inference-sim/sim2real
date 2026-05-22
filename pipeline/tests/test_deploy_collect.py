@@ -1338,3 +1338,167 @@ def test_collect_unscoped_parallel_all_slots_fail(tmp_path, monkeypatch, capsys)
     out = capsys.readouterr().out
     assert "0/" in out
     assert "Failed:" in out
+
+
+# ── Stale file clearing tests ───────────────────────────────────────────────
+
+
+def test_collect_full_copy_clears_stale_files(tmp_path, monkeypatch):
+    """Full-copy path removes stale local files before kubectl cp."""
+    from pipeline import deploy
+    import subprocess
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    results_dir = run_dir / "results" / "baseline" / "wl-smoke"
+    results_dir.mkdir(parents=True)
+
+    stale_file = results_dir / "server_logs" / "stale.log"
+    stale_file.parent.mkdir(parents=True)
+    stale_file.write_text("stale")
+
+    data = {
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        package = None
+        skip_logs = False
+
+    def mock_run(cmd, **kwargs):
+        mock = MagicMock(returncode=0, stdout="", stderr="")
+        cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+        if "exec" in cmd_str and "ls" in cmd_str:
+            mock.stdout = "wl-smoke"
+        if "exec" in cmd_str and "stat" in cmd_str:
+            mock.stdout = ""
+        return mock
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    deploy._extract_phases_from_pvc(
+        ["baseline"], "test-run", "ns-0", run_dir, skip_logs=False)
+
+    assert not stale_file.exists()
+
+
+def test_collect_per_workload_clears_stale_files(tmp_path, monkeypatch):
+    """Per-workload (scoped) path removes stale local files before kubectl cp."""
+    from pipeline import deploy
+    import subprocess
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    results_dir = run_dir / "results" / "baseline" / "wl-smoke"
+    results_dir.mkdir(parents=True)
+
+    stale_file = results_dir / "server_logs" / "stale.log"
+    stale_file.parent.mkdir(parents=True)
+    stale_file.write_text("stale")
+
+    data = {
+        "wl-smoke-baseline": {"workload": "wl-smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    def mock_run(cmd, **kwargs):
+        mock = MagicMock(returncode=0, stdout="", stderr="")
+        cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+        if "exec" in cmd_str and "stat" in cmd_str:
+            mock.stdout = ""
+        return mock
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    deploy._extract_phases_from_pvc(
+        ["baseline"], "test-run", "ns-0", run_dir,
+        skip_logs=False, workload="wl-smoke")
+
+    assert not stale_file.exists()
+
+
+def test_collect_skip_logs_clears_stale_log_dirs(tmp_path, monkeypatch):
+    """--skip-logs path removes stale server_logs/ and epp_logs/ before copying."""
+    from pipeline import deploy
+    import subprocess
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    results_dir = run_dir / "results" / "baseline" / "wl-smoke"
+    results_dir.mkdir(parents=True)
+
+    stale_server = results_dir / "server_logs" / "stale.log"
+    stale_server.parent.mkdir(parents=True)
+    stale_server.write_text("stale server log")
+
+    stale_epp = results_dir / "epp_logs" / "stale.log"
+    stale_epp.parent.mkdir(parents=True)
+    stale_epp.write_text("stale epp log")
+
+    data = {
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    def mock_run(cmd, **kwargs):
+        mock = MagicMock(returncode=0, stdout="", stderr="")
+        cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+        if "exec" in cmd_str and "ls" in cmd_str:
+            mock.stdout = "wl-smoke"
+        if "exec" in cmd_str and "stat" in cmd_str:
+            mock.stdout = ""
+        return mock
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    deploy._extract_phases_from_pvc(
+        ["baseline"], "test-run", "ns-0", run_dir, skip_logs=True)
+
+    assert not stale_server.exists()
+    assert not (results_dir / "server_logs").exists()
+    assert not stale_epp.exists()
+
+
+def test_collect_idempotent_no_stale_accumulation(tmp_path, monkeypatch):
+    """Running collect twice produces same result as once (no accumulation)."""
+    from pipeline import deploy
+    import subprocess
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+
+    data = {
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    call_count = [0]
+
+    def mock_run(cmd, **kwargs):
+        mock = MagicMock(returncode=0, stdout="", stderr="")
+        cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+        if "exec" in cmd_str and "ls" in cmd_str:
+            mock.stdout = "wl-smoke"
+        elif "exec" in cmd_str and "stat" in cmd_str:
+            mock.stdout = ""
+        elif "cp" in cmd_str:
+            call_count[0] += 1
+            dest = run_dir / "results" / "baseline" / "wl-smoke"
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "trace_data.csv").write_text(f"data-{call_count[0]}")
+            (dest / "server_logs").mkdir(exist_ok=True)
+            (dest / "server_logs" / f"pod-{call_count[0]}.log").write_text("log")
+        return mock
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    deploy._extract_phases_from_pvc(
+        ["baseline"], "test-run", "ns-0", run_dir, skip_logs=False)
+
+    deploy._extract_phases_from_pvc(
+        ["baseline"], "test-run", "ns-0", run_dir, skip_logs=False)
+
+    results_dir = run_dir / "results" / "baseline" / "wl-smoke" / "server_logs"
+    log_files = list(results_dir.glob("*.log"))
+    assert len(log_files) == 1
