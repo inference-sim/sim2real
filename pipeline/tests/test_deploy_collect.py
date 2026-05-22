@@ -1557,13 +1557,13 @@ def test_collect_parallel_filters_workloads_per_slot(tmp_path, monkeypatch):
     # Build a map of namespace -> allowed_workloads for verification
     ns_to_allowed = {c["namespace"]: c["allowed_workloads"] for c in extract_calls}
 
-    # ns-0 should only allow "smoke"
-    assert ns_to_allowed["ns-0"] == {"smoke"}, (
-        f"Expected ns-0 allowed_workloads={{'smoke'}}, got {ns_to_allowed['ns-0']}")
+    # ns-0 should allow smoke in both phases
+    assert ns_to_allowed["ns-0"] == {"baseline": {"smoke"}, "treatment": {"smoke"}}, (
+        f"Expected ns-0 per-phase allowed_workloads, got {ns_to_allowed['ns-0']}")
 
-    # ns-1 should only allow "load" and "heavy"
-    assert ns_to_allowed["ns-1"] == {"load", "heavy"}, (
-        f"Expected ns-1 allowed_workloads={{'load', 'heavy'}}, got {ns_to_allowed['ns-1']}")
+    # ns-1 should allow load+heavy in both phases
+    assert ns_to_allowed["ns-1"] == {"baseline": {"load", "heavy"}, "treatment": {"load", "heavy"}}, (
+        f"Expected ns-1 per-phase allowed_workloads, got {ns_to_allowed['ns-1']}")
 
 
 def test_collect_sequential_filters_workloads_per_slot(tmp_path, monkeypatch):
@@ -1615,11 +1615,11 @@ def test_collect_sequential_filters_workloads_per_slot(tmp_path, monkeypatch):
     # Should have exactly 1 extract call
     assert len(extract_calls) == 1
 
-    # The single slot should receive allowed_workloads with both workloads
+    # The single slot should receive per-phase allowed_workloads
     call = extract_calls[0]
     assert call["namespace"] == "ns-0"
-    assert call["allowed_workloads"] == {"smoke", "load"}, (
-        f"Expected allowed_workloads={{'smoke', 'load'}}, got {call['allowed_workloads']}")
+    assert call["allowed_workloads"] == {"baseline": {"smoke", "load"}, "treatment": {"smoke", "load"}}, (
+        f"Expected per-phase allowed_workloads, got {call['allowed_workloads']}")
 
 
 def test_extract_phases_filters_by_allowed_workloads(tmp_path, monkeypatch):
@@ -1662,10 +1662,10 @@ def test_extract_phases_filters_by_allowed_workloads(tmp_path, monkeypatch):
                         lambda pod, path, ns: {})
     monkeypatch.setattr(deploy, "_is_up_to_date", lambda local, remote: False)
 
-    # Call with allowed_workloads limiting to only smoke and heavy
+    # Call with allowed_workloads limiting baseline phase to only smoke and heavy
     deploy._extract_phases_from_pvc(
         ["baseline"], "test-run", "ns-0", run_dir,
-        skip_logs=False, allowed_workloads={"wl-smoke", "wl-heavy"})
+        skip_logs=False, allowed_workloads={"baseline": {"wl-smoke", "wl-heavy"}})
 
     # Only wl-smoke and wl-heavy should have been copied, NOT wl-load
     assert "wl-smoke" in copied_workloads, "wl-smoke should have been copied"
@@ -1711,9 +1711,60 @@ def test_extract_phases_filters_by_allowed_workloads_skip_logs(tmp_path, monkeyp
 
     deploy._extract_phases_from_pvc(
         ["baseline"], "test-run", "ns-0", run_dir,
-        skip_logs=True, allowed_workloads={"wl-smoke", "wl-heavy"})
+        skip_logs=True, allowed_workloads={"baseline": {"wl-smoke", "wl-heavy"}})
 
     assert "wl-smoke" in copied_workloads, "wl-smoke should have been copied"
     assert "wl-heavy" in copied_workloads, "wl-heavy should have been copied"
     assert "wl-load" not in copied_workloads, (
         "wl-load should NOT have been copied in skip-logs mode when excluded")
+
+
+def test_extract_phases_per_phase_filter_prevents_cross_phase_leak(tmp_path, monkeypatch):
+    """Regression test for #216: a workload assigned to treatment on this slot
+    must NOT be collected under baseline even if it exists on the PVC there."""
+    from pipeline import deploy
+    import subprocess
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+
+    copied_pairs = []
+
+    def mock_run(cmd, **kwargs):
+        mock = MagicMock(returncode=0, stdout="", stderr="")
+        cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+        if "exec" in cmd_str and "ls" in cmd_str:
+            # Both phases have chatbot and balanced on PVC (stale from prior run)
+            mock.stdout = "chatbot\nbalanced"
+        elif "exec" in cmd_str and "stat" in cmd_str:
+            mock.stdout = ""
+        elif "cp" in cmd_str:
+            for phase in ("baseline", "treatment"):
+                for wl in ("chatbot", "balanced"):
+                    if f"/{phase}/{wl}/" in cmd_str:
+                        copied_pairs.append(f"{phase}/{wl}")
+                        dest = run_dir / "results" / phase / wl
+                        dest.mkdir(parents=True, exist_ok=True)
+                        break
+        return mock
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+    monkeypatch.setattr(deploy, "_probe_phase_sizes",
+                        lambda pod, rn, phases, ns: {p: 100 for p in phases})
+    monkeypatch.setattr(deploy, "_probe_remote_mtimes",
+                        lambda pod, path, ns: {})
+    monkeypatch.setattr(deploy, "_is_up_to_date", lambda local, remote: False)
+
+    # This slot is assigned: baseline/chatbot + treatment/balanced
+    # PVC has both workloads under both phases (stale)
+    deploy._extract_phases_from_pvc(
+        ["baseline", "treatment"], "test-run", "ns-0", run_dir,
+        skip_logs=False,
+        allowed_workloads={"baseline": {"chatbot"}, "treatment": {"balanced"}})
+
+    assert "baseline/chatbot" in copied_pairs
+    assert "treatment/balanced" in copied_pairs
+    assert "baseline/balanced" not in copied_pairs, (
+        "baseline/balanced is stale — should NOT be collected (cross-phase leak)")
+    assert "treatment/chatbot" not in copied_pairs, (
+        "treatment/chatbot is stale — should NOT be collected (cross-phase leak)")
