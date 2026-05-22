@@ -624,7 +624,7 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
     When *on_workload_done* is set, it is called after each workload completes
     (success or failure) with ``(phase, workload_name, namespace, error)``.
     *error* is None on success, or an Exception on failure. Used by callers to
-    report per-workload progress in real time during parallel extraction.
+    report per-workload progress in real time during extraction.
 
     When *skip_logs* is True, only trace files are copied (skipping vLLM and
     EPP log files which typically account for the bulk of the data).
@@ -704,8 +704,12 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                         check=False, capture=True,
                     )
                     if list_result.returncode != 0:
-                        errors[phase] = RuntimeError(
+                        ls_err = RuntimeError(
                             f"failed to list workloads: {list_result.stderr.strip()}")
+                        errors[phase] = ls_err
+                        if on_workload_done and allowed_workloads is not None:
+                            for wl in allowed_workloads.get(phase, set()):
+                                on_workload_done(phase, wl, namespace, ls_err)
                         continue
                     wl_names = list_result.stdout.strip().split() if list_result.stdout.strip() else []
                     if allowed_workloads is not None:
@@ -786,8 +790,12 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                     check=False, capture=True,
                 )
                 if list_result.returncode != 0:
-                    errors[phase] = RuntimeError(
+                    ls_err = RuntimeError(
                         f"failed to list workloads: {list_result.stderr.strip()}")
+                    errors[phase] = ls_err
+                    if on_workload_done and allowed_workloads is not None:
+                        for wl in allowed_workloads.get(phase, set()):
+                            on_workload_done(phase, wl, namespace, ls_err)
                     continue
                 wl_names = list_result.stdout.strip().split() if list_result.stdout.strip() else []
                 if allowed_workloads is not None:
@@ -1066,6 +1074,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                             failed.append(p)
                         for pkg, wl in sorted(pairs_in_ns):
                             if pkg == p:
+                                warn(f"{p}/{wl}    ({ns})")
                                 failed_pairs.append(f"{p}/{wl}")
 
                 if len(ns_items) > 1:
@@ -1113,7 +1122,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                                 skip_logs=skip_logs,
                                 allowed_workloads=allowed,
                                 on_workload_done=_on_workload_done)
-                        except RuntimeError as e:
+                        except Exception as e:
                             warn(f"Extractor pod failed in {ns}: {e}")
                             _handle_slot_failure(ns, pairs_in_ns)
             else:
