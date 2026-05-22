@@ -949,7 +949,6 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
         else:
             phases_to_collect = list(known_phases)
 
-        step(1, "Collecting Results")
         collected = []
         failed = []
         collected_pairs: list[str] = []
@@ -990,24 +989,28 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                     and pentry.get("completed_namespace")
                 )
 
+                ns_items = sorted(ns_phase_map.items())
+                if len(ns_items) > 1:
+                    step(1, f"Collecting Results ({len(ns_items)} slots in parallel)")
+                else:
+                    step(1, "Collecting Results")
+
                 for key in missing_ns_keys:
                     warn(f"{key}: completed_namespace missing — skipping (re-run the workload with a newer orchestrator to collect results)")
-                for ns, ns_phases in sorted(ns_phase_map.items()):
-                    pairs_in_ns = ns_pair_map.get(ns, set())
-                    try:
-                        errors = _extract_phases_from_pvc(
-                            sorted(ns_phases), run_name, ns, run_dir,
-                            skip_logs=skip_logs)
-                    except RuntimeError as e:
-                        warn(f"Extractor pod failed in {ns}: {e}")
-                        for p in ns_phases:
+
+                def _process_slot_result(ns, pairs_in_ns, result):
+                    """Process extraction result for one namespace slot."""
+                    if isinstance(result, Exception):
+                        warn(f"Extractor pod failed in {ns}: {result}")
+                        ns_phases_local = ns_phase_map[ns]
+                        for p in ns_phases_local:
                             if p not in failed:
                                 failed.append(p)
                             for pkg, wl in sorted(pairs_in_ns):
                                 if pkg == p:
                                     failed_pairs.append(f"{p}/{wl}")
                     else:
-                        for phase, exc in errors.items():
+                        for phase, exc in result.items():
                             wls_for_phase = sorted(
                                 wl for pkg, wl in pairs_in_ns if pkg == phase)
                             if exc is None:
@@ -1022,8 +1025,42 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                                     failed_pairs.append(f"{phase}/{wl}")
                                 if phase not in failed:
                                     failed.append(phase)
+
+                if len(ns_items) > 1:
+                    import concurrent.futures
+
+                    def _extract_one_slot(ns, ns_phases):
+                        pairs_in_ns = ns_pair_map.get(ns, set())
+                        try:
+                            errors = _extract_phases_from_pvc(
+                                sorted(ns_phases), run_name, ns, run_dir,
+                                skip_logs=skip_logs)
+                        except RuntimeError as e:
+                            return (ns, pairs_in_ns, e)
+                        return (ns, pairs_in_ns, errors)
+
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=len(ns_items)) as executor:
+                        futures = {
+                            executor.submit(_extract_one_slot, ns, ns_phases): ns
+                            for ns, ns_phases in ns_items
+                        }
+                        for future in concurrent.futures.as_completed(futures):
+                            ns, pairs_in_ns, result = future.result()
+                            _process_slot_result(ns, pairs_in_ns, result)
+                else:
+                    for ns, ns_phases in ns_items:
+                        pairs_in_ns = ns_pair_map.get(ns, set())
+                        try:
+                            errors = _extract_phases_from_pvc(
+                                sorted(ns_phases), run_name, ns, run_dir,
+                                skip_logs=skip_logs)
+                        except RuntimeError as e:
+                            _process_slot_result(ns, pairs_in_ns, e)
+                        else:
+                            _process_slot_result(ns, pairs_in_ns, errors)
             else:
                 # No progress data — fallback to primary namespace.
+                step(1, "Collecting Results")
                 total_pairs = len(phases_to_collect)
                 try:
                     errors = _extract_phases_from_pvc(
