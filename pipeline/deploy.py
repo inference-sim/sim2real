@@ -703,6 +703,9 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                         continue
                     wl_dest = dest_dir / wl_name
                     wl_dest.mkdir(parents=True, exist_ok=True)
+                    for log_dir in (wl_dest / "server_logs", wl_dest / "epp_logs"):
+                        if log_dir.exists():
+                            shutil.rmtree(log_dir)
                     # Copy trace files
                     for fname in ("trace_data.csv", "trace_header.yaml", "epp_stream_done"):
                         src = f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{wl_name}/{fname}"
@@ -729,6 +732,8 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                     errors[phase] = None
                 else:
                     wl_dest = dest_dir / workload
+                    if wl_dest.exists():
+                        shutil.rmtree(wl_dest)
                     wl_dest.mkdir(parents=True, exist_ok=True)
                     result = run(
                         ["kubectl", "cp",
@@ -765,6 +770,8 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                         info(f"[{phase}/{wl_name}] up to date — skipping")
                         continue
                     wl_dest = dest_dir / wl_name
+                    if wl_dest.exists():
+                        shutil.rmtree(wl_dest)
                     wl_dest.mkdir(parents=True, exist_ok=True)
                     result = run(
                         ["kubectl", "cp",
