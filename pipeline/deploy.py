@@ -601,7 +601,8 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                               run_dir: Path,
                               skip_logs: bool = False,
                               workload: "str | None" = None,
-                              allowed_workloads: "dict[str, set[str]] | None" = None) -> dict[str, "Exception | None"]:
+                              allowed_workloads: "dict[str, set[str]] | None" = None,
+                              on_workload_done=None) -> dict[str, "Exception | None"]:
     """Extract results for one or more phases from data-pvc using a single pod.
 
     Data layout on PVC (written by run-workload-blis-observe):
@@ -619,6 +620,11 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
     only include workloads in that phase's set. Used by the parallel/sequential
     callers to scope each slot to the exact (phase, workload) pairs that
     progress assigns to it.
+
+    When *on_workload_done* is set, it is called after each workload completes
+    (success or failure) with ``(phase, workload_name, namespace, error)``.
+    *error* is None on success, or an Exception on failure. Used by callers to
+    report per-workload progress in real time during parallel extraction.
 
     When *skip_logs* is True, only trace files are copied (skipping vLLM and
     EPP log files which typically account for the bulk of the data).
@@ -710,6 +716,8 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                     if _is_up_to_date(dest_dir / wl_name / "trace_data.csv",
                                       remote_mtimes.get(wl_name)):
                         info(f"[{phase}/{wl_name}] up to date — skipping")
+                        if on_workload_done:
+                            on_workload_done(phase, wl_name, namespace, None)
                         continue
                     wl_dest = dest_dir / wl_name
                     wl_dest.mkdir(parents=True, exist_ok=True)
@@ -717,12 +725,13 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                         if log_dir.exists():
                             shutil.rmtree(log_dir)
                     # Copy trace files
+                    wl_errors = []
                     for fname in ("trace_data.csv", "trace_header.yaml", "epp_stream_done"):
                         src = f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{wl_name}/{fname}"
                         r = run(["kubectl", "cp", src, str(wl_dest / fname), "--retries=3"],
                                 check=False, capture=True)
                         if r.returncode != 0 and "no such file" not in r.stderr.lower():
-                            phase_errors.append(f"{wl_name}/{fname}: {r.stderr.strip()}")
+                            wl_errors.append(f"{wl_name}/{fname}: {r.stderr.strip()}")
                     # Copy epp_logs directory
                     epp_src = f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{wl_name}/epp_logs/"
                     epp_dest = wl_dest / "epp_logs"
@@ -730,7 +739,12 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                     r = run(["kubectl", "cp", epp_src, str(epp_dest), "--retries=3"],
                             check=False, capture=True)
                     if r.returncode != 0 and "no such file" not in r.stderr.lower():
-                        phase_errors.append(f"{wl_name}/epp_logs: {r.stderr.strip()}")
+                        wl_errors.append(f"{wl_name}/epp_logs: {r.stderr.strip()}")
+                    if wl_errors:
+                        phase_errors.extend(wl_errors)
+                    if on_workload_done:
+                        wl_exc = RuntimeError("; ".join(wl_errors)) if wl_errors else None
+                        on_workload_done(phase, wl_name, namespace, wl_exc)
                 if phase_errors:
                     errors[phase] = RuntimeError("; ".join(phase_errors))
                 else:
@@ -740,6 +754,8 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                                   remote_mtimes.get(workload)):
                     info(f"[{phase}/{workload}] up to date — skipping")
                     errors[phase] = None
+                    if on_workload_done:
+                        on_workload_done(phase, workload, namespace, None)
                 else:
                     wl_dest = dest_dir / workload
                     if wl_dest.exists():
@@ -752,10 +768,14 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                         check=False, capture=True,
                     )
                     if result.returncode != 0:
-                        errors[phase] = RuntimeError(
+                        wl_exc = RuntimeError(
                             f"kubectl cp failed: {result.stderr.strip()}")
+                        errors[phase] = wl_exc
                     else:
+                        wl_exc = None
                         errors[phase] = None
+                    if on_workload_done:
+                        on_workload_done(phase, workload, namespace, wl_exc)
             else:
                 # Unscoped full copy: discover workloads via ls, skip
                 # up-to-date ones using remote_mtimes when available.
@@ -781,6 +801,8 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                     if _is_up_to_date(dest_dir / wl_name / "trace_data.csv",
                                       remote_mtimes.get(wl_name)):
                         info(f"[{phase}/{wl_name}] up to date — skipping")
+                        if on_workload_done:
+                            on_workload_done(phase, wl_name, namespace, None)
                         continue
                     wl_dest = dest_dir / wl_name
                     if wl_dest.exists():
@@ -793,7 +815,12 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                         check=False, capture=True,
                     )
                     if result.returncode != 0:
+                        wl_exc = RuntimeError(f"{wl_name}: {result.stderr.strip()}")
                         phase_errors.append(f"{wl_name}: {result.stderr.strip()}")
+                    else:
+                        wl_exc = None
+                    if on_workload_done:
+                        on_workload_done(phase, wl_name, namespace, wl_exc)
                 errors[phase] = RuntimeError("; ".join(phase_errors)) if phase_errors else None
     finally:
         run(["kubectl", "delete", "pod", pod_name, "-n", namespace,
@@ -1018,33 +1045,28 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                 for key in missing_ns_keys:
                     warn(f"{key}: completed_namespace missing — skipping (re-run the workload with a newer orchestrator to collect results)")
 
-                def _process_slot_result(ns, pairs_in_ns, result):
-                    """Process extraction result for one namespace slot."""
-                    if isinstance(result, Exception):
-                        warn(f"Extractor pod failed in {ns}: {result}")
-                        ns_phases_local = ns_phase_map[ns]
-                        for p in ns_phases_local:
-                            if p not in failed:
-                                failed.append(p)
-                            for pkg, wl in sorted(pairs_in_ns):
-                                if pkg == p:
-                                    failed_pairs.append(f"{p}/{wl}")
+                def _on_workload_done(phase, wl_name, ns, error):
+                    """Report per-workload progress as it happens."""
+                    if error is None:
+                        ok(f"{phase}/{wl_name}    ({ns})")
+                        collected_pairs.append(f"{phase}/{wl_name}")
+                        if phase not in collected:
+                            collected.append(phase)
                     else:
-                        for phase, exc in result.items():
-                            wls_for_phase = sorted(
-                                wl for pkg, wl in pairs_in_ns if pkg == phase)
-                            if exc is None:
-                                for wl in wls_for_phase:
-                                    ok(f"{phase}/{wl}    ({ns})")
-                                    collected_pairs.append(f"{phase}/{wl}")
-                                if phase not in collected:
-                                    collected.append(phase)
-                            else:
-                                for wl in wls_for_phase:
-                                    warn(f"{phase}/{wl}    ({ns}): {exc}")
-                                    failed_pairs.append(f"{phase}/{wl}")
-                                if phase not in failed:
-                                    failed.append(phase)
+                        warn(f"{phase}/{wl_name}    ({ns}): {error}")
+                        failed_pairs.append(f"{phase}/{wl_name}")
+                        if phase not in failed:
+                            failed.append(phase)
+
+                def _handle_slot_failure(ns, pairs_in_ns):
+                    """Handle pod-level failure where callback never fired."""
+                    ns_phases_local = ns_phase_map[ns]
+                    for p in ns_phases_local:
+                        if p not in failed:
+                            failed.append(p)
+                        for pkg, wl in sorted(pairs_in_ns):
+                            if pkg == p:
+                                failed_pairs.append(f"{p}/{wl}")
 
                 if len(ns_items) > 1:
                     import concurrent.futures
@@ -1055,13 +1077,14 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                         for pkg, wl in pairs_in_ns:
                             allowed.setdefault(pkg, set()).add(wl)
                         try:
-                            errors = _extract_phases_from_pvc(
+                            _extract_phases_from_pvc(
                                 sorted(ns_phases), run_name, ns, run_dir,
                                 skip_logs=skip_logs,
-                                allowed_workloads=allowed)
+                                allowed_workloads=allowed,
+                                on_workload_done=_on_workload_done)
                         except Exception as e:
                             return (ns, pairs_in_ns, e)
-                        return (ns, pairs_in_ns, errors)
+                        return (ns, pairs_in_ns, None)
 
                     with concurrent.futures.ThreadPoolExecutor(max_workers=len(ns_items)) as executor:
                         futures = {
@@ -1075,7 +1098,9 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                                 ns = futures[future]
                                 pairs_in_ns = ns_pair_map.get(ns, set())
                                 result = e
-                            _process_slot_result(ns, pairs_in_ns, result)
+                            if isinstance(result, Exception):
+                                warn(f"Extractor pod failed in {ns}: {result}")
+                                _handle_slot_failure(ns, pairs_in_ns)
                 else:
                     for ns, ns_phases in ns_items:
                         pairs_in_ns = ns_pair_map.get(ns, set())
@@ -1083,14 +1108,14 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
                         for pkg, wl in pairs_in_ns:
                             allowed.setdefault(pkg, set()).add(wl)
                         try:
-                            errors = _extract_phases_from_pvc(
+                            _extract_phases_from_pvc(
                                 sorted(ns_phases), run_name, ns, run_dir,
                                 skip_logs=skip_logs,
-                                allowed_workloads=allowed)
+                                allowed_workloads=allowed,
+                                on_workload_done=_on_workload_done)
                         except RuntimeError as e:
-                            _process_slot_result(ns, pairs_in_ns, e)
-                        else:
-                            _process_slot_result(ns, pairs_in_ns, errors)
+                            warn(f"Extractor pod failed in {ns}: {e}")
+                            _handle_slot_failure(ns, pairs_in_ns)
             else:
                 # No progress data — fallback to primary namespace.
                 step(1, "Collecting Results")
