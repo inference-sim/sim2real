@@ -1136,3 +1136,205 @@ def test_collect_unscoped_no_cross_product_on_slot_reuse(tmp_path, monkeypatch, 
     assert "baseline/smoke" in output
     assert "baseline/load" in output
     assert "treatment/smoke" in output
+
+
+# ── Parallel extraction tests ────────────────────────────────────────────────
+
+
+def test_collect_unscoped_parallel_multi_ns(tmp_path, monkeypatch):
+    """With multiple namespace slots, extraction runs via ThreadPoolExecutor."""
+    from pipeline import deploy
+    import concurrent.futures
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    data = {
+        "wl-smoke-baseline":   {"workload": "smoke", "package": "baseline",  "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment":  {"workload": "smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
+        "wl-load-baseline":    {"workload": "load",  "package": "baseline",  "status": "done", "completed_namespace": "ns-1"},
+        "wl-load-treatment":   {"workload": "load",  "package": "treatment", "status": "done", "completed_namespace": "ns-1"},
+        "wl-heavy-baseline":   {"workload": "heavy", "package": "baseline",  "status": "done", "completed_namespace": "ns-2"},
+        "wl-heavy-treatment":  {"workload": "heavy", "package": "treatment", "status": "done", "completed_namespace": "ns-2"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        package = None
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        extract_calls.append({"namespace": namespace, "phases": sorted(phases)})
+        return {p: None for p in phases}
+
+    executor_used = []
+    OrigExecutor = concurrent.futures.ThreadPoolExecutor
+
+    class TrackingExecutor(OrigExecutor):
+        def __init__(self, *a, **kw):
+            executor_used.append(True)
+            super().__init__(*a, **kw)
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
+         patch("concurrent.futures.ThreadPoolExecutor", TrackingExecutor):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert len(extract_calls) == 3
+    ns_set = {c["namespace"] for c in extract_calls}
+    assert ns_set == {"ns-0", "ns-1", "ns-2"}
+    assert len(executor_used) == 1
+
+
+def test_collect_unscoped_single_ns_no_threading(tmp_path, monkeypatch):
+    """With a single namespace slot, extraction runs sequentially (no ThreadPoolExecutor)."""
+    from pipeline import deploy
+    import concurrent.futures
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    data = {
+        "wl-smoke-baseline":   {"workload": "smoke", "package": "baseline",  "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment":  {"workload": "smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        package = None
+        skip_logs = False
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        return {p: None for p in phases}
+
+    executor_used = []
+    OrigExecutor = concurrent.futures.ThreadPoolExecutor
+
+    class TrackingExecutor(OrigExecutor):
+        def __init__(self, *a, **kw):
+            executor_used.append(True)
+            super().__init__(*a, **kw)
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
+         patch("concurrent.futures.ThreadPoolExecutor", TrackingExecutor):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert len(executor_used) == 0
+
+
+def test_collect_unscoped_parallel_one_slot_fails(tmp_path, monkeypatch, capsys):
+    """When one slot fails in parallel mode, other slots still succeed."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    data = {
+        "wl-smoke-baseline":   {"workload": "smoke", "package": "baseline",  "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment":  {"workload": "smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
+        "wl-load-baseline":    {"workload": "load",  "package": "baseline",  "status": "done", "completed_namespace": "ns-1"},
+        "wl-load-treatment":   {"workload": "load",  "package": "treatment", "status": "done", "completed_namespace": "ns-1"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        package = None
+        skip_logs = False
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        if namespace == "ns-1":
+            raise RuntimeError("pod not ready")
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    out = capsys.readouterr().out
+    assert "baseline/smoke" in out
+    assert "treatment/smoke" in out
+    assert "2/" in out
+
+
+def test_collect_unscoped_parallel_step_header(tmp_path, monkeypatch, capsys):
+    """Step header announces slot count when multiple slots exist."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    data = {
+        "wl-smoke-baseline":   {"workload": "smoke", "package": "baseline",  "status": "done", "completed_namespace": "ns-0"},
+        "wl-load-baseline":    {"workload": "load",  "package": "baseline",  "status": "done", "completed_namespace": "ns-1"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        package = None
+        skip_logs = False
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    out = capsys.readouterr().out
+    assert "2 slots in parallel" in out
+
+
+def test_collect_unscoped_parallel_non_runtime_error(tmp_path, monkeypatch, capsys):
+    """Non-RuntimeError from one slot doesn't crash the loop — other slots still succeed."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    data = {
+        "wl-smoke-baseline":   {"workload": "smoke", "package": "baseline",  "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment":  {"workload": "smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
+        "wl-load-baseline":    {"workload": "load",  "package": "baseline",  "status": "done", "completed_namespace": "ns-1"},
+        "wl-load-treatment":   {"workload": "load",  "package": "treatment", "status": "done", "completed_namespace": "ns-1"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        package = None
+        skip_logs = False
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        if namespace == "ns-1":
+            raise OSError("kubectl binary not found")
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    out = capsys.readouterr().out
+    assert "baseline/smoke" in out
+    assert "treatment/smoke" in out
+    assert "2/" in out
+
+
+def test_collect_unscoped_parallel_all_slots_fail(tmp_path, monkeypatch, capsys):
+    """All slots failing produces correct summary with zero collected."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    data = {
+        "wl-smoke-baseline":   {"workload": "smoke", "package": "baseline",  "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment":  {"workload": "smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
+        "wl-load-baseline":    {"workload": "load",  "package": "baseline",  "status": "done", "completed_namespace": "ns-1"},
+        "wl-load-treatment":   {"workload": "load",  "package": "treatment", "status": "done", "completed_namespace": "ns-1"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        package = None
+        skip_logs = False
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None):
+        raise RuntimeError(f"pod failed in {namespace}")
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    out = capsys.readouterr().out
+    assert "0/" in out
+    assert "Failed:" in out
