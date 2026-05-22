@@ -901,14 +901,15 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
         if not scoped_phases:
             warn("No done phases for scoped pairs.")
             phases_to_collect: list[str] = []
-        elif args.package:
+        elif _parse_list(args.package):
+            pkg_filter = _parse_list(args.package)
             valid = set(scoped_phases) | {"experiment"}
-            unknown = set(args.package) - valid
+            unknown = set(pkg_filter) - valid
             if unknown:
                 err(f"Unknown packages: {sorted(unknown)}. Valid: {sorted(valid)}")
                 sys.exit(1)
             phases_to_collect = []
-            for p in args.package:
+            for p in pkg_filter:
                 if p == "experiment":
                     phases_to_collect.extend(scoped_phases)
                 else:
@@ -986,14 +987,15 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
             else:
                 warn(f"No done phases in progress — discovered from cluster/: {known_phases}")
 
-        if args.package:
+        pkg_filter = _parse_list(args.package)
+        if pkg_filter:
             valid = set(known_phases) | {"experiment"}
-            unknown = set(args.package) - valid
+            unknown = set(pkg_filter) - valid
             if unknown:
                 err(f"Unknown packages: {sorted(unknown)}. Valid: {sorted(valid)}")
                 sys.exit(1)
             phases_to_collect = []
-            for p in args.package:
+            for p in pkg_filter:
                 if p == "experiment":
                     phases_to_collect.extend(known_phases)
                 else:
@@ -1342,35 +1344,49 @@ def _force_reset(progress: dict, scope: set, discovered: dict | None = None,
     return reset
 
 
+def _parse_list(value) -> "list[str] | None":
+    """Normalize a CLI flag value to a flat list, handling comma/space/mixed."""
+    if value is None:
+        return None
+    if isinstance(value, list):
+        result = [v.strip() for item in value for v in item.split(",") if v.strip()]
+    else:
+        result = [v.strip() for v in value.split(",") if v.strip()]
+    return result if result else None
+
+
 def _apply_run_filters(progress: dict, args) -> set:
     """Return the set of pair keys in scope for this invocation.
 
     With no flags: returns empty set (caller interprets as all pairs in scope).
     With flags: returns only matching pairs.
     """
-    only = getattr(args, "only", None)
-    workload = getattr(args, "workload", None)
-    package = getattr(args, "package", None)
+    only = _parse_list(getattr(args, "only", None))
+    workload = _parse_list(getattr(args, "workload", None))
+    package = _parse_list(getattr(args, "package", None))
     status_filter = getattr(args, "status", None)
 
     if only:
-        only = only.strip()
-        if only in progress and _is_pair_key(only):
-            return {only}
-        prefixed = "wl-" + only
-        if prefixed in progress:
-            info(f"--only: resolved '{only}' → '{prefixed}'")
-            return {prefixed}
-        return set()
+        result = set()
+        for key in only:
+            key = key.strip()
+            if key in progress and _is_pair_key(key):
+                result.add(key)
+            else:
+                prefixed = "wl-" + key
+                if prefixed in progress:
+                    info(f"--only: resolved '{key}' → '{prefixed}'")
+                    result.add(prefixed)
+        return result
 
     if not any([workload, package, status_filter]):
         return set()
 
     candidates = {k for k in progress.keys() if _is_pair_key(k)}
     if workload:
-        candidates = {k for k in candidates if progress[k].get("workload") == workload}
+        candidates = {k for k in candidates if progress[k].get("workload") in workload}
     if package:
-        candidates = {k for k in candidates if progress[k].get("package") == package}
+        candidates = {k for k in candidates if progress[k].get("package") in package}
     if status_filter:
         candidates = {k for k in candidates if progress[k].get("status") == status_filter}
     return candidates
@@ -1397,18 +1413,18 @@ def _resolve_scope(progress: dict, args) -> set:
 
 def _report_filter_mismatch(progress: dict, args) -> None:
     """Print all valid filter values to help the user correct their filter flags."""
-    only = getattr(args, "only", None)
-    workload = getattr(args, "workload", None)
-    package = getattr(args, "package", None)
+    only = _parse_list(getattr(args, "only", None))
+    workload = _parse_list(getattr(args, "workload", None))
+    package = _parse_list(getattr(args, "package", None))
     status_filter = getattr(args, "status", None)
 
     parts = []
     if only is not None:
-        parts.append(f"--only '{only}'")
+        parts.append(f"--only '{','.join(only)}'")
     if workload is not None:
-        parts.append(f"--workload '{workload}'")
+        parts.append(f"--workload '{','.join(workload)}'")
     if package is not None:
-        parts.append(f"--package '{package}'")
+        parts.append(f"--package '{','.join(package)}'")
     if status_filter is not None:
         parts.append(f"--status '{status_filter}'")
 
@@ -2399,19 +2415,19 @@ Examples:
 
     sub = p.add_subparsers(dest="command")
     collect_p = sub.add_parser("collect", help="Pull results for completed packages")
-    collect_p.add_argument("--only",     metavar="PAIR",
-                           help="Scope to one specific pair key (wl- prefix optional)")
-    collect_p.add_argument("--workload", metavar="NAME",
-                           help="Scope to pairs matching this workload")
+    collect_p.add_argument("--only",     nargs="+", metavar="PAIR",
+                           help="Scope to specific pair keys (comma or space-separated, wl- prefix optional)")
+    collect_p.add_argument("--workload", nargs="+", metavar="NAME",
+                           help="Scope to pairs matching these workloads (comma or space-separated)")
     collect_p.add_argument("--package", nargs="+", metavar="NAME",
-                           help="Collect only these packages")
+                           help="Collect only these packages (comma or space-separated)")
     collect_p.add_argument("--skip-logs", action="store_true", dest="skip_logs",
                            help="Skip vLLM and EPP log files, collect only traces")
 
     status_p = sub.add_parser("status", help="Show progress of all (workload, package) pairs")
-    status_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key (wl- prefix optional)")
-    status_p.add_argument("--workload", metavar="NAME",  help="Scope to pairs matching this workload")
-    status_p.add_argument("--package",  metavar="NAME",  help="Scope to pairs matching this package")
+    status_p.add_argument("--only",     nargs="+", metavar="PAIR",  help="Scope to specific pair keys (comma or space-separated, wl- prefix optional)")
+    status_p.add_argument("--workload", nargs="+", metavar="NAME",  help="Scope to pairs matching these workloads (comma or space-separated)")
+    status_p.add_argument("--package",  nargs="+", metavar="NAME",  help="Scope to pairs matching these packages (comma or space-separated)")
     status_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status (e.g. running, done, failed)")
 
     build_p = sub.add_parser("build", help="Ensure all scenario images exist (pre-flight for run)")
@@ -2423,9 +2439,9 @@ Examples:
                        help="Submit orchestrator as in-cluster Job instead of running locally")
     run_p.add_argument("--skip-build", action="store_true", dest="skip_build",
                        help="Skip image build")
-    run_p.add_argument("--only",         metavar="PAIR",  help="Scope execution to one specific pair key (wl- prefix optional)")
-    run_p.add_argument("--workload",     metavar="NAME",  help="Scope execution to pairs matching this workload")
-    run_p.add_argument("--package",      metavar="NAME",  help="Scope execution to pairs matching this package")
+    run_p.add_argument("--only",         nargs="+", metavar="PAIR",  help="Scope execution to specific pair keys (comma or space-separated, wl- prefix optional)")
+    run_p.add_argument("--workload",     nargs="+", metavar="NAME",  help="Scope execution to pairs matching these workloads (comma or space-separated)")
+    run_p.add_argument("--package",      nargs="+", metavar="NAME",  help="Scope execution to pairs matching these packages (comma or space-separated)")
     run_p.add_argument("--status",       metavar="STATE", help="Scope execution to pairs with this status (e.g. failed, timed-out)")
     run_p.add_argument("--force",        action="store_true",
                        help="Reset non-pending pairs to pending, cleaning cluster resources for pairs with assigned namespaces")
@@ -2451,9 +2467,9 @@ Examples:
     sub.add_parser("stop", help="Stop the remote orchestrator Job")
 
     reset_p = sub.add_parser("reset", help="Reset all non-pending pairs to pending (with cluster cleanup)")
-    reset_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key (wl- prefix optional)")
-    reset_p.add_argument("--workload", metavar="NAME",  help="Scope to pairs matching this workload")
-    reset_p.add_argument("--package",  metavar="NAME",  help="Scope to pairs matching this package")
+    reset_p.add_argument("--only",     nargs="+", metavar="PAIR",  help="Scope to specific pair keys (comma or space-separated, wl- prefix optional)")
+    reset_p.add_argument("--workload", nargs="+", metavar="NAME",  help="Scope to pairs matching these workloads (comma or space-separated)")
+    reset_p.add_argument("--package",  nargs="+", metavar="NAME",  help="Scope to pairs matching these packages (comma or space-separated)")
     reset_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status")
     reset_p.add_argument("--preserve-done-status", action="store_true", dest="preserve_done_status",
                          help="Keep done pairs' status unchanged (cluster cleanup only)")
@@ -2461,9 +2477,9 @@ Examples:
                          help="Print what would be reset without doing it")
 
     wipe_p = sub.add_parser("wipe", help="Delete local result files for pairs in scope")
-    wipe_p.add_argument("--only",     metavar="PAIR",  help="Scope to one specific pair key (wl- prefix optional)")
-    wipe_p.add_argument("--workload", metavar="NAME",  help="Scope to pairs matching this workload")
-    wipe_p.add_argument("--package",  metavar="NAME",  help="Scope to pairs matching this package")
+    wipe_p.add_argument("--only",     nargs="+", metavar="PAIR",  help="Scope to specific pair keys (comma or space-separated, wl- prefix optional)")
+    wipe_p.add_argument("--workload", nargs="+", metavar="NAME",  help="Scope to pairs matching these workloads (comma or space-separated)")
+    wipe_p.add_argument("--package",  nargs="+", metavar="NAME",  help="Scope to pairs matching these packages (comma or space-separated)")
     wipe_p.add_argument("--dry-run",  action="store_true", dest="dry_run",
                          help="Print what would be wiped without doing it")
     wipe_p.add_argument("--yes", "-y", action="store_true",
