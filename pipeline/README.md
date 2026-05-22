@@ -152,9 +152,9 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--remote` | — | Submit orchestrator as in-cluster Job instead of running locally |
-| `--only PAIR` | — | Scope execution to one specific pair key (`wl-` prefix optional) |
-| `--workload NAME` | — | Scope execution to pairs matching this workload |
-| `--package NAME` | — | Scope execution to pairs matching this package |
+| `--only PAIR…` | — | Scope execution to specific pair keys (comma or space-separated, `wl-` prefix optional) |
+| `--workload NAME…` | — | Scope execution to pairs matching these workloads (comma or space-separated) |
+| `--package NAME…` | — | Scope execution to pairs matching these packages (comma or space-separated) |
 | `--status STATE` | — | Scope execution to pairs with this status (e.g. `failed`, `timed-out`) |
 | `--skip-teardown` | — | Skip the Tekton teardown task, leaving namespace resources intact for debugging |
 | `--preserve-pipelineruns` | — | Do not delete PipelineRun objects after completion (keeps TaskRun logs for debugging) |
@@ -181,18 +181,18 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 | Flag | Description |
 |------|-------------|
-| `--only PAIR` | Scope to one pair key (`wl-` prefix optional) |
-| `--workload NAME` | Filter by workload name |
-| `--package NAME` | Filter by package name |
+| `--only PAIR…` | Scope to specific pair keys (comma or space-separated, `wl-` prefix optional) |
+| `--workload NAME…` | Filter by workload names (comma or space-separated) |
+| `--package NAME…` | Filter by package names (comma or space-separated) |
 | `--status STATE` | Filter by status (e.g. `running`, `done`, `failed`) |
 
 **`deploy.py collect`** — extracts results from the cluster PVC and writes to `workspace/runs/<run>/results/{phase}/<workload>/`.
 
 | Flag | Description |
 |------|-------------|
-| `--only PAIR` | Scope to one pair key — narrows both workload and package (`wl-` prefix optional; takes precedence over `--workload`) |
-| `--workload NAME` | Scope to pairs matching this workload |
-| `--package NAME…` | Collect only these packages (phase-level filter) |
+| `--only PAIR…` | Scope to specific pair keys — narrows both workload and package (comma or space-separated, `wl-` prefix optional; takes precedence over `--workload`) |
+| `--workload NAME…` | Scope to pairs matching these workloads (comma or space-separated) |
+| `--package NAME…` | Collect only these packages (comma or space-separated, phase-level filter) |
 | `--skip-logs` | Skip vLLM and EPP log files, collect only traces |
 
 When `--only` or `--workload` is given, only matching workload subdirectories are pulled from the PVC (instead of entire phase directories). These pair-level flags compose with `--package` as AND: `--workload X --package baseline` pulls workload X from the baseline phase only. Requires progress data to resolve pairs.
@@ -203,9 +203,9 @@ When `--only` or `--workload` is given, only matching workload subdirectories ar
 
 | Flag | Description |
 |------|-------------|
-| `--only PAIR` | Scope reset to one specific pair key (`wl-` prefix optional) |
-| `--workload NAME` | Scope reset to pairs matching this workload |
-| `--package NAME` | Scope reset to pairs matching this package |
+| `--only PAIR…` | Scope reset to specific pair keys (comma or space-separated, `wl-` prefix optional) |
+| `--workload NAME…` | Scope reset to pairs matching these workloads (comma or space-separated) |
+| `--package NAME…` | Scope reset to pairs matching these packages (comma or space-separated) |
 | `--status STATE` | Scope reset to pairs with this status |
 | `--preserve-done-status` | Keep done pairs' status unchanged (cluster cleanup only) |
 | `--dry-run` | Print what would be reset without acting |
@@ -216,9 +216,9 @@ When `--only` or `--workload` is given, only matching workload subdirectories ar
 
 | Flag | Description |
 |------|-------------|
-| `--only PAIR` | Scope wipe to one specific pair key (`wl-` prefix optional) |
-| `--workload NAME` | Scope wipe to pairs matching this workload |
-| `--package NAME` | Scope wipe to pairs matching this package |
+| `--only PAIR…` | Scope wipe to specific pair keys (comma or space-separated, `wl-` prefix optional) |
+| `--workload NAME…` | Scope wipe to pairs matching these workloads (comma or space-separated) |
+| `--package NAME…` | Scope wipe to pairs matching these packages (comma or space-separated) |
 | `--dry-run` | Print what would be wiped without acting |
 | `--yes` / `-y` | Skip confirmation prompt |
 

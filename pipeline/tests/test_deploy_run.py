@@ -331,6 +331,118 @@ def test_apply_run_filters_only_empty_string():
     assert result == set()
 
 
+# ── Multi-value flag tests (issue #212) ────────────────────────────────────
+
+
+def test_parse_list_none():
+    from pipeline.deploy import _parse_list
+    assert _parse_list(None) is None
+
+
+def test_parse_list_empty_list():
+    from pipeline.deploy import _parse_list
+    assert _parse_list([]) is None
+
+
+def test_parse_list_single_string():
+    from pipeline.deploy import _parse_list
+    assert _parse_list("smoke") == ["smoke"]
+
+
+def test_parse_list_comma_separated():
+    from pipeline.deploy import _parse_list
+    assert _parse_list("smoke,load") == ["smoke", "load"]
+
+
+def test_parse_list_list_input():
+    from pipeline.deploy import _parse_list
+    assert _parse_list(["smoke", "load"]) == ["smoke", "load"]
+
+
+def test_parse_list_mixed_comma_and_list():
+    from pipeline.deploy import _parse_list
+    assert _parse_list(["smoke,load", "heavy"]) == ["smoke", "load", "heavy"]
+
+
+def test_parse_list_strips_whitespace():
+    from pipeline.deploy import _parse_list
+    assert _parse_list(" smoke , load ") == ["smoke", "load"]
+
+
+def test_parse_list_whitespace_only():
+    from pipeline.deploy import _parse_list
+    assert _parse_list("  ,  ") is None
+
+
+def test_apply_run_filters_multi_workload():
+    """Multiple --workload values match any of the specified workloads."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = ["wl-smoke", "wl-heavy"]; package = None; status = None
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    assert result == {"wl-smoke-baseline", "wl-smoke-treatment", "wl-heavy-baseline"}
+
+
+def test_apply_run_filters_multi_package():
+    """Multiple --package values use union semantics."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = None; package = ["baseline", "treatment"]; status = None
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    assert result == {"wl-smoke-baseline", "wl-load-baseline", "wl-heavy-baseline",
+                      "wl-smoke-treatment", "wl-load-treatment"}
+
+
+def test_apply_run_filters_multi_only():
+    """Multiple --only values resolve independently and return the union."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = ["wl-smoke-baseline", "wl-load-treatment"]; workload = None; package = None; status = None
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    assert result == {"wl-smoke-baseline", "wl-load-treatment"}
+
+
+def test_apply_run_filters_multi_only_with_prefix_resolution(capsys):
+    """Multiple --only values with wl- prefix resolution."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = ["smoke-baseline", "load-treatment"]; workload = None; package = None; status = None
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    assert result == {"wl-smoke-baseline", "wl-load-treatment"}
+    assert "resolved" in capsys.readouterr().out
+
+
+def test_apply_run_filters_multi_only_partial_unresolved(capsys):
+    """Partial match in --only warns about unresolved keys."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = ["wl-smoke-baseline", "nonexistent"]; workload = None; package = None; status = None
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    assert result == {"wl-smoke-baseline"}
+    assert "no match" in capsys.readouterr().err
+
+
+def test_apply_run_filters_comma_in_workload():
+    """Comma-separated --workload values are parsed correctly."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = ["wl-smoke,wl-heavy"]; package = None; status = None
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    assert result == {"wl-smoke-baseline", "wl-smoke-treatment", "wl-heavy-baseline"}
+
+
 def test_resolve_scope_shows_valid_keys_on_only_mismatch(capsys):
     """--only mismatch prints valid pair keys before aborting with exit code 1."""
     import pytest

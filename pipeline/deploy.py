@@ -901,8 +901,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
         if not scoped_phases:
             warn("No done phases for scoped pairs.")
             phases_to_collect: list[str] = []
-        elif _parse_list(args.package):
-            pkg_filter = _parse_list(args.package)
+        elif (pkg_filter := _parse_list(args.package)):
             valid = set(scoped_phases) | {"experiment"}
             unknown = set(pkg_filter) - valid
             if unknown:
@@ -1368,8 +1367,8 @@ def _apply_run_filters(progress: dict, args) -> set:
 
     if only:
         result = set()
+        unresolved = []
         for key in only:
-            key = key.strip()
             if key in progress and _is_pair_key(key):
                 result.add(key)
             else:
@@ -1377,6 +1376,10 @@ def _apply_run_filters(progress: dict, args) -> set:
                 if prefixed in progress:
                     info(f"--only: resolved '{key}' → '{prefixed}'")
                     result.add(prefixed)
+                else:
+                    unresolved.append(key)
+        if unresolved:
+            warn(f"--only: no match for {unresolved}")
         return result
 
     if not any([workload, package, status_filter]):
