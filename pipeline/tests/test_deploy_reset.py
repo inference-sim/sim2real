@@ -530,7 +530,7 @@ def test_cmd_reset_aborts_on_filter_mismatch(tmp_path, monkeypatch, capsys):
                        setup_config={"namespace": "sim2real-ns"})
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
-    assert "No pairs matched" in captured.out + captured.err
+    assert "no match" in captured.out + captured.err
 
 
 def test_reset_pair_done_uninstalls_helm_in_completed_namespace(monkeypatch):

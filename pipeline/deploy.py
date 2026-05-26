@@ -1344,7 +1344,7 @@ def _force_reset(progress: dict, scope: set, discovered: dict | None = None,
 
 
 def _parse_list(value) -> "list[str] | None":
-    """Normalize a CLI flag value to a flat list, handling comma/space/mixed."""
+    """Flatten a CLI flag value (possibly a list from nargs='+') by splitting on commas."""
     if value is None:
         return None
     if isinstance(value, list):
@@ -1379,7 +1379,10 @@ def _apply_run_filters(progress: dict, args) -> set:
                 else:
                     unresolved.append(key)
         if unresolved:
-            warn(f"--only: no match for {unresolved}")
+            err(f"--only: no match for {unresolved}")
+            valid = sorted(k for k in progress.keys() if _is_pair_key(k))
+            print(f"  Valid pair keys: {valid}", file=sys.stderr)
+            sys.exit(1)
         return result
 
     if not any([workload, package, status_filter]):
@@ -2204,7 +2207,10 @@ def _collect_run_flags(args) -> list[str]:
     for name in ("only", "workload", "package", "status"):
         val = getattr(args, name)
         if val is not None:
-            flags.extend([f"--{name}", str(val)])
+            if isinstance(val, list):
+                flags.extend([f"--{name}"] + val)
+            else:
+                flags.extend([f"--{name}", str(val)])
     if getattr(args, "force"):
         flags.append("--force")
     if getattr(args, "skip_teardown", False):

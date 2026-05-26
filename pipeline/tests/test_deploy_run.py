@@ -299,25 +299,29 @@ def test_apply_run_filters_only_without_prefix(capsys):
 
 
 def test_apply_run_filters_only_no_match():
-    """--only returns empty set when neither exact nor prefixed form matches."""
+    """--only aborts when neither exact nor prefixed form matches."""
+    import pytest
     from pipeline.deploy import _apply_run_filters
 
     class _Args:
         only = "nonexistent"; workload = None; package = None; status = None
 
-    result = _apply_run_filters(dict(_PROGRESS), _Args())
-    assert result == set()
+    with pytest.raises(SystemExit) as exc_info:
+        _apply_run_filters(dict(_PROGRESS), _Args())
+    assert exc_info.value.code == 1
 
 
 def test_apply_run_filters_only_no_double_prefix():
     """--only wl-nonexistent doesn't false-match via double-prefixing."""
+    import pytest
     from pipeline.deploy import _apply_run_filters
 
     class _Args:
         only = "wl-nonexistent"; workload = None; package = None; status = None
 
-    result = _apply_run_filters(dict(_PROGRESS), _Args())
-    assert result == set()
+    with pytest.raises(SystemExit) as exc_info:
+        _apply_run_filters(dict(_PROGRESS), _Args())
+    assert exc_info.value.code == 1
 
 
 def test_apply_run_filters_only_empty_string():
@@ -421,15 +425,19 @@ def test_apply_run_filters_multi_only_with_prefix_resolution(capsys):
 
 
 def test_apply_run_filters_multi_only_partial_unresolved(capsys):
-    """Partial match in --only warns about unresolved keys."""
+    """Partial match in --only aborts with error listing unresolved keys."""
+    import pytest
     from pipeline.deploy import _apply_run_filters
 
     class _Args:
         only = ["wl-smoke-baseline", "nonexistent"]; workload = None; package = None; status = None
 
-    result = _apply_run_filters(dict(_PROGRESS), _Args())
-    assert result == {"wl-smoke-baseline"}
-    assert "no match" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as exc_info:
+        _apply_run_filters(dict(_PROGRESS), _Args())
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr().err
+    assert "no match" in captured
+    assert "nonexistent" in captured
 
 
 def test_apply_run_filters_comma_in_workload():
@@ -441,6 +449,106 @@ def test_apply_run_filters_comma_in_workload():
 
     result = _apply_run_filters(dict(_PROGRESS), _Args())
     assert result == {"wl-smoke-baseline", "wl-smoke-treatment", "wl-heavy-baseline"}
+
+
+def test_apply_run_filters_multi_only_all_unresolved(capsys):
+    """All --only keys unresolved aborts with exit code 1."""
+    import pytest
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = ["nonexistent1", "nonexistent2"]; workload = None; package = None; status = None
+
+    with pytest.raises(SystemExit) as exc_info:
+        _apply_run_filters(dict(_PROGRESS), _Args())
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr().err
+    assert "no match" in captured
+    assert "nonexistent1" in captured
+
+
+def test_resolve_scope_multi_only_all_unresolved_aborts(capsys):
+    """Multi-value --only with all keys unresolved aborts via _apply_run_filters."""
+    import pytest
+    from pipeline.deploy import _resolve_scope
+
+    class _Args:
+        only = ["bad1", "bad2"]; workload = None; package = None; status = None
+
+    with pytest.raises(SystemExit) as exc_info:
+        _resolve_scope(dict(_PROGRESS), _Args())
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr().err
+    assert "no match" in captured
+
+
+def test_report_filter_mismatch_multi_value_formatting(capsys):
+    """_report_filter_mismatch formats multi-value lists with commas."""
+    from pipeline.deploy import _report_filter_mismatch
+
+    class _Args:
+        only = None; workload = ["wl-smoke", "wl-heavy"]; package = ["baseline", "treatment"]; status = None
+
+    _report_filter_mismatch(dict(_PROGRESS), _Args())
+    captured = capsys.readouterr().err
+    assert "--workload 'wl-smoke,wl-heavy'" in captured
+    assert "--package 'baseline,treatment'" in captured
+
+
+def test_collect_run_flags_list_values():
+    """_collect_run_flags correctly serializes list-valued args."""
+    from pipeline.deploy import _collect_run_flags
+
+    class _Args:
+        only = ["wl-smoke-baseline", "wl-load-treatment"]
+        workload = None
+        package = ["baseline", "treatment"]
+        status = None
+        force = False
+        skip_teardown = False
+        preserve_pipelineruns = False
+        max_retries = 2
+        poll_interval = 30
+        gpu_resource_type = None
+        default_gpu_cost = 1
+        pending_threshold = 600
+        max_pending_stalls = 10
+        max_backoff = 600
+
+    flags = _collect_run_flags(_Args())
+    assert "--only" in flags
+    idx = flags.index("--only")
+    assert flags[idx + 1] == "wl-smoke-baseline"
+    assert flags[idx + 2] == "wl-load-treatment"
+    assert "--package" in flags
+    pidx = flags.index("--package")
+    assert flags[pidx + 1] == "baseline"
+    assert flags[pidx + 2] == "treatment"
+    assert "['wl-smoke-baseline'" not in " ".join(flags)
+
+
+def test_collect_run_flags_single_string_status():
+    """_collect_run_flags handles single-string status correctly."""
+    from pipeline.deploy import _collect_run_flags
+
+    class _Args:
+        only = None
+        workload = None
+        package = None
+        status = "failed"
+        force = False
+        skip_teardown = False
+        preserve_pipelineruns = False
+        max_retries = 2
+        poll_interval = 30
+        gpu_resource_type = None
+        default_gpu_cost = 1
+        pending_threshold = 600
+        max_pending_stalls = 10
+        max_backoff = 600
+
+    flags = _collect_run_flags(_Args())
+    assert flags == ["--status", "failed"]
 
 
 def test_resolve_scope_shows_valid_keys_on_only_mismatch(capsys):
@@ -455,7 +563,7 @@ def test_resolve_scope_shows_valid_keys_on_only_mismatch(capsys):
         _resolve_scope(dict(_PROGRESS), _Args())
     assert exc_info.value.code == 1
     captured = capsys.readouterr().err
-    assert "No pairs matched" in captured
+    assert "no match" in captured
     assert "wl-smoke-baseline" in captured
     assert "wl-load-treatment" in captured
 

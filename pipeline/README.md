@@ -195,7 +195,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 | `--package NAME…` | Collect only these packages (comma or space-separated, phase-level filter) |
 | `--skip-logs` | Skip vLLM and EPP log files, collect only traces |
 
-When `--only` or `--workload` is given, only matching workload subdirectories are pulled from the PVC (instead of entire phase directories). These pair-level flags compose with `--package` as AND: `--workload X --package baseline` pulls workload X from the baseline phase only. Requires progress data to resolve pairs.
+When `--only` or `--workload` is given, only matching workload subdirectories are pulled from the PVC (instead of entire phase directories). Multiple values within a flag use OR (union): `--workload X Y` matches pairs for workload X or Y. Different flags compose as AND: `--workload X Y --package baseline` pulls workloads X and Y from the baseline phase only. Requires progress data to resolve pairs.
 
 **`deploy.py stop`** — deletes the `sim2real-orchestrator` Kubernetes Job (with cascading pod deletion) in the primary namespace. Only meaningful when the orchestrator runs as an in-cluster Job. Pair state is left as-is. If no remote orchestrator Job exists, prints a message and returns. Use `reset` separately to clear failed/stalled pair state.
 
