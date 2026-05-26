@@ -6,8 +6,6 @@ import os
 import sys
 from pathlib import Path
 
-import yaml
-
 # ---------------------------------------------------------------------------
 # Lookup tables
 # ---------------------------------------------------------------------------
@@ -133,7 +131,6 @@ def build_scenario(entry: dict, name: str) -> dict:
     """Build a scenario YAML dict from a single top3_selection entry."""
     workload = entry["workload"]
     vllm_args = entry["vllm_args"]
-    routing_config = entry.get("routing_config")
 
     model_name = workload["model"]
     hardware = workload["hardware"]
@@ -192,9 +189,6 @@ def build_scenario(entry: dict, name: str) -> dict:
 
 def write_commented_yaml(scenario: dict, entry: dict, out_path: str):
     """Write scenario YAML with comments explaining the source of each field."""
-    vllm_args = entry["vllm_args"]
-    workload = entry["workload"]
-
     lines = []
     lines.append("scenario:")
     lines.append(f"- name: {scenario['name']}")
