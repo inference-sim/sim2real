@@ -153,7 +153,7 @@ def test_status_mismatch_shows_valid_values(tmp_path, capsys, monkeypatch):
         _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
     assert exc_info.value.code == 1
     captured = capsys.readouterr().err
-    assert "No pairs matched" in captured
+    assert "unrecognized" in captured
     assert "wl-smoke" in captured
 
 
@@ -467,6 +467,68 @@ def test_apply_run_filters_multi_only_all_unresolved(capsys):
     assert "nonexistent1" in captured
 
 
+def test_apply_run_filters_invalid_workload_aborts(capsys):
+    """--workload with a value not in progress aborts with exit 1."""
+    import pytest
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = "nonexistent"; package = None; status = None
+
+    with pytest.raises(SystemExit) as exc_info:
+        _apply_run_filters(dict(_PROGRESS), _Args())
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "nonexistent" in err
+    assert "wl-smoke" in err
+
+
+def test_apply_run_filters_partial_invalid_workload_aborts(capsys):
+    """--workload with one valid and one invalid value still aborts."""
+    import pytest
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = "wl-smoke,bogus"; package = None; status = None
+
+    with pytest.raises(SystemExit) as exc_info:
+        _apply_run_filters(dict(_PROGRESS), _Args())
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "bogus" in err
+
+
+def test_apply_run_filters_invalid_package_aborts(capsys):
+    """--package with a value not in progress aborts with exit 1."""
+    import pytest
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = None; package = "baseline1x"; status = None
+
+    with pytest.raises(SystemExit) as exc_info:
+        _apply_run_filters(dict(_PROGRESS), _Args())
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "baseline1x" in err
+    assert "baseline" in err
+
+
+def test_apply_run_filters_partial_invalid_package_aborts(capsys):
+    """--package with one valid and one invalid value still aborts."""
+    import pytest
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = None; package = "treatment,bogus"; status = None
+
+    with pytest.raises(SystemExit) as exc_info:
+        _apply_run_filters(dict(_PROGRESS), _Args())
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "bogus" in err
+
+
 def test_resolve_scope_multi_only_all_unresolved_aborts(capsys):
     """Multi-value --only with all keys unresolved aborts via _apply_run_filters."""
     import pytest
@@ -580,7 +642,7 @@ def test_resolve_scope_shows_valid_workloads_on_mismatch(capsys):
         _resolve_scope(dict(_PROGRESS), _Args())
     assert exc_info.value.code == 1
     captured = capsys.readouterr().err
-    assert "No pairs matched" in captured
+    assert "unrecognized" in captured
     assert "wl-smoke" in captured
     assert "wl-load" in captured
     assert "wl-heavy" in captured
@@ -598,7 +660,7 @@ def test_resolve_scope_shows_valid_packages_on_mismatch(capsys):
         _resolve_scope(dict(_PROGRESS), _Args())
     assert exc_info.value.code == 1
     captured = capsys.readouterr().err
-    assert "No pairs matched" in captured
+    assert "unrecognized" in captured
     assert "baseline" in captured
     assert "treatment" in captured
 
