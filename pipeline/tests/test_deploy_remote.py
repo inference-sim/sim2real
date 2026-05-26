@@ -424,6 +424,13 @@ def test_run_remote_job_uses_initcontainer_and_emptydir(monkeypatch, tmp_path):
 
 def test_run_remote_passes_scoping_flags(monkeypatch, tmp_path):
     run_dir = _setup_run_dir(tmp_path)
+    cluster_dir = run_dir / "cluster"
+    (cluster_dir / "pipelinerun-smoke-baseline.yaml").write_text(
+        "metadata:\n  name: pipelinerun-smoke-baseline\n"
+        "spec:\n  params:\n"
+        "  - name: workloadName\n    value: wl-smoke\n"
+        "  - name: phase\n    value: baseline\n"
+    )
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
     monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
