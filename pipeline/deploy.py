@@ -1388,13 +1388,31 @@ def _apply_run_filters(progress: dict, args) -> set:
     if not any([workload, package, status_filter]):
         return set()
 
-    candidates = {k for k in progress.keys() if _is_pair_key(k)}
+    pair_entries = {k: v for k, v in progress.items() if _is_pair_key(k)}
+
     if workload:
-        candidates = {k for k in candidates if progress[k].get("workload") in workload}
+        valid_workloads = {v.get("workload", "") for v in pair_entries.values()} - {""}
+        unknown = set(workload) - valid_workloads
+        if unknown:
+            err(f"--workload: unrecognized values {sorted(unknown)}")
+            print(f"  Valid --workload values: {', '.join(sorted(valid_workloads))}", file=sys.stderr)
+            sys.exit(1)
+
     if package:
-        candidates = {k for k in candidates if progress[k].get("package") in package}
+        valid_packages = {v.get("package", "") for v in pair_entries.values()} - {""}
+        unknown = set(package) - valid_packages
+        if unknown:
+            err(f"--package: unrecognized values {sorted(unknown)}")
+            print(f"  Valid --package values: {', '.join(sorted(valid_packages))}", file=sys.stderr)
+            sys.exit(1)
+
+    candidates = set(pair_entries.keys())
+    if workload:
+        candidates = {k for k in candidates if pair_entries[k].get("workload") in workload}
+    if package:
+        candidates = {k for k in candidates if pair_entries[k].get("package") in package}
     if status_filter:
-        candidates = {k for k in candidates if progress[k].get("status") == status_filter}
+        candidates = {k for k in candidates if pair_entries[k].get("status") == status_filter}
     return candidates
 
 
