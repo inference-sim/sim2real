@@ -350,7 +350,7 @@ class TestPhaseTranslate:
         assert si["config_kind"] == "EndpointPickerConfig"
         assert isinstance(si["build_commands"], list)
         # Test should not append, skill determines test scope
-        assert si["build_commands"] == [["go", "build", "./..."]]
+        assert si["build_commands"] == ["go build ./..."]
 
     def test_skips_when_done(self, repo):
         mod = _import_prepare_with_root(repo)
@@ -650,7 +650,7 @@ class TestPhaseTranslate:
         # Should only have the build commands from manifest, not test appended
         build_cmds = si["build_commands"]
         assert len(build_cmds) == 1
-        assert build_cmds[0] == ["go", "build", "./..."]
+        assert build_cmds[0] == "go build ./..."
         # Should NOT have go test appended
         assert not any("test" in str(cmd) for cmd in build_cmds)
 

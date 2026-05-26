@@ -294,7 +294,7 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
     build_cfg = resolved.get("build", {})
 
     # Build commands: common commands (skill determines test scope)
-    commands = [list(c) for c in build_cfg.get("commands", [])]
+    commands = [" ".join(c) if isinstance(c, list) else c for c in build_cfg.get("commands", [])]
 
     # Write skill_input.json
     first_bl = manifest.get("baselines", [{}])[0]
@@ -654,22 +654,23 @@ def _validate_assembly(run_dir: Path, resolved: dict, algorithm_packages: list[s
 
     errors = []
 
-    # Check 1: plugin_type in register_file (skip if null — rewrite mode)
+    # Check 1: plugin_type literal exists in register_file's directory OR in files_created
     register_file = output.get("register_file")
     if register_file is not None:
         register_path = EXPERIMENT_ROOT / target_path / register_file
         if register_path.exists():
-            # Search register_file's directory recursively: Go plugins use constants
-            # defined in sibling files (e.g. AdaptiveV2Type = "adaptive-v2-scorer" in
-            # adaptive_v2.go, referenced as scorer.AdaptiveV2Type in register.go).
-            plugins_dir = register_path.parent
+            search_files = list(register_path.parent.rglob("*.go"))
+            for f in output.get("files_created", []):
+                p = EXPERIMENT_ROOT / target_path / f
+                if p.exists() and p.suffix == ".go":
+                    search_files.append(p)
             found = any(
                 plugin_type in f.read_text()
-                for f in plugins_dir.rglob("*.go")
+                for f in search_files
             )
             if not found:
                 errors.append(
-                    f"plugin_type '{plugin_type}' not found in {register_file} or adjacent plugin files")
+                    f"plugin_type '{plugin_type}' not found in {register_file} or plugin files")
         else:
             errors.append(f"register_file not found on disk: {register_file}")
 

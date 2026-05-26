@@ -90,6 +90,15 @@ def load_manifest(path: "Path | str") -> dict:
     else:
         data["algorithms"] = []
 
+    # Cross-reference check: algorithm.defaults must name an existing baseline
+    baseline_names = {bl["name"] for bl in data["baselines"]}
+    for i, algo in enumerate(data["algorithms"]):
+        if algo["defaults"] not in baseline_names:
+            raise ManifestError(
+                f"algorithms[{i}].defaults references unknown baseline "
+                f"'{algo['defaults']}'. Available: {sorted(baseline_names)}"
+            )
+
     # Cross-collision check: all package names must be globally unique
     all_names = [bl["name"] for bl in data["baselines"]] + [a["name"] for a in data["algorithms"]]
     if len(all_names) != len(set(all_names)):

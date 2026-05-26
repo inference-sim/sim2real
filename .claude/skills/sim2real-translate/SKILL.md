@@ -265,44 +265,41 @@ echo "Context file prepared."
 ```
 
 **If `context_file_populated=false` (always true after a fresh prepare.py run):**
-assemble the full structured context document directly in the current session.
+enrich the existing context document with production interfaces from the target repo.
 
-Read these files using the Read tool:
+The context file at `$CONTEXT_PATH` already contains content assembled by `prepare.py`
+from the manifest's `context.files` (e.g., README.md, config.md). This content includes
+deployment guidance, signal mapping, InferenceObjectives, and other scenario-specific
+details that the writer depends on. **Do not overwrite it.**
 
-1. All files listed in `manifest["context"]["files"]` — read each one in full
-2. Production interfaces for `$SCENARIO` from `$TARGET_REPO` — explore `$TARGET_REPO/pkg/plugins/`
-   to find the relevant interface definitions:
+Read the existing file, then **append** the following sections to it using the Edit tool
+(append at end of file). Explore `$TARGET_REPO` to gather the content for each section:
+
+1. Production interfaces for `$SCENARIO` — explore the target repo to find the relevant
+   interface definitions:
    - routing → `Scorer` interface, `EndpointPickerConfig`, `SchedulingContext`
    - admission_control → `Admission` interface, `AdmissionPolicyConfig`
-   Read from the actual `.go` source files in that directory.
-3. One or two representative example plugins from the same directory — read in full
-4. Plugin registration pattern: explore `$TARGET_REPO` to discover the registration file
-   (typically a `register.go` or `plugins.go`) and read it in full
+   - flowcontrol → `UsageLimitPolicy` interface, `SaturationDetector`
+   Read from the actual `.go` source files.
+2. One or two representative example plugins from the same directory — read in full
+3. Plugin registration pattern: explore `$TARGET_REPO` to discover the registration file
+   (typically `runner.go` or `register.go`) and read the relevant section
 
-Then use the Write tool to write `$CONTEXT_PATH` with this structure:
+Append these sections to `$CONTEXT_PATH`:
 
 ```
-# Translation Context
-Scenario: $SCENARIO | inference-sim@<sha> | llm-d@<sha>
-
-## Signal Mapping
-[full contents of mapping document]
-
 ## Production Interfaces
-[Scorer/Admission interface, EndpointPickerConfig, SchedulingContext
- — extracted verbatim from source, not paraphrased]
+[Interface definitions extracted verbatim from source, not paraphrased]
 
 ## Example Plugin: <filename>
-[full contents]
+[full contents of a representative plugin in the same category]
 
 ## Plugin Registration
-[full contents of the discovered registration file]
-
-## <any additional manifest context file>
-[full contents]
+[registration pattern showing how plugins are registered]
 ```
 
 Do NOT include context.text in the context file — it is held in session memory via $CONTEXT_TEXT.
+Do NOT rewrite the file header or existing content — only append new sections.
 
 Verify the file was written:
 
@@ -345,19 +342,30 @@ print(json.dumps(si.get('build_commands', [])))
 ")
 ```
 
-Read the three prompt templates and construct agent prompts by substituting
-all `{PLACEHOLDER}` values with the corresponding shell variables
-(`{REPO_ROOT}` → `$REPO_ROOT`, `{RUN_DIR}` → `$RUN_DIR`, `{CONTEXT_PATH}` →
-`$CONTEXT_PATH`, `{ALGO_SOURCE}` → `$ALGO_SOURCE`, `{ALGO_CONFIG}` →
-`$ALGO_CONFIG`, `{BASELINE_SIM_CONFIG}` → `$BASELINE_SIM_CONFIG`,
-`{BASELINE_REAL_CONFIG}` → `$BASELINE_REAL_CONFIG`,
-`{BASELINE_REAL_NOTES}` → `$BASELINE_REAL_NOTES`,
-`{EXPERT_AGENT_NAME}` → `"expert"`,
-`{TARGET_REPO}` → `$TARGET_REPO`, `{CONFIG_KIND}` →
-`$CONFIG_KIND`, `{REVIEW_ROUNDS}` → `$REVIEW_ROUNDS`, `{SCENARIO}` →
-`$SCENARIO`, `{BUILD_COMMANDS}` → `$BUILD_COMMANDS`, `{CONTEXT_TEXT}` →
-`$CONTEXT_TEXT`,
-`{MAIN_SESSION_NAME}` → `"main-session"`).
+Read the three prompt templates from the skill's prompts/ directory:
+- `$REPO_ROOT/.claude/skills/sim2real-translate/prompts/agent-expert.md`
+- `$REPO_ROOT/.claude/skills/sim2real-translate/prompts/agent-writer.md`
+- `$REPO_ROOT/.claude/skills/sim2real-translate/prompts/agent-reviewer.md`
+
+Construct agent prompts by substituting all `{PLACEHOLDER}` values with the
+corresponding shell variables:
+- `{REPO_ROOT}` → `$REPO_ROOT`
+- `{EXPERIMENT_ROOT}` → `$EXPERIMENT_ROOT`
+- `{RUN_DIR}` → `$RUN_DIR`
+- `{CONTEXT_PATH}` → `$CONTEXT_PATH`
+- `{ALGO_SOURCE}` → `$ALGO_SOURCE`
+- `{ALGO_CONFIG}` → `$ALGO_CONFIG`
+- `{BASELINE_SIM_CONFIG}` → `$BASELINE_SIM_CONFIG`
+- `{BASELINE_REAL_CONFIG}` → `$BASELINE_REAL_CONFIG`
+- `{BASELINE_REAL_NOTES}` → `$BASELINE_REAL_NOTES`
+- `{EXPERT_AGENT_NAME}` → `"expert"`
+- `{TARGET_REPO}` → `$TARGET_REPO`
+- `{CONFIG_KIND}` → `$CONFIG_KIND`
+- `{REVIEW_ROUNDS}` → `$REVIEW_ROUNDS`
+- `{SCENARIO}` → `$SCENARIO`
+- `{BUILD_COMMANDS}` → `$BUILD_COMMANDS`
+- `{CONTEXT_TEXT}` → `$CONTEXT_TEXT`
+- `{MAIN_SESSION_NAME}` → `"main-session"`
 
 Use TeamCreate to create the team:
 ```
