@@ -18,18 +18,21 @@ class ProgressStore(ABC):
 class ConfigMapProgressStore(ProgressStore):
     """Read/write progress as a Kubernetes ConfigMap."""
 
-    CONFIGMAP_NAME = "sim2real-progress"
+    BASE_NAME = "sim2real-progress"
     DATA_KEY = "progress"
 
-    def __init__(self, namespace: str) -> None:
+    def __init__(self, namespace: str, *, run_name: str = "") -> None:
         if not namespace:
             raise ValueError("ConfigMapProgressStore requires a non-empty namespace")
         self._namespace = namespace
+        self.configmap_name = (
+            f"{self.BASE_NAME}-{run_name}" if run_name else self.BASE_NAME
+        )
 
     def load(self) -> dict:
         try:
             result = subprocess.run(
-                ["kubectl", "get", "configmap", self.CONFIGMAP_NAME,
+                ["kubectl", "get", "configmap", self.configmap_name,
                  "-n", self._namespace,
                  "-o", f"jsonpath={{.data.{self.DATA_KEY}}}"],
                 check=False, text=True, capture_output=True,
@@ -40,7 +43,7 @@ class ConfigMapProgressStore(ProgressStore):
             if "(NotFound)" in result.stderr:
                 return {}
             raise RuntimeError(
-                f"kubectl get configmap {self.CONFIGMAP_NAME} failed: "
+                f"kubectl get configmap {self.configmap_name} failed: "
                 f"{result.stderr.strip()}"
             )
         raw = result.stdout.strip()
@@ -50,7 +53,7 @@ class ConfigMapProgressStore(ProgressStore):
             return json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ValueError(
-                f"Corrupt ConfigMap {self.CONFIGMAP_NAME} in {self._namespace}"
+                f"Corrupt ConfigMap {self.configmap_name} in {self._namespace}"
             ) from exc
 
     def save(self, data: dict) -> None:
@@ -58,7 +61,7 @@ class ConfigMapProgressStore(ProgressStore):
             "apiVersion": "v1",
             "kind": "ConfigMap",
             "metadata": {
-                "name": self.CONFIGMAP_NAME,
+                "name": self.configmap_name,
                 "namespace": self._namespace,
             },
             "data": {
@@ -73,10 +76,28 @@ class ConfigMapProgressStore(ProgressStore):
             )
         except OSError as exc:
             raise RuntimeError(
-                f"Failed to update ConfigMap {self.CONFIGMAP_NAME}: {exc}"
+                f"Failed to update ConfigMap {self.configmap_name}: {exc}"
             ) from exc
         if result.returncode != 0:
             raise RuntimeError(
-                f"Failed to update ConfigMap {self.CONFIGMAP_NAME}: "
+                f"Failed to update ConfigMap {self.configmap_name}: "
+                f"{result.stderr.strip()}"
+            )
+
+    def delete(self) -> None:
+        """Delete the ConfigMap from the cluster."""
+        try:
+            result = subprocess.run(
+                ["kubectl", "delete", "configmap", self.configmap_name,
+                 "-n", self._namespace, "--ignore-not-found=true"],
+                check=False, text=True, capture_output=True,
+            )
+        except OSError as exc:
+            raise RuntimeError(
+                f"Failed to delete ConfigMap {self.configmap_name}: {exc}"
+            ) from exc
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Failed to delete ConfigMap {self.configmap_name}: "
                 f"{result.stderr.strip()}"
             )

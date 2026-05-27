@@ -105,3 +105,38 @@ def test_configmap_save_missing_kubectl_raises():
         store = ConfigMapProgressStore("sim2real-ns")
         with pytest.raises(RuntimeError, match="Failed to update ConfigMap"):
             store.save({"x": 1})
+
+
+def test_configmap_name_includes_run_name():
+    """ConfigMap name includes run_name suffix when provided."""
+    store = ConfigMapProgressStore("sim2real-ns", run_name="experiment-1")
+    assert store.configmap_name == "sim2real-progress-experiment-1"
+
+
+def test_configmap_name_default_without_run_name():
+    """ConfigMap name is the base name when run_name is omitted."""
+    store = ConfigMapProgressStore("sim2real-ns")
+    assert store.configmap_name == "sim2real-progress"
+
+
+def test_configmap_delete_calls_kubectl():
+    """delete() calls kubectl delete with correct arguments."""
+    with patch("subprocess.run") as mock:
+        mock.return_value = MagicMock(returncode=0)
+        store = ConfigMapProgressStore("sim2real-ns", run_name="run-1")
+        store.delete()
+    call_args = mock.call_args
+    cmd = call_args[0][0]
+    assert cmd == [
+        "kubectl", "delete", "configmap", "sim2real-progress-run-1",
+        "-n", "sim2real-ns", "--ignore-not-found=true",
+    ]
+
+
+def test_configmap_delete_failure_raises():
+    """delete() raises RuntimeError when kubectl delete fails."""
+    with patch("subprocess.run") as mock:
+        mock.return_value = MagicMock(returncode=1, stderr="forbidden")
+        store = ConfigMapProgressStore("sim2real-ns", run_name="run-1")
+        with pytest.raises(RuntimeError, match="Failed to delete ConfigMap"):
+            store.delete()
