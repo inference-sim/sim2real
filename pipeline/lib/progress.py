@@ -83,21 +83,3 @@ class ConfigMapProgressStore(ProgressStore):
                 f"Failed to update ConfigMap {self.configmap_name}: "
                 f"{result.stderr.strip()}"
             )
-
-    def delete(self) -> None:
-        """Delete the ConfigMap from the cluster."""
-        try:
-            result = subprocess.run(
-                ["kubectl", "delete", "configmap", self.configmap_name,
-                 "-n", self._namespace, "--ignore-not-found=true"],
-                check=False, text=True, capture_output=True,
-            )
-        except OSError as exc:
-            raise RuntimeError(
-                f"Failed to delete ConfigMap {self.configmap_name}: {exc}"
-            ) from exc
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"Failed to delete ConfigMap {self.configmap_name}: "
-                f"{result.stderr.strip()}"
-            )
