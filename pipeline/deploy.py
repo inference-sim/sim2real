@@ -314,7 +314,7 @@ def _cmd_status(args, run_dir: Path,
     if not primary_ns:
         err("No namespace configured. Run setup.py first.")
         sys.exit(1)
-    store = ConfigMapProgressStore(primary_ns)
+    store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
     try:
         progress = store.load()
     except (ValueError, RuntimeError) as exc:
@@ -853,7 +853,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
     if not primary_ns:
         err("No namespace configured. Run setup.py first.")
         sys.exit(1)
-    store = ConfigMapProgressStore(primary_ns)
+    store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
     try:
         progress = store.load() or None
     except (ValueError, RuntimeError) as exc:
@@ -1653,7 +1653,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     primary_ns = _configmap_namespace(setup_config, namespaces)
     if not primary_ns:
         err("No namespace configured. Run setup.py first."); sys.exit(1)
-    store = ConfigMapProgressStore(primary_ns)
+    store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
 
     # Derive GPU resource type from baseline scenario
     # CLI --gpu-resource-type overrides auto-derivation when explicitly set
@@ -2038,7 +2038,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             counts[v["status"]] = counts.get(v["status"], 0) + 1
     print()
     ok("Run complete: " + "  ".join(f"{v} {k}" for k, v in sorted(counts.items())))
-    print(f"  Progress: ConfigMap {ConfigMapProgressStore.CONFIGMAP_NAME} in {primary_ns}")
+    print(f"  Progress: ConfigMap {store.configmap_name} in {primary_ns}")
     print()
 
 
@@ -2051,7 +2051,7 @@ def _cmd_reset(args, run_dir: Path, discovered: dict,
     if not primary_ns:
         err("No namespace configured. Run setup.py first.")
         sys.exit(1)
-    store = ConfigMapProgressStore(primary_ns)
+    store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
     progress = store.load()
 
     if not progress:
@@ -2106,7 +2106,7 @@ def _cmd_wipe(args, run_dir: Path,
     if not primary_ns:
         err("No namespace configured. Run setup.py first.")
         sys.exit(1)
-    store = ConfigMapProgressStore(primary_ns)
+    store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
     progress = store.load()
 
     if not progress:
