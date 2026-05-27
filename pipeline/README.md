@@ -147,7 +147,7 @@ python pipeline/deploy.py wipe  [flags]     # delete local result files for pair
 python pipeline/deploy.py pairs   [flags]   # list available pair keys, workloads, and packages
 ```
 
-**`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, and retries pairs that time out. Reads progress from the `sim2real-progress` ConfigMap to resume interrupted runs. Requires a configured namespace. Use `deploy.py collect` to pull results off-cluster after runs complete.
+**`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, and retries pairs that time out. Reads progress from the run-scoped `sim2real-progress-{run}` ConfigMap to resume interrupted runs. Requires a configured namespace. Use `deploy.py collect` to pull results off-cluster after runs complete.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -177,7 +177,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 **Remote mode** — `deploy.py run --remote` submits the orchestrator as a Kubernetes Job (`sim2real-orchestrator`) instead of running locally. The launcher builds the EPP image locally, packs workspace files into a ConfigMap, applies the Job, and waits for the pod to reach Running. Use `stop` to cancel, `status` to check progress, and `collect` to pull results after completion. Requires `orchestrator_image` in `setup_config.json`.
 
-**`deploy.py status`** — prints the current state of all pairs. Reads from the `sim2real-progress` ConfigMap. Requires a configured namespace.
+**`deploy.py status`** — prints the current state of all pairs. Reads from the run-scoped `sim2real-progress-{run}` ConfigMap. Requires a configured namespace.
 
 | Flag | Description |
 |------|-------------|
@@ -342,9 +342,9 @@ All paths are relative to the repo root and validated at Phase 1.
 
 | Artifact | Written by | Read by |
 |----------|-----------|---------|
-| ConfigMap `sim2real-progress` | `deploy.py run`, `deploy.py reset` | All subcommands |
+| ConfigMap `sim2real-progress-{run}` | `deploy.py run`, `deploy.py reset` | All subcommands |
 
-All subcommands (`status`, `collect`, `run`, `reset`, `wipe`) use the `sim2real-progress` ConfigMap as the sole progress store. A configured namespace is required.
+All subcommands (`status`, `collect`, `run`, `reset`, `wipe`) use a run-scoped `sim2real-progress-{run}` ConfigMap as the sole progress store. Each run gets its own ConfigMap, avoiding cross-run conflicts. A configured namespace is required.
 
 ---
 
