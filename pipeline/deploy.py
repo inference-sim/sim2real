@@ -70,7 +70,7 @@ def run(cmd: list[str], *, check: bool = True, capture: bool = False,
 
 def _configmap_namespace(setup_config: dict | None,
                          namespaces: list[str] | None = None) -> str:
-    """Return the namespace for the sim2real-progress ConfigMap.
+    """Return the namespace for the run-scoped progress ConfigMap.
 
     Checks setup_config["namespace"] first, then falls back to
     namespaces[0] (or setup_config["namespaces"][0] if namespaces

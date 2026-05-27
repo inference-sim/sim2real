@@ -1,6 +1,7 @@
 """Progress persistence for the parallel pool orchestrator."""
 from __future__ import annotations
 import json
+import re
 import subprocess
 from abc import ABC, abstractmethod
 
@@ -21,13 +22,24 @@ class ConfigMapProgressStore(ProgressStore):
     BASE_NAME = "sim2real-progress"
     DATA_KEY = "progress"
 
+    _K8S_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9.\-]*$")
+
     def __init__(self, namespace: str, *, run_name: str = "") -> None:
         if not namespace:
             raise ValueError("ConfigMapProgressStore requires a non-empty namespace")
         self._namespace = namespace
-        self.configmap_name = (
-            f"{self.BASE_NAME}-{run_name}" if run_name else self.BASE_NAME
-        )
+        if run_name:
+            sanitized = re.sub(r"[^a-z0-9.\-]", "-", run_name.lower()).strip("-")
+            candidate = f"{self.BASE_NAME}-{sanitized}"
+            if len(candidate) > 253 or not self._K8S_NAME_RE.match(candidate):
+                raise ValueError(
+                    f"run_name {run_name!r} produces invalid ConfigMap name "
+                    f"{candidate!r} — must be lowercase alphanumeric, hyphens, "
+                    f"or dots, max 253 chars"
+                )
+            self.configmap_name = candidate
+        else:
+            self.configmap_name = self.BASE_NAME
 
     def load(self) -> dict:
         try:

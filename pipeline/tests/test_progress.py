@@ -117,3 +117,21 @@ def test_configmap_name_default_without_run_name():
     """ConfigMap name is the base name when run_name is omitted."""
     store = ConfigMapProgressStore("sim2real-ns")
     assert store.configmap_name == "sim2real-progress"
+
+
+def test_configmap_run_name_sanitized_lowercase():
+    """Uppercase chars in run_name are lowercased for K8s compliance."""
+    store = ConfigMapProgressStore("sim2real-ns", run_name="My-Experiment")
+    assert store.configmap_name == "sim2real-progress-my-experiment"
+
+
+def test_configmap_run_name_sanitized_underscores():
+    """Underscores in run_name are replaced with hyphens for K8s compliance."""
+    store = ConfigMapProgressStore("sim2real-ns", run_name="foo_bar")
+    assert store.configmap_name == "sim2real-progress-foo-bar"
+
+
+def test_configmap_run_name_too_long_raises():
+    """run_name that exceeds 253-char ConfigMap name limit is rejected."""
+    with pytest.raises(ValueError, match="invalid ConfigMap name"):
+        ConfigMapProgressStore("sim2real-ns", run_name="a" * 250)
