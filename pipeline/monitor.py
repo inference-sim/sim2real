@@ -353,7 +353,7 @@ def main() -> None:
     if not ns:
         err("No namespace configured in setup_config.json. Run setup.py first.")
         sys.exit(1)
-    store = ConfigMapProgressStore(ns)
+    store = ConfigMapProgressStore(ns, run_name=run_name)
 
     info(f"Monitoring run '{run_name}' (interval: {args.interval}s)")
     info(f"Report: {run_dir}/health_report.md")
