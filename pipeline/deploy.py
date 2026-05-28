@@ -253,15 +253,19 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
 
 # ── PipelineRun helpers ──────────────────────────────────────────────────────
 
-def _cancel_and_delete_pipelinerun(pr_name: str, namespace: str) -> None:
+def _cancel_and_delete_pipelinerun(pr_name: str, namespace: str) -> bool:
     """If a PipelineRun with the given name exists, cancel it, wait for it to
-    finish cancelling, then delete it so a fresh one can be submitted."""
+    finish cancelling, then delete it so a fresh one can be submitted.
+
+    Returns True if the PipelineRun was successfully deleted (or didn't exist).
+    Returns False if the delete failed — caller should NOT free the slot.
+    """
     exists = run(
         ["kubectl", "get", "pipelinerun", pr_name, "-n", namespace],
         check=False, capture=True,
     )
     if exists.returncode != 0:
-        return  # doesn't exist, nothing to cancel
+        return True  # doesn't exist, nothing to cancel
 
     status = _check_pipelinerun_status(pr_name, namespace)
     info(f"Existing PipelineRun {pr_name!r} found (status: {status}); cancelling …")
@@ -282,11 +286,17 @@ def _cancel_and_delete_pipelinerun(pr_name: str, namespace: str) -> None:
         else:
             warn(f"PipelineRun {pr_name!r} did not cancel within 120 s; deleting anyway")
 
-    run(
+    result = run(
         ["kubectl", "delete", "pipelinerun", pr_name, "-n", namespace,
          "--ignore-not-found"],
         check=False, capture=True,
     )
+    if result.returncode != 0:
+        detail = result.stderr.strip() if result.stderr else ""
+        warn(f"Failed to delete PipelineRun {pr_name!r} in {namespace}"
+             + (f": {detail}" if detail else ""))
+        return False
+    return True
 
 
 def _delete_pipelinerun(pr_name: str, namespace: str) -> None:
