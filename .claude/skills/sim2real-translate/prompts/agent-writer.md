@@ -16,6 +16,7 @@ Experiment root: {EXPERIMENT_ROOT}
 Target repo (submodule): {TARGET_REPO}
 Run directory: {RUN_DIR}
 Main session name: {MAIN_SESSION_NAME}
+Algorithm being translated: {ALGO_NAME}
 
 Run Go commands via: `(cd {TARGET_REPO} && <cmd>)`
 (If a `go.work` file exists in `{TARGET_REPO}`, add `GOWORK=off` to the command.)
@@ -68,6 +69,13 @@ Example queries:
 
 Use TaskCreate: `"Phase 2: Baseline Config Derivation"` → TaskUpdate in_progress
 
+**Skip check:** If `{RUN_DIR}/generated/baseline_config.yaml` already exists (written by a
+prior algorithm's skill invocation), skip Phase 2 — send:
+```
+SendMessage({MAIN_SESSION_NAME}, "baseline-ready: {RUN_DIR}/generated/baseline_config.yaml")
+```
+and wait for "continue". Baseline config is shared across algorithms.
+
 Read:
 1. `{REPO_ROOT}/pipeline/README.md` — the "Scenario Overlay Format" section defines the
    required output structure. Follow it exactly.
@@ -115,7 +123,7 @@ Read:
 2. If `{ALGO_CONFIG}` is non-empty: read it — the algorithm policy config (what changes from baseline)
 3. `{ALGO_SOURCE}` — the algorithm source
 
-Your goal: produce `{RUN_DIR}/generated/treatment_config.yaml` — a **llmdbenchmark scenario overlay**
+Your goal: produce `{RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_config.yaml` — a **llmdbenchmark scenario overlay**
 containing ONLY what differs from the baseline. Since assembly computes
 `treatment_resolved = deep_merge(baseline_resolved, treatment_overlay)`, anything already in
 baseline propagates automatically.
@@ -136,9 +144,9 @@ baseline propagates automatically.
   no `parameters:` block is needed — just declare the plugin type and name
 - Ask the Expert about config struct field names if needed
 
-Write `{RUN_DIR}/generated/treatment_config.yaml`. Then send to main session:
+Create the directory `{RUN_DIR}/generated/{ALGO_NAME}/` if needed, then write `{RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_config.yaml`. Then send to main session:
 ```
-SendMessage({MAIN_SESSION_NAME}, "treatment-ready: {RUN_DIR}/generated/treatment_config.yaml")
+SendMessage({MAIN_SESSION_NAME}, "treatment-ready: {RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_config.yaml")
 ```
 
 Wait for the reply. Handle feedback / continue as in Phase 2.
@@ -155,7 +163,7 @@ TaskUpdate Phase 3 → completed
 4. Define a `Type` constant (kebab-case string) and a `Factory` function matching the
    pattern used by existing plugins in this subsystem
 5. **Register** the plugin in the registration file identified by the Expert
-6. Update `{RUN_DIR}/generated/treatment_config.yaml` if the plugin type or parameters changed
+6. Update `{RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_config.yaml` if the plugin type or parameters changed
 7. **Follow logging and code patterns** used by existing plugins in the same subsystem —
    ask the Expert for a representative example if the context document doesn't show one
 8. **Write tests** — for every new plugin Go file (e.g., `foo.go`), write a corresponding
@@ -163,9 +171,9 @@ TaskUpdate Phase 3 → completed
    algorithm logic (at least main branches), and (if configurable) at least one
    threshold/weight value from the algorithm config
 
-## Phase 4.5: Write Preliminary translation_output.json
+## Phase 4.5: Write Preliminary {ALGO_NAME}_output.json
 
-After writing all plugin code (but before running the build), write `{RUN_DIR}/translation_output.json`
+After writing all plugin code (but before running the build), write `{RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_output.json`
 with all 9 required fields. If the file list changes in a later round, update it.
 
 ```json
@@ -215,13 +223,13 @@ mkdir -p "$SNAP_DIR"
 ```
 
 Copy all `files_created` + `files_modified` entries (relative to `{TARGET_REPO}`) plus
-`{RUN_DIR}/generated/treatment_config.yaml` into `$SNAP_DIR`:
+`{RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_config.yaml` into `$SNAP_DIR`:
 
 ```bash
 python3 -c "
 import json, shutil
 from pathlib import Path
-o = json.load(open('{RUN_DIR}/translation_output.json'))
+o = json.load(open('{RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_output.json'))
 snap = Path('$SNAP_DIR')
 target = Path('{TARGET_REPO}')
 for f in o['files_created'] + o.get('files_modified', []):
@@ -229,7 +237,9 @@ for f in o['files_created'] + o.get('files_modified', []):
     dst = snap / Path(f).name
     shutil.copy2(src, dst)
     print(f'  {Path(f).name} -> snapshots/v$SNAP_NUM/')
-shutil.copy2('{RUN_DIR}/generated/treatment_config.yaml', snap / 'treatment_config.yaml')
+algo_cfg = Path('{RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_config.yaml')
+if algo_cfg.exists():
+    shutil.copy2(algo_cfg, snap / '{ALGO_NAME}_config.yaml')
 print(f'Snapshot v$SNAP_NUM saved')
 "
 ```
@@ -252,7 +262,7 @@ After each green build, send a review request to the reviewer agent:
 REVIEW REQUEST — Round <N>
 Plugin files: <absolute paths of all files_created (excluding test files), one per line>
 Test files: <absolute paths of all _test.go files created or modified, one per line>
-Treatment config: {RUN_DIR}/generated/treatment_config.yaml
+Treatment config: {RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_config.yaml
 Build: PASSED
 Changed since last round: <brief description, or "initial" for round 1>
 ```
@@ -261,7 +271,7 @@ Wait for the reviewer's reply.
 
 ### On APPROVE
 
-1. Write `{RUN_DIR}/translation_output.json` (update if needed)
+1. Write `{RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_output.json` (update if needed)
 2. Create `{RUN_DIR}/review/` directory if needed, write `round_<N>.json` (see schema below)
 3. Send to main session:
    ```

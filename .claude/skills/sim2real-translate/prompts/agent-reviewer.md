@@ -34,6 +34,8 @@ Read and hold in context:
 
 You will read the generated plugin files and treatment config fresh on each review request.
 
+Algorithm being reviewed: {ALGO_NAME}
+
 Context from the operator (held in mind, not written to disk):
 
 {CONTEXT_TEXT}
@@ -41,7 +43,7 @@ Context from the operator (held in mind, not written to disk):
 ## Tool Discipline
 
 **Do not explore `{TARGET_REPO}` yourself** beyond the specific files you must read per
-review request (plugin files, registration file, treatment_config.yaml, translation_output.json).
+review request (plugin files, registration file, {ALGO_NAME}_config.yaml, {ALGO_NAME}_output.json).
 
 For anything that requires verifying code-level details — Go interface signatures,
 config struct field names, whether a built-in plugin already exists, exact type string
@@ -67,9 +69,9 @@ Example queries:
 You stay idle after initialization. When the writer sends you a review request:
 
 1. Read ALL plugin files listed in the writer's message (paths provided in the request) — fresh
-2. Read `{RUN_DIR}/generated/treatment_config.yaml` fresh
-3. Read `{RUN_DIR}/translation_output.json` for metadata cross-reference
-4. Read the registration file mentioned in `translation_output.json` — just the relevant section
+2. Read `{RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_config.yaml` fresh
+3. Read `{RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_output.json` for metadata cross-reference
+4. Read the registration file mentioned in `{ALGO_NAME}_output.json` — just the relevant section
 5. Apply ALL review criteria below (never skip one)
 6. Send your verdict to the writer using SendMessage
 
@@ -112,15 +114,15 @@ Verify the complete registration chain — ALL of these must be true:
 1. Plugin Go file defines a `Type` constant (string must be kebab-case)
 2. Plugin Go file defines a `Factory` function with the correct signature (ask Expert if uncertain)
 3. The registration file contains the correct registration call for this plugin
-4. The type string in the Go constant matches `plugin_type` in `translation_output.json` exactly
-5. The type string in the Go constant matches the `type:` field for this plugin in `treatment_config.yaml`
+4. The type string in the Go constant matches `plugin_type` in `{ALGO_NAME}_output.json` exactly
+5. The type string in the Go constant matches the `type:` field for this plugin in `{ALGO_NAME}_config.yaml`
 
 If any of these five items is missing or mismatched, raise `[registration]` NEEDS_CHANGES.
 This is the most common failure mode — check it carefully.
 
 ### Criterion 4: Config Correctness
 
-- `treatment_config.yaml` is a valid **scenario overlay** (top-level `scenario:` list with a dict)
+- `{ALGO_NAME}_config.yaml` is a valid **scenario overlay** (top-level `scenario:` list with a dict)
 - The plugin config within `inferenceExtension.pluginsCustomConfig` references the correct
   plugin type string
 - All plugin `type:` values in the config reference plugins that are registered
@@ -132,7 +134,7 @@ This verifies that `prepare.py` Phase 4 Assembly will succeed when it deep-merge
 treatment overlay into the baseline-resolved scenario.
 
 **Step A — Validate overlay structure:**
-Confirm `treatment_config.yaml` follows the scenario overlay format from
+Confirm `{ALGO_NAME}_config.yaml` follows the scenario overlay format from
 `{REPO_ROOT}/pipeline/README.md`:
 - Top-level `scenario:` key with a list containing a single dict
 - The dict has a `name` field matching the experiment's scenario name
@@ -147,7 +149,7 @@ treatment_resolved = deep_merge(deep_merge(baseline_resolved, treatment_diffs), 
 ```
 
 Verify:
-- `treatment_config_generated: true` is set in `translation_output.json`
+- `treatment_config_generated: true` is set in `{ALGO_NAME}_output.json`
 - Every key in the treatment overlay also appears in the baseline structure, or is
   explicitly justified (no invented keys that would be silently ignored)
 
@@ -157,12 +159,12 @@ Raise any problem as `[assembly]` NEEDS_CHANGES.
 
 Determine whether the algorithm has configurable parameters:
 - If `{ALGO_CONFIG}` is non-empty: use it as the reference (every threshold and weight
-  must have a corresponding field in treatment_config.yaml)
+  must have a corresponding field in {ALGO_NAME}_config.yaml)
 - If `{ALGO_CONFIG}` is empty: check `{ALGO_SOURCE}` for numeric literals that represent
   configurable thresholds or weights
 
 **If the algorithm has configurable parameters:**
-1. Confirm each parameter has a corresponding field in `treatment_config.yaml`
+1. Confirm each parameter has a corresponding field in `{ALGO_NAME}_config.yaml`
 2. Confirm the plugin Go file has config parsing (struct with yaml/json tags, or decoder logic)
    that reads these fields
 3. If a scoring threshold or weight appears as a numeric literal in the Go code without
@@ -189,7 +191,7 @@ Verification summary (required — one line per criterion):
 - Code quality: [confirm interfaces correct, tests present, patterns followed]
 - Registration: TypeConst=<exact value>, Factory=<name>, registration file=<path>
 - Config: overlay format valid, plugin types registered, keys consistent
-- Assembly: overlay YAML valid, scenario name matches, treatment_config_generated=true
+- Assembly: overlay YAML valid, scenario name matches, treatment_config_generated=true in {ALGO_NAME}_output.json
 - Treatment config: [parameter-free / parameters match algo config]
 ```
 
