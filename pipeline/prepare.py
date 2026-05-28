@@ -807,23 +807,43 @@ def _phase_summary(state: StateMachine, manifest: dict, run_dir: Path, resolved:
         output = json.loads(translation_output_path.read_text())
         translate_meta = state.get_phase("translate")
 
-        lines = [
-            f"**Run Summary: `{state.run_name}`**",
-            f"Generated: {datetime.now(timezone.utc).isoformat()} | Scenario: {manifest['scenario']}",
-            "",
-            "**Algorithm**",
-            f"- Source: `{(manifest.get('algorithms') or [{}])[0].get('source', 'N/A')}`",
-            f"- Description: {output.get('description', 'N/A')}",
-            "",
-            "**Translation**",
-            f"- Plugin type: `{output['plugin_type']}`",
-            f"- Files created: {', '.join(f'`{f}`' for f in output.get('files_created', []))}",
-            f"- Files modified: {', '.join(f'`{f}`' for f in output.get('files_modified', []))}",
-        ]
+        if "per_algorithm" in output:
+            lines = [
+                f"**Run Summary: `{state.run_name}`**",
+                f"Generated: {datetime.now(timezone.utc).isoformat()} | Scenario: {manifest['scenario']}",
+                "",
+                "**Algorithms**",
+            ]
+            for algo_name, algo_output in output["per_algorithm"].items():
+                algo_src = next(
+                    (a.get("source", "N/A") for a in manifest.get("algorithms", [])
+                     if a["name"] == algo_name),
+                    "N/A"
+                )
+                lines.append(f"- **{algo_name}**")
+                lines.append(f"  - Source: `{algo_src}`")
+                lines.append(f"  - Plugin type: `{algo_output.get('plugin_type', 'N/A')}`")
+                lines.append(f"  - Description: {algo_output.get('description', 'N/A')}")
+                lines.append(f"  - Files: {len(algo_output.get('files_created', []))} created, "
+                             f"{len(algo_output.get('files_modified', []))} modified")
+        else:
+            lines = [
+                f"**Run Summary: `{state.run_name}`**",
+                f"Generated: {datetime.now(timezone.utc).isoformat()} | Scenario: {manifest['scenario']}",
+                "",
+                "**Algorithm**",
+                f"- Source: `{(manifest.get('algorithms') or [{}])[0].get('source', 'N/A')}`",
+                f"- Description: {output.get('description', 'N/A')}",
+                "",
+                "**Translation**",
+                f"- Plugin type: `{output['plugin_type']}`",
+                f"- Files created: {', '.join(f'`{f}`' for f in output.get('files_created', []))}",
+                f"- Files modified: {', '.join(f'`{f}`' for f in output.get('files_modified', []))}",
+            ]
 
-        if translate_meta.get("review_rounds"):
-            lines.append(f"- Review: {translate_meta.get('consensus', 'N/A')} "
-                         f"after {translate_meta['review_rounds']} rounds")
+            if translate_meta.get("review_rounds"):
+                lines.append(f"- Review: {translate_meta.get('consensus', 'N/A')} "
+                             f"after {translate_meta['review_rounds']} rounds")
     else:
         baselines_str = ", ".join(bl["name"] for bl in manifest.get("baselines", []))
         lines = [
