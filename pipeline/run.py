@@ -90,7 +90,8 @@ def cmd_switch(args, workspace_dir: Path, submodule_dir: Path, setup_config: Pat
 
     try:
         result = switch_run(
-            args.name, workspace_dir, submodule_dir, setup_config, confirm_fn
+            args.name, workspace_dir, submodule_dir, setup_config, confirm_fn,
+            algorithm=getattr(args, "algorithm", None),
         )
     except (RunNotFoundError, TranslationOutputError, ValueError) as e:
         err(str(e))
@@ -103,6 +104,8 @@ def cmd_switch(args, workspace_dir: Path, submodule_dir: Path, setup_config: Pat
         sys.exit(1)
 
     ok(f"Switched to run: {result.active_run}")
+    if result.algorithm:
+        info(f"  algorithm: {result.algorithm}")
     for f in result.files_written:
         info(f"  wrote {f}")
 
@@ -134,6 +137,8 @@ Examples:
 
     switch_p = sub.add_parser("switch", help="Switch active run and sync scorer plugin files")
     switch_p.add_argument("name", metavar="NAME", help="Run name to switch to")
+    switch_p.add_argument("--algorithm", metavar="ALGO",
+                          help="Which algorithm to apply (default: first in index)")
 
     return p
 

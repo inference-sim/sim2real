@@ -31,11 +31,11 @@ class TestExperimentRootPaths:
 
         captured = {}
 
-        def fake_switch(run_name, workspace_dir, submodule_dir, setup_config, confirm_fn):
+        def fake_switch(run_name, workspace_dir, submodule_dir, setup_config, confirm_fn, **kwargs):
             captured["workspace_dir"] = workspace_dir
             captured["submodule_dir"] = submodule_dir
             captured["setup_config"] = setup_config
-            return MagicMock(active_run=run_name, files_written=[])
+            return MagicMock(active_run=run_name, files_written=[], algorithm=None)
 
         with patch.object(mod, "switch_run", side_effect=fake_switch), \
              patch.object(sys, "argv",
