@@ -1314,7 +1314,7 @@ def test_early_reclaim_recoverable_threshold_exceeded(monkeypatch):
 
     monkeypatch.setattr(mod, "run", fake_run)
     monkeypatch.setattr(mod, "_cancel_and_delete_pipelinerun",
-                        lambda pr, ns: cancelled.append((pr, ns)))
+                        lambda pr, ns: cancelled.append((pr, ns)) or True)
 
     reclaimed = mod._handle_pending_pods(
         pr_name="baseline-smoke-run1",
@@ -1413,7 +1413,7 @@ def test_early_reclaim_non_recoverable_fails_immediately(monkeypatch):
 
     monkeypatch.setattr(mod, "run", fake_run)
     monkeypatch.setattr(mod, "_cancel_and_delete_pipelinerun",
-                        lambda pr, ns: cancelled.append((pr, ns)))
+                        lambda pr, ns: cancelled.append((pr, ns)) or True)
 
     reclaimed = mod._handle_pending_pods(
         pr_name="baseline-smoke-run1",
@@ -1464,7 +1464,7 @@ def test_early_reclaim_stalled_at_max_pending_stalls(monkeypatch):
         return _R()
 
     monkeypatch.setattr(mod, "run", fake_run)
-    monkeypatch.setattr(mod, "_cancel_and_delete_pipelinerun", lambda pr, ns: None)
+    monkeypatch.setattr(mod, "_cancel_and_delete_pipelinerun", lambda pr, ns: True)
 
     reclaimed = mod._handle_pending_pods(
         pr_name="baseline-smoke-run1",
@@ -2262,3 +2262,97 @@ def test_status_uses_configmap_directly(tmp_path, capsys, monkeypatch):
 
     out = capsys.readouterr().out
     assert "wl-remote-baseline" in out
+
+
+def test_early_reclaim_non_recoverable_cancel_fails_leaves_slot_busy(monkeypatch):
+    """When cancel fails for non-recoverable pod, slot stays busy (not freed)."""
+    import json
+    import pipeline.deploy as mod
+
+    pods_json = {
+        "items": [{
+            "status": {
+                "phase": "Pending",
+                "conditions": [{
+                    "type": "PodScheduled",
+                    "status": "False",
+                    "reason": "Unschedulable",
+                    "message": "node(s) had untolerated taint {nvidia.com/gpu=present}",
+                }],
+            },
+        }],
+    }
+    entry = {
+        "workload": "wl-smoke", "package": "baseline", "status": "running",
+        "namespace": "sim2real-0", "retries": 0, "gpu_cost": 1,
+        "pending_stalls": 0, "pending_since": None,
+    }
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = json.dumps(pods_json)
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    monkeypatch.setattr(mod, "_cancel_and_delete_pipelinerun", lambda pr, ns: False)
+
+    reclaimed = mod._handle_pending_pods(
+        pr_name="baseline-smoke-run1",
+        namespace="sim2real-0",
+        entry=entry,
+        pending_threshold=600,
+        max_pending_stalls=10,
+    )
+
+    assert reclaimed is False
+    assert entry["status"] == "running"
+    assert entry["namespace"] == "sim2real-0"
+
+
+def test_early_reclaim_recoverable_cancel_fails_leaves_slot_busy(monkeypatch):
+    """When cancel fails for recoverable timeout, slot stays busy."""
+    import datetime as _dt
+    import json
+    import pipeline.deploy as mod
+
+    pods_json = {
+        "items": [{
+            "status": {
+                "phase": "Pending",
+                "conditions": [{
+                    "type": "PodScheduled",
+                    "status": "False",
+                    "reason": "Unschedulable",
+                    "message": "0/8 nodes are available: 8 Insufficient nvidia.com/gpu.",
+                }],
+            },
+        }],
+    }
+    old_time = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=700)).isoformat()
+    entry = {
+        "workload": "wl-smoke", "package": "baseline", "status": "running",
+        "namespace": "sim2real-0", "retries": 0, "gpu_cost": 1,
+        "pending_stalls": 0, "pending_since": old_time,
+    }
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = json.dumps(pods_json)
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    monkeypatch.setattr(mod, "_cancel_and_delete_pipelinerun", lambda pr, ns: False)
+
+    reclaimed = mod._handle_pending_pods(
+        pr_name="baseline-smoke-run1",
+        namespace="sim2real-0",
+        entry=entry,
+        pending_threshold=600,
+        max_pending_stalls=10,
+    )
+
+    assert reclaimed is False
+    assert entry["status"] == "running"
+    assert entry["namespace"] == "sim2real-0"

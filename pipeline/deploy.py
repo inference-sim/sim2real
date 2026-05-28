@@ -499,7 +499,9 @@ def _handle_pending_pods(*, pr_name: str, namespace: str, entry: dict,
 
     if category == "non_recoverable":
         warn(f"[{entry.get('workload', '?')}] non-recoverable pending: {detail}")
-        _cancel_and_delete_pipelinerun(pr_name, namespace)
+        if not _cancel_and_delete_pipelinerun(pr_name, namespace):
+            warn(f"[{entry.get('workload', '?')}] cancel failed — slot NOT freed")
+            return False
         entry["status"] = "failed"
         entry["namespace"] = None
         entry["pending_since"] = None
@@ -523,7 +525,9 @@ def _handle_pending_pods(*, pr_name: str, namespace: str, entry: dict,
         return False
 
     warn(f"[{entry.get('workload', '?')}] pending {int(elapsed)}s > {pending_threshold}s threshold → reclaim")
-    _cancel_and_delete_pipelinerun(pr_name, namespace)
+    if not _cancel_and_delete_pipelinerun(pr_name, namespace):
+        warn(f"[{entry.get('workload', '?')}] cancel failed — slot NOT freed")
+        return False
     stalls = entry.get("pending_stalls", 0) + 1
     entry["pending_stalls"] = stalls
     entry["pending_since"] = None
