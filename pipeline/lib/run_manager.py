@@ -176,8 +176,13 @@ def inspect_run(run_dir: Path, active_run: str = "") -> RunDetail:
     if to_path.exists():
         try:
             to = json.loads(to_path.read_text())
-            files_created = to.get("files_created") or []
-            files_modified = to.get("files_modified") or []
+            if "per_algorithm" in to:
+                for algo_output in to["per_algorithm"].values():
+                    files_created.extend(algo_output.get("files_created", []))
+                    files_modified.extend(algo_output.get("files_modified", []))
+            else:
+                files_created = to.get("files_created") or []
+                files_modified = to.get("files_modified") or []
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -205,7 +210,11 @@ def inspect_run(run_dir: Path, active_run: str = "") -> RunDetail:
 
 
 def _load_translation_output(run_dir: Path, run_name: str) -> "tuple[list[str], list[str]]":
-    """Load and validate translation_output.json. Returns (files_created, files_modified)."""
+    """Load and validate translation_output.json. Returns (files_created, files_modified).
+
+    Handles both per-algorithm index format and legacy single format.
+    Returns aggregated (files_created, files_modified) across all algorithms.
+    """
     to_path = run_dir / "translation_output.json"
     if not to_path.exists():
         raise TranslationOutputError(
@@ -217,6 +226,24 @@ def _load_translation_output(run_dir: Path, run_name: str) -> "tuple[list[str], 
         raise TranslationOutputError(
             f"Error: translation_output.json is malformed — {e}"
         )
+
+    if "per_algorithm" in data:
+        all_created: list[str] = []
+        all_modified: list[str] = []
+        for algo_output in data["per_algorithm"].values():
+            fc = algo_output.get("files_created", [])
+            fm = algo_output.get("files_modified", [])
+            if (not isinstance(fc, list) or not isinstance(fm, list)
+                    or not all(isinstance(x, str) for x in fc)
+                    or not all(isinstance(x, str) for x in fm)):
+                raise TranslationOutputError(
+                    "Error: translation_output.json is malformed — expected 'files_created' and "
+                    "'files_modified' as lists of strings in per_algorithm entries"
+                )
+            all_created.extend(fc)
+            all_modified.extend(fm)
+        return all_created, all_modified
+
     fc = data.get("files_created")
     fm = data.get("files_modified")
     if (not isinstance(fc, list) or not isinstance(fm, list)
@@ -286,21 +313,34 @@ def switch_run(
     files_created, files_modified = _load_translation_output(run_dir, run_name)
     target_files = set(files_created + files_modified)
 
-    # Step 2: basename collision check
-    seen: set[str] = set()
-    for rel_path in target_files:
-        basename = Path(rel_path).name
-        if basename in seen:
-            raise ValueError(
-                f"Error: basename collision in translation_output.json: "
-                f"'{basename}' maps to multiple paths"
-            )
-        seen.add(basename)
+    # Detect per-algorithm mode
+    output = json.loads((run_dir / "translation_output.json").read_text())
+    is_per_algorithm = "per_algorithm" in output
+
+    # Step 2: basename collision check (only for legacy flat mode)
+    if not is_per_algorithm:
+        seen: set[str] = set()
+        for rel_path in target_files:
+            basename = Path(rel_path).name
+            if basename in seen:
+                raise ValueError(
+                    f"Error: basename collision in translation_output.json: "
+                    f"'{basename}' maps to multiple paths"
+                )
+            seen.add(basename)
 
     # Step 3: pre-validate all source files exist in generated/
     generated_dir = run_dir / "generated"
-    missing = [Path(f).name for f in target_files
-               if not (generated_dir / Path(f).name).exists()]
+    if is_per_algorithm:
+        missing = []
+        for algo_name, algo_output in output["per_algorithm"].items():
+            algo_dir = generated_dir / algo_name
+            for f in algo_output.get("files_created", []) + algo_output.get("files_modified", []):
+                if not (algo_dir / f).exists():
+                    missing.append(f"{algo_name}/{f}")
+    else:
+        missing = [Path(f).name for f in target_files
+                   if not (generated_dir / Path(f).name).exists()]
     if missing:
         raise ValueError(
             f"Error: missing source files in workspace/runs/{run_name}/generated/: "
@@ -339,15 +379,32 @@ def switch_run(
 
     # Step 8: copy all generated files to their destinations in the submodule
     files_written: list[str] = []
-    for rel_path in sorted(target_files):
-        src = generated_dir / Path(rel_path).name
-        dst = submodule_dir / rel_path
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            shutil.copy2(src, dst)
-            files_written.append(rel_path)
-        except OSError as e:
-            raise OSError(f"Error: failed to copy {rel_path}: {e}") from e
+    if is_per_algorithm:
+        for algo_name, algo_output in output["per_algorithm"].items():
+            algo_dir = generated_dir / algo_name
+            algo_files = (
+                algo_output.get("files_created", []) +
+                algo_output.get("files_modified", [])
+            )
+            for rel_path in sorted(algo_files):
+                src = algo_dir / rel_path
+                dst = submodule_dir / rel_path
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.copy2(src, dst)
+                    files_written.append(rel_path)
+                except OSError as e:
+                    raise OSError(f"Error: failed to copy {rel_path}: {e}") from e
+    else:
+        for rel_path in sorted(target_files):
+            src = generated_dir / Path(rel_path).name
+            dst = submodule_dir / rel_path
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(src, dst)
+                files_written.append(rel_path)
+            except OSError as e:
+                raise OSError(f"Error: failed to copy {rel_path}: {e}") from e
 
     # Step 9: update setup_config only after all copies succeed
     cfg["current_run"] = run_name
