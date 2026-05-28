@@ -139,6 +139,81 @@ class TestRestoreTreatment:
         assert (component_dir / "a" / "b" / "c" / "deep.go").read_text() == "deep file"
 
 
+class TestPerAlgorithmRestore:
+    def test_restore_treatment_from_subdirectory(self, tmp_path):
+        """When algo_name is set, files are read from generated_dir/{algo_name}/{rel_path}."""
+        component_dir = tmp_path / "component"
+        component_dir.mkdir()
+        _init_repo(component_dir)
+
+        generated_dir = tmp_path / "generated"
+        algo_subdir = generated_dir / "my_algo" / "cmd" / "epp" / "runner"
+        algo_subdir.mkdir(parents=True)
+        (algo_subdir / "runner.go").write_text("algo runner content")
+
+        # Also a top-level modified file
+        (generated_dir / "my_algo" / "base.txt").write_text("algo base content")
+
+        translation_output = {
+            "files_created": ["cmd/epp/runner/runner.go"],
+            "files_modified": ["base.txt"],
+        }
+
+        restore_treatment(component_dir, generated_dir, translation_output, algo_name="my_algo")
+        assert (component_dir / "cmd" / "epp" / "runner" / "runner.go").read_text() == "algo runner content"
+        assert (component_dir / "base.txt").read_text() == "algo base content"
+
+    def test_restore_treatment_without_algo_name_uses_basename(self, tmp_path):
+        """When algo_name is None, the legacy basename lookup is used."""
+        component_dir = tmp_path / "component"
+        component_dir.mkdir()
+        _init_repo(component_dir)
+
+        generated_dir = tmp_path / "generated"
+        generated_dir.mkdir()
+        (generated_dir / "runner.go").write_text("flat runner content")
+
+        translation_output = {
+            "files_created": ["cmd/epp/runner/runner.go"],
+            "files_modified": [],
+        }
+
+        restore_treatment(component_dir, generated_dir, translation_output)
+        assert (component_dir / "cmd" / "epp" / "runner" / "runner.go").read_text() == "flat runner content"
+
+    def test_round_trip_per_algorithm(self, tmp_path):
+        """Full cycle: baseline -> treatment (per-algo) -> baseline -> treatment (per-algo)."""
+        component_dir = tmp_path / "component"
+        component_dir.mkdir()
+        _init_repo(component_dir)
+
+        generated_dir = tmp_path / "generated"
+        algo_subdir = generated_dir / "evolved_v2"
+        (algo_subdir / "pkg").mkdir(parents=True)
+        (algo_subdir / "pkg" / "scorer.go").write_text("evolved scorer")
+        (algo_subdir / "base.txt").write_text("evolved base")
+
+        translation_output = {
+            "files_created": ["pkg/scorer.go"],
+            "files_modified": ["base.txt"],
+        }
+
+        # Apply treatment with per-algorithm path
+        restore_treatment(component_dir, generated_dir, translation_output, algo_name="evolved_v2")
+        assert (component_dir / "pkg" / "scorer.go").read_text() == "evolved scorer"
+        assert (component_dir / "base.txt").read_text() == "evolved base"
+
+        # Restore baseline
+        restore_baseline(component_dir, translation_output)
+        assert not (component_dir / "pkg" / "scorer.go").exists()
+        assert (component_dir / "base.txt").read_text() == "original"
+
+        # Restore treatment again
+        restore_treatment(component_dir, generated_dir, translation_output, algo_name="evolved_v2")
+        assert (component_dir / "pkg" / "scorer.go").read_text() == "evolved scorer"
+        assert (component_dir / "base.txt").read_text() == "evolved base"
+
+
 class TestRoundTrip:
     def test_baseline_then_treatment_restores_state(self, tmp_path):
         """Full round-trip: start with treatment state, restore baseline, restore treatment."""
