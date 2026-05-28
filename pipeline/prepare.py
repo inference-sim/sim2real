@@ -457,9 +457,10 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
             sys.exit(1)
         for pkg in packages:
             if pkg.kind == "algorithm":
-                injected = inject_epp_image(pkg.resolved, registry, repo_name, run_name_tag)
+                injected = inject_epp_image(pkg.resolved, registry, repo_name, run_name_tag, algo_name=pkg.name)
                 if injected:
-                    ok(f"EPP image injected into {pkg.name}: {registry}/{repo_name}:{run_name_tag}")
+                    effective_tag = f"{run_name_tag}-{pkg.name}"
+                    ok(f"EPP image injected into {pkg.name}: {registry}/{repo_name}:{effective_tag}")
                 else:
                     err(f"{pkg.name} has no 'scenario' entries — EPP image cannot be injected.")
                     sys.exit(1)
