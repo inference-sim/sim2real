@@ -87,9 +87,9 @@ python pipeline/prepare.py [--force] [--rebuild-context] [--manifest PATH] [--ru
 
 **Phase 1 ref validation**: If `component.ref` is set in the manifest, Phase 1 resolves it via `git rev-parse` in the component submodule and compares against HEAD. A mismatch produces a warning (not a hard error) with the expected/actual SHA and a checkout command. Missing submodule or non-git directory with `component.ref` set is a hard error with an init command.
 
-**Phase 3 checkpoint**: writes `skill_input.json` and exits cleanly (exit 0). Run `/sim2real-translate` in Claude Code, then re-run `prepare.py` to continue from Phase 4. When no `algorithm` is present in the manifest, Phase 3 is skipped entirely (baseline-only mode).
+**Phase 3 checkpoint**: iterates over each algorithm in the manifest. For each, checks whether `generated/{algo_name}/{algo_name}_output.json` exists. If any algorithm is untranslated, writes `skill_input.json` (with `current_algorithm` targeting the next pending algorithm) and exits cleanly (exit 0). Run `/sim2real-translate` in Claude Code, then re-run `prepare.py`. When all algorithms are translated, writes a top-level `translation_output.json` index and proceeds to Phase 4. When no `algorithm` is present in the manifest, Phase 3 is skipped entirely (baseline-only mode).
 
-**Phase 4 assembly** reads `baseline.yaml` and `treatment.yaml` from the experiment root, merges them with skill-generated overlay files (`generated/baseline_config.yaml`, `generated/treatment_config.yaml`), and writes resolved scenario files to `cluster/`. PipelineRuns are generated with a `scenarioContent` param containing the fully resolved scenario YAML. Workloads are loaded from the manifest.
+**Phase 4 assembly** reads baseline scenario files from the experiment root, merges them with skill-generated overlay files from `generated/`. For multi-algorithm runs, each algorithm's overlay is in `generated/{algo_name}/{algo_name}_config.yaml`. For single-algorithm runs, the overlay may be at `generated/{name}_config.yaml` or `generated/treatment_config.yaml` (legacy). Resolved scenario files are written to `cluster/`. PipelineRuns are generated with a `scenarioContent` param containing the fully resolved scenario YAML. Workloads are loaded from the manifest.
 
 **Phase 6 gate**: `d` marks the run `READY TO DEPLOY` (required by `deploy.py`). `e` drops you back to edit files, then re-displays the summary. `q` marks `abandoned` and exits.
 
@@ -126,7 +126,7 @@ Common flags (all subcommands):
 | `--experiment-root PATH` | cwd | path to experiment repo |
 | `--skip-build` | false | skip image build pre-flight |
 
-**Image build** — `deploy.py build` (called implicitly as pre-flight by `deploy.py run`) iterates over all resolved scenarios in `cluster/`, collects unique `images.inferenceScheduler` refs, and builds any that are stale. Baseline images are tagged by the component directory's HEAD SHA (8 chars); treatment images by the run name. Source hash comparison skips builds when the image is already current.
+**Image build** — `deploy.py build` (called implicitly as pre-flight by `deploy.py run`) iterates over all resolved scenarios in `cluster/`, collects unique `images.inferenceScheduler` refs, and builds any that are stale. Baseline images are tagged by the component directory's HEAD SHA (8 chars); algorithm images are tagged `{run_name}-{algo_name}` (per-algorithm). For each algorithm build, the component working tree is reset to baseline and only that algorithm's files are applied before building. Source hash comparison skips builds when the image is already current.
 
 **Pair discovery** — `deploy.py run` discovers `pipelinerun-*.yaml` files at the `cluster/` root. Each file's pair key is derived as `wl-` + filename stem minus the `pipelinerun-` prefix.
 
@@ -248,7 +248,7 @@ python pipeline/run.py --experiment-root ../admission-control switch <name>
 
 `--experiment-root` defaults to the current working directory; omit it when running from the experiment repo root.
 
-**`switch`** copies files listed in `translation_output.json` (`files_created` + `files_modified`) into the experiment repo's `llm-d-inference-scheduler/` directory and updates `setup_config.json`. Prompts before overwriting uncommitted changes.
+**`switch`** copies files listed in `translation_output.json` (`files_created` + `files_modified`) into the experiment repo's `llm-d-inference-scheduler/` directory and updates `setup_config.json`. For per-algorithm index format, copies from `generated/{algo_name}/` using full relative paths. Prompts before overwriting uncommitted changes.
 
 ---
 
@@ -323,8 +323,15 @@ All subcommands (`status`, `collect`, `run`, `reset`, `wipe`) use a run-scoped `
 
 ## Scenario Overlay Format
 
-The `/sim2real-translate` skill produces two overlay files in `workspace/runs/<run>/generated/`:
+The `/sim2real-translate` skill produces overlay files in `workspace/runs/<run>/generated/`:
 
+**Per-algorithm layout** (multi-algorithm manifests):
+- `baseline_config.yaml` — shared baseline overlay (merged onto all baselines)
+- `{algo_name}/{algo_name}_config.yaml` — per-algorithm treatment overlay
+- `{algo_name}/{algo_name}_output.json` — per-algorithm translation metadata
+- `{algo_name}/...` — generated source files with full relative paths
+
+**Legacy flat layout** (single-algorithm, backward compat):
 - `baseline_config.yaml` — overlay merged onto `baseline.yaml`
 - `treatment_config.yaml` — overlay merged onto the already-resolved baseline
 

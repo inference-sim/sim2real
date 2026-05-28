@@ -279,27 +279,97 @@ def _phase_context(args, state: StateMachine, manifest: dict, run_dir: Path) -> 
 
 def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
                      resolved: dict, context_path: Path):
-    """Phase 3: Write skill_input.json (or skip if no algorithm in manifest)."""
+    """Phase 3: Per-algorithm translation checkpoint.
+
+    For each algorithm in manifest, check if its per-algo output exists in
+    generated/{algo_name}/{algo_name}_output.json. If all exist, write the
+    top-level translation_output.json index and mark phase done. Otherwise,
+    write skill_input.json targeting the next untranslated algorithm and exit.
+    """
     step(3, "Translation Checkpoint")
 
     if state.is_done("translate") and not args.force:
         info("[skip] Translation already complete")
         return
 
-    if not manifest.get("algorithms"):
+    algorithms = manifest.get("algorithms", [])
+    if not algorithms:
         info("[skip] No algorithm in manifest — baseline-only mode")
         state.mark_done("translate", mode="baseline-only")
         return
 
+    generated_dir = run_dir / "generated"
     build_cfg = resolved.get("build", {})
-
-    # Build commands: common commands (skill determines test scope)
     commands = [" ".join(c) if isinstance(c, list) else c for c in build_cfg.get("commands", [])]
 
-    # Write skill_input.json
-    first_bl = manifest.get("baselines", [{}])[0]
-    first_algo = manifest.get("algorithms", [{}])[0]
+    # Check for existing translation_output.json
+    output_path = run_dir / "translation_output.json"
+    if output_path.exists():
+        try:
+            output = json.loads(output_path.read_text())
+        except json.JSONDecodeError as e:
+            err(f"translation_output.json is not valid JSON: {e}. "
+                "Delete the file and re-run the /sim2real-translate skill.")
+            sys.exit(1)
 
+        if "per_algorithm" in output:
+            # Per-algorithm index format — check completeness
+            all_present = all(
+                (generated_dir / a["name"] / f"{a['name']}_output.json").exists()
+                for a in algorithms
+            )
+            if all_present:
+                state.mark_done("translate", algorithms=[a["name"] for a in algorithms])
+                ok(f"All {len(algorithms)} algorithms translated")
+                return
+        elif "plugin_type" in output:
+            # Legacy single-algo format — validate and mark done
+            for f in ["plugin_type", "files_created", "files_modified",
+                      "package", "test_commands", "config_kind",
+                      "treatment_config_generated", "description"]:
+                if f not in output:
+                    err(f"translation_output.json missing required field: {f}")
+                    sys.exit(1)
+            if "register_file" not in output:
+                err("translation_output.json missing required field: register_file")
+                sys.exit(1)
+            state.mark_done("translate",
+                            plugin_type=output["plugin_type"],
+                            files_created=output["files_created"],
+                            register_file=output.get("register_file"),
+                            treatment_config_generated=output.get("treatment_config_generated", False))
+            ok(f"Translation found: {output['plugin_type']}")
+            return
+        else:
+            err("translation_output.json has unrecognized format "
+                "(missing both 'per_algorithm' and 'plugin_type' keys). "
+                "Delete the file and re-run the /sim2real-translate skill.")
+            sys.exit(1)
+
+    # Determine which algorithms still need translation
+    translated = []
+    pending = []
+    for algo in algorithms:
+        algo_output = generated_dir / algo["name"] / f"{algo['name']}_output.json"
+        if algo_output.exists():
+            translated.append(algo)
+        else:
+            pending.append(algo)
+
+    if not pending:
+        # All algorithms translated — write index and mark done
+        _write_translation_index(run_dir, algorithms, generated_dir)
+        state.mark_done("translate", algorithms=[a["name"] for a in algorithms])
+        ok(f"All {len(algorithms)} algorithms translated — index written")
+        return
+
+    # Target the next pending algorithm
+    target_algo = pending[0]
+    info(f"Translation needed for: {target_algo['name']} "
+         f"({len(translated)}/{len(algorithms)} complete)")
+
+    # Write skill_input.json targeting this algorithm
+    first_bl = manifest.get("baselines", [{}])[0]
     skill_input = {
         "run_name": state.run_name,
         "run_dir": _display_path(run_dir),
@@ -322,11 +392,12 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
                 "config": algo.get("config"),
                 "defaults": algo["defaults"],
             }
-            for algo in manifest.get("algorithms", [])
+            for algo in algorithms
         ],
-        # Legacy fields for backward compat with existing skill
-        "algorithm_source": first_algo.get("source", ""),
-        "algorithm_config": first_algo.get("config"),
+        "current_algorithm": target_algo["name"],
+        # Legacy fields — point at current target algorithm
+        "algorithm_source": target_algo.get("source", ""),
+        "algorithm_config": target_algo.get("config"),
         "baseline_sim_config": first_bl.get("sim", {}).get("config"),
         "baseline_real_config": first_bl.get("real", {}).get("config"),
         "baseline_real_notes": first_bl.get("real", {}).get("notes", ""),
@@ -338,43 +409,35 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
     skill_input_path = run_dir / "skill_input.json"
     skill_input_path.write_text(json.dumps(skill_input, indent=2))
 
-    # Check for translation output
-    output_path = run_dir / "translation_output.json"
-    if output_path.exists():
-        output = json.loads(output_path.read_text())
-        # Validate required fields
-        for f in ["plugin_type", "files_created", "files_modified",
-                  "package", "test_commands", "config_kind",
-                  "treatment_config_generated", "description"]:
-            if f not in output:
-                err(f"translation_output.json missing required field: {f}")
-                sys.exit(1)
-        if "register_file" not in output:
-            err("translation_output.json missing required field: register_file")
-            sys.exit(1)
-
-        state.mark_done("translate",
-                        plugin_type=output["plugin_type"],
-                        files_created=output["files_created"],
-                        register_file=output.get("register_file"),
-                        treatment_config_generated=output.get("treatment_config_generated", False))
-        ok(f"Translation found: {output['plugin_type']}")
-        return
-
-    # No translation output yet — checkpoint
+    # Checkpoint — exit and wait for skill invocation
     state.increment("translate", "checkpoint_hits")
     hits = state.get_phase("translate").get("checkpoint_hits", 1)
 
     print(f"\n{'='*60}")
     print("  TRANSLATION CHECKPOINT")
     print(f"{'='*60}")
-    print(f"\n  skill_input.json written to: {_display_path(skill_input_path)}")
+    print(f"\n  Algorithm: {target_algo['name']} ({len(translated)}/{len(algorithms)} done)")
+    print(f"  skill_input.json written to: {_display_path(skill_input_path)}")
     print("\n  Next step: run the /sim2real-translate skill in Claude Code,")
     print("  then re-run: python pipeline/prepare.py")
     if hits >= 3:
         warn(f"Checkpoint hit {hits} times. Have you run the translation skill?")
     print(f"\n{'='*60}\n")
     sys.exit(0)
+
+
+def _write_translation_index(run_dir: Path, algorithms: list[dict], generated_dir: Path):
+    """Write top-level translation_output.json as an index of per-algorithm outputs."""
+    per_algorithm = {}
+    for algo in algorithms:
+        algo_output_path = generated_dir / algo["name"] / f"{algo['name']}_output.json"
+        per_algorithm[algo["name"]] = json.loads(algo_output_path.read_text())
+
+    index = {
+        "algorithms": [a["name"] for a in algorithms],
+        "per_algorithm": per_algorithm,
+    }
+    (run_dir / "translation_output.json").write_text(json.dumps(index, indent=2))
 
 
 # ── Phase 4: Assembly ────────────────────────────────────────────────────────
@@ -457,9 +520,10 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
             sys.exit(1)
         for pkg in packages:
             if pkg.kind == "algorithm":
-                injected = inject_epp_image(pkg.resolved, registry, repo_name, run_name_tag)
+                injected = inject_epp_image(pkg.resolved, registry, repo_name, run_name_tag, algo_name=pkg.name)
                 if injected:
-                    ok(f"EPP image injected into {pkg.name}: {registry}/{repo_name}:{run_name_tag}")
+                    effective_tag = f"{run_name_tag}-{pkg.name}"
+                    ok(f"EPP image injected into {pkg.name}: {registry}/{repo_name}:{effective_tag}")
                 else:
                     err(f"{pkg.name} has no 'scenario' entries — EPP image cannot be injected.")
                     sys.exit(1)
@@ -633,6 +697,33 @@ def _verify_generated_dir(run_dir: Path):
             "Re-run the /sim2real-translate skill.")
         sys.exit(1)
 
+    # Per-algorithm index format
+    if "per_algorithm" in output:
+        missing_dirs = []
+        missing_files = []
+        for algo_name, algo_output in output["per_algorithm"].items():
+            algo_dir = generated_dir / algo_name
+            if not algo_dir.exists():
+                missing_dirs.append(algo_name)
+                continue
+            for f in algo_output.get("files_created", []) + algo_output.get("files_modified", []):
+                if not (algo_dir / f).exists():
+                    missing_files.append(f"generated/{algo_name}/{f}")
+        if missing_dirs:
+            err(f"Per-algorithm directories missing from generated/: {', '.join(missing_dirs)}. "
+                "Re-run the /sim2real-translate skill for these algorithms.")
+            sys.exit(1)
+        if missing_files:
+            for f in missing_files:
+                warn(f"missing: {f}")
+        return
+
+    if "plugin_type" not in output:
+        err("translation_output.json has unrecognized format. "
+            "Re-run the /sim2real-translate skill.")
+        sys.exit(1)
+
+    # Legacy flat format
     for f in output.get("files_created", []) + output.get("files_modified", []):
         if not (generated_dir / Path(f).name).exists():
             warn(f"generated/ missing: {Path(f).name}")
@@ -648,6 +739,39 @@ def _validate_assembly(run_dir: Path, resolved: dict, algorithm_packages: list[s
     except json.JSONDecodeError:
         warn("translation_output.json is not valid JSON — skipping validation")
         return
+
+    # Per-algorithm index format
+    if "per_algorithm" in output:
+        target_path = resolved.get("path", "")
+        errors = []
+        for algo_name, algo_output in output["per_algorithm"].items():
+            plugin_type = algo_output.get("plugin_type", "")
+            treatment_config_generated = algo_output.get("treatment_config_generated", True)
+
+            # Check: plugin_type in scenario YAML
+            if treatment_config_generated:
+                pkg_yaml = run_dir / "cluster" / f"{algo_name}.yaml"
+                if not pkg_yaml.exists():
+                    errors.append(
+                        f"[{algo_name}] scenario YAML not found: cluster/{algo_name}.yaml")
+                elif plugin_type not in pkg_yaml.read_text():
+                    errors.append(
+                        f"[{algo_name}] plugin_type '{plugin_type}' not found in {algo_name}.yaml")
+
+        if errors:
+            err("validate-assembly FAILED:")
+            for e in errors:
+                err(f"  - {e}")
+            sys.exit(1)
+        ok("validate-assembly: all checks passed")
+        return
+
+    if "plugin_type" not in output:
+        err("translation_output.json has unrecognized format — skipping validation. "
+            "Re-run the /sim2real-translate skill.")
+        sys.exit(1)
+
+    # Legacy single-output format
     plugin_type = output["plugin_type"]
     target_path = resolved.get("path", "")
     treatment_config_generated = output.get("treatment_config_generated", True)
@@ -715,23 +839,43 @@ def _phase_summary(state: StateMachine, manifest: dict, run_dir: Path, resolved:
         output = json.loads(translation_output_path.read_text())
         translate_meta = state.get_phase("translate")
 
-        lines = [
-            f"**Run Summary: `{state.run_name}`**",
-            f"Generated: {datetime.now(timezone.utc).isoformat()} | Scenario: {manifest['scenario']}",
-            "",
-            "**Algorithm**",
-            f"- Source: `{(manifest.get('algorithms') or [{}])[0].get('source', 'N/A')}`",
-            f"- Description: {output.get('description', 'N/A')}",
-            "",
-            "**Translation**",
-            f"- Plugin type: `{output['plugin_type']}`",
-            f"- Files created: {', '.join(f'`{f}`' for f in output.get('files_created', []))}",
-            f"- Files modified: {', '.join(f'`{f}`' for f in output.get('files_modified', []))}",
-        ]
+        if "per_algorithm" in output:
+            lines = [
+                f"**Run Summary: `{state.run_name}`**",
+                f"Generated: {datetime.now(timezone.utc).isoformat()} | Scenario: {manifest['scenario']}",
+                "",
+                "**Algorithms**",
+            ]
+            for algo_name, algo_output in output["per_algorithm"].items():
+                algo_src = next(
+                    (a.get("source", "N/A") for a in manifest.get("algorithms", [])
+                     if a["name"] == algo_name),
+                    "N/A"
+                )
+                lines.append(f"- **{algo_name}**")
+                lines.append(f"  - Source: `{algo_src}`")
+                lines.append(f"  - Plugin type: `{algo_output.get('plugin_type', 'N/A')}`")
+                lines.append(f"  - Description: {algo_output.get('description', 'N/A')}")
+                lines.append(f"  - Files: {len(algo_output.get('files_created', []))} created, "
+                             f"{len(algo_output.get('files_modified', []))} modified")
+        else:
+            lines = [
+                f"**Run Summary: `{state.run_name}`**",
+                f"Generated: {datetime.now(timezone.utc).isoformat()} | Scenario: {manifest['scenario']}",
+                "",
+                "**Algorithm**",
+                f"- Source: `{(manifest.get('algorithms') or [{}])[0].get('source', 'N/A')}`",
+                f"- Description: {output.get('description', 'N/A')}",
+                "",
+                "**Translation**",
+                f"- Plugin type: `{output['plugin_type']}`",
+                f"- Files created: {', '.join(f'`{f}`' for f in output.get('files_created', []))}",
+                f"- Files modified: {', '.join(f'`{f}`' for f in output.get('files_modified', []))}",
+            ]
 
-        if translate_meta.get("review_rounds"):
-            lines.append(f"- Review: {translate_meta.get('consensus', 'N/A')} "
-                         f"after {translate_meta['review_rounds']} rounds")
+            if translate_meta.get("review_rounds"):
+                lines.append(f"- Review: {translate_meta.get('consensus', 'N/A')} "
+                             f"after {translate_meta['review_rounds']} rounds")
     else:
         baselines_str = ", ".join(bl["name"] for bl in manifest.get("baselines", []))
         lines = [

@@ -50,6 +50,7 @@ class RunDetail:
 class SwitchResult:
     files_written: list  # list[str]
     active_run: str
+    algorithm: "str | None"  # which algorithm was applied (None for legacy)
 
 
 # ── Conformance helpers ───────────────────────────────────────────────────────
@@ -176,8 +177,13 @@ def inspect_run(run_dir: Path, active_run: str = "") -> RunDetail:
     if to_path.exists():
         try:
             to = json.loads(to_path.read_text())
-            files_created = to.get("files_created") or []
-            files_modified = to.get("files_modified") or []
+            if "per_algorithm" in to:
+                for algo_output in to["per_algorithm"].values():
+                    files_created.extend(algo_output.get("files_created", []))
+                    files_modified.extend(algo_output.get("files_modified", []))
+            else:
+                files_created = to.get("files_created") or []
+                files_modified = to.get("files_modified") or []
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -205,7 +211,11 @@ def inspect_run(run_dir: Path, active_run: str = "") -> RunDetail:
 
 
 def _load_translation_output(run_dir: Path, run_name: str) -> "tuple[list[str], list[str]]":
-    """Load and validate translation_output.json. Returns (files_created, files_modified)."""
+    """Load and validate translation_output.json. Returns (files_created, files_modified).
+
+    Handles both per-algorithm index format and legacy single format.
+    Returns aggregated (files_created, files_modified) across all algorithms.
+    """
     to_path = run_dir / "translation_output.json"
     if not to_path.exists():
         raise TranslationOutputError(
@@ -217,6 +227,24 @@ def _load_translation_output(run_dir: Path, run_name: str) -> "tuple[list[str], 
         raise TranslationOutputError(
             f"Error: translation_output.json is malformed — {e}"
         )
+
+    if "per_algorithm" in data:
+        all_created: list[str] = []
+        all_modified: list[str] = []
+        for algo_output in data["per_algorithm"].values():
+            fc = algo_output.get("files_created", [])
+            fm = algo_output.get("files_modified", [])
+            if (not isinstance(fc, list) or not isinstance(fm, list)
+                    or not all(isinstance(x, str) for x in fc)
+                    or not all(isinstance(x, str) for x in fm)):
+                raise TranslationOutputError(
+                    "Error: translation_output.json is malformed — expected 'files_created' and "
+                    "'files_modified' as lists of strings in per_algorithm entries"
+                )
+            all_created.extend(fc)
+            all_modified.extend(fm)
+        return all_created, all_modified
+
     fc = data.get("files_created")
     fm = data.get("files_modified")
     if (not isinstance(fc, list) or not isinstance(fm, list)
@@ -256,12 +284,17 @@ def switch_run(
     submodule_dir: Path,
     setup_config_path: Path,
     confirm_fn: "callable",
+    algorithm: "str | None" = None,
     _is_dirty: "callable | None" = None,
     _reset: "callable | None" = None,
 ) -> SwitchResult:
     """
     Switch the active run: reset the submodule, delete stale files from the
     previous run, copy all generated files from the target run, update setup_config.
+
+    For per-algorithm runs, applies only one algorithm's files at a time
+    (the working tree can only represent one algorithm state). Specify
+    `algorithm` to choose which; defaults to the first algorithm in the index.
 
     confirm_fn(dirty: bool) -> bool  — called when submodule has uncommitted changes;
         return True to proceed with the reset.
@@ -286,21 +319,49 @@ def switch_run(
     files_created, files_modified = _load_translation_output(run_dir, run_name)
     target_files = set(files_created + files_modified)
 
-    # Step 2: basename collision check
-    seen: set[str] = set()
-    for rel_path in target_files:
-        basename = Path(rel_path).name
-        if basename in seen:
-            raise ValueError(
-                f"Error: basename collision in translation_output.json: "
-                f"'{basename}' maps to multiple paths"
-            )
-        seen.add(basename)
+    # Detect per-algorithm mode and select target algorithm
+    output = json.loads((run_dir / "translation_output.json").read_text())
+    is_per_algorithm = "per_algorithm" in output
+    selected_algo = None
+
+    if is_per_algorithm:
+        available = list(output["per_algorithm"].keys())
+        if algorithm:
+            if algorithm not in output["per_algorithm"]:
+                raise ValueError(
+                    f"Error: algorithm '{algorithm}' not found in run '{run_name}'. "
+                    f"Available: {', '.join(available)}"
+                )
+            selected_algo = algorithm
+        else:
+            selected_algo = available[0]
+        # Narrow target_files to just this algorithm
+        algo_output = output["per_algorithm"][selected_algo]
+        target_files = set(
+            algo_output.get("files_created", []) +
+            algo_output.get("files_modified", [])
+        )
+
+    # Step 2: basename collision check (only for legacy flat mode)
+    if not is_per_algorithm:
+        seen: set[str] = set()
+        for rel_path in target_files:
+            basename = Path(rel_path).name
+            if basename in seen:
+                raise ValueError(
+                    f"Error: basename collision in translation_output.json: "
+                    f"'{basename}' maps to multiple paths"
+                )
+            seen.add(basename)
 
     # Step 3: pre-validate all source files exist in generated/
     generated_dir = run_dir / "generated"
-    missing = [Path(f).name for f in target_files
-               if not (generated_dir / Path(f).name).exists()]
+    if is_per_algorithm:
+        algo_dir = generated_dir / selected_algo
+        missing = [f for f in target_files if not (algo_dir / f).exists()]
+    else:
+        missing = [Path(f).name for f in target_files
+                   if not (generated_dir / Path(f).name).exists()]
     if missing:
         raise ValueError(
             f"Error: missing source files in workspace/runs/{run_name}/generated/: "
@@ -337,20 +398,33 @@ def switch_run(
         if stale.exists():
             stale.unlink()
 
-    # Step 8: copy all generated files to their destinations in the submodule
+    # Step 8: copy generated files to their destinations in the submodule
     files_written: list[str] = []
-    for rel_path in sorted(target_files):
-        src = generated_dir / Path(rel_path).name
-        dst = submodule_dir / rel_path
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            shutil.copy2(src, dst)
-            files_written.append(rel_path)
-        except OSError as e:
-            raise OSError(f"Error: failed to copy {rel_path}: {e}") from e
+    if is_per_algorithm:
+        algo_dir = generated_dir / selected_algo
+        for rel_path in sorted(target_files):
+            src = algo_dir / rel_path
+            dst = submodule_dir / rel_path
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(src, dst)
+                files_written.append(rel_path)
+            except OSError as e:
+                raise OSError(f"Error: failed to copy {rel_path}: {e}") from e
+    else:
+        for rel_path in sorted(target_files):
+            src = generated_dir / Path(rel_path).name
+            dst = submodule_dir / rel_path
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(src, dst)
+                files_written.append(rel_path)
+            except OSError as e:
+                raise OSError(f"Error: failed to copy {rel_path}: {e}") from e
 
     # Step 9: update setup_config only after all copies succeed
     cfg["current_run"] = run_name
     setup_config_path.write_text(json.dumps(cfg, indent=2))
 
-    return SwitchResult(files_written=files_written, active_run=run_name)
+    return SwitchResult(files_written=files_written, active_run=run_name,
+                        algorithm=selected_algo)

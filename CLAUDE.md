@@ -83,9 +83,11 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). When no `-
 | `runs/<run>/.state.json` | `prepare.py` | `prepare.py`, `deploy.py` |
 | `runs/<run>/run_metadata.json` | `setup.py`, `deploy.py` | `deploy.py`, `run.py` |
 | `runs/<run>/skill_input.json` | `prepare.py` Phase 3 | `/sim2real-translate` skill |
-| `runs/<run>/translation_output.json` | `/sim2real-translate` skill | `prepare.py` Phase 4 |
+| `runs/<run>/translation_output.json` | `prepare.py` Phase 3 (index) | `prepare.py` Phase 4, `deploy.py`, `run.py` |
 | `runs/<run>/generated/baseline_config.yaml` | `/sim2real-translate` skill | `prepare.py` Phase 4 (overlay) |
-| `runs/<run>/generated/treatment_config.yaml` | `/sim2real-translate` skill | `prepare.py` Phase 4 (overlay) |
+| `runs/<run>/generated/{algo}/{algo}_config.yaml` | `/sim2real-translate` skill | `prepare.py` Phase 4 (per-algo overlay) |
+| `runs/<run>/generated/{algo}/{algo}_output.json` | `/sim2real-translate` skill | `prepare.py` Phase 3 (completeness check) |
+| `runs/<run>/generated/treatment_config.yaml` | `/sim2real-translate` skill (legacy) | `prepare.py` Phase 4 (fallback overlay) |
 | `runs/<run>/cluster/baseline.yaml` | `prepare.py` Phase 4 | `deploy.py` |
 | `runs/<run>/cluster/treatment.yaml` | `prepare.py` Phase 4 | `deploy.py` |
 | `runs/<run>/cluster/pipelinerun-*.yaml` | `prepare.py` Phase 4 | `deploy.py run` |

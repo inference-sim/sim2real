@@ -185,11 +185,22 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
     # Load translation output for source toggle (if available)
     translation_output_path = run_dir / "translation_output.json"
     translation_output = None
+    per_algorithm_outputs = None
     if translation_output_path.exists():
         try:
-            translation_output = json.loads(translation_output_path.read_text())
+            raw_output = json.loads(translation_output_path.read_text())
         except json.JSONDecodeError as e:
             err(f"translation_output.json is not valid JSON: {e}. Re-run /sim2real-translate.")
+            sys.exit(1)
+
+        if "per_algorithm" in raw_output:
+            per_algorithm_outputs = raw_output["per_algorithm"]
+        elif "plugin_type" in raw_output:
+            translation_output = raw_output
+        else:
+            err("translation_output.json has unrecognized format "
+                "(missing both 'per_algorithm' and 'plugin_type' keys). "
+                "Re-run /sim2real-translate.")
             sys.exit(1)
 
     build_script = REPO_ROOT / "pipeline" / "scripts" / "build-epp.sh"
@@ -197,23 +208,52 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
         err(f"build-epp.sh not found at {build_script.relative_to(REPO_ROOT)}")
         sys.exit(1)
 
-    # Treatment ref for comparison (to distinguish baseline from treatment builds)
-    treatment_ref = f"{registry}/{repo_name}:{run_name}"
     generated_dir = run_dir / "generated"
 
     built_any = False
     for img_info in to_build:
         ref = img_info["image_ref"]
-        is_treatment = (ref == treatment_ref)
+        pkg_name = img_info["package"]
 
-        # Source toggle: ensure working tree is in correct state for baseline builds
-        if translation_output and not is_treatment:
+        # Determine which translation output governs this image and whether it's an algo build
+        algo_output = None
+        algo_name = None
+        if per_algorithm_outputs is not None and pkg_name in per_algorithm_outputs:
+            algo_output = per_algorithm_outputs[pkg_name]
+            algo_name = pkg_name
+        elif translation_output:
+            # Legacy single-algo format: check if this is the treatment image
+            treatment_ref = f"{registry}/{repo_name}:{run_name}"
+            if ref == treatment_ref:
+                algo_output = translation_output
+                algo_name = None  # legacy mode, no per-algo subdirectory
+            else:
+                # Baseline build — need to restore baseline state
+                algo_output = translation_output
+
+        is_algorithm_build = (algo_name is not None) or (
+            translation_output and ref == f"{registry}/{repo_name}:{run_name}"
+        )
+        is_baseline_build = not is_algorithm_build and algo_output is not None
+
+        # Source toggle: ensure working tree is in correct state
+        if is_baseline_build:
             from pipeline.lib.source_toggle import restore_baseline
             info(f"Restoring baseline state for: {ref}")
             try:
-                restore_baseline(source_dir, translation_output)
+                restore_baseline(source_dir, algo_output)
             except (subprocess.CalledProcessError, OSError) as exc:
                 err(f"Failed to restore baseline state in {source_dir}: {exc}")
+                sys.exit(1)
+        elif is_algorithm_build and algo_name:
+            # Per-algorithm: apply only this algorithm's files
+            from pipeline.lib.source_toggle import restore_baseline, restore_treatment
+            info(f"Applying algorithm state for: {ref} (algo={algo_name})")
+            try:
+                restore_baseline(source_dir, algo_output)
+                restore_treatment(source_dir, generated_dir, algo_output, algo_name=algo_name)
+            except (subprocess.CalledProcessError, OSError, FileNotFoundError) as exc:
+                err(f"Failed to apply algorithm state for {algo_name}: {exc}")
                 sys.exit(1)
 
         info(f"Building image: {ref}")
@@ -228,8 +268,19 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
             cwd=REPO_ROOT,
         )
 
-        # Restore treatment state after baseline build
-        if translation_output and not is_treatment:
+        # Restore baseline after algorithm build (clean state for next iteration)
+        if is_algorithm_build and algo_output:
+            from pipeline.lib.source_toggle import restore_baseline
+            try:
+                restore_baseline(source_dir, algo_output)
+            except (subprocess.CalledProcessError, OSError) as exc:
+                err(f"Failed to restore baseline after build: {exc}\n"
+                    f"  Working tree may be in modified state. To recover:\n"
+                    f"  cd {source_dir} && git checkout -- .")
+                sys.exit(1)
+
+        # Restore treatment state after baseline build (legacy mode)
+        if is_baseline_build and translation_output:
             from pipeline.lib.source_toggle import restore_treatment
             try:
                 restore_treatment(source_dir, generated_dir, translation_output)

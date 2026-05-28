@@ -87,6 +87,23 @@ class TestInjectEppImage:
         assert scenario["scenario"][0]["images"]["vllm"] == {"repository": "vllm-r", "tag": "vllm-t"}
         assert scenario["scenario"][0]["images"]["inferenceScheduler"]["tag"] == "v2"
 
+    def test_inject_epp_image_with_algo_suffix(self):
+        """Per-algorithm tag: tag becomes '{tag}-{algo_name}' when algo_name is set."""
+        scenario = {"scenario": [{"name": "s1"}]}
+        result = inject_epp_image(scenario, "reg.io", "epp", "r1", algo_name="algo1")
+        assert result is True
+        img = scenario["scenario"][0]["images"]["inferenceScheduler"]
+        assert img["tag"] == "r1-algo1"
+        assert img["repository"] == "reg.io/epp"
+
+    def test_inject_epp_image_without_algo_name_unchanged(self):
+        """Backward compat: tag stays as-is when algo_name is None."""
+        scenario = {"scenario": [{"name": "s1"}]}
+        result = inject_epp_image(scenario, "reg.io", "epp", "r1")
+        assert result is True
+        img = scenario["scenario"][0]["images"]["inferenceScheduler"]
+        assert img["tag"] == "r1"
+
 
 class TestInjectImageRef:
     def test_injects_complete_ref(self):

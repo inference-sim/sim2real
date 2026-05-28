@@ -107,10 +107,14 @@ def _resolve_overlay(name: str, generated_dir: Path, kind: str) -> dict:
     """Find overlay for a package.
 
     Lookup order:
-      1. {name}_config.yaml (per-package overlay)
-      2. baseline_config.yaml (shared fallback for baselines)
-      3. treatment_config.yaml (legacy fallback for algorithms)
+      1. {name}/{name}_config.yaml (per-algorithm subdirectory)
+      2. {name}_config.yaml (per-package flat overlay)
+      3. baseline_config.yaml (shared fallback for baselines)
+      4. treatment_config.yaml (legacy fallback for algorithms)
     """
+    per_algo_subdir = generated_dir / name / f"{name}_config.yaml"
+    if per_algo_subdir.exists():
+        return _load_yaml(per_algo_subdir)
     per_pkg = generated_dir / f"{name}_config.yaml"
     if per_pkg.exists():
         return _load_yaml(per_pkg)
@@ -181,13 +185,15 @@ def assemble_packages(
 
     if overlays_expected:
         for algo in algorithms:
-            overlay_path = generated_dir / f"{algo['name']}_config.yaml"
-            if not overlay_path.exists():
-                legacy = generated_dir / "treatment_config.yaml"
-                if not legacy.exists():
-                    raise AssemblyError(
-                        f"Overlay expected but missing for algorithm '{algo['name']}': {overlay_path}"
-                    )
+            algo_name = algo["name"]
+            subdir_path = generated_dir / algo_name / f"{algo_name}_config.yaml"
+            flat_path = generated_dir / f"{algo_name}_config.yaml"
+            legacy = generated_dir / "treatment_config.yaml"
+            if not (subdir_path.exists() or flat_path.exists() or legacy.exists()):
+                raise AssemblyError(
+                    f"Overlay expected but missing for algorithm '{algo_name}': "
+                    f"checked {subdir_path}, {flat_path}, and {legacy}"
+                )
 
     return packages
 

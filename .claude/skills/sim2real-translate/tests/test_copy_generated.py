@@ -170,3 +170,49 @@ def test_preserves_other_json_fields(git_repo, run_dir):
     result = json.loads((run_dir / "translation_output.json").read_text())
     assert result["plugin_type"] == "scorer"
     assert result["description"] == "test plugin"
+
+
+# --- Per-algorithm subdirectory tests ---
+
+
+def test_per_algorithm_subdirectory(git_repo, run_dir):
+    """With algo_name, files go to generated/{algo_name}/ preserving full paths."""
+    (git_repo / "pkg" / "scorer").mkdir(parents=True)
+    (git_repo / "pkg" / "scorer" / "plugin.go").write_text("package scorer")
+    (git_repo / "existing.go").write_text("package main\n// changed")
+    created, modified = cg.copy_generated(str(git_repo), str(run_dir), algo_name="myalgo")
+    gen = run_dir / "generated" / "myalgo"
+    assert gen.exists()
+    # Full relative paths preserved
+    assert (gen / "pkg" / "scorer" / "plugin.go").exists()
+    assert (gen / "existing.go").exists()
+    assert "pkg/scorer/plugin.go" in created
+    assert "existing.go" in modified
+
+
+def test_per_algorithm_no_basename_collision(git_repo, run_dir):
+    """With algo_name, same basename in different dirs does NOT raise."""
+    (git_repo / "pkg" / "scorer").mkdir(parents=True)
+    (git_repo / "pkg" / "admission").mkdir(parents=True)
+    (git_repo / "pkg" / "scorer" / "config.go").write_text("package scorer")
+    (git_repo / "pkg" / "admission" / "config.go").write_text("package admission")
+    # Should not raise — full paths can't collide
+    created, modified = cg.copy_generated(str(git_repo), str(run_dir), algo_name="myalgo")
+    gen = run_dir / "generated" / "myalgo"
+    assert (gen / "pkg" / "scorer" / "config.go").exists()
+    assert (gen / "pkg" / "admission" / "config.go").exists()
+
+
+def test_per_algorithm_output_json(git_repo, run_dir):
+    """With algo_name, {algo_name}_output.json is created in the subdirectory."""
+    (git_repo / "existing.go").write_text("package main\n// changed")
+    cg.copy_generated(str(git_repo), str(run_dir), algo_name="myalgo")
+    gen = run_dir / "generated" / "myalgo"
+    algo_out = gen / "myalgo_output.json"
+    assert algo_out.exists()
+    data = json.loads(algo_out.read_text())
+    assert data["files_modified"] == ["existing.go"]
+    assert data["files_created"] == []
+    # Should also contain other fields from translation_output.json
+    assert data["plugin_type"] == "scorer"
+    assert data["description"] == "test plugin"
