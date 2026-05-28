@@ -83,6 +83,7 @@ def test_reset_pair_running_cancels_first(monkeypatch):
 
     def fake_cancel(pr_name, ns):
         cancelled.append((pr_name, ns))
+        return True
 
     def fake_run(cmd, *, check=True, capture=False, cwd=None):
         class _R:
@@ -389,7 +390,7 @@ def test_cmd_reset_saves_progress_on_success(tmp_path, monkeypatch, capsys):
         return _R()
 
     def fake_cancel(pr_name, ns):
-        pass
+        return True
 
     monkeypatch.setattr(mod, "run", fake_run)
     monkeypatch.setattr(mod, "_cancel_and_delete_pipelinerun", fake_cancel)
@@ -691,3 +692,19 @@ def test_reset_pair_done_no_pr_name_still_cleans_helm(monkeypatch):
     assert "sim2real-0" in helm_lists[0]
     helm_uninstalls = [c for c in calls if c[:2] == ["helm", "uninstall"]]
     assert len(helm_uninstalls) == 1
+
+
+def test_reset_pair_cancel_failure_does_not_reset(monkeypatch):
+    """When _cancel_and_delete_pipelinerun returns False, _reset_pair returns False."""
+    import pipeline.deploy as mod
+
+    entry = {"workload": "wl-smoke", "package": "treatment", "status": "running",
+             "namespace": "sim2real-1", "retries": 0}
+
+    monkeypatch.setattr(mod, "_cancel_and_delete_pipelinerun", lambda pr, ns: False)
+    monkeypatch.setattr(mod, "run", lambda cmd, **kw: type("R", (), {"returncode": 0, "stdout": ""})())
+
+    result = mod._reset_pair("wl-smoke-treatment", entry, _DISCOVERED)
+    assert result is False
+    assert entry["status"] == "running"
+    assert entry["namespace"] == "sim2real-1"

@@ -1270,8 +1270,7 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
         warn(f"{key}: no PipelineRun name found — skipping PR deletion (manual check needed)")
     elif ns:
         if entry.get("status") == "running":
-            _cancel_and_delete_pipelinerun(pr_name, ns)
-            pr_deleted = True
+            pr_deleted = _cancel_and_delete_pipelinerun(pr_name, ns)
         else:
             result = run(["kubectl", "delete", "pipelinerun", pr_name, "-n", ns,
                          "--ignore-not-found"], check=False, capture=True)
