@@ -2356,3 +2356,113 @@ def test_early_reclaim_recoverable_cancel_fails_leaves_slot_busy(monkeypatch):
     assert reclaimed is False
     assert entry["status"] == "running"
     assert entry["namespace"] == "sim2real-0"
+
+
+# ── _handle_timeout tests ────────────────────────────────────────────────────
+
+
+def test_handle_timeout_cancel_fails_leaves_entry_unchanged(monkeypatch):
+    """When PR is timed out but cancel fails, return False and leave entry unchanged."""
+    import datetime as _dt
+    import pipeline.deploy as mod
+
+    old_ts = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=5)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+    entry = {
+        "workload": "wl-smoke", "package": "treatment", "status": "running",
+        "namespace": "sim2real-0", "retries": 0, "pending_since": None,
+    }
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = old_ts
+            stderr = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    monkeypatch.setattr(mod, "_cancel_and_delete_pipelinerun", lambda pr, ns: False)
+
+    result = mod._handle_timeout(
+        pr_name="treatment-smoke-run1",
+        namespace="sim2real-0",
+        entry=entry,
+        timeout_hours=4.0,
+        max_retries=3,
+    )
+
+    assert result is False
+    assert entry["status"] == "running"
+    assert entry["namespace"] == "sim2real-0"
+
+
+def test_handle_timeout_cancel_succeeds_requeues(monkeypatch):
+    """When PR is timed out and cancel succeeds, requeue entry."""
+    import datetime as _dt
+    import pipeline.deploy as mod
+
+    old_ts = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=5)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+    entry = {
+        "workload": "wl-smoke", "package": "treatment", "status": "running",
+        "namespace": "sim2real-0", "retries": 0, "pending_since": None,
+    }
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = old_ts
+            stderr = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    monkeypatch.setattr(mod, "_cancel_and_delete_pipelinerun", lambda pr, ns: True)
+
+    result = mod._handle_timeout(
+        pr_name="treatment-smoke-run1",
+        namespace="sim2real-0",
+        entry=entry,
+        timeout_hours=4.0,
+        max_retries=3,
+    )
+
+    assert result is True
+    assert entry["status"] == "pending"
+    assert entry["retries"] == 1
+    assert entry["namespace"] is None
+
+
+def test_handle_timeout_not_expired_returns_none(monkeypatch):
+    """When PR is not timed out, return None (no action taken)."""
+    import datetime as _dt
+    import pipeline.deploy as mod
+
+    recent_ts = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=1)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+    entry = {
+        "workload": "wl-smoke", "package": "treatment", "status": "running",
+        "namespace": "sim2real-0", "retries": 0, "pending_since": None,
+    }
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = recent_ts
+            stderr = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    result = mod._handle_timeout(
+        pr_name="treatment-smoke-run1",
+        namespace="sim2real-0",
+        entry=entry,
+        timeout_hours=4.0,
+        max_retries=3,
+    )
+
+    assert result is None
+    assert entry["status"] == "running"

@@ -258,33 +258,45 @@ def _cancel_and_delete_pipelinerun(pr_name: str, namespace: str) -> bool:
     finish cancelling, then delete it so a fresh one can be submitted.
 
     Returns True if the PipelineRun was successfully deleted (or didn't exist).
-    Returns False if the delete failed — caller should NOT free the slot.
+    Returns False if it could not be removed — caller should NOT free the slot.
+    The cancel-patch step is best-effort: if the patch fails the function still
+    attempts the delete, and the return value reflects whether delete succeeded.
     """
     exists = run(
         ["kubectl", "get", "pipelinerun", pr_name, "-n", namespace],
         check=False, capture=True,
     )
     if exists.returncode != 0:
-        return True  # doesn't exist, nothing to cancel
+        stderr = exists.stderr.strip() if exists.stderr else ""
+        if "NotFound" in stderr or "not found" in stderr:
+            return True  # doesn't exist, nothing to cancel
+        warn(f"Cannot reach PipelineRun {pr_name!r} in {namespace}"
+             + (f": {stderr}" if stderr else "") + " — assuming still active")
+        return False
 
     status = _check_pipelinerun_status(pr_name, namespace)
     info(f"Existing PipelineRun {pr_name!r} found (status: {status}); cancelling …")
 
     if status in ("Running", "Started"):
-        run(
+        patch_result = run(
             ["kubectl", "patch", "pipelinerun", pr_name,
              "--type=merge", "-p", '{"spec":{"status":"CancelledRunFinally"}}',
              "-n", namespace],
             check=False, capture=True,
         )
-        for _ in range(40):  # wait up to 120 s
-            time.sleep(3)
-            current = _check_pipelinerun_status(pr_name, namespace)
-            if current not in ("Running", "Started"):
-                info(f"PipelineRun {pr_name!r} cancelled (now: {current})")
-                break
+        if patch_result.returncode != 0:
+            detail = patch_result.stderr.strip() if patch_result.stderr else ""
+            warn(f"Failed to patch PipelineRun {pr_name!r} for cancellation"
+                 + (f": {detail}" if detail else ""))
         else:
-            warn(f"PipelineRun {pr_name!r} did not cancel within 120 s; deleting anyway")
+            for _ in range(40):  # wait up to 120 s
+                time.sleep(3)
+                current = _check_pipelinerun_status(pr_name, namespace)
+                if current not in ("Running", "Started"):
+                    info(f"PipelineRun {pr_name!r} cancelled (now: {current})")
+                    break
+            else:
+                warn(f"PipelineRun {pr_name!r} did not cancel within 120 s; deleting anyway")
 
     result = run(
         ["kubectl", "delete", "pipelinerun", pr_name, "-n", namespace,
@@ -500,7 +512,7 @@ def _handle_pending_pods(*, pr_name: str, namespace: str, entry: dict,
     if category == "non_recoverable":
         warn(f"[{entry.get('workload', '?')}] non-recoverable pending: {detail}")
         if not _cancel_and_delete_pipelinerun(pr_name, namespace):
-            warn(f"[{entry.get('workload', '?')}] cancel failed — slot NOT freed")
+            warn(f"[{entry.get('workload', '?')}] could not remove PipelineRun {pr_name!r} in {namespace} — slot NOT freed")
             return False
         entry["status"] = "failed"
         entry["namespace"] = None
@@ -526,7 +538,7 @@ def _handle_pending_pods(*, pr_name: str, namespace: str, entry: dict,
 
     warn(f"[{entry.get('workload', '?')}] pending {int(elapsed)}s > {pending_threshold}s threshold → reclaim")
     if not _cancel_and_delete_pipelinerun(pr_name, namespace):
-        warn(f"[{entry.get('workload', '?')}] cancel failed — slot NOT freed")
+        warn(f"[{entry.get('workload', '?')}] could not remove PipelineRun {pr_name!r} in {namespace} — slot NOT freed")
         return False
     stalls = entry.get("pending_stalls", 0) + 1
     entry["pending_stalls"] = stalls
@@ -537,6 +549,48 @@ def _handle_pending_pods(*, pr_name: str, namespace: str, entry: dict,
         warn(f"[{entry.get('workload', '?')}] reached max pending stalls ({max_pending_stalls}) → stalled")
     else:
         entry["status"] = "pending"
+    return True
+
+
+def _handle_timeout(*, pr_name: str, namespace: str, entry: dict,
+                    timeout_hours: float, max_retries: int) -> bool | None:
+    """Check if a PipelineRun has exceeded its timeout and handle accordingly.
+
+    Returns True if the entry was timed out and cleaned up, False if timeout
+    was detected but cancel failed (slot left busy), None if not timed out.
+    """
+    import datetime as _dt
+    ts_result = run(
+        ["kubectl", "get", "pipelinerun", pr_name, f"-n={namespace}",
+         "-o", "jsonpath={.metadata.creationTimestamp}"],
+        check=False, capture=True,
+    )
+    if ts_result.returncode != 0 or not ts_result.stdout.strip():
+        return None
+    try:
+        created = _dt.datetime.fromisoformat(
+            ts_result.stdout.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    age_h = (_dt.datetime.now(_dt.timezone.utc) - created).total_seconds() / 3600
+    if age_h <= timeout_hours:
+        return None
+
+    retries = entry.get("retries", 0)
+    if not _cancel_and_delete_pipelinerun(pr_name, namespace):
+        warn(f"[{entry.get('workload', '?')}] timed out but could not remove "
+             f"PipelineRun {pr_name!r} in {namespace} — slot NOT freed")
+        return False
+    if retries < max_retries:
+        warn(f"[{entry.get('workload', '?')}] timed out → requeue "
+             f"(attempt {retries + 1}/{max_retries})")
+        entry["status"] = "pending"
+        entry["retries"] = retries + 1
+    else:
+        warn(f"[{entry.get('workload', '?')}] timed out, max retries → timed-out")
+        entry["status"] = "timed-out"
+    entry["namespace"] = None
+    entry["pending_since"] = None
     return True
 
 
@@ -1643,7 +1697,6 @@ def _capacity_limited_pairs(
 
 def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     """Orchestrate parallel pool execution across namespace slots."""
-    import datetime as _dt
     import tempfile as _tmp
     from pipeline.lib.progress import ConfigMapProgressStore
     from pipeline.lib.backoff import BackoffController
@@ -1863,38 +1916,19 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                         store.save(progress)
 
                 # Check for timeout
-                ts_result = run(
-                    ["kubectl", "get", "pipelinerun", pr_name, f"-n={ns}",
-                     "-o", "jsonpath={.metadata.creationTimestamp}"],
-                    check=False, capture=True,
+                timeout_result = _handle_timeout(
+                    pr_name=pr_name, namespace=ns, entry=entry,
+                    timeout_hours=timeout_hours, max_retries=max_retries,
                 )
-                if ts_result.returncode == 0 and ts_result.stdout.strip():
-                    try:
-                        created = _dt.datetime.fromisoformat(
-                            ts_result.stdout.strip().replace("Z", "+00:00"))
-                        age_h = (_dt.datetime.now(_dt.timezone.utc) - created).total_seconds() / 3600
-                        if age_h > timeout_hours:
-                            retries = entry.get("retries", 0)
-                            if not _cancel_and_delete_pipelinerun(pr_name, ns):
-                                warn(f"[{pair_key}] timed out but cancel failed — slot NOT freed")
-                                continue
-                            if retries < max_retries:
-                                warn(f"[{pair_key}] timed out → requeue (attempt {retries + 1}/{max_retries})")
-                                entry["status"] = "pending"
-                                entry["retries"] = retries + 1
-                            else:
-                                warn(f"[{pair_key}] timed out, max retries → timed-out")
-                                entry["status"] = "timed-out"
-                            entry["namespace"] = None
-                            entry["pending_since"] = None
-                            del slots_busy[ns]
-                            _last_log_state.pop("capacity", None)
-                            _last_log_state.pop("dispatch", None)
-                            _last_log_state.pop("backoff_skip", None)
-                            _zero_dispatch_count = 0
-                            store.save(progress)
-                    except ValueError:
-                        pass
+                if timeout_result is True:
+                    del slots_busy[ns]
+                    _last_log_state.pop("capacity", None)
+                    _last_log_state.pop("dispatch", None)
+                    _last_log_state.pop("backoff_skip", None)
+                    _zero_dispatch_count = 0
+                    store.save(progress)
+                elif timeout_result is False:
+                    continue
 
         # ── Capacity probe ───────────────────────────────────────────────
         capacity = probe_free_gpus(gpu_resource_type=gpu_resource_type)
