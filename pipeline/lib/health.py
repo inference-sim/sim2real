@@ -273,7 +273,3 @@ def delete_pod(namespace: str, pod_name: str) -> bool:
     return rc == 0
 
 
-def describe_pod(namespace: str, pod_name: str) -> str:
-    """Fetch kubectl describe pod output. Returns empty string on error."""
-    rc, stdout = _kubectl("describe", "pod", pod_name, f"-n={namespace}")
-    return stdout if rc == 0 else ""
