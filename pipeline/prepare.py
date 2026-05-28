@@ -302,12 +302,18 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
     build_cfg = resolved.get("build", {})
     commands = [" ".join(c) if isinstance(c, list) else c for c in build_cfg.get("commands", [])]
 
-    # Check legacy single translation_output.json first (backward compat)
+    # Check for existing translation_output.json
     output_path = run_dir / "translation_output.json"
     if output_path.exists():
-        output = json.loads(output_path.read_text())
-        # If it's already an index (per_algorithm key present), check completeness
+        try:
+            output = json.loads(output_path.read_text())
+        except json.JSONDecodeError as e:
+            err(f"translation_output.json is not valid JSON: {e}. "
+                "Delete the file and re-run the /sim2real-translate skill.")
+            sys.exit(1)
+
         if "per_algorithm" in output:
+            # Per-algorithm index format — check completeness
             all_present = all(
                 (generated_dir / a["name"] / f"{a['name']}_output.json").exists()
                 for a in algorithms
@@ -334,6 +340,11 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
                             treatment_config_generated=output.get("treatment_config_generated", False))
             ok(f"Translation found: {output['plugin_type']}")
             return
+        else:
+            err("translation_output.json has unrecognized format "
+                "(missing both 'per_algorithm' and 'plugin_type' keys). "
+                "Delete the file and re-run the /sim2real-translate skill.")
+            sys.exit(1)
 
     # Determine which algorithms still need translation
     translated = []
@@ -688,15 +699,29 @@ def _verify_generated_dir(run_dir: Path):
 
     # Per-algorithm index format
     if "per_algorithm" in output:
+        missing_dirs = []
+        missing_files = []
         for algo_name, algo_output in output["per_algorithm"].items():
             algo_dir = generated_dir / algo_name
             if not algo_dir.exists():
-                warn(f"generated/{algo_name}/ directory not found")
+                missing_dirs.append(algo_name)
                 continue
             for f in algo_output.get("files_created", []) + algo_output.get("files_modified", []):
                 if not (algo_dir / f).exists():
-                    warn(f"generated/{algo_name}/ missing: {f}")
+                    missing_files.append(f"generated/{algo_name}/{f}")
+        if missing_dirs:
+            err(f"Per-algorithm directories missing from generated/: {', '.join(missing_dirs)}. "
+                "Re-run the /sim2real-translate skill for these algorithms.")
+            sys.exit(1)
+        if missing_files:
+            for f in missing_files:
+                warn(f"missing: {f}")
         return
+
+    if "plugin_type" not in output:
+        err("translation_output.json has unrecognized format. "
+            "Re-run the /sim2real-translate skill.")
+        sys.exit(1)
 
     # Legacy flat format
     for f in output.get("files_created", []) + output.get("files_modified", []):
@@ -726,10 +751,12 @@ def _validate_assembly(run_dir: Path, resolved: dict, algorithm_packages: list[s
             # Check: plugin_type in scenario YAML
             if treatment_config_generated:
                 pkg_yaml = run_dir / "cluster" / f"{algo_name}.yaml"
-                if pkg_yaml.exists():
-                    if plugin_type not in pkg_yaml.read_text():
-                        errors.append(
-                            f"[{algo_name}] plugin_type '{plugin_type}' not found in {algo_name}.yaml")
+                if not pkg_yaml.exists():
+                    errors.append(
+                        f"[{algo_name}] scenario YAML not found: cluster/{algo_name}.yaml")
+                elif plugin_type not in pkg_yaml.read_text():
+                    errors.append(
+                        f"[{algo_name}] plugin_type '{plugin_type}' not found in {algo_name}.yaml")
 
         if errors:
             err("validate-assembly FAILED:")
@@ -738,6 +765,11 @@ def _validate_assembly(run_dir: Path, resolved: dict, algorithm_packages: list[s
             sys.exit(1)
         ok("validate-assembly: all checks passed")
         return
+
+    if "plugin_type" not in output:
+        err("translation_output.json has unrecognized format — skipping validation. "
+            "Re-run the /sim2real-translate skill.")
+        sys.exit(1)
 
     # Legacy single-output format
     plugin_type = output["plugin_type"]

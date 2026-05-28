@@ -195,8 +195,13 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
 
         if "per_algorithm" in raw_output:
             per_algorithm_outputs = raw_output["per_algorithm"]
-        else:
+        elif "plugin_type" in raw_output:
             translation_output = raw_output
+        else:
+            err("translation_output.json has unrecognized format "
+                "(missing both 'per_algorithm' and 'plugin_type' keys). "
+                "Re-run /sim2real-translate.")
+            sys.exit(1)
 
     build_script = REPO_ROOT / "pipeline" / "scripts" / "build-epp.sh"
     if not build_script.exists():
@@ -213,7 +218,7 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
         # Determine which translation output governs this image and whether it's an algo build
         algo_output = None
         algo_name = None
-        if per_algorithm_outputs and pkg_name in per_algorithm_outputs:
+        if per_algorithm_outputs is not None and pkg_name in per_algorithm_outputs:
             algo_output = per_algorithm_outputs[pkg_name]
             algo_name = pkg_name
         elif translation_output:
