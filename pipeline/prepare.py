@@ -279,27 +279,86 @@ def _phase_context(args, state: StateMachine, manifest: dict, run_dir: Path) -> 
 
 def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
                      resolved: dict, context_path: Path):
-    """Phase 3: Write skill_input.json (or skip if no algorithm in manifest)."""
+    """Phase 3: Per-algorithm translation checkpoint.
+
+    For each algorithm in manifest, check if its per-algo output exists in
+    generated/{algo_name}/{algo_name}_output.json. If all exist, write the
+    top-level translation_output.json index and mark phase done. Otherwise,
+    write skill_input.json targeting the next untranslated algorithm and exit.
+    """
     step(3, "Translation Checkpoint")
 
     if state.is_done("translate") and not args.force:
         info("[skip] Translation already complete")
         return
 
-    if not manifest.get("algorithms"):
+    algorithms = manifest.get("algorithms", [])
+    if not algorithms:
         info("[skip] No algorithm in manifest — baseline-only mode")
         state.mark_done("translate", mode="baseline-only")
         return
 
+    generated_dir = run_dir / "generated"
     build_cfg = resolved.get("build", {})
-
-    # Build commands: common commands (skill determines test scope)
     commands = [" ".join(c) if isinstance(c, list) else c for c in build_cfg.get("commands", [])]
 
-    # Write skill_input.json
-    first_bl = manifest.get("baselines", [{}])[0]
-    first_algo = manifest.get("algorithms", [{}])[0]
+    # Check legacy single translation_output.json first (backward compat)
+    output_path = run_dir / "translation_output.json"
+    if output_path.exists():
+        output = json.loads(output_path.read_text())
+        # If it's already an index (per_algorithm key present), check completeness
+        if "per_algorithm" in output:
+            all_present = all(
+                (generated_dir / a["name"] / f"{a['name']}_output.json").exists()
+                for a in algorithms
+            )
+            if all_present:
+                state.mark_done("translate", algorithms=[a["name"] for a in algorithms])
+                ok(f"All {len(algorithms)} algorithms translated")
+                return
+        elif "plugin_type" in output:
+            # Legacy single-algo format — validate and mark done
+            for f in ["plugin_type", "files_created", "files_modified",
+                      "package", "test_commands", "config_kind",
+                      "treatment_config_generated", "description"]:
+                if f not in output:
+                    err(f"translation_output.json missing required field: {f}")
+                    sys.exit(1)
+            if "register_file" not in output:
+                err("translation_output.json missing required field: register_file")
+                sys.exit(1)
+            state.mark_done("translate",
+                            plugin_type=output["plugin_type"],
+                            files_created=output["files_created"],
+                            register_file=output.get("register_file"),
+                            treatment_config_generated=output.get("treatment_config_generated", False))
+            ok(f"Translation found: {output['plugin_type']}")
+            return
 
+    # Determine which algorithms still need translation
+    translated = []
+    pending = []
+    for algo in algorithms:
+        algo_output = generated_dir / algo["name"] / f"{algo['name']}_output.json"
+        if algo_output.exists():
+            translated.append(algo)
+        else:
+            pending.append(algo)
+
+    if not pending:
+        # All algorithms translated — write index and mark done
+        _write_translation_index(run_dir, algorithms, generated_dir)
+        state.mark_done("translate", algorithms=[a["name"] for a in algorithms])
+        ok(f"All {len(algorithms)} algorithms translated — index written")
+        return
+
+    # Target the next pending algorithm
+    target_algo = pending[0]
+    info(f"Translation needed for: {target_algo['name']} "
+         f"({len(translated)}/{len(algorithms)} complete)")
+
+    # Write skill_input.json targeting this algorithm
+    first_bl = manifest.get("baselines", [{}])[0]
     skill_input = {
         "run_name": state.run_name,
         "run_dir": _display_path(run_dir),
@@ -322,11 +381,12 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
                 "config": algo.get("config"),
                 "defaults": algo["defaults"],
             }
-            for algo in manifest.get("algorithms", [])
+            for algo in algorithms
         ],
-        # Legacy fields for backward compat with existing skill
-        "algorithm_source": first_algo.get("source", ""),
-        "algorithm_config": first_algo.get("config"),
+        "current_algorithm": target_algo["name"],
+        # Legacy fields — point at current target algorithm
+        "algorithm_source": target_algo.get("source", ""),
+        "algorithm_config": target_algo.get("config"),
         "baseline_sim_config": first_bl.get("sim", {}).get("config"),
         "baseline_real_config": first_bl.get("real", {}).get("config"),
         "baseline_real_notes": first_bl.get("real", {}).get("notes", ""),
@@ -338,43 +398,35 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
     skill_input_path = run_dir / "skill_input.json"
     skill_input_path.write_text(json.dumps(skill_input, indent=2))
 
-    # Check for translation output
-    output_path = run_dir / "translation_output.json"
-    if output_path.exists():
-        output = json.loads(output_path.read_text())
-        # Validate required fields
-        for f in ["plugin_type", "files_created", "files_modified",
-                  "package", "test_commands", "config_kind",
-                  "treatment_config_generated", "description"]:
-            if f not in output:
-                err(f"translation_output.json missing required field: {f}")
-                sys.exit(1)
-        if "register_file" not in output:
-            err("translation_output.json missing required field: register_file")
-            sys.exit(1)
-
-        state.mark_done("translate",
-                        plugin_type=output["plugin_type"],
-                        files_created=output["files_created"],
-                        register_file=output.get("register_file"),
-                        treatment_config_generated=output.get("treatment_config_generated", False))
-        ok(f"Translation found: {output['plugin_type']}")
-        return
-
-    # No translation output yet — checkpoint
+    # Checkpoint — exit and wait for skill invocation
     state.increment("translate", "checkpoint_hits")
     hits = state.get_phase("translate").get("checkpoint_hits", 1)
 
     print(f"\n{'='*60}")
     print("  TRANSLATION CHECKPOINT")
     print(f"{'='*60}")
-    print(f"\n  skill_input.json written to: {_display_path(skill_input_path)}")
+    print(f"\n  Algorithm: {target_algo['name']} ({len(translated)}/{len(algorithms)} done)")
+    print(f"  skill_input.json written to: {_display_path(skill_input_path)}")
     print("\n  Next step: run the /sim2real-translate skill in Claude Code,")
     print("  then re-run: python pipeline/prepare.py")
     if hits >= 3:
         warn(f"Checkpoint hit {hits} times. Have you run the translation skill?")
     print(f"\n{'='*60}\n")
     sys.exit(0)
+
+
+def _write_translation_index(run_dir: Path, algorithms: list[dict], generated_dir: Path):
+    """Write top-level translation_output.json as an index of per-algorithm outputs."""
+    per_algorithm = {}
+    for algo in algorithms:
+        algo_output_path = generated_dir / algo["name"] / f"{algo['name']}_output.json"
+        per_algorithm[algo["name"]] = json.loads(algo_output_path.read_text())
+
+    index = {
+        "algorithms": [a["name"] for a in algorithms],
+        "per_algorithm": per_algorithm,
+    }
+    (run_dir / "translation_output.json").write_text(json.dumps(index, indent=2))
 
 
 # ── Phase 4: Assembly ────────────────────────────────────────────────────────
