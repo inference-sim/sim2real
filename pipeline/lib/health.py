@@ -1,4 +1,4 @@
-"""Pod health detection and remediation for the deploy monitor."""
+"""Pod health detection and remediation for the deploy orchestrator."""
 from __future__ import annotations
 
 import json
