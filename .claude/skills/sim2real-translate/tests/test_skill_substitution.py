@@ -54,3 +54,17 @@ def test_skill_md_requires_current_algorithm_field():
     """skill_input.json validation must require current_algorithm."""
     content = (SKILL_DIR / "SKILL.md").read_text()
     assert "'current_algorithm'" in content
+
+
+def test_skill_md_no_translation_output_in_code_blocks():
+    """SKILL.md code blocks must not read translation_output.json directly."""
+    content = (SKILL_DIR / "SKILL.md").read_text()
+    import re
+    blocks = re.findall(r"```(?:bash|python3?|)\n(.*?)```", content, re.DOTALL)
+    for block in blocks:
+        for i, line in enumerate(block.splitlines(), 1):
+            if "translation_output.json" in line:
+                pytest.fail(
+                    f"SKILL.md code block still reads translation_output.json: "
+                    f"{line.strip()}"
+                )

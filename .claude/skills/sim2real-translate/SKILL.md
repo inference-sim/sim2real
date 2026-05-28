@@ -148,7 +148,10 @@ if missing:
 if 'repo' not in si['target']:
     print('HALT: skill_input.json target.repo missing')
     sys.exit(1)
-print(f'Loaded: run={si[\"run_name\"]} scenario={si[\"scenario\"]} config_kind={si[\"config_kind\"]}')
+if not si.get('current_algorithm'):
+    print('HALT: skill_input.json current_algorithm is empty')
+    sys.exit(1)
+print(f'Loaded: run={si[\"run_name\"]} scenario={si[\"scenario\"]} algorithm={si[\"current_algorithm\"]}')
 " || exit 1
 ```
 
@@ -472,7 +475,10 @@ SendMessage("writer", "continue")
 ```bash
 python3 -c "
 import json
-o = json.load(open('$RUN_DIR/translation_output.json'))
+from pathlib import Path
+algo = '$CURRENT_ALGORITHM'
+algo_out = Path('$RUN_DIR/generated') / algo / f'{algo}_output.json'
+o = json.load(open(algo_out))
 print('Plugin files:', o.get('files_created', []))
 "
 python3 -c "print(open('$RUN_DIR/generated/$CURRENT_ALGORITHM/${CURRENT_ALGORITHM}_config.yaml').read())"
@@ -576,7 +582,7 @@ print(len(list((Path('$RUN_DIR/review')).glob('round_*.json'))))
 " 2>/dev/null || echo 0)
 ```
 
-Derive file lists from git state, overwrite `translation_output.json`, and copy to `$RUN_DIR/generated/`:
+Derive file lists from git state, update per-algorithm output, and copy to `$RUN_DIR/generated/$CURRENT_ALGORITHM/`:
 
 ```bash
 python3 -c "
@@ -600,10 +606,9 @@ state = json.loads(state_path.read_text())
 algo = '$CURRENT_ALGORITHM'
 algo_out = Path('$RUN_DIR/generated') / algo / f'{algo}_output.json'
 o = json.load(open(algo_out))
-state.setdefault('phases', {})['translate'] = {
-    'status': 'done',
+translate_phase = state.setdefault('phases', {}).setdefault('translate', {})
+translate_phase.setdefault('completed_algorithms', {})[algo] = {
     'timestamp': datetime.now(timezone.utc).isoformat(),
-    'algorithm': '$CURRENT_ALGORITHM',
     'files': o['files_created'],
     'review_rounds': $REVIEW_ROUNDS_DONE,
     'consensus': '$FINAL_CONSENSUS',

@@ -237,9 +237,7 @@ for f in o['files_created'] + o.get('files_modified', []):
     dst = snap / Path(f).name
     shutil.copy2(src, dst)
     print(f'  {Path(f).name} -> snapshots/v$SNAP_NUM/')
-algo_cfg = Path('{RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_config.yaml')
-if algo_cfg.exists():
-    shutil.copy2(algo_cfg, snap / '{ALGO_NAME}_config.yaml')
+shutil.copy2('{RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_config.yaml', snap / '{ALGO_NAME}_config.yaml')
 print(f'Snapshot v$SNAP_NUM saved')
 "
 ```

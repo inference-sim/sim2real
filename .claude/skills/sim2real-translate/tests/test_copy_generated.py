@@ -175,8 +175,26 @@ def test_preserves_other_json_fields(git_repo, run_dir):
 # --- Per-algorithm subdirectory tests ---
 
 
+def _setup_algo_output(run_dir, algo_name="myalgo"):
+    """Pre-create per-algo output JSON as the writer would before copy_generated runs."""
+    algo_dir = run_dir / "generated" / algo_name
+    algo_dir.mkdir(parents=True, exist_ok=True)
+    (algo_dir / f"{algo_name}_output.json").write_text(json.dumps({
+        "plugin_type": "scorer",
+        "files_created": [],
+        "files_modified": [],
+        "package": "pkg",
+        "register_file": "register.go",
+        "test_commands": ["go test ./..."],
+        "config_kind": "ScorerConfig",
+        "treatment_config_generated": True,
+        "description": "test plugin",
+    }))
+
+
 def test_per_algorithm_subdirectory(git_repo, run_dir):
     """With algo_name, files go to generated/{algo_name}/ preserving full paths."""
+    _setup_algo_output(run_dir)
     (git_repo / "pkg" / "scorer").mkdir(parents=True)
     (git_repo / "pkg" / "scorer" / "plugin.go").write_text("package scorer")
     (git_repo / "existing.go").write_text("package main\n// changed")
@@ -192,6 +210,7 @@ def test_per_algorithm_subdirectory(git_repo, run_dir):
 
 def test_per_algorithm_no_basename_collision(git_repo, run_dir):
     """With algo_name, same basename in different dirs does NOT raise."""
+    _setup_algo_output(run_dir)
     (git_repo / "pkg" / "scorer").mkdir(parents=True)
     (git_repo / "pkg" / "admission").mkdir(parents=True)
     (git_repo / "pkg" / "scorer" / "config.go").write_text("package scorer")
@@ -204,7 +223,8 @@ def test_per_algorithm_no_basename_collision(git_repo, run_dir):
 
 
 def test_per_algorithm_output_json(git_repo, run_dir):
-    """With algo_name, {algo_name}_output.json is created in the subdirectory."""
+    """With algo_name, {algo_name}_output.json is updated in the subdirectory."""
+    _setup_algo_output(run_dir)
     (git_repo / "existing.go").write_text("package main\n// changed")
     cg.copy_generated(str(git_repo), str(run_dir), algo_name="myalgo")
     gen = run_dir / "generated" / "myalgo"
@@ -213,6 +233,6 @@ def test_per_algorithm_output_json(git_repo, run_dir):
     data = json.loads(algo_out.read_text())
     assert data["files_modified"] == ["existing.go"]
     assert data["files_created"] == []
-    # Should also contain other fields from translation_output.json
+    # Other fields preserved from pre-existing output
     assert data["plugin_type"] == "scorer"
     assert data["description"] == "test plugin"
