@@ -275,6 +275,82 @@ def test_assemble_packages_algorithm_unknown_baseline_raises(tmp_path):
         )
 
 
+def test_assemble_packages_per_algo_subdir_overlay(tmp_path):
+    """Algorithm overlay resolved from generated/{name}/{name}_config.yaml subdirectory."""
+    _write(tmp_path / "b1.yaml", BASELINE)
+    _write(tmp_path / "treatment.yaml", TREATMENT_DIFFS)
+    # Place overlay in subdirectory instead of flat layout
+    _write(tmp_path / "generated" / "ac1" / "ac1_config.yaml", TREATMENT_OVERLAY)
+    pkgs = assemble_packages(
+        baselines=[{"name": "b1", "scenario_path": tmp_path / "b1.yaml"}],
+        algorithms=[{"name": "ac1", "scenario_path": tmp_path / "treatment.yaml", "defaults": "b1"}],
+        generated_dir=tmp_path / "generated",
+        overlays_expected=True,
+    )
+    assert len(pkgs) == 2
+    assert pkgs[1].kind == "algorithm"
+    assert pkgs[1].name == "ac1"
+    # Overlay applied — quintic-shed plugin present
+    assert "quintic-shed" in pkgs[1].resolved["scenario"][0]["inferenceExtension"]["pluginsCustomConfig"]["custom-plugins.yaml"]
+    # Treatment diffs applied — image tag overridden
+    assert pkgs[1].resolved["scenario"][0]["images"]["inferenceScheduler"]["tag"] == "ac"
+
+
+def test_assemble_packages_multi_algo_independent_overlays(tmp_path):
+    """Two algorithms with different subdirectory overlays produce distinct scenarios."""
+    _write(tmp_path / "b1.yaml", BASELINE)
+    _write(tmp_path / "treatment.yaml", TREATMENT_DIFFS)
+
+    # Algorithm 1 overlay — quintic-shed plugin
+    overlay_algo1 = {
+        "scenario": [{
+            "name": "admission-control",
+            "inferenceExtension": {
+                "pluginsConfigFile": "custom-plugins.yaml",
+                "pluginsCustomConfig": {
+                    "custom-plugins.yaml": "kind: EndpointPickerConfig\nplugins:\n- type: quintic-shed\n",
+                },
+            },
+        }],
+    }
+    # Algorithm 2 overlay — cubic-bloom plugin (different)
+    overlay_algo2 = {
+        "scenario": [{
+            "name": "admission-control",
+            "inferenceExtension": {
+                "pluginsConfigFile": "custom-plugins.yaml",
+                "pluginsCustomConfig": {
+                    "custom-plugins.yaml": "kind: EndpointPickerConfig\nplugins:\n- type: cubic-bloom\n",
+                },
+            },
+        }],
+    }
+    _write(tmp_path / "generated" / "algo1" / "algo1_config.yaml", overlay_algo1)
+    _write(tmp_path / "generated" / "algo2" / "algo2_config.yaml", overlay_algo2)
+
+    pkgs = assemble_packages(
+        baselines=[{"name": "b1", "scenario_path": tmp_path / "b1.yaml"}],
+        algorithms=[
+            {"name": "algo1", "scenario_path": tmp_path / "treatment.yaml", "defaults": "b1"},
+            {"name": "algo2", "scenario_path": tmp_path / "treatment.yaml", "defaults": "b1"},
+        ],
+        generated_dir=tmp_path / "generated",
+        overlays_expected=True,
+    )
+    assert len(pkgs) == 3
+    algo1_pkg = pkgs[1]
+    algo2_pkg = pkgs[2]
+    assert algo1_pkg.name == "algo1"
+    assert algo2_pkg.name == "algo2"
+    # Each algorithm gets its own distinct plugin config
+    algo1_plugins = algo1_pkg.resolved["scenario"][0]["inferenceExtension"]["pluginsCustomConfig"]["custom-plugins.yaml"]
+    algo2_plugins = algo2_pkg.resolved["scenario"][0]["inferenceExtension"]["pluginsCustomConfig"]["custom-plugins.yaml"]
+    assert "quintic-shed" in algo1_plugins
+    assert "cubic-bloom" in algo2_plugins
+    assert "cubic-bloom" not in algo1_plugins
+    assert "quintic-shed" not in algo2_plugins
+
+
 class TestInjectHfSecretName:
     """inject_hf_secret_name sets huggingface.secretName on all scenario entries."""
 
