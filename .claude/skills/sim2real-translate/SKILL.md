@@ -139,7 +139,8 @@ import json, sys
 si = json.load(open('$RUN_DIR/skill_input.json'))
 required = ['run_name', 'run_dir', 'scenario', 'context_path', 'manifest_path',
             'algorithm_source', 'baseline_sim_config',
-            'target', 'build_commands', 'config_kind', 'context']
+            'target', 'build_commands', 'config_kind', 'context',
+            'current_algorithm']
 missing = [f for f in required if f not in si]
 if missing:
     print(f'HALT: skill_input.json missing fields: {missing}')
@@ -147,7 +148,10 @@ if missing:
 if 'repo' not in si['target']:
     print('HALT: skill_input.json target.repo missing')
     sys.exit(1)
-print(f'Loaded: run={si[\"run_name\"]} scenario={si[\"scenario\"]} config_kind={si[\"config_kind\"]}')
+if not si.get('current_algorithm'):
+    print('HALT: skill_input.json current_algorithm is empty')
+    sys.exit(1)
+print(f'Loaded: run={si[\"run_name\"]} scenario={si[\"scenario\"]} algorithm={si[\"current_algorithm\"]}')
 " || exit 1
 ```
 
@@ -163,6 +167,7 @@ ALGO_SOURCE=$EXPERIMENT_ROOT/$(python3 -c "import json; print(json.load(open('$R
 ALGO_CONFIG=$(python3 -c "import json; v=json.load(open('$RUN_DIR/skill_input.json')).get('algorithm_config'); print('$EXPERIMENT_ROOT/' + v if v else '')")
 TARGET_REPO=$EXPERIMENT_ROOT/$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['target']['repo'])")
 CONFIG_KIND=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['config_kind'])")
+CURRENT_ALGORITHM=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['current_algorithm'])")
 CONTEXT_TEXT=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json')).get('context', {}).get('text', ''))")
 BASELINE_SIM_CONFIG=$(python3 -c "import json; v=json.load(open('$RUN_DIR/skill_input.json'))['baseline_sim_config']; print('$EXPERIMENT_ROOT/' + v if v else '')")
 BASELINE_REAL_CONFIG=$(python3 -c "import json; v=json.load(open('$RUN_DIR/skill_input.json')).get('baseline_real_config'); print('$EXPERIMENT_ROOT/' + v if v else 'null')")
@@ -215,12 +220,13 @@ BASELINE_DONE=$(grep '^BASELINE_DONE=' /tmp/resume_state.txt | cut -d= -f2)
 TREATMENT_DONE=$(grep '^TREATMENT_DONE=' /tmp/resume_state.txt | cut -d= -f2)
 ```
 
-**If `translate` phase is `done` and `translation_output.json` exists:**
-- Read `translation_output.json` and verify all `files_created` + `files_modified` exist
-  in `$RUN_DIR/generated/`
+**If `translate` phase is `done` and per-algorithm output exists:**
+- Check `$RUN_DIR/generated/$CURRENT_ALGORITHM/${CURRENT_ALGORITHM}_output.json`
+- Read it and verify all `files_created` + `files_modified` exist
+  in `$RUN_DIR/generated/$CURRENT_ALGORITHM/`
 - If complete: print the summary (see Step 6) and HALT with:
-  `Translation already complete. Re-run prepare.py to continue.`
-- If `generated/` is missing files: jump directly to Step 6 to re-copy
+  `Translation for $CURRENT_ALGORITHM already complete. Re-run prepare.py to continue.`
+- If `generated/$CURRENT_ALGORITHM/` is missing files: jump directly to Step 6 to re-copy
 
 **If `context_file_populated=true` in state AND `$CONTEXT_PATH` exists AND `REBUILD_CONTEXT=false`:**
 - Skip Step 1 entirely
@@ -363,6 +369,7 @@ corresponding shell variables:
 - `{CONFIG_KIND}` → `$CONFIG_KIND`
 - `{REVIEW_ROUNDS}` → `$REVIEW_ROUNDS`
 - `{SCENARIO}` → `$SCENARIO`
+- `{ALGO_NAME}` → `$CURRENT_ALGORITHM`
 - `{BUILD_COMMANDS}` → `$BUILD_COMMANDS`
 - `{CONTEXT_TEXT}` → `$CONTEXT_TEXT`
 - `{MAIN_SESSION_NAME}` → `"main-session"`
@@ -432,7 +439,7 @@ SendMessage("writer", "continue")
 
 **On "treatment-ready: ...":**
 
-Read `$RUN_DIR/generated/treatment_config.yaml` and print to user:
+Read `$RUN_DIR/generated/$CURRENT_ALGORITHM/${CURRENT_ALGORITHM}_config.yaml` and print to user:
 ```
 ━━━ Treatment Config (derived from baseline + algorithm) ━━━
 <file contents>
@@ -468,10 +475,13 @@ SendMessage("writer", "continue")
 ```bash
 python3 -c "
 import json
-o = json.load(open('$RUN_DIR/translation_output.json'))
+from pathlib import Path
+algo = '$CURRENT_ALGORITHM'
+algo_out = Path('$RUN_DIR/generated') / algo / f'{algo}_output.json'
+o = json.load(open(algo_out))
 print('Plugin files:', o.get('files_created', []))
 "
-python3 -c "print(open('$RUN_DIR/generated/treatment_config.yaml').read())"
+python3 -c "print(open('$RUN_DIR/generated/$CURRENT_ALGORITHM/${CURRENT_ALGORITHM}_config.yaml').read())"
 ```
 
 Print to user:
@@ -572,14 +582,14 @@ print(len(list((Path('$RUN_DIR/review')).glob('round_*.json'))))
 " 2>/dev/null || echo 0)
 ```
 
-Derive file lists from git state, overwrite `translation_output.json`, and copy to `$RUN_DIR/generated/`:
+Derive file lists from git state, update per-algorithm output, and copy to `$RUN_DIR/generated/$CURRENT_ALGORITHM/`:
 
 ```bash
 python3 -c "
 import sys
 sys.path.insert(0, '$REPO_ROOT/.claude/skills/sim2real-translate/scripts')
 from copy_generated import copy_generated
-copy_generated('$TARGET_REPO', '$RUN_DIR')
+copy_generated('$TARGET_REPO', '$RUN_DIR', algo_name='$CURRENT_ALGORITHM')
 " || exit 1
 ```
 
@@ -593,9 +603,11 @@ from datetime import datetime, timezone
 
 state_path = Path('$RUN_DIR') / '.state.json'
 state = json.loads(state_path.read_text())
-o = json.load(open('$RUN_DIR/translation_output.json'))
-state.setdefault('phases', {})['translate'] = {
-    'status': 'done',
+algo = '$CURRENT_ALGORITHM'
+algo_out = Path('$RUN_DIR/generated') / algo / f'{algo}_output.json'
+o = json.load(open(algo_out))
+translate_phase = state.setdefault('phases', {}).setdefault('translate', {})
+translate_phase.setdefault('completed_algorithms', {})[algo] = {
     'timestamp': datetime.now(timezone.utc).isoformat(),
     'files': o['files_created'],
     'review_rounds': $REVIEW_ROUNDS_DONE,
@@ -615,19 +627,24 @@ Verify outputs:
 python3 -c "
 import json, sys
 from pathlib import Path
-o = json.load(open('$RUN_DIR/translation_output.json'))
+algo = '$CURRENT_ALGORITHM'
+algo_dir = Path('$RUN_DIR/generated') / algo
+algo_out = algo_dir / f'{algo}_output.json'
+if not algo_out.exists():
+    print(f'ERROR: {algo_dir}/{algo}_output.json not found')
+    sys.exit(1)
+o = json.load(open(algo_out))
 required = ['plugin_type', 'files_created', 'files_modified', 'package',
             'register_file', 'test_commands', 'config_kind',
             'treatment_config_generated', 'description']
 missing = [f for f in required if f not in o]
 if missing:
-    print(f'ERROR: translation_output.json missing: {missing}')
+    print(f'ERROR: {algo}_output.json missing: {missing}')
     sys.exit(1)
-gen = Path('$RUN_DIR/generated')
 for f in o['files_created'] + o.get('files_modified', []):
-    dst = gen / Path(f).name
+    dst = algo_dir / f
     if not dst.exists():
-        print(f'ERROR: generated/ missing: {Path(f).name}')
+        print(f'ERROR: generated/{algo}/{f} not found')
         sys.exit(1)
 print(f'Verified: plugin_type={o[\"plugin_type\"]}, '
       f'{len(o[\"files_created\"])} created, '
@@ -652,12 +669,13 @@ Review:   <consensus> after <N> rounds
 Snapshots: <N> versions in $RUN_DIR/snapshots/
 
 Output artifacts:
-  $RUN_DIR/translation_output.json
-  $RUN_DIR/generated/
+  $RUN_DIR/generated/$CURRENT_ALGORITHM/${CURRENT_ALGORITHM}_output.json
+  $RUN_DIR/generated/$CURRENT_ALGORITHM/
   $RUN_DIR/snapshots/
   $RUN_DIR/review/
 
-Next: re-run prepare.py to continue through Assembly, Summary, and Gate.
+Next: re-run prepare.py to pick up the next untranslated algorithm (or continue
+through Assembly if all algorithms are complete).
   python3 $REPO_ROOT/pipeline/prepare.py
   (or: cd $EXPERIMENT_ROOT && python3 $REPO_ROOT/pipeline/prepare.py)
 ```

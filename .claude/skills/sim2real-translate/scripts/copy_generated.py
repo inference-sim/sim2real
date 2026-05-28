@@ -73,25 +73,20 @@ def copy_generated(
         else:
             print(f"  {Path(f).name} → generated/")
 
-    # Update top-level translation_output.json
-    to_path = rd / "translation_output.json"
-    o = json.loads(to_path.read_text())
-    o["files_created"] = files_created
-    o["files_modified"] = files_modified
-    to_path.write_text(json.dumps(o, indent=2))
-
-    # Per-algorithm output JSON
     if algo_name is not None:
-        algo_output = {
-            "files_created": files_created,
-            "files_modified": files_modified,
-        }
-        # Include other fields from translation_output.json
-        for k, v in o.items():
-            if k not in ("files_created", "files_modified"):
-                algo_output[k] = v
+        # Per-algorithm mode: update the per-algo output JSON (written by the writer)
         algo_out_path = gen / f"{algo_name}_output.json"
-        algo_out_path.write_text(json.dumps(algo_output, indent=2))
+        o = json.loads(algo_out_path.read_text())
+        o["files_created"] = files_created
+        o["files_modified"] = files_modified
+        algo_out_path.write_text(json.dumps(o, indent=2))
+    else:
+        # Flat mode: update top-level translation_output.json
+        to_path = rd / "translation_output.json"
+        o = json.loads(to_path.read_text())
+        o["files_created"] = files_created
+        o["files_modified"] = files_modified
+        to_path.write_text(json.dumps(o, indent=2))
 
     count = len(files_created) + len(files_modified)
     if count:
