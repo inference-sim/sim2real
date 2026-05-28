@@ -13,19 +13,28 @@ import subprocess
 from pathlib import Path
 
 
-def copy_generated(target_repo: str, run_dir: str) -> tuple[list[str], list[str]]:
+def copy_generated(
+    target_repo: str, run_dir: str, algo_name: str | None = None
+) -> tuple[list[str], list[str]]:
     """Discover changed/new files via git, update translation_output.json, copy to generated/.
 
     Args:
         target_repo: Path to the target repo (e.g., llm-d-inference-scheduler directory).
         run_dir: Path to the run directory containing translation_output.json.
+        algo_name: When set, files are written to generated/{algo_name}/ preserving
+            full relative paths; an {algo_name}_output.json is also written there.
+            When None, existing flat-copy behavior with basename collision check.
 
     Returns:
         Tuple of (files_created, files_modified) as written to translation_output.json.
     """
     target = Path(target_repo)
     rd = Path(run_dir)
-    gen = rd / "generated"
+
+    if algo_name is not None:
+        gen = rd / "generated" / algo_name
+    else:
+        gen = rd / "generated"
     gen.mkdir(parents=True, exist_ok=True)
 
     diff = subprocess.run(
@@ -40,26 +49,49 @@ def copy_generated(target_repo: str, run_dir: str) -> tuple[list[str], list[str]
     )
     files_created = [f for f in untracked.stdout.strip().splitlines() if f]
 
-    seen: dict[str, str] = {}
-    for f in files_created + files_modified:
-        base = Path(f).name
-        if base in seen:
-            raise ValueError(
-                f"Basename collision: '{base}' from both '{seen[base]}' and '{f}'"
-            )
-        seen[base] = f
+    if algo_name is None:
+        # Flat mode: basename collision check required
+        seen: dict[str, str] = {}
+        for f in files_created + files_modified:
+            base = Path(f).name
+            if base in seen:
+                raise ValueError(
+                    f"Basename collision: '{base}' from both '{seen[base]}' and '{f}'"
+                )
+            seen[base] = f
 
     for f in files_created + files_modified:
         src = target / f
-        dst = gen / Path(f).name
+        if algo_name is not None:
+            dst = gen / f
+            dst.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            dst = gen / Path(f).name
         shutil.copy2(src, dst)
-        print(f"  {Path(f).name} → generated/")
+        if algo_name is not None:
+            print(f"  {f} → generated/{algo_name}/{f}")
+        else:
+            print(f"  {Path(f).name} → generated/")
 
+    # Update top-level translation_output.json
     to_path = rd / "translation_output.json"
     o = json.loads(to_path.read_text())
     o["files_created"] = files_created
     o["files_modified"] = files_modified
     to_path.write_text(json.dumps(o, indent=2))
+
+    # Per-algorithm output JSON
+    if algo_name is not None:
+        algo_output = {
+            "files_created": files_created,
+            "files_modified": files_modified,
+        }
+        # Include other fields from translation_output.json
+        for k, v in o.items():
+            if k not in ("files_created", "files_modified"):
+                algo_output[k] = v
+        algo_out_path = gen / f"{algo_name}_output.json"
+        algo_out_path.write_text(json.dumps(algo_output, indent=2))
 
     count = len(files_created) + len(files_modified)
     if count:
