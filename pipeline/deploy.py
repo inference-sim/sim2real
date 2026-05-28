@@ -1875,7 +1875,9 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                         age_h = (_dt.datetime.now(_dt.timezone.utc) - created).total_seconds() / 3600
                         if age_h > timeout_hours:
                             retries = entry.get("retries", 0)
-                            _cancel_and_delete_pipelinerun(pr_name, ns)
+                            if not _cancel_and_delete_pipelinerun(pr_name, ns):
+                                warn(f"[{pair_key}] timed out but cancel failed — slot NOT freed")
+                                continue
                             if retries < max_retries:
                                 warn(f"[{pair_key}] timed out → requeue (attempt {retries + 1}/{max_retries})")
                                 entry["status"] = "pending"
