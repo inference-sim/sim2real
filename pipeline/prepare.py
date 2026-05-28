@@ -686,6 +686,19 @@ def _verify_generated_dir(run_dir: Path):
             "Re-run the /sim2real-translate skill.")
         sys.exit(1)
 
+    # Per-algorithm index format
+    if "per_algorithm" in output:
+        for algo_name, algo_output in output["per_algorithm"].items():
+            algo_dir = generated_dir / algo_name
+            if not algo_dir.exists():
+                warn(f"generated/{algo_name}/ directory not found")
+                continue
+            for f in algo_output.get("files_created", []) + algo_output.get("files_modified", []):
+                if not (algo_dir / f).exists():
+                    warn(f"generated/{algo_name}/ missing: {f}")
+        return
+
+    # Legacy flat format
     for f in output.get("files_created", []) + output.get("files_modified", []):
         if not (generated_dir / Path(f).name).exists():
             warn(f"generated/ missing: {Path(f).name}")
@@ -701,6 +714,32 @@ def _validate_assembly(run_dir: Path, resolved: dict, algorithm_packages: list[s
     except json.JSONDecodeError:
         warn("translation_output.json is not valid JSON — skipping validation")
         return
+
+    # Per-algorithm index format
+    if "per_algorithm" in output:
+        target_path = resolved.get("path", "")
+        errors = []
+        for algo_name, algo_output in output["per_algorithm"].items():
+            plugin_type = algo_output.get("plugin_type", "")
+            treatment_config_generated = algo_output.get("treatment_config_generated", True)
+
+            # Check: plugin_type in scenario YAML
+            if treatment_config_generated:
+                pkg_yaml = run_dir / "cluster" / f"{algo_name}.yaml"
+                if pkg_yaml.exists():
+                    if plugin_type not in pkg_yaml.read_text():
+                        errors.append(
+                            f"[{algo_name}] plugin_type '{plugin_type}' not found in {algo_name}.yaml")
+
+        if errors:
+            err("validate-assembly FAILED:")
+            for e in errors:
+                err(f"  - {e}")
+            sys.exit(1)
+        ok("validate-assembly: all checks passed")
+        return
+
+    # Legacy single-output format
     plugin_type = output["plugin_type"]
     target_path = resolved.get("path", "")
     treatment_config_generated = output.get("treatment_config_generated", True)
