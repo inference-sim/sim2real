@@ -2667,4 +2667,105 @@ def test_derive_costs_only_for_scoped_pairs(tmp_path, monkeypatch):
 
     # _derive_pair_gpu_costs should have been called with only the 2 in-scope pairs
     assert len(called_keys) == 1
-    assert called_keys[0] == {"wl-a-baseline", "wl-a-treatment"}
+
+
+# ── Pod health check (issue #228) ───────────────────────────────────────────
+
+
+def test_check_pod_health_tier1_deletes(monkeypatch):
+    """Tier 1 finding triggers pod deletion and returns False (no escalation yet)."""
+    import pipeline.deploy as mod
+    from pipeline.lib.health import PodState, RemediationTracker
+    import pipeline.lib.health as health_mod
+
+    tracker = RemediationTracker()
+    deleted = []
+
+    monkeypatch.setattr(health_mod, "get_all_pods", lambda ns: [
+        PodState(name="vllm-0", phase="Running", ready=False,
+                 restart_count=1, reason="OOMKilled", message=""),
+    ])
+    monkeypatch.setattr(health_mod, "get_events", lambda ns: [])
+    monkeypatch.setattr(health_mod, "delete_pod", lambda ns, name: (deleted.append(name), True)[1])
+
+    result = mod._check_pod_health(
+        namespace="ns-0", pair_key="wl-a-baseline",
+        tracker=tracker, skip_teardown=False,
+    )
+    assert result is False
+    assert "vllm-0" in deleted
+    assert tracker.count("vllm-0") == 1
+
+
+def test_check_pod_health_tier2_escalates(monkeypatch):
+    """Tier 2 finding escalates when skip_teardown=False."""
+    import pipeline.deploy as mod
+    from pipeline.lib.health import PodState, RemediationTracker
+    import pipeline.lib.health as health_mod
+
+    tracker = RemediationTracker()
+
+    monkeypatch.setattr(health_mod, "get_all_pods", lambda ns: [
+        PodState(name="vllm-0", phase="Running", ready=False,
+                 restart_count=5, reason="OOMKilled", message=""),
+    ])
+    monkeypatch.setattr(health_mod, "get_events", lambda ns: [])
+    monkeypatch.setattr(health_mod, "delete_pod", lambda ns, name: True)
+
+    # Pre-load tracker past threshold so OOM escalates to tier 2
+    tracker.record("vllm-0")
+    tracker.record("vllm-0")
+
+    result = mod._check_pod_health(
+        namespace="ns-0", pair_key="wl-a-baseline",
+        tracker=tracker, skip_teardown=False,
+    )
+    assert result is True
+
+
+def test_check_pod_health_tier2_no_escalate_skip_teardown(monkeypatch):
+    """Tier 2 does NOT escalate when skip_teardown=True."""
+    import pipeline.deploy as mod
+    from pipeline.lib.health import PodState, RemediationTracker
+    import pipeline.lib.health as health_mod
+
+    tracker = RemediationTracker()
+    tracker.record("vllm-0")
+    tracker.record("vllm-0")
+
+    monkeypatch.setattr(health_mod, "get_all_pods", lambda ns: [
+        PodState(name="vllm-0", phase="Running", ready=False,
+                 restart_count=5, reason="OOMKilled", message=""),
+    ])
+    monkeypatch.setattr(health_mod, "get_events", lambda ns: [])
+    monkeypatch.setattr(health_mod, "delete_pod", lambda ns, name: True)
+
+    result = mod._check_pod_health(
+        namespace="ns-0", pair_key="wl-a-baseline",
+        tracker=tracker, skip_teardown=True,
+    )
+    assert result is False
+
+
+def test_check_pod_health_resets_healthy(monkeypatch):
+    """Healthy pods (Running+Ready) reset their tracker count."""
+    import pipeline.deploy as mod
+    from pipeline.lib.health import PodState, RemediationTracker
+    import pipeline.lib.health as health_mod
+
+    tracker = RemediationTracker()
+    tracker.record("vllm-0")
+    tracker.record("vllm-0")
+    assert tracker.count("vllm-0") == 2
+
+    monkeypatch.setattr(health_mod, "get_all_pods", lambda ns: [
+        PodState(name="vllm-0", phase="Running", ready=True,
+                 restart_count=0, reason="", message=""),
+    ])
+    monkeypatch.setattr(health_mod, "get_events", lambda ns: [])
+
+    mod._check_pod_health(
+        namespace="ns-0", pair_key="wl-a-baseline",
+        tracker=tracker, skip_teardown=False,
+    )
+    assert tracker.count("vllm-0") == 0

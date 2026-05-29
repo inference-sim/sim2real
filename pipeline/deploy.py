@@ -645,6 +645,54 @@ def _handle_timeout(*, pr_name: str, namespace: str, entry: dict,
     return True
 
 
+def _check_pod_health(*, namespace: str, pair_key: str,
+                      tracker: "RemediationTracker",
+                      skip_teardown: bool) -> bool:
+    """Check non-Tekton pods in namespace for health issues.
+
+    Returns True if escalation is needed (persistent tier-1 failure or tier-2
+    finding with skip_teardown=False), meaning caller should cancel the
+    PipelineRun and reclaim the slot.
+    """
+    from pipeline.lib.health import (
+        get_all_pods, get_events, triage_pod, delete_pod,
+    )
+
+    pods = get_all_pods(namespace)
+    if not pods:
+        return False
+    events = get_events(namespace)
+    needs_escalation = False
+
+    for pod in pods:
+        if pod.phase == "Running" and pod.ready:
+            tracker.reset(pod.name)
+            continue
+
+        result = triage_pod(pod, events, tracker)
+        if result is None:
+            continue
+
+        if result.tier == 1:
+            success = delete_pod(namespace, pod.name)
+            if success:
+                tracker.record(pod.name)
+                warn(f"[{pair_key}] {result.message}")
+            else:
+                warn(f"[{pair_key}] {result.message} — delete failed")
+                needs_escalation = True
+        elif result.tier == 2:
+            warn(f"[{pair_key}] {result.message}")
+            if result.suggestion:
+                info(f"  Suggestion: {result.suggestion}")
+            if not skip_teardown:
+                needs_escalation = True
+        elif result.tier == 3:
+            warn(f"[{pair_key}] {result.message}")
+
+    return needs_escalation
+
+
 def _probe_phase_sizes(pod_name: str, run_name: str, phases: list[str],
                        namespace: str) -> dict[str, int]:
     """Return byte sizes for each phase directory on the PVC."""
