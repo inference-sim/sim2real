@@ -2174,6 +2174,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 warn(f"[{pair_key}] kubectl apply failed: {result.stderr.strip()}")
                 continue
 
+            entry = progress[pair_key]
             entry["status"] = "running"
             entry["namespace"] = ns
             entry["pending_since"] = None
