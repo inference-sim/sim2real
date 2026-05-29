@@ -346,15 +346,20 @@ def test_collect_with_workload_scope(tmp_path, monkeypatch):
     extract_calls = []
 
     def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
-        extract_calls.append({"phases": phases, "workload": workload})
+        extract_calls.append({"phases": sorted(phases), "allowed_workloads": allowed_workloads, "namespace": namespace})
+        if on_workload_done and allowed_workloads:
+            for phase in phases:
+                for wl in allowed_workloads.get(phase, set()):
+                    on_workload_done(phase, wl, namespace, None)
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
         deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
 
     assert len(extract_calls) == 1
-    assert extract_calls[0]["workload"] == "smoke"
+    assert extract_calls[0]["namespace"] == "ns-0"
     assert sorted(extract_calls[0]["phases"]) == ["baseline", "treatment"]
+    assert extract_calls[0]["allowed_workloads"] == {"baseline": {"smoke"}, "treatment": {"smoke"}}
 
 
 def test_collect_with_only_scope(tmp_path, monkeypatch):
@@ -379,15 +384,20 @@ def test_collect_with_only_scope(tmp_path, monkeypatch):
     extract_calls = []
 
     def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
-        extract_calls.append({"phases": phases, "workload": workload})
+        extract_calls.append({"phases": sorted(phases), "allowed_workloads": allowed_workloads, "namespace": namespace})
+        if on_workload_done and allowed_workloads:
+            for phase in phases:
+                for wl in allowed_workloads.get(phase, set()):
+                    on_workload_done(phase, wl, namespace, None)
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
         deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
 
     assert len(extract_calls) == 1
-    assert extract_calls[0]["workload"] == "smoke"
+    assert extract_calls[0]["namespace"] == "ns-0"
     assert extract_calls[0]["phases"] == ["baseline"]
+    assert extract_calls[0]["allowed_workloads"] == {"baseline": {"smoke"}}
 
 
 def test_collect_only_without_prefix(tmp_path, monkeypatch):
@@ -410,14 +420,18 @@ def test_collect_only_without_prefix(tmp_path, monkeypatch):
     extract_calls = []
 
     def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
-        extract_calls.append({"phases": phases, "workload": workload})
+        extract_calls.append({"phases": sorted(phases), "allowed_workloads": allowed_workloads})
+        if on_workload_done and allowed_workloads:
+            for phase in phases:
+                for wl in allowed_workloads.get(phase, set()):
+                    on_workload_done(phase, wl, namespace, None)
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
         deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
 
     assert len(extract_calls) == 1
-    assert extract_calls[0]["workload"] == "smoke"
+    assert extract_calls[0]["allowed_workloads"] == {"baseline": {"smoke"}}
 
 
 def test_collect_workload_with_package_filter(tmp_path, monkeypatch):
@@ -442,15 +456,19 @@ def test_collect_workload_with_package_filter(tmp_path, monkeypatch):
     extract_calls = []
 
     def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
-        extract_calls.append({"phases": phases, "workload": workload})
+        extract_calls.append({"phases": sorted(phases), "allowed_workloads": allowed_workloads})
+        if on_workload_done and allowed_workloads:
+            for phase in phases:
+                for wl in allowed_workloads.get(phase, set()):
+                    on_workload_done(phase, wl, namespace, None)
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
         deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
 
     assert len(extract_calls) == 1
-    assert extract_calls[0]["workload"] == "smoke"
     assert extract_calls[0]["phases"] == ["baseline"]
+    assert extract_calls[0]["allowed_workloads"] == {"baseline": {"smoke"}}
 
 
 def test_collect_workload_no_match_exits(tmp_path, monkeypatch):
@@ -635,6 +653,9 @@ def test_collect_scoped_per_phase_failure(tmp_path, monkeypatch):
         skip_logs = False
 
     def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+        if on_workload_done:
+            on_workload_done("baseline", "smoke", namespace, None)
+            on_workload_done("treatment", "smoke", namespace, RuntimeError("tar failed"))
         return {
             "baseline": None,
             "treatment": RuntimeError("tar failed"),
@@ -669,15 +690,19 @@ def test_collect_only_takes_precedence_over_workload(tmp_path, monkeypatch):
     extract_calls = []
 
     def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
-        extract_calls.append({"phases": phases, "workload": workload})
+        extract_calls.append({"phases": sorted(phases), "allowed_workloads": allowed_workloads})
+        if on_workload_done and allowed_workloads:
+            for phase in phases:
+                for wl in allowed_workloads.get(phase, set()):
+                    on_workload_done(phase, wl, namespace, None)
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
         deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
 
     assert len(extract_calls) == 1
-    assert extract_calls[0]["workload"] == "smoke"
     assert extract_calls[0]["phases"] == ["baseline"]
+    assert extract_calls[0]["allowed_workloads"] == {"baseline": {"smoke"}}
 
 
 def test_collect_unscoped_multi_namespace_dispatch(tmp_path, monkeypatch):
@@ -771,17 +796,20 @@ def test_collect_scoped_multi_namespace_dispatch(tmp_path, monkeypatch):
     extract_calls = []
 
     def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
-        extract_calls.append({"namespace": namespace, "phases": sorted(phases), "workload": workload})
+        extract_calls.append({"namespace": namespace, "phases": sorted(phases), "allowed_workloads": allowed_workloads})
+        if on_workload_done and allowed_workloads:
+            for phase in phases:
+                for wl in allowed_workloads.get(phase, set()):
+                    on_workload_done(phase, wl, namespace, None)
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
         deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-primary"})
 
     assert len(extract_calls) == 1
-    # Must use smoke's completed_namespace (ns-0), NOT the primary namespace
     assert extract_calls[0]["namespace"] == "ns-0"
-    assert extract_calls[0]["workload"] == "smoke"
     assert sorted(extract_calls[0]["phases"]) == ["baseline", "treatment"]
+    assert extract_calls[0]["allowed_workloads"] == {"baseline": {"smoke"}, "treatment": {"smoke"}}
 
 
 def test_collect_scoped_missing_completed_namespace_warns_and_skips(tmp_path, monkeypatch):
@@ -1097,6 +1125,10 @@ def test_collect_scoped_reports_namespace_context(tmp_path, monkeypatch, capsys)
         skip_logs = False
 
     def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+        if on_workload_done and allowed_workloads:
+            for phase in phases:
+                for wl in allowed_workloads.get(phase, set()):
+                    on_workload_done(phase, wl, namespace, None)
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
@@ -1789,3 +1821,52 @@ def test_extract_phases_per_phase_filter_prevents_cross_phase_leak(tmp_path, mon
         "baseline/balanced is stale — should NOT be collected (cross-phase leak)")
     assert "treatment/chatbot" not in copied_pairs, (
         "treatment/chatbot is stale — should NOT be collected (cross-phase leak)")
+
+
+# ── Issue #242: scoped collect must dispatch per-slot ─────────────────────────
+
+
+def test_collect_scoped_multi_slot_per_workload(tmp_path, monkeypatch):
+    """--workload dispatches per-slot when a workload's packages span multiple slots."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    data = {
+        "wl-mid-constantcontrol": {"workload": "mid", "package": "constantcontrol", "status": "done", "completed_namespace": "ns-0"},
+        "wl-mid-expceil":         {"workload": "mid", "package": "expceil",         "status": "done", "completed_namespace": "ns-1"},
+        "wl-mid-expceiling":      {"workload": "mid", "package": "expceiling",      "status": "done", "completed_namespace": "ns-2"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        only = None
+        workload = "mid"
+        package = None
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+        extract_calls.append({
+            "namespace": namespace,
+            "phases": sorted(phases),
+            "allowed_workloads": allowed_workloads,
+        })
+        if on_workload_done and allowed_workloads:
+            for phase in phases:
+                for wl in allowed_workloads.get(phase, set()):
+                    on_workload_done(phase, wl, namespace, None)
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-primary"})
+
+    assert len(extract_calls) == 3, f"Expected 3 slot dispatches, got {len(extract_calls)}"
+    ns_set = {c["namespace"] for c in extract_calls}
+    assert ns_set == {"ns-0", "ns-1", "ns-2"}
+
+    ns_to_allowed = {c["namespace"]: c["allowed_workloads"] for c in extract_calls}
+    assert ns_to_allowed["ns-0"] == {"constantcontrol": {"mid"}}
+    assert ns_to_allowed["ns-1"] == {"expceil": {"mid"}}
+    assert ns_to_allowed["ns-2"] == {"expceiling": {"mid"}}
