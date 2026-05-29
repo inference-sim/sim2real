@@ -245,6 +245,25 @@ def get_pods(namespace: str, experiment_id: str) -> list[PodState]:
     return [p for p in parse_pods(stdout) if experiment_id in p.name]
 
 
+_TEKTON_LABELS = {"tekton.dev/pipelineRun", "tekton.dev/taskRun", "tekton.dev/pipelineTask"}
+
+
+def get_all_pods(namespace: str) -> list[PodState]:
+    """Return all non-Tekton pod states in a namespace."""
+    rc, stdout = _kubectl("get", "pods", f"-n={namespace}", "-o", "json")
+    if rc != 0 or not stdout.strip():
+        return []
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError:
+        return []
+    items = data.get("items", [])
+    filtered = [item for item in items
+                if not (set(item.get("metadata", {}).get("labels", {}))
+                        & _TEKTON_LABELS)]
+    return parse_pods(json.dumps({"items": filtered}))
+
+
 def get_events(namespace: str) -> list[EventRecord]:
     """Return recent events from the namespace."""
     rc, stdout = _kubectl(
