@@ -1681,22 +1681,21 @@ def _derive_pair_gpu_costs(
     *,
     defaults: dict | None,
     fallback_cost: int,
-) -> dict[str, int]:
+) -> dict[str, tuple[int, str]]:
     """Compute GPU cost per pair from its scenarioContent.
 
-    If defaults is None, returns fallback_cost for all pairs immediately.
-
-    Otherwise, per pair:
-      1. Parse scenarioContent → gpu_cost_per_pair(scenario, defaults)
-      2. If scenarioContent missing/invalid → gpu_cost_per_pair({}, defaults)
-      3. If derivation returns an error → fallback_cost
+    Returns dict mapping pair key to (cost, source) where source is one of:
+    - "derived": cost parsed from scenarioContent
+    - "defaults-only": scenarioContent missing/invalid, derived from defaults
+    - "fallback": derivation failed or defaults unavailable, using fallback_cost
     """
     from pipeline.lib.capacity import gpu_cost_per_pair
 
-    costs = {}
+    costs: dict[str, tuple[int, str]] = {}
     for key, meta in discovered.items():
         if defaults is None:
-            costs[key] = fallback_cost
+            warn(f"{key}: no defaults available — using fallback cost ({fallback_cost})")
+            costs[key] = (fallback_cost, "fallback")
             continue
 
         scenario_content = meta.get("scenario_content")
@@ -1709,37 +1708,39 @@ def _derive_pair_gpu_costs(
 
         if resolved and isinstance(resolved, dict):
             result = gpu_cost_per_pair(resolved, defaults)
+            source = "derived"
         else:
+            if scenario_content:
+                warn(f"{key}: scenarioContent not parseable as dict — deriving cost from defaults only")
+            else:
+                warn(f"{key}: no scenarioContent — deriving cost from defaults only")
             result = gpu_cost_per_pair({}, defaults)
+            source = "defaults-only"
 
         if isinstance(result, int):
-            costs[key] = result
+            costs[key] = (result, source)
         else:
             warn(f"{key}: GPU cost derivation failed: {result} — using fallback ({fallback_cost})")
-            costs[key] = fallback_cost
+            costs[key] = (fallback_cost, "fallback")
 
     return costs
 
 
 def _capacity_limited_pairs(
     pending: list[str],
-    progress: dict,
     *,
     free_gpus: int,
-    default_gpu_cost: int,
+    cost_map: dict[str, int],
 ) -> list[str]:
     """Select pending pairs that fit within available GPU capacity.
 
     Sorts by gpu_cost ascending to maximize dispatch count.
     """
-    sorted_pending = sorted(
-        pending,
-        key=lambda k: progress[k].get("gpu_cost", default_gpu_cost),
-    )
+    sorted_pending = sorted(pending, key=lambda k: cost_map[k])
     result = []
     budget = free_gpus
     for pair in sorted_pending:
-        cost = progress[pair].get("gpu_cost", default_gpu_cost)
+        cost = cost_map[pair]
         if budget >= cost:
             budget -= cost
             result.append(pair)
@@ -1823,9 +1824,11 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     if not discovered:
         err("No pairs found in cluster/. Run prepare.py first."); sys.exit(1)
 
-    pair_costs = _derive_pair_gpu_costs(
+    pair_costs_with_prov = _derive_pair_gpu_costs(
         discovered, defaults=defaults_result, fallback_cost=fallback_cost,
     )
+    pair_costs = {k: v[0] for k, v in pair_costs_with_prov.items()}
+    pair_provenance = {k: v[1] for k, v in pair_costs_with_prov.items()}
 
     # Initialize new entries (first run or new pairs added)
     for key, meta in discovered.items():
@@ -1837,7 +1840,6 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 "namespace": None,
                 "completed_namespace": None,
                 "retries":  0,
-                "gpu_cost": pair_costs[key],
                 "pending_stalls": 0,
                 "pending_since": None,
             }
@@ -2005,8 +2007,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             backoff.last_probe_free_gpus = free_gpus
         pending = _pending_pairs()
         if free_gpus is not None and pending:
-            min_cost = min(progress[k].get("gpu_cost", fallback_cost) for k in pending)
-            max_cost = max(progress[k].get("gpu_cost", fallback_cost) for k in pending)
+            min_cost = min(pair_costs[k] for k in pending)
+            max_cost = max(pair_costs[k] for k in pending)
             if free_gpus < min_cost:
                 prev_state = backoff.state
                 backoff.signal_scarcity(free_gpus=free_gpus, min_cost=min_cost)
@@ -2028,7 +2030,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
         free_slots = [ns for ns in namespaces if ns not in slots_busy]
         pending = _pending_pairs()
         if free_gpus is not None and pending:
-            min_cost = min(progress[k].get("gpu_cost", fallback_cost) for k in pending)
+            min_cost = min(pair_costs[k] for k in pending)
             if not backoff.should_dispatch(free_gpus=free_gpus, min_cost=min_cost):
                 _skip_state = (len(pending), free_gpus)
                 if _skip_state != _last_log_state.get("backoff_skip"):
@@ -2037,11 +2039,11 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 dispatchable = []
             else:
                 dispatchable = _capacity_limited_pairs(
-                    pending, progress,
-                    free_gpus=free_gpus, default_gpu_cost=fallback_cost,
+                    pending,
+                    free_gpus=free_gpus, cost_map=pair_costs,
                 )
                 if len(dispatchable) == 0 and pending:
-                    smallest = min(progress[k].get("gpu_cost", fallback_cost) for k in pending)
+                    smallest = min(pair_costs[k] for k in pending)
                     _disp_state = ("zero", len(pending), free_gpus, smallest)
                     _zero_dispatch_count += 1
                     if _disp_state != _last_log_state.get("dispatch") or _zero_dispatch_count % 10 == 0:
@@ -2067,9 +2069,10 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 warn(f"Slot {ns} not ready: {'; '.join(reasons)}")
                 continue
 
-            entry = progress[pair_key]
-            pair_cost = entry.get("gpu_cost", fallback_cost)
-            info(f"{pair_key} requires {pair_cost} GPUs")
+            pair_cost = pair_costs[pair_key]
+            source = pair_provenance[pair_key]
+            _source_labels = {"derived": "derived from scenarioContent", "defaults-only": "derived from defaults only", "fallback": "fallback default"}
+            info(f"{pair_key} requires {pair_cost} GPUs ({_source_labels[source]})")
             pr_meta = discovered.get(pair_key, {})
             pr_path_str = pr_meta.get("pr_path", "")
             if not pr_path_str:

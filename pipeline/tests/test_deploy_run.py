@@ -1019,11 +1019,71 @@ def test_force_reset_clears_retries(monkeypatch):
     assert progress["wl-a-baseline"]["retries"] == 0
 
 
+# ── GPU cost derivation provenance (issue #240) ──────────────────────────────
+
+
+def test_derive_pair_gpu_costs_returns_provenance():
+    """_derive_pair_gpu_costs returns (cost, source) tuples."""
+    from pipeline.deploy import _derive_pair_gpu_costs
+    from unittest.mock import patch
+    import yaml
+
+    discovered = {
+        "wl-a-baseline": {"scenario_content": yaml.dump({"decode": {"replicas": 4}})},
+    }
+
+    with patch("pipeline.lib.capacity.gpu_cost_per_pair", return_value=4):
+        result = _derive_pair_gpu_costs(
+            discovered,
+            defaults={"decode": {"resources": {"limits": {"nvidia.com/gpu": "1"}}}},
+            fallback_cost=1,
+        )
+    assert result["wl-a-baseline"] == (4, "derived")
+
+
+def test_derive_pair_gpu_costs_defaults_none_returns_fallback():
+    """When defaults is None, returns fallback with 'fallback' source."""
+    from pipeline.deploy import _derive_pair_gpu_costs
+
+    discovered = {"wl-a-baseline": {"scenario_content": "decode:\n  replicas: 4\n"}}
+    result = _derive_pair_gpu_costs(discovered, defaults=None, fallback_cost=1)
+    assert result["wl-a-baseline"] == (1, "fallback")
+
+
+def test_derive_pair_gpu_costs_empty_scenario_returns_defaults_only():
+    """When scenarioContent is empty, derives from defaults with 'defaults-only' source."""
+    from pipeline.deploy import _derive_pair_gpu_costs
+    from unittest.mock import patch
+
+    discovered = {"wl-a-baseline": {"scenario_content": ""}}
+    with patch("pipeline.lib.capacity.gpu_cost_per_pair", return_value=2):
+        result = _derive_pair_gpu_costs(
+            discovered, defaults={"some": "defaults"}, fallback_cost=1,
+        )
+    assert result["wl-a-baseline"] == (2, "defaults-only")
+
+
+def test_derive_pair_gpu_costs_derivation_error_returns_fallback():
+    """When gpu_cost_per_pair returns an error string, uses fallback."""
+    from pipeline.deploy import _derive_pair_gpu_costs
+    from unittest.mock import patch
+    import yaml
+
+    discovered = {
+        "wl-a-baseline": {"scenario_content": yaml.dump({"decode": {"replicas": 4}})},
+    }
+    with patch("pipeline.lib.capacity.gpu_cost_per_pair", return_value="missing field"):
+        result = _derive_pair_gpu_costs(
+            discovered, defaults={"some": "defaults"}, fallback_cost=1,
+        )
+    assert result["wl-a-baseline"] == (1, "fallback")
+
+
 # ── Capacity-gated dispatch (issue #64) ──────────────────────────────────────
 
 
-def test_init_progress_stores_gpu_cost(tmp_path):
-    """New progress entries include gpu_cost field."""
+def test_init_progress_does_not_store_gpu_cost(tmp_path):
+    """Progress entries must not persist gpu_cost — it's derived per invocation."""
     import yaml as _yaml
     from pipeline.deploy import _load_pairs
 
@@ -1040,8 +1100,6 @@ def test_init_progress_stores_gpu_cost(tmp_path):
     (cluster_dir / "pipelinerun-smoke-baseline.yaml").write_text(_yaml.dump(pr))
 
     discovered = _load_pairs(cluster_dir)
-    # Simulate progress initialization with gpu_cost
-    pair_gpu_cost = 8
     progress = {}
     for key, meta in discovered.items():
         if key not in progress:
@@ -1050,60 +1108,28 @@ def test_init_progress_stores_gpu_cost(tmp_path):
                 "package":  meta["package"],
                 "status":   "pending",
                 "namespace": None,
+                "completed_namespace": None,
                 "retries":  0,
-                "gpu_cost": pair_gpu_cost,
+                "pending_stalls": 0,
+                "pending_since": None,
             }
-    assert "gpu_cost" in progress["wl-smoke-baseline"]
-    assert progress["wl-smoke-baseline"]["gpu_cost"] == 8
-
-
-def test_init_progress_gpu_cost_uses_fallback(tmp_path):
-    """When using default cost, gpu_cost stores that value."""
-    import yaml as _yaml
-    from pipeline.deploy import _load_pairs
-
-    cluster_dir = tmp_path / "cluster"
-    cluster_dir.mkdir()
-
-    pr = {
-        "metadata": {"name": "baseline-smoke-run1", "namespace": "ns"},
-        "spec": {"params": [
-            {"name": "workloadName", "value": "wl-smoke"},
-            {"name": "phase", "value": "baseline"},
-        ]},
-    }
-    (cluster_dir / "pipelinerun-smoke-baseline.yaml").write_text(_yaml.dump(pr))
-
-    discovered = _load_pairs(cluster_dir)
-    default_cost = 1  # --default-gpu-cost fallback
-    progress = {}
-    for key, meta in discovered.items():
-        if key not in progress:
-            progress[key] = {
-                "workload": meta["workload"],
-                "package":  meta["package"],
-                "status":   "pending",
-                "namespace": None,
-                "retries":  0,
-                "gpu_cost": default_cost,
-            }
-    assert progress["wl-smoke-baseline"]["gpu_cost"] == 1
+    assert "gpu_cost" not in progress["wl-smoke-baseline"]
 
 
 def test_capacity_gated_dispatch_limits_pairs():
     """When free GPUs < total pending cost, only a subset is dispatched."""
     from pipeline.deploy import _capacity_limited_pairs
 
-    progress = {
-        "wl-a-baseline":   {"status": "pending", "gpu_cost": 8},
-        "wl-b-baseline":   {"status": "pending", "gpu_cost": 4},
-        "wl-c-baseline":   {"status": "pending", "gpu_cost": 4},
-        "wl-d-baseline":   {"status": "pending", "gpu_cost": 8},
+    cost_map = {
+        "wl-a-baseline": 8,
+        "wl-b-baseline": 4,
+        "wl-c-baseline": 4,
+        "wl-d-baseline": 8,
     }
     pending = ["wl-a-baseline", "wl-b-baseline", "wl-c-baseline", "wl-d-baseline"]
 
     # sorted: b(4), c(4), a(8), d(8). budget=12: b→8, c→4, 4>=8? No. So only b and c fit.
-    result = _capacity_limited_pairs(pending, progress, free_gpus=12, default_gpu_cost=1)
+    result = _capacity_limited_pairs(pending, free_gpus=12, cost_map=cost_map)
     assert result == ["wl-b-baseline", "wl-c-baseline"]
 
 
@@ -1111,13 +1137,13 @@ def test_capacity_gated_dispatch_all_fit():
     """When free GPUs >= total pending cost, all pairs are returned."""
     from pipeline.deploy import _capacity_limited_pairs
 
-    progress = {
-        "wl-a-baseline":   {"status": "pending", "gpu_cost": 4},
-        "wl-b-baseline":   {"status": "pending", "gpu_cost": 4},
+    cost_map = {
+        "wl-a-baseline": 4,
+        "wl-b-baseline": 4,
     }
     pending = ["wl-a-baseline", "wl-b-baseline"]
 
-    result = _capacity_limited_pairs(pending, progress, free_gpus=16, default_gpu_cost=1)
+    result = _capacity_limited_pairs(pending, free_gpus=16, cost_map=cost_map)
     # sorted by cost (both 4), stable sort preserves order
     assert set(result) == {"wl-a-baseline", "wl-b-baseline"}
     assert len(result) == 2
@@ -1127,43 +1153,26 @@ def test_capacity_gated_dispatch_sorts_ascending():
     """Pairs are sorted by gpu_cost ascending to maximize dispatch count."""
     from pipeline.deploy import _capacity_limited_pairs
 
-    progress = {
-        "wl-big-baseline":   {"status": "pending", "gpu_cost": 8},
-        "wl-small-baseline": {"status": "pending", "gpu_cost": 2},
-        "wl-mid-baseline":   {"status": "pending", "gpu_cost": 4},
+    cost_map = {
+        "wl-big-baseline": 8,
+        "wl-small-baseline": 2,
+        "wl-mid-baseline": 4,
     }
     pending = ["wl-big-baseline", "wl-small-baseline", "wl-mid-baseline"]
 
     # Budget 10: sorted → small(2), mid(4), big(8). 2+4=6<=10, 6+8=14>10. So small+mid.
-    result = _capacity_limited_pairs(pending, progress, free_gpus=10, default_gpu_cost=1)
+    result = _capacity_limited_pairs(pending, free_gpus=10, cost_map=cost_map)
     assert result == ["wl-small-baseline", "wl-mid-baseline"]
-
-
-def test_capacity_gated_dispatch_uses_default_cost_for_legacy_entries():
-    """Entries without gpu_cost field use the default_gpu_cost fallback."""
-    from pipeline.deploy import _capacity_limited_pairs
-
-    progress = {
-        "wl-old-baseline": {"status": "pending"},  # no gpu_cost field
-        "wl-new-baseline": {"status": "pending", "gpu_cost": 4},
-    }
-    pending = ["wl-old-baseline", "wl-new-baseline"]
-
-    # default_gpu_cost=2: sorted → old(2), new(4). budget=5: 2+4=6>5. Only old fits.
-    result = _capacity_limited_pairs(pending, progress, free_gpus=5, default_gpu_cost=2)
-    assert result == ["wl-old-baseline"]
 
 
 def test_capacity_gated_dispatch_zero_budget():
     """Zero free GPUs means nothing is dispatched."""
     from pipeline.deploy import _capacity_limited_pairs
 
-    progress = {
-        "wl-a-baseline": {"status": "pending", "gpu_cost": 4},
-    }
+    cost_map = {"wl-a-baseline": 4}
     pending = ["wl-a-baseline"]
 
-    result = _capacity_limited_pairs(pending, progress, free_gpus=0, default_gpu_cost=1)
+    result = _capacity_limited_pairs(pending, free_gpus=0, cost_map=cost_map)
     assert result == []
 
 
@@ -1171,16 +1180,15 @@ def test_probe_failure_dispatches_all_pending():
     """When probe returns error string, all pending pairs are dispatched (no gating)."""
     from pipeline.deploy import _capacity_limited_pairs
 
-    progress = {
-        "wl-a-baseline": {"status": "pending", "gpu_cost": 8},
-        "wl-b-baseline": {"status": "pending", "gpu_cost": 4},
-        "wl-c-baseline": {"status": "pending", "gpu_cost": 4},
+    cost_map = {
+        "wl-a-baseline": 8,
+        "wl-b-baseline": 4,
+        "wl-c-baseline": 4,
     }
     pending = ["wl-a-baseline", "wl-b-baseline", "wl-c-baseline"]
 
     # Simulate the dispatch logic: when probe fails, free_gpus is None,
     # so _capacity_limited_pairs is NOT called — dispatchable = pending directly.
-    # This verifies the contract: probe failure means no filtering.
     capacity = "connection refused"  # str = failure
     free_gpus = None
     if isinstance(capacity, tuple):
@@ -1188,7 +1196,7 @@ def test_probe_failure_dispatches_all_pending():
 
     if free_gpus is not None:
         dispatchable = _capacity_limited_pairs(
-            pending, progress, free_gpus=free_gpus, default_gpu_cost=1,
+            pending, free_gpus=free_gpus, cost_map=cost_map,
         )
     else:
         dispatchable = pending
@@ -1201,17 +1209,16 @@ def test_slot_limited_dispatch(capsys):
     """When capacity allows all pairs but fewer slots exist, slot-limited log fires."""
     from pipeline.deploy import _capacity_limited_pairs, info
 
-    progress = {
-        "wl-a-baseline": {"status": "pending", "gpu_cost": 4},
-        "wl-b-baseline": {"status": "pending", "gpu_cost": 4},
-        "wl-c-baseline": {"status": "pending", "gpu_cost": 4},
+    cost_map = {
+        "wl-a-baseline": 4,
+        "wl-b-baseline": 4,
+        "wl-c-baseline": 4,
     }
     pending = ["wl-a-baseline", "wl-b-baseline", "wl-c-baseline"]
     free_gpus = 24  # plenty of capacity
-    pair_gpu_cost = 4
 
     dispatchable = _capacity_limited_pairs(
-        pending, progress, free_gpus=free_gpus, default_gpu_cost=pair_gpu_cost,
+        pending, free_gpus=free_gpus, cost_map=cost_map,
     )
     # All 3 fit in capacity
     assert len(dispatchable) == 3
@@ -1999,8 +2006,8 @@ def test_derive_pair_gpu_costs_heterogeneous():
     }
 
     costs = _derive_pair_gpu_costs(discovered, defaults=defaults, fallback_cost=1)
-    assert costs["wl-a-baseline"] == 2
-    assert costs["wl-b-treatment"] == 4
+    assert costs["wl-a-baseline"] == (2, "derived")
+    assert costs["wl-b-treatment"] == (4, "derived")
 
 
 def test_derive_pair_gpu_costs_fallback_on_missing_scenario():
@@ -2017,7 +2024,7 @@ def test_derive_pair_gpu_costs_fallback_on_missing_scenario():
     }
 
     costs = _derive_pair_gpu_costs(discovered, defaults=defaults, fallback_cost=1)
-    assert costs["wl-a-baseline"] == 4
+    assert costs["wl-a-baseline"] == (4, "defaults-only")
 
 
 def test_derive_pair_gpu_costs_fallback_on_bad_yaml():
@@ -2031,7 +2038,7 @@ def test_derive_pair_gpu_costs_fallback_on_bad_yaml():
     }
 
     costs = _derive_pair_gpu_costs(discovered, defaults=defaults, fallback_cost=99)
-    assert costs["wl-a-baseline"] == 2
+    assert costs["wl-a-baseline"] == (2, "defaults-only")
 
 
 def test_derive_pair_gpu_costs_no_defaults():
@@ -2043,11 +2050,11 @@ def test_derive_pair_gpu_costs_no_defaults():
     }
 
     costs = _derive_pair_gpu_costs(discovered, defaults=None, fallback_cost=7)
-    assert costs["wl-a-baseline"] == 7
+    assert costs["wl-a-baseline"] == (7, "fallback")
 
 
-def test_init_progress_per_pair_heterogeneous_cost(tmp_path):
-    """Progress entries get individually-derived gpu_cost from scenarioContent."""
+def test_derive_pair_gpu_costs_per_pair_heterogeneous(tmp_path):
+    """Per-pair cost derivation from scenarioContent in loaded PipelineRuns."""
     import yaml as _yaml
     from pipeline.deploy import _load_pairs, _derive_pair_gpu_costs
 
@@ -2080,21 +2087,8 @@ def test_init_progress_per_pair_heterogeneous_cost(tmp_path):
     discovered = _load_pairs(cluster_dir)
     costs = _derive_pair_gpu_costs(discovered, defaults=defaults, fallback_cost=1)
 
-    progress = {}
-    for key, meta in discovered.items():
-        progress[key] = {
-            "workload": meta["workload"],
-            "package":  meta["package"],
-            "status":   "pending",
-            "namespace": None,
-            "retries":  0,
-            "gpu_cost": costs[key],
-            "pending_stalls": 0,
-            "pending_since": None,
-        }
-
-    assert progress["wl-a-baseline"]["gpu_cost"] == 8
-    assert progress["wl-b-treatment"]["gpu_cost"] == 2
+    assert costs["wl-a-baseline"] == (8, "derived")
+    assert costs["wl-b-treatment"] == (2, "derived")
 
 
 # ── status ConfigMap behavior ───────────────────────────────────────────────
