@@ -1838,6 +1838,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     defaults_path_override = getattr(args, "defaults_path", None)
     if defaults_path_override:
         defaults_result = load_defaults(REPO_ROOT, defaults_path=defaults_path_override)
+        if defaults_result is None:
+            warn(f"--defaults-path {defaults_path_override} not found — GPU cost derivation will use fallback")
     else:
         defaults_result = load_defaults(REPO_ROOT)
     if isinstance(defaults_result, str):
@@ -2546,7 +2548,12 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
 
     # Read defaults.yaml locally — not available in-cluster
     defaults_path = REPO_ROOT / "llm-d-benchmark" / "config" / "templates" / "values" / "defaults.yaml"
-    defaults_content = defaults_path.read_text() if defaults_path.exists() else None
+    defaults_content = None
+    if defaults_path.exists():
+        try:
+            defaults_content = defaults_path.read_text()
+        except OSError as exc:
+            warn(f"defaults.yaml read failed: {exc} — remote Job will run without GPU cost defaults")
 
     try:
         cm = build_run_inputs_configmap(
@@ -2569,7 +2576,7 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
         sys.exit(1)
 
     run_flags = _collect_run_flags(args)
-    if defaults_content:
+    if defaults_content is not None:
         run_flags.append("--defaults-path")
         run_flags.append("/data/workspace/defaults.yaml")
     job = build_orchestrator_job(
