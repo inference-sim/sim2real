@@ -305,3 +305,23 @@ class TestGpuCostPerPair:
         assert isinstance(cost, str)
         assert "bad" in cost
         assert "decode.accelerator.count" in cost
+
+
+# ── load_defaults tests ───────────────────────────────────────────────────────
+
+
+from pipeline.lib.capacity import load_defaults
+
+
+def test_load_defaults_explicit_path(tmp_path):
+    """load_defaults with explicit defaults_path reads from that path directly."""
+    defaults_file = tmp_path / "my-defaults.yaml"
+    defaults_file.write_text("decode:\n  accelerator:\n    count: 4\n")
+    result = load_defaults(tmp_path, defaults_path=defaults_file)
+    assert result == {"decode": {"accelerator": {"count": 4}}}
+
+
+def test_load_defaults_explicit_path_missing(tmp_path):
+    """load_defaults with explicit path to non-existent file returns None."""
+    result = load_defaults(tmp_path, defaults_path=tmp_path / "nope.yaml")
+    assert result is None
