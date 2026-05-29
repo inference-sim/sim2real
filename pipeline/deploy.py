@@ -1882,12 +1882,6 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     if not discovered:
         err("No pairs found in cluster/. Run prepare.py first."); sys.exit(1)
 
-    pair_costs_with_prov = _derive_pair_gpu_costs(
-        discovered, defaults=defaults_result, fallback_cost=fallback_cost,
-    )
-    pair_costs = {k: v[0] for k, v in pair_costs_with_prov.items()}
-    pair_provenance = {k: v[1] for k, v in pair_costs_with_prov.items()}
-
     # Initialize new entries (first run or new pairs added)
     for key, meta in discovered.items():
         if key not in progress:
@@ -1906,6 +1900,13 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     total_pairs = sum(1 for k in progress if _is_pair_key(k))
     if len(_scope) < total_pairs:
         info(f"Scope: {len(_scope)}/{total_pairs} pairs")
+
+    scoped_discovered = {k: v for k, v in discovered.items() if k in _scope}
+    pair_costs_with_prov = _derive_pair_gpu_costs(
+        scoped_discovered, defaults=defaults_result, fallback_cost=fallback_cost,
+    )
+    pair_costs = {k: v[0] for k, v in pair_costs_with_prov.items()}
+    pair_provenance = {k: v[1] for k, v in pair_costs_with_prov.items()}
 
     if getattr(args, "force", False):
         n = _force_reset(progress, _scope, discovered, namespaces=namespaces)
