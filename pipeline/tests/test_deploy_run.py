@@ -2769,3 +2769,81 @@ def test_check_pod_health_resets_healthy(monkeypatch):
         tracker=tracker, skip_teardown=False,
     )
     assert tracker.count("vllm-0") == 0
+
+
+# ── Health escalation integration (issue #228) ───────────────────────────────
+
+
+def test_health_escalation_cancels_pipelinerun(tmp_path, monkeypatch):
+    """When _check_pod_health returns True (escalation), the orchestrator cancels the
+    PipelineRun, marks the pair failed, and frees the slot."""
+    import yaml as _yaml
+    import pipeline.deploy as mod
+    import pipeline.lib.capacity as _cap_mod
+    from pipeline.lib.progress import ConfigMapProgressStore
+
+    run_dir = tmp_path / "runs" / "test-run"
+    cluster_dir = run_dir / "cluster"
+    cluster_dir.mkdir(parents=True)
+
+    pr = {
+        "metadata": {"name": "pr-a-baseline", "namespace": "ns"},
+        "spec": {"params": [
+            {"name": "workloadName", "value": "wl-a"},
+            {"name": "phase", "value": "baseline"},
+        ]},
+    }
+    (cluster_dir / "pipelinerun-a-baseline.yaml").write_text(_yaml.dump(pr))
+    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+
+    setup_config = {"namespaces": ["sim2real-0"], "namespace": "sim2real-0"}
+
+    saved = {}
+    monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
+    monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: saved.update(d))
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
+    monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
+    monkeypatch.setattr(_cap_mod, "probe_free_gpus", lambda **kw: (8, 8, 0))
+    monkeypatch.setattr(_cap_mod, "load_defaults",
+                        lambda root, **kw: {"decode": {"accelerator": {"count": 1}}})
+
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+
+    # PipelineRun reports "Running" always — health check will escalate
+    monkeypatch.setattr(mod, "_check_pipelinerun_status",
+                        lambda pr_name, ns: "Running")
+
+    # Health check always returns escalation
+    monkeypatch.setattr(mod, "_check_pod_health",
+                        lambda **kw: True)
+
+    # Cancel succeeds
+    monkeypatch.setattr(mod, "_cancel_and_delete_pipelinerun",
+                        lambda pr, ns: True)
+
+    # Prevent infinite loop from _handle_pending_pods and _handle_timeout
+    monkeypatch.setattr(mod, "_handle_pending_pods", lambda **kw: False)
+    monkeypatch.setattr(mod, "_handle_timeout", lambda **kw: None)
+
+    args = argparse.Namespace(
+        skip_build=True, max_retries=0, poll_interval=1,
+        pending_threshold=600, max_pending_stalls=10, max_backoff=600,
+        default_gpu_cost=1, gpu_resource_type="nvidia.com/gpu",
+        only=None, workload=None, package=None, status=None,
+        force=False, skip_teardown=False, remote=False,
+        preserve_pipelineruns=False,
+    )
+
+    mod._cmd_run(args, run_dir, setup_config)
+
+    assert "wl-a-baseline" in saved
+    assert saved["wl-a-baseline"]["status"] == "failed"
