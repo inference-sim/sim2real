@@ -252,3 +252,37 @@ def test_job_backoff_limit_zero():
 def test_job_active_deadline():
     job = _build_job()
     assert job["spec"]["activeDeadlineSeconds"] == 18000
+
+
+# --- defaults.yaml bundling tests ---
+
+
+def test_defaults_yaml_packed(workspace):
+    """defaults.yaml content is included in ConfigMap when provided."""
+    workspace_dir, run_dir = workspace
+    _write_defaults(workspace_dir, run_dir)
+    defaults_content = "decode:\n  accelerator:\n    count: 2\n"
+    cm = build_run_inputs_configmap(
+        run_dir=run_dir, workspace_dir=workspace_dir,
+        namespace="ns", run_name="test-run",
+        defaults_content=defaults_content,
+    )
+    assert cm["data"]["defaults.yaml"] == defaults_content
+
+
+def test_defaults_yaml_omitted_when_none(workspace):
+    """When defaults_content is None, no defaults.yaml key in ConfigMap."""
+    workspace_dir, run_dir = workspace
+    _write_defaults(workspace_dir, run_dir)
+    cm = build_run_inputs_configmap(
+        run_dir=run_dir, workspace_dir=workspace_dir,
+        namespace="ns", run_name="test-run",
+    )
+    assert "defaults.yaml" not in cm["data"]
+
+
+def test_configmap_items_defaults_at_root():
+    """defaults.yaml maps to workspace root."""
+    data = {"defaults.yaml": "content", "setup_config.json": "{}"}
+    items = _configmap_items(data, "run1")
+    assert {"key": "defaults.yaml", "path": "defaults.yaml"} in items

@@ -9,7 +9,8 @@ MOUNT_BASE = "/data"
 
 
 def build_run_inputs_configmap(
-    *, run_dir: Path, workspace_dir: Path, namespace: str, run_name: str
+    *, run_dir: Path, workspace_dir: Path, namespace: str, run_name: str,
+    defaults_content: "str | None" = None,
 ) -> dict:
     setup_path = workspace_dir / "setup_config.json"
     if not setup_path.exists():
@@ -23,6 +24,9 @@ def build_run_inputs_configmap(
         "setup_config.json": setup_path.read_text(),
         "run_metadata.json": metadata_path.read_text(),
     }
+
+    if defaults_content is not None:
+        data["defaults.yaml"] = defaults_content
 
     cluster_dir = run_dir / "cluster"
     yaml_files = sorted(cluster_dir.glob("*.yaml")) if cluster_dir.is_dir() else []
@@ -47,6 +51,8 @@ def _configmap_items(data: dict, run_name: str) -> list[dict]:
     for key in sorted(data):
         if key == "setup_config.json":
             items.append({"key": key, "path": key})
+        elif key == "defaults.yaml":
+            items.append({"key": key, "path": "defaults.yaml"})
         elif key == "run_metadata.json":
             items.append({"key": key, "path": f"runs/{run_name}/{key}"})
         elif key.startswith("cluster--"):

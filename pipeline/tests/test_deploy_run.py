@@ -2460,3 +2460,211 @@ def test_handle_timeout_not_expired_returns_none(monkeypatch):
 
     assert result is None
     assert entry["status"] == "running"
+
+
+# ── dispatch loop entry assignment (issue #244) ──────────────────────────────
+
+
+def test_dispatch_sets_entry_running(tmp_path, monkeypatch):
+    """After successful kubectl apply, the dispatched pair must be marked 'running'."""
+    import yaml as _yaml
+    import pipeline.deploy as mod
+    from pipeline.lib.progress import ConfigMapProgressStore
+
+    # Set up run directory structure
+    run_dir = tmp_path / "runs" / "test-run"
+    cluster_dir = run_dir / "cluster"
+    cluster_dir.mkdir(parents=True)
+
+    # Write a single PipelineRun YAML
+    # Key derivation: "wl-" + stem.removeprefix("pipelinerun-") → "wl-a-baseline"
+    pr = {
+        "metadata": {"name": "pr-a-baseline", "namespace": "ns"},
+        "spec": {"params": [
+            {"name": "workloadName", "value": "wl-a"},
+            {"name": "phase", "value": "baseline"},
+        ]},
+    }
+    (cluster_dir / "pipelinerun-a-baseline.yaml").write_text(_yaml.dump(pr))
+
+    # Write run_metadata.json (needed by _cmd_build)
+    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+
+    # Setup config with one namespace slot
+    setup_config = {"namespaces": ["sim2real-0"], "namespace": "sim2real-0"}
+
+    # Track progress store saves
+    saved_progress = {}
+
+    def mock_save(self, data):
+        saved_progress.update(data)
+
+    monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
+    monkeypatch.setattr(ConfigMapProgressStore, "save", mock_save)
+
+    # _cmd_build → no-op (skip)
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
+
+    # _check_slot_ready → always ready
+    monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
+
+    # probe_free_gpus → plenty of capacity (imported inside _cmd_run from pipeline.lib.capacity)
+    import pipeline.lib.capacity as _cap_mod
+    monkeypatch.setattr(_cap_mod, "probe_free_gpus", lambda **kw: (8, 8, 0))
+
+    # load_defaults → minimal defaults (also imported inside _cmd_run)
+    monkeypatch.setattr(_cap_mod, "load_defaults", lambda root: {"decode": {"accelerator": {"count": 1}}})
+
+    # subprocess run → kubectl apply succeeds; then PipelineRun completes
+    call_count = {"n": 0}
+
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        call_count["n"] += 1
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    # After dispatch, PipelineRun immediately "Succeeds" so loop terminates
+    monkeypatch.setattr(mod, "_check_pipelinerun_status",
+                        lambda pr_name, ns: "Succeeded")
+
+    # Set REPO_ROOT and EXPERIMENT_ROOT
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+
+    # Build args namespace
+    args = argparse.Namespace(
+        skip_build=True,
+        max_retries=0,
+        poll_interval=1,
+        pending_threshold=600,
+        max_pending_stalls=10,
+        max_backoff=600,
+        default_gpu_cost=1,
+        gpu_resource_type="nvidia.com/gpu",
+        only=None,
+        workload=None,
+        package=None,
+        status=None,
+        force=False,
+        skip_teardown=False,
+        remote=False,
+        preserve_pipelineruns=False,
+    )
+
+    mod._cmd_run(args, run_dir, setup_config)
+
+    # The pair should have been marked running at some point during dispatch
+    assert "wl-a-baseline" in saved_progress
+    # After full loop it ends as "done" (since we mock Succeeded), but
+    # the critical thing is that no UnboundLocalError was raised.
+    # The final status should be "done" because _check_pipelinerun_status returns Succeeded.
+    assert saved_progress["wl-a-baseline"]["status"] == "done"
+
+
+# ── Scoped GPU cost derivation (issue #244) ─────────────────────────────────
+
+
+def test_derive_costs_only_for_scoped_pairs(tmp_path, monkeypatch):
+    """_derive_pair_gpu_costs must only be called with in-scope pairs, not all discovered."""
+    import yaml as _yaml
+    import pipeline.deploy as mod
+    import pipeline.lib.capacity as _cap_mod
+    from pipeline.lib.progress import ConfigMapProgressStore
+
+    # Create cluster dir with 3 workloads x 2 packages = 6 pairs
+    run_dir = tmp_path / "runs" / "test-run"
+    cluster_dir = run_dir / "cluster"
+    cluster_dir.mkdir(parents=True)
+
+    for wl in ("a", "b", "c"):
+        for pkg in ("baseline", "treatment"):
+            pr = {
+                "metadata": {"name": f"pr-{wl}-{pkg}", "namespace": "ns"},
+                "spec": {"params": [
+                    {"name": "workloadName", "value": f"wl-{wl}"},
+                    {"name": "phase", "value": pkg},
+                ]},
+            }
+            (cluster_dir / f"pipelinerun-{wl}-{pkg}.yaml").write_text(_yaml.dump(pr))
+
+    # Write run_metadata.json
+    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+
+    # Setup config
+    setup_config = {"namespaces": ["sim2real-0"], "namespace": "sim2real-0"}
+
+    # Mock ConfigMapProgressStore
+    monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
+    monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
+
+    # _cmd_build → no-op
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
+
+    # _check_slot_ready → always ready
+    monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
+
+    # probe_free_gpus → plenty of capacity
+    monkeypatch.setattr(_cap_mod, "probe_free_gpus", lambda **kw: (8, 8, 0))
+
+    # load_defaults → minimal defaults
+    monkeypatch.setattr(_cap_mod, "load_defaults",
+                        lambda root: {"decode": {"accelerator": {"count": 1}}})
+
+    # subprocess run → success
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    # PipelineRun immediately succeeds so loop terminates
+    monkeypatch.setattr(mod, "_check_pipelinerun_status",
+                        lambda pr_name, ns: "Succeeded")
+
+    # Set REPO_ROOT and EXPERIMENT_ROOT
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+
+    # Track which keys are passed to _derive_pair_gpu_costs
+    from pipeline.deploy import _derive_pair_gpu_costs as _orig_derive
+    called_keys: list[set] = []
+
+    def tracking_derive(discovered, *, defaults, fallback_cost):
+        called_keys.append(set(discovered.keys()))
+        return _orig_derive(discovered, defaults=defaults, fallback_cost=fallback_cost)
+
+    monkeypatch.setattr(mod, "_derive_pair_gpu_costs", tracking_derive)
+
+    # Args: scope to workload "wl-a" only (2 pairs: wl-a-baseline, wl-a-treatment)
+    args = argparse.Namespace(
+        skip_build=True,
+        max_retries=0,
+        poll_interval=1,
+        pending_threshold=600,
+        max_pending_stalls=10,
+        max_backoff=600,
+        default_gpu_cost=1,
+        gpu_resource_type="nvidia.com/gpu",
+        only=None,
+        workload="wl-a",
+        package=None,
+        status=None,
+        force=False,
+        skip_teardown=False,
+        remote=False,
+        preserve_pipelineruns=False,
+    )
+
+    mod._cmd_run(args, run_dir, setup_config)
+
+    # _derive_pair_gpu_costs should have been called with only the 2 in-scope pairs
+    assert len(called_keys) == 1
+    assert called_keys[0] == {"wl-a-baseline", "wl-a-treatment"}

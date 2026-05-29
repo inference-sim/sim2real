@@ -161,15 +161,22 @@ def gpu_cost_per_pair(resolved_scenario: dict, defaults: dict) -> Union[int, str
     return gpu_cost
 
 
-def load_defaults(repo_root: Path) -> Union[dict, str, None]:
+def load_defaults(repo_root: Path, *, defaults_path: "Path | None" = None) -> Union[dict, str, None]:
     """Load llm-d-benchmark defaults.yaml.
+
+    Args:
+        repo_root: experiment repo root (used to locate defaults.yaml by convention).
+        defaults_path: if provided, read from this path directly instead of
+            constructing from repo_root. Used by the remote orchestrator where
+            the file is mounted at a known location.
 
     Returns:
         dict: parsed defaults on success.
         None: file not found (expected when submodule not initialized).
         str: error message when file exists but can't be parsed.
     """
-    defaults_path = repo_root / "llm-d-benchmark" / "config" / "templates" / "values" / "defaults.yaml"
+    if defaults_path is None:
+        defaults_path = repo_root / "llm-d-benchmark" / "config" / "templates" / "values" / "defaults.yaml"
     if not defaults_path.exists():
         return None
     try:

@@ -1835,7 +1835,13 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     # CLI --gpu-resource-type overrides auto-derivation when explicitly set
     gpu_resource_type = args.gpu_resource_type  # None means auto-derive
     fallback_cost = args.default_gpu_cost
-    defaults_result = load_defaults(REPO_ROOT)
+    defaults_path_override = getattr(args, "defaults_path", None)
+    if defaults_path_override:
+        defaults_result = load_defaults(REPO_ROOT, defaults_path=defaults_path_override)
+        if defaults_result is None:
+            warn(f"--defaults-path {defaults_path_override} not found — GPU cost derivation will use fallback")
+    else:
+        defaults_result = load_defaults(REPO_ROOT)
     if isinstance(defaults_result, str):
         warn(defaults_result)
         defaults_result = None
@@ -1882,12 +1888,6 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     if not discovered:
         err("No pairs found in cluster/. Run prepare.py first."); sys.exit(1)
 
-    pair_costs_with_prov = _derive_pair_gpu_costs(
-        discovered, defaults=defaults_result, fallback_cost=fallback_cost,
-    )
-    pair_costs = {k: v[0] for k, v in pair_costs_with_prov.items()}
-    pair_provenance = {k: v[1] for k, v in pair_costs_with_prov.items()}
-
     # Initialize new entries (first run or new pairs added)
     for key, meta in discovered.items():
         if key not in progress:
@@ -1906,6 +1906,13 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     total_pairs = sum(1 for k in progress if _is_pair_key(k))
     if len(_scope) < total_pairs:
         info(f"Scope: {len(_scope)}/{total_pairs} pairs")
+
+    scoped_discovered = {k: v for k, v in discovered.items() if k in _scope}
+    pair_costs_with_prov = _derive_pair_gpu_costs(
+        scoped_discovered, defaults=defaults_result, fallback_cost=fallback_cost,
+    )
+    pair_costs = {k: v[0] for k, v in pair_costs_with_prov.items()}
+    pair_provenance = {k: v[1] for k, v in pair_costs_with_prov.items()}
 
     if getattr(args, "force", False):
         n = _force_reset(progress, _scope, discovered, namespaces=namespaces)
@@ -2174,6 +2181,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 warn(f"[{pair_key}] kubectl apply failed: {result.stderr.strip()}")
                 continue
 
+            entry = progress[pair_key]
             entry["status"] = "running"
             entry["namespace"] = ns
             entry["pending_since"] = None
@@ -2538,10 +2546,20 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
     workspace_dir = EXPERIMENT_ROOT / "workspace"
     run_name = run_dir.name
 
+    # Read defaults.yaml locally — not available in-cluster
+    defaults_path = REPO_ROOT / "llm-d-benchmark" / "config" / "templates" / "values" / "defaults.yaml"
+    defaults_content = None
+    if defaults_path.exists():
+        try:
+            defaults_content = defaults_path.read_text()
+        except OSError as exc:
+            warn(f"defaults.yaml read failed: {exc} — remote Job will run without GPU cost defaults")
+
     try:
         cm = build_run_inputs_configmap(
             run_dir=run_dir, workspace_dir=workspace_dir,
             namespace=namespace, run_name=run_name,
+            defaults_content=defaults_content,
         )
     except OSError as exc:
         err(f"{exc} — run setup.py and prepare.py first")
@@ -2558,6 +2576,9 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
         sys.exit(1)
 
     run_flags = _collect_run_flags(args)
+    if defaults_content is not None:
+        run_flags.append("--defaults-path")
+        run_flags.append("/data/workspace/defaults.yaml")
     job = build_orchestrator_job(
         namespace=namespace, image=orchestrator_image,
         run_name=run_name, run_flags=run_flags,
@@ -2658,6 +2679,8 @@ Examples:
                        help="Max early reclaims before marking pair stalled [10]")
     run_p.add_argument("--max-backoff", type=int, default=600, dest="max_backoff",
                        help="Maximum backoff interval in seconds during GPU scarcity [600]")
+    run_p.add_argument("--defaults-path", type=Path, default=None, dest="defaults_path",
+                       help=argparse.SUPPRESS)
 
     sub.add_parser("stop", help="Stop the remote orchestrator Job")
 
