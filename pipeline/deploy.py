@@ -1013,9 +1013,6 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
         scoped_phases = sorted({
             progress[k].get("package", "") for k in collectible
         } - {""})
-        scoped_workloads = sorted({
-            progress[k].get("workload", "") for k in collectible
-        } - {""})
 
         if not scoped_phases:
             warn("No done phases for scoped pairs.")
@@ -1038,52 +1035,113 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
         else:
             phases_to_collect = list(scoped_phases)
 
-        step(1, "Collecting Results")
+        # Group collectible pairs by completed_namespace (same model as unscoped path)
+        ns_phase_map: dict[str, list[str]] = {}
+        ns_pair_map: dict[str, set[tuple[str, str]]] = {}
+        missing_ns_keys: list[str] = []
+        for key in collectible:
+            entry = progress[key]
+            pkg = entry.get("package", "")
+            if pkg not in phases_to_collect:
+                continue
+            ns = entry.get("completed_namespace")
+            if not ns:
+                missing_ns_keys.append(key)
+                continue
+            if pkg not in ns_phase_map.setdefault(ns, []):
+                ns_phase_map[ns].append(pkg)
+            wl = entry.get("workload", "")
+            if wl:
+                ns_pair_map.setdefault(ns, set()).add((pkg, wl))
+
+        total_pairs = sum(len(pairs) for pairs in ns_pair_map.values())
+
+        ns_items = sorted(ns_phase_map.items())
+        if len(ns_items) > 1:
+            step(1, f"Collecting Results ({len(ns_items)} slots in parallel)")
+        else:
+            step(1, "Collecting Results")
+
+        for key in missing_ns_keys:
+            warn(f"{key}: completed_namespace missing — skipping (re-run the workload with a newer orchestrator to collect results)")
+
         collected: list[str] = []
         failed: list[str] = []
         collected_pairs: list[str] = []
         failed_pairs: list[str] = []
-        total_pairs = len(collectible)
 
         skip_logs = getattr(args, "skip_logs", False)
-        for wl_name in scoped_workloads:
-            wl_ns = next(
-                (progress[k].get("completed_namespace")
-                 for k in collectible
-                 if isinstance(progress[k], dict)
-                 and progress[k].get("workload") == wl_name
-                 and progress[k].get("completed_namespace")),
-                None,
-            )
-            if not wl_ns:
-                warn(f"{wl_name}: completed_namespace missing — skipping (re-run the workload with a newer orchestrator to collect results)")
-                for p in phases_to_collect:
-                    if p not in failed:
-                        failed.append(p)
-                    failed_pairs.append(f"{p}/{wl_name}")
-                continue
-            try:
-                errors = _extract_phases_from_pvc(
-                    phases_to_collect, run_name, wl_ns, run_dir,
-                    skip_logs=skip_logs, workload=wl_name)
-            except RuntimeError as e:
-                warn(f"Extractor pod failed for workload {wl_name}: {e}")
-                for p in phases_to_collect:
-                    if p not in failed:
-                        failed.append(p)
-                    failed_pairs.append(f"{p}/{wl_name}")
+
+        def _on_workload_done(phase, wl_name, ns, error):
+            if error is None:
+                ok(f"{phase}/{wl_name}    ({ns})")
+                collected_pairs.append(f"{phase}/{wl_name}")
+                if phase not in collected:
+                    collected.append(phase)
             else:
-                for phase, exc in errors.items():
-                    if exc is None:
-                        ok(f"{phase}/{wl_name}    ({wl_ns})")
-                        if phase not in collected:
-                            collected.append(phase)
-                        collected_pairs.append(f"{phase}/{wl_name}")
-                    else:
-                        warn(f"{phase}/{wl_name}    ({wl_ns}): {exc}")
-                        if phase not in failed:
-                            failed.append(phase)
-                        failed_pairs.append(f"{phase}/{wl_name}")
+                warn(f"{phase}/{wl_name}    ({ns}): {error}")
+                failed_pairs.append(f"{phase}/{wl_name}")
+                if phase not in failed:
+                    failed.append(phase)
+
+        def _handle_slot_failure(ns, pairs_in_ns):
+            ns_phases_local = ns_phase_map[ns]
+            for p in ns_phases_local:
+                if p not in failed:
+                    failed.append(p)
+                for pkg, wl in sorted(pairs_in_ns):
+                    if pkg == p:
+                        warn(f"{p}/{wl}    ({ns})")
+                        failed_pairs.append(f"{p}/{wl}")
+
+        if len(ns_items) > 1:
+            import concurrent.futures
+
+            def _extract_one_slot(ns, ns_phases):
+                pairs_in_ns = ns_pair_map.get(ns, set())
+                allowed = {}
+                for pkg, wl in pairs_in_ns:
+                    allowed.setdefault(pkg, set()).add(wl)
+                try:
+                    _extract_phases_from_pvc(
+                        sorted(ns_phases), run_name, ns, run_dir,
+                        skip_logs=skip_logs,
+                        allowed_workloads=allowed,
+                        on_workload_done=_on_workload_done)
+                except Exception as e:
+                    return (ns, pairs_in_ns, e)
+                return (ns, pairs_in_ns, None)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(ns_items)) as executor:
+                futures = {
+                    executor.submit(_extract_one_slot, ns, ns_phases): ns
+                    for ns, ns_phases in ns_items
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        ns, pairs_in_ns, result = future.result()
+                    except Exception as e:
+                        ns = futures[future]
+                        pairs_in_ns = ns_pair_map.get(ns, set())
+                        result = e
+                    if isinstance(result, Exception):
+                        warn(f"Extractor pod failed in {ns}: {result}")
+                        _handle_slot_failure(ns, pairs_in_ns)
+        else:
+            for ns, ns_phases in ns_items:
+                pairs_in_ns = ns_pair_map.get(ns, set())
+                allowed = {}
+                for pkg, wl in pairs_in_ns:
+                    allowed.setdefault(pkg, set()).add(wl)
+                try:
+                    _extract_phases_from_pvc(
+                        sorted(ns_phases), run_name, ns, run_dir,
+                        skip_logs=skip_logs,
+                        allowed_workloads=allowed,
+                        on_workload_done=_on_workload_done)
+                except Exception as e:
+                    warn(f"Extractor pod failed in {ns}: {e}")
+                    _handle_slot_failure(ns, pairs_in_ns)
 
         collected = [p for p in collected if p not in failed]
     else:
