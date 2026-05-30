@@ -576,6 +576,7 @@ def test_collect_run_flags_list_values():
         pending_threshold = 600
         max_pending_stalls = 10
         max_backoff = 600
+        dispatch_cooldown = 15
 
     flags = _collect_run_flags(_Args())
     assert "--only" in flags
@@ -608,6 +609,7 @@ def test_collect_run_flags_single_string_status():
         pending_threshold = 600
         max_pending_stalls = 10
         max_backoff = 600
+        dispatch_cooldown = 15
 
     flags = _collect_run_flags(_Args())
     assert flags == ["--status", "failed"]
@@ -2554,6 +2556,7 @@ def test_dispatch_sets_entry_running(tmp_path, monkeypatch):
         skip_teardown=False,
         remote=False,
         preserve_pipelineruns=False,
+        dispatch_cooldown=0,
     )
 
     mod._cmd_run(args, run_dir, setup_config)
@@ -2661,6 +2664,7 @@ def test_derive_costs_only_for_scoped_pairs(tmp_path, monkeypatch):
         skip_teardown=False,
         remote=False,
         preserve_pipelineruns=False,
+        dispatch_cooldown=0,
     )
 
     mod._cmd_run(args, run_dir, setup_config)
@@ -2840,7 +2844,7 @@ def test_health_escalation_cancels_pipelinerun(tmp_path, monkeypatch):
         default_gpu_cost=1, gpu_resource_type="nvidia.com/gpu",
         only=None, workload=None, package=None, status=None,
         force=False, skip_teardown=False, remote=False,
-        preserve_pipelineruns=False,
+        preserve_pipelineruns=False, dispatch_cooldown=0,
     )
 
     mod._cmd_run(args, run_dir, setup_config)
@@ -2912,10 +2916,173 @@ def test_dispatch_shuffles_dispatchable(tmp_path, monkeypatch):
         default_gpu_cost=1, gpu_resource_type="nvidia.com/gpu",
         only=None, workload=None, package=None, status=None,
         force=False, skip_teardown=False, remote=False,
-        preserve_pipelineruns=False,
+        preserve_pipelineruns=False, dispatch_cooldown=0,
     )
 
     mod._cmd_run(args, run_dir, setup_config)
 
     assert len(shuffle_calls) >= 1
     assert "wl-a-baseline" in shuffle_calls[0]
+
+
+# ── Dispatch cooldown (issue #249) ──────────────────────────────────────────
+
+
+def test_dispatch_cooldown_prevents_immediate_redispatch(tmp_path, monkeypatch):
+    """With dispatch_cooldown > 0, dispatch is skipped when within cooldown window.
+
+    Uses 2 pairs and 1 slot. Pair A dispatches on first iteration (cooldown
+    inactive since _last_dispatch_time=0). Pair A immediately succeeds, freeing
+    the slot. Next iterations skip dispatch until simulated time advances past
+    the cooldown window, at which point pair B dispatches.
+    """
+    import time as _time_mod
+    import yaml as _yaml
+    import pipeline.deploy as mod
+    from pipeline.lib.progress import ConfigMapProgressStore
+
+    run_dir = tmp_path / "runs" / "test-run"
+    cluster_dir = run_dir / "cluster"
+    cluster_dir.mkdir(parents=True)
+
+    # Two pairs: a-baseline, b-baseline
+    for name in ("a", "b"):
+        pr = {
+            "metadata": {"name": f"pr-{name}-baseline", "namespace": "ns"},
+            "spec": {"params": [
+                {"name": "workloadName", "value": f"wl-{name}"},
+                {"name": "phase", "value": "baseline"},
+            ]},
+        }
+        (cluster_dir / f"pipelinerun-{name}-baseline.yaml").write_text(_yaml.dump(pr))
+
+    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+
+    # Only 1 slot — forces sequential dispatch
+    setup_config = {"namespaces": ["sim2real-0"], "namespace": "sim2real-0"}
+
+    monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
+    monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
+    monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
+
+    import pipeline.lib.capacity as _cap_mod
+    monkeypatch.setattr(_cap_mod, "probe_free_gpus", lambda **kw: (8, 8, 0))
+    monkeypatch.setattr(_cap_mod, "load_defaults", lambda root: {"decode": {"accelerator": {"count": 1}}})
+
+    # Track dispatches (kubectl apply calls only)
+    dispatch_times = []
+
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        if "apply" in cmd:
+            dispatch_times.append(clock[0])
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    # Both pairs succeed immediately once dispatched
+    monkeypatch.setattr(mod, "_check_pipelinerun_status",
+                        lambda pr_name, ns: "Succeeded")
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+
+    # Controlled clock: advances by 1 second per call to time.time()
+    # Cooldown is 10s, so iterations at t=1..10 will be blocked; t=11+ allows dispatch
+    clock = [100.0]
+
+    def fake_time():
+        val = clock[0]
+        clock[0] += 1.0
+        return val
+
+    monkeypatch.setattr(_time_mod, "time", fake_time)
+    monkeypatch.setattr(mod.time, "time", fake_time)
+    monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+
+    args = argparse.Namespace(
+        skip_build=True, max_retries=0, poll_interval=1,
+        pending_threshold=600, max_pending_stalls=10, max_backoff=600,
+        default_gpu_cost=1, gpu_resource_type="nvidia.com/gpu",
+        only=None, workload=None, package=None, status=None,
+        force=False, skip_teardown=False, remote=False,
+        preserve_pipelineruns=False, dispatch_cooldown=10,
+    )
+
+    mod._cmd_run(args, run_dir, setup_config)
+
+    # Both pairs dispatched (2 kubectl apply calls)
+    assert len(dispatch_times) == 2
+    # Second dispatch happened AFTER cooldown elapsed (time gap > 10)
+    assert dispatch_times[1] - dispatch_times[0] > 10
+
+
+def test_dispatch_cooldown_zero_disables(tmp_path, monkeypatch):
+    """dispatch_cooldown=0 preserves original behavior (no delay between dispatches)."""
+    import yaml as _yaml
+    import pipeline.deploy as mod
+    from pipeline.lib.progress import ConfigMapProgressStore
+
+    run_dir = tmp_path / "runs" / "test-run"
+    cluster_dir = run_dir / "cluster"
+    cluster_dir.mkdir(parents=True)
+
+    # Two pairs
+    for name in ("a", "b"):
+        pr = {
+            "metadata": {"name": f"pr-{name}-baseline", "namespace": "ns"},
+            "spec": {"params": [
+                {"name": "workloadName", "value": f"wl-{name}"},
+                {"name": "phase", "value": "baseline"},
+            ]},
+        }
+        (cluster_dir / f"pipelinerun-{name}-baseline.yaml").write_text(_yaml.dump(pr))
+
+    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+
+    # 2 slots — both can dispatch in same iteration
+    setup_config = {"namespaces": ["sim2real-0", "sim2real-1"], "namespace": "sim2real-0"}
+
+    monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
+    monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
+    monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
+
+    import pipeline.lib.capacity as _cap_mod
+    monkeypatch.setattr(_cap_mod, "probe_free_gpus", lambda **kw: (8, 8, 0))
+    monkeypatch.setattr(_cap_mod, "load_defaults", lambda root: {"decode": {"accelerator": {"count": 1}}})
+
+    dispatch_count = {"n": 0}
+
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        if "apply" in cmd:
+            dispatch_count["n"] += 1
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    monkeypatch.setattr(mod, "_check_pipelinerun_status",
+                        lambda pr_name, ns: "Succeeded")
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+    monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+
+    args = argparse.Namespace(
+        skip_build=True, max_retries=0, poll_interval=1,
+        pending_threshold=600, max_pending_stalls=10, max_backoff=600,
+        default_gpu_cost=1, gpu_resource_type="nvidia.com/gpu",
+        only=None, workload=None, package=None, status=None,
+        force=False, skip_teardown=False, remote=False,
+        preserve_pipelineruns=False, dispatch_cooldown=0,
+    )
+
+    mod._cmd_run(args, run_dir, setup_config)
+
+    # Both pairs dispatched (2 kubectl apply calls)
+    assert dispatch_count["n"] == 2

@@ -166,6 +166,9 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 | `--pending-threshold N` | 600 | Seconds a pod may remain Pending (recoverable reason) before early reclaim |
 | `--max-pending-stalls N` | 10 | Max early reclaims before marking pair `stalled` |
 | `--max-backoff N` | 600 | Maximum backoff interval in seconds during GPU scarcity |
+| `--dispatch-cooldown N` | 15 | Seconds to wait after a dispatch batch before dispatching again (0 to disable) |
+
+**Dispatch cooldown** — after dispatching ≥1 pair, the orchestrator skips new dispatch for `--dispatch-cooldown` seconds. This prevents over-subscription when the GPU capacity probe hasn't yet reflected recently-dispatched workloads (typical probe lag: 10-20s). Completion/failure polling continues unaffected during cooldown. Set to 0 to disable.
 
 **Early reclaim** — on each poll cycle, pods in `Running`/`Started` PipelineRuns are checked for scheduling failures. Recoverable reasons (e.g. `Insufficient nvidia.com/gpu`) trigger early reclaim after `--pending-threshold` seconds. Non-recoverable reasons (e.g. node affinity mismatch, PVC not found) fail the pair immediately. Each early reclaim increments `pending_stalls`; at `--max-pending-stalls` the pair transitions to `stalled` (terminal).
 

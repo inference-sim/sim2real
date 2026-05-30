@@ -14,7 +14,8 @@ def _make_run_args(*, remote=False, workload=None, only=None, package=None,
                    skip_teardown=False,
                    max_retries=2, poll_interval=30, gpu_resource_type=None,
                    default_gpu_cost=1, pending_threshold=600,
-                   max_pending_stalls=10, max_backoff=600):
+                   max_pending_stalls=10, max_backoff=600,
+                   dispatch_cooldown=15):
     return argparse.Namespace(
         remote=remote, workload=workload, only=only, package=package,
         status=status, force=force, skip_build=skip_build,
@@ -22,7 +23,7 @@ def _make_run_args(*, remote=False, workload=None, only=None, package=None,
         max_retries=max_retries, poll_interval=poll_interval,
         gpu_resource_type=gpu_resource_type, default_gpu_cost=default_gpu_cost,
         pending_threshold=pending_threshold, max_pending_stalls=max_pending_stalls,
-        max_backoff=max_backoff,
+        max_backoff=max_backoff, dispatch_cooldown=dispatch_cooldown,
     )
 
 
