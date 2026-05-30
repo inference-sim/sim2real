@@ -2847,3 +2847,27 @@ def test_health_escalation_cancels_pipelinerun(tmp_path, monkeypatch):
 
     assert "wl-a-baseline" in saved
     assert saved["wl-a-baseline"]["status"] == "failed"
+
+
+def test_dispatch_shuffles_dispatchable(monkeypatch):
+    """Verify that dispatchable list is shuffled before slot assignment (#247)."""
+    from pipeline.deploy import _capacity_limited_pairs
+
+    cost_map = {"a-baseline": 4, "b-baseline": 4, "c-baseline": 4}
+    pending = ["a-baseline", "b-baseline", "c-baseline"]
+
+    dispatchable = _capacity_limited_pairs(pending, free_gpus=24, cost_map=cost_map)
+    assert len(dispatchable) == 3
+
+    shuffle_calls = []
+
+    def tracking_shuffle(lst):
+        shuffle_calls.append(list(lst))
+
+    monkeypatch.setattr("pipeline.deploy.random.shuffle", tracking_shuffle)
+
+    import pipeline.deploy as mod
+    mod.random.shuffle(dispatchable)
+
+    assert len(shuffle_calls) == 1
+    assert set(shuffle_calls[0]) == {"a-baseline", "b-baseline", "c-baseline"}

@@ -15,6 +15,7 @@ Subcommands:
 import argparse
 import json
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -2206,6 +2207,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                         _last_log_state["dispatch"] = _disp_state
         else:
             dispatchable = pending
+
+        random.shuffle(dispatchable)
 
         for ns, pair_key in zip(free_slots, dispatchable):
             hf_secret_name = setup_config.get("hf_secret_name", "hf-secret")
