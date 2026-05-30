@@ -708,3 +708,35 @@ def test_reset_pair_cancel_failure_does_not_reset(monkeypatch):
     assert result is False
     assert entry["status"] == "running"
     assert entry["namespace"] == "sim2real-1"
+
+
+def test_reset_pair_logs_info_before_cleanup(monkeypatch, capsys):
+    """Non-dry-run reset emits an INFO line per pair before cleanup (#253)."""
+    import pipeline.deploy as mod
+
+    monkeypatch.setattr(mod, "run", lambda cmd, **kw: type("R", (), {"returncode": 0, "stdout": ""})())
+
+    # Case 1: state-only reset (no namespace, no pr_name)
+    entry1 = {"workload": "wl-a", "package": "baseline", "status": "failed",
+              "namespace": None, "retries": 0}
+    mod._reset_pair("wl-a-baseline", entry1, {})
+    out = capsys.readouterr().out
+    assert "Resetting wl-a-baseline" in out
+    assert "status: failed" in out
+    assert "state-only reset" in out
+
+    # Case 2: with namespace (full cleanup)
+    entry2 = {"workload": "wl-b", "package": "baseline", "status": "failed",
+              "namespace": "sim2real-0", "retries": 0}
+    mod._reset_pair("wl-b-baseline", entry2, _DISCOVERED)
+    out = capsys.readouterr().out
+    assert "Resetting wl-b-baseline" in out
+    assert "ns: sim2real-0" in out
+    assert "uninstalling helm releases" in out
+
+    # Case 3: dry-run does NOT emit the new info line
+    entry3 = {"workload": "wl-c", "package": "baseline", "status": "failed",
+              "namespace": None, "retries": 0}
+    mod._reset_pair("wl-c-baseline", entry3, {}, dry_run=True)
+    out = capsys.readouterr().out
+    assert "Resetting wl-c-baseline" not in out
