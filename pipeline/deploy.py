@@ -2632,10 +2632,11 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
     discovered = _load_pairs(cluster_dir)
     if discovered:
         from pipeline.lib.progress import ConfigMapProgressStore
+        store = ConfigMapProgressStore(namespace, run_name=run_dir.name)
         try:
-            store = ConfigMapProgressStore(namespace, run_name=run_dir.name)
             progress = store.load()
-        except Exception:
+        except (RuntimeError, OSError) as exc:
+            warn(f"ConfigMap unreachable — skipping pre-flight filter validation: {exc}")
             progress = None
         if progress:
             _resolve_scope(progress, args)
