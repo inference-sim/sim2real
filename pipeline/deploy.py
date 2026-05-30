@@ -1453,6 +1453,17 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
     pr_name = discovered.get(key, {}).get("pr_name", "")
     is_done = entry.get("status") == "done"
 
+    if not dry_run:
+        status = entry.get("status", "unknown")
+        slot = ns or "—"
+        if not ns and not pr_name:
+            action = "state-only reset"
+        elif is_done:
+            action = "deleting PipelineRun, checking orphaned releases"
+        else:
+            action = "deleting PipelineRun, uninstalling helm releases"
+        info(f"Resetting {key} (status: {status}, ns: {slot}) — {action}")
+
     # No namespace and no pr_name — just reset state
     if not ns and not pr_name:
         if is_done:
