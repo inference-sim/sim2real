@@ -2004,7 +2004,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     from pipeline.lib.health import RemediationTracker as _HealthTracker
     _health_tracker = _HealthTracker()
 
-    dispatch_cooldown = getattr(args, "dispatch_cooldown", 15)
+    dispatch_cooldown = args.dispatch_cooldown
     _last_dispatch_time: float = 0.0
 
     while _work_remaining() or slots_busy:
@@ -2177,7 +2177,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
 
         # ── Assign pending work to free slots ────────────────────────────
         _cooldown_elapsed = time.time() - _last_dispatch_time if _last_dispatch_time > 0 else float('inf')
-        if dispatch_cooldown > 0 and _cooldown_elapsed < dispatch_cooldown:
+        _in_cooldown = dispatch_cooldown > 0 and _cooldown_elapsed < dispatch_cooldown
+        if _in_cooldown:
             free_slots = []
         else:
             free_slots = [ns for ns in namespaces if ns not in slots_busy]
@@ -2207,7 +2208,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                     if _disp_state != _last_log_state.get("dispatch"):
                         info(f"Dispatching {len(dispatchable)}/{len(pending)} pending pairs (capacity-limited: {free_gpus} free GPUs)")
                         _last_log_state["dispatch"] = _disp_state
-                elif len(free_slots) < len(dispatchable):
+                elif not _in_cooldown and len(free_slots) < len(dispatchable):
                     _disp_state = ("slot_limited", len(free_slots), len(pending))
                     if _disp_state != _last_log_state.get("dispatch"):
                         info(f"Dispatching {len(free_slots)}/{len(pending)} pending pairs (slot-limited)")
@@ -2503,6 +2504,7 @@ def _collect_run_flags(args) -> list[str]:
         "pending_threshold": 600,
         "max_pending_stalls": 10,
         "max_backoff": 600,
+        "dispatch_cooldown": 15,
     }
     for attr, default in _defaults.items():
         val = getattr(args, attr)

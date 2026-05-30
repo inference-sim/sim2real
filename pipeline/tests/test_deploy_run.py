@@ -576,6 +576,7 @@ def test_collect_run_flags_list_values():
         pending_threshold = 600
         max_pending_stalls = 10
         max_backoff = 600
+        dispatch_cooldown = 15
 
     flags = _collect_run_flags(_Args())
     assert "--only" in flags
@@ -608,6 +609,7 @@ def test_collect_run_flags_single_string_status():
         pending_threshold = 600
         max_pending_stalls = 10
         max_backoff = 600
+        dispatch_cooldown = 15
 
     flags = _collect_run_flags(_Args())
     assert flags == ["--status", "failed"]
@@ -2554,6 +2556,7 @@ def test_dispatch_sets_entry_running(tmp_path, monkeypatch):
         skip_teardown=False,
         remote=False,
         preserve_pipelineruns=False,
+        dispatch_cooldown=0,
     )
 
     mod._cmd_run(args, run_dir, setup_config)
@@ -2661,6 +2664,7 @@ def test_derive_costs_only_for_scoped_pairs(tmp_path, monkeypatch):
         skip_teardown=False,
         remote=False,
         preserve_pipelineruns=False,
+        dispatch_cooldown=0,
     )
 
     mod._cmd_run(args, run_dir, setup_config)
@@ -2840,7 +2844,7 @@ def test_health_escalation_cancels_pipelinerun(tmp_path, monkeypatch):
         default_gpu_cost=1, gpu_resource_type="nvidia.com/gpu",
         only=None, workload=None, package=None, status=None,
         force=False, skip_teardown=False, remote=False,
-        preserve_pipelineruns=False,
+        preserve_pipelineruns=False, dispatch_cooldown=0,
     )
 
     mod._cmd_run(args, run_dir, setup_config)
@@ -2912,7 +2916,7 @@ def test_dispatch_shuffles_dispatchable(tmp_path, monkeypatch):
         default_gpu_cost=1, gpu_resource_type="nvidia.com/gpu",
         only=None, workload=None, package=None, status=None,
         force=False, skip_teardown=False, remote=False,
-        preserve_pipelineruns=False,
+        preserve_pipelineruns=False, dispatch_cooldown=0,
     )
 
     mod._cmd_run(args, run_dir, setup_config)
