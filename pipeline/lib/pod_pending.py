@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import re
-import sys
+
+from pipeline.lib.log import warn
 
 _RECOVERABLE_PATTERNS = [
     re.compile(r"Insufficient\s+\S+", re.IGNORECASE),
@@ -35,8 +36,8 @@ def classify_pending_reason(message: str) -> str:
         if pat.search(message):
             return "non_recoverable"
 
-    print(f"[WARN]  unrecognized scheduling message (defaulting to recoverable): "
-          f"{message[:200]}", file=sys.stderr)
+    warn(f"unrecognized scheduling message (defaulting to recoverable): "
+         f"{message[:200]}")
     return "recoverable"
 
 

@@ -195,8 +195,8 @@ def test_reset_pair_missing_pr_name_warns(monkeypatch, capsys):
     result = mod._reset_pair("wl-unknown-baseline", entry, {})
     assert result is True
     assert entry["status"] == "pending"
-    err = capsys.readouterr().err
-    assert "no PipelineRun name found" in err
+    out = capsys.readouterr().out
+    assert "no PipelineRun name found" in out
 
 
 def test_cmd_reset_continues_on_exception(tmp_path, monkeypatch, capsys):
@@ -638,8 +638,8 @@ def test_reset_pair_done_helm_list_failure_warns(monkeypatch, capsys):
 
     assert result is True
     assert entry["status"] == "pending"
-    err = capsys.readouterr().err
-    assert "helm list failed" in err
+    out = capsys.readouterr().out
+    assert "helm list failed" in out
 
 
 def test_reset_pair_done_helm_uninstall_failure_warns(monkeypatch, capsys):
@@ -662,8 +662,8 @@ def test_reset_pair_done_helm_uninstall_failure_warns(monkeypatch, capsys):
 
     assert result is True
     assert entry["status"] == "pending"
-    err = capsys.readouterr().err
-    assert "Failed to uninstall" in err
+    out = capsys.readouterr().out
+    assert "Failed to uninstall" in out
 
 
 def test_reset_pair_done_no_pr_name_still_cleans_helm(monkeypatch):
