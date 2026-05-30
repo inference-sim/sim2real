@@ -407,3 +407,35 @@ def test_parse_pods_bad_json_returns_empty():
 def test_parse_events_bad_json_returns_empty():
     from pipeline.lib.health import parse_events
     assert parse_events("{invalid}") == []
+
+
+def test_get_all_pods_excludes_tekton(monkeypatch):
+    """get_all_pods returns non-Tekton pods only."""
+    from pipeline.lib import health
+    import json
+
+    pods_json = json.dumps({"items": [
+        {"metadata": {"name": "vllm-decode-0", "labels": {"llm-d.ai/role": "decode"}},
+         "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}],
+                    "containerStatuses": [{"restartCount": 0, "state": {}, "lastState": {}}]}},
+        {"metadata": {"name": "task-pod-abc", "labels": {"tekton.dev/pipelineRun": "pr-1"}},
+         "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}],
+                    "containerStatuses": [{"restartCount": 0, "state": {}, "lastState": {}}]}},
+        {"metadata": {"name": "epp-scorer-0", "labels": {"app": "epp"}},
+         "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}],
+                    "containerStatuses": [{"restartCount": 0, "state": {}, "lastState": {}}]}},
+    ]})
+
+    monkeypatch.setattr(health, "_kubectl", lambda *args: (0, pods_json))
+    result = health.get_all_pods("ns-0")
+    names = [p.name for p in result]
+    assert "vllm-decode-0" in names
+    assert "epp-scorer-0" in names
+    assert "task-pod-abc" not in names
+
+
+def test_get_all_pods_returns_empty_on_error(monkeypatch):
+    """get_all_pods returns [] when kubectl fails."""
+    from pipeline.lib import health
+    monkeypatch.setattr(health, "_kubectl", lambda *args: (1, ""))
+    assert health.get_all_pods("ns-0") == []

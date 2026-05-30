@@ -22,11 +22,15 @@ import time
 import yaml
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 # Ensure repo root is on sys.path when run as a script (python pipeline/deploy.py)
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
+if TYPE_CHECKING:
+    from pipeline.lib.health import RemediationTracker
 
 
 # ── Repo layout ──────────────────────────────────────────────────────────────
@@ -643,6 +647,54 @@ def _handle_timeout(*, pr_name: str, namespace: str, entry: dict,
     entry["namespace"] = None
     entry["pending_since"] = None
     return True
+
+
+def _check_pod_health(*, namespace: str, pair_key: str,
+                      tracker: "RemediationTracker",
+                      skip_teardown: bool) -> bool:
+    """Check non-Tekton pods in namespace for health issues.
+
+    Returns True if escalation is needed (tier-1 pod deletion failure, or
+    tier-2 finding with skip_teardown=False), meaning caller should cancel
+    the PipelineRun and reclaim the slot.
+    """
+    from pipeline.lib.health import (
+        get_all_pods, get_events, triage_pod, delete_pod,
+    )
+
+    pods = get_all_pods(namespace)
+    if not pods:
+        return False
+    events = get_events(namespace)
+    needs_escalation = False
+
+    for pod in pods:
+        if pod.phase == "Running" and pod.ready:
+            tracker.reset(pod.name)
+            continue
+
+        result = triage_pod(pod, events, tracker)
+        if result is None:
+            continue
+
+        if result.tier == 1:
+            success = delete_pod(namespace, pod.name)
+            if success:
+                tracker.record(pod.name)
+                warn(f"[{pair_key}] {result.message}")
+            else:
+                warn(f"[{pair_key}] {result.message} — delete failed")
+                needs_escalation = True
+        elif result.tier == 2:
+            warn(f"[{pair_key}] {result.message}")
+            if result.suggestion:
+                info(f"  Suggestion: {result.suggestion}")
+            if not skip_teardown:
+                needs_escalation = True
+        elif result.tier == 3:
+            warn(f"[{pair_key}] {result.message}")
+
+    return needs_escalation
 
 
 def _probe_phase_sizes(pod_name: str, run_name: str, phases: list[str],
@@ -1948,6 +2000,9 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
         info(f"All {len(_scope)} pairs in scope already done — nothing to dispatch (use --force to reset)")
         return
 
+    from pipeline.lib.health import RemediationTracker as _HealthTracker
+    _health_tracker = _HealthTracker()
+
     while _work_remaining() or slots_busy:
 
         # ── Process completed/failed slots ───────────────────────────────
@@ -2045,8 +2100,33 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                     _last_log_state.pop("backoff_skip", None)
                     _zero_dispatch_count = 0
                     store.save(progress)
+                    continue
                 elif timeout_result is False:
                     continue
+
+                # Check pod health (non-Tekton pods)
+                try:
+                    escalate = _check_pod_health(
+                        namespace=ns, pair_key=pair_key,
+                        tracker=_health_tracker,
+                        skip_teardown=getattr(args, "skip_teardown", False),
+                    )
+                except Exception as exc:
+                    warn(f"[{pair_key}] health check failed: {exc}")
+                    escalate = False
+                if escalate:
+                    warn(f"[{pair_key}] pod health escalation → cancelling PipelineRun")
+                    if _cancel_and_delete_pipelinerun(pr_name, ns):
+                        entry["status"] = "failed"
+                        entry["namespace"] = None
+                        store.save(progress)
+                        del slots_busy[ns]
+                        _last_log_state.pop("capacity", None)
+                        _last_log_state.pop("dispatch", None)
+                        _last_log_state.pop("backoff_skip", None)
+                        _zero_dispatch_count = 0
+                    else:
+                        warn(f"[{pair_key}] could not cancel PipelineRun — slot remains busy")
 
         # ── Capacity probe ───────────────────────────────────────────────
         capacity = probe_free_gpus(gpu_resource_type=gpu_resource_type)

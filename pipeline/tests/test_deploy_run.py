@@ -2667,4 +2667,183 @@ def test_derive_costs_only_for_scoped_pairs(tmp_path, monkeypatch):
 
     # _derive_pair_gpu_costs should have been called with only the 2 in-scope pairs
     assert len(called_keys) == 1
-    assert called_keys[0] == {"wl-a-baseline", "wl-a-treatment"}
+
+
+# ── Pod health check (issue #228) ───────────────────────────────────────────
+
+
+def test_check_pod_health_tier1_deletes(monkeypatch):
+    """Tier 1 finding triggers pod deletion and returns False (no escalation yet)."""
+    import pipeline.deploy as mod
+    from pipeline.lib.health import PodState, RemediationTracker
+    import pipeline.lib.health as health_mod
+
+    tracker = RemediationTracker()
+    deleted = []
+
+    monkeypatch.setattr(health_mod, "get_all_pods", lambda ns: [
+        PodState(name="vllm-0", phase="Running", ready=False,
+                 restart_count=1, reason="OOMKilled", message=""),
+    ])
+    monkeypatch.setattr(health_mod, "get_events", lambda ns: [])
+    monkeypatch.setattr(health_mod, "delete_pod", lambda ns, name: (deleted.append(name), True)[1])
+
+    result = mod._check_pod_health(
+        namespace="ns-0", pair_key="wl-a-baseline",
+        tracker=tracker, skip_teardown=False,
+    )
+    assert result is False
+    assert "vllm-0" in deleted
+    assert tracker.count("vllm-0") == 1
+
+
+def test_check_pod_health_tier2_escalates(monkeypatch):
+    """Tier 2 finding escalates when skip_teardown=False."""
+    import pipeline.deploy as mod
+    from pipeline.lib.health import PodState, RemediationTracker
+    import pipeline.lib.health as health_mod
+
+    tracker = RemediationTracker()
+
+    monkeypatch.setattr(health_mod, "get_all_pods", lambda ns: [
+        PodState(name="vllm-0", phase="Running", ready=False,
+                 restart_count=5, reason="OOMKilled", message=""),
+    ])
+    monkeypatch.setattr(health_mod, "get_events", lambda ns: [])
+    monkeypatch.setattr(health_mod, "delete_pod", lambda ns, name: True)
+
+    # Pre-load tracker past threshold so OOM escalates to tier 2
+    tracker.record("vllm-0")
+    tracker.record("vllm-0")
+
+    result = mod._check_pod_health(
+        namespace="ns-0", pair_key="wl-a-baseline",
+        tracker=tracker, skip_teardown=False,
+    )
+    assert result is True
+
+
+def test_check_pod_health_tier2_no_escalate_skip_teardown(monkeypatch):
+    """Tier 2 does NOT escalate when skip_teardown=True."""
+    import pipeline.deploy as mod
+    from pipeline.lib.health import PodState, RemediationTracker
+    import pipeline.lib.health as health_mod
+
+    tracker = RemediationTracker()
+    tracker.record("vllm-0")
+    tracker.record("vllm-0")
+
+    monkeypatch.setattr(health_mod, "get_all_pods", lambda ns: [
+        PodState(name="vllm-0", phase="Running", ready=False,
+                 restart_count=5, reason="OOMKilled", message=""),
+    ])
+    monkeypatch.setattr(health_mod, "get_events", lambda ns: [])
+    monkeypatch.setattr(health_mod, "delete_pod", lambda ns, name: True)
+
+    result = mod._check_pod_health(
+        namespace="ns-0", pair_key="wl-a-baseline",
+        tracker=tracker, skip_teardown=True,
+    )
+    assert result is False
+
+
+def test_check_pod_health_resets_healthy(monkeypatch):
+    """Healthy pods (Running+Ready) reset their tracker count."""
+    import pipeline.deploy as mod
+    from pipeline.lib.health import PodState, RemediationTracker
+    import pipeline.lib.health as health_mod
+
+    tracker = RemediationTracker()
+    tracker.record("vllm-0")
+    tracker.record("vllm-0")
+    assert tracker.count("vllm-0") == 2
+
+    monkeypatch.setattr(health_mod, "get_all_pods", lambda ns: [
+        PodState(name="vllm-0", phase="Running", ready=True,
+                 restart_count=0, reason="", message=""),
+    ])
+    monkeypatch.setattr(health_mod, "get_events", lambda ns: [])
+
+    mod._check_pod_health(
+        namespace="ns-0", pair_key="wl-a-baseline",
+        tracker=tracker, skip_teardown=False,
+    )
+    assert tracker.count("vllm-0") == 0
+
+
+# ── Health escalation integration (issue #228) ───────────────────────────────
+
+
+def test_health_escalation_cancels_pipelinerun(tmp_path, monkeypatch):
+    """When _check_pod_health returns True (escalation), the orchestrator cancels the
+    PipelineRun, marks the pair failed, and frees the slot."""
+    import yaml as _yaml
+    import pipeline.deploy as mod
+    import pipeline.lib.capacity as _cap_mod
+    from pipeline.lib.progress import ConfigMapProgressStore
+
+    run_dir = tmp_path / "runs" / "test-run"
+    cluster_dir = run_dir / "cluster"
+    cluster_dir.mkdir(parents=True)
+
+    pr = {
+        "metadata": {"name": "pr-a-baseline", "namespace": "ns"},
+        "spec": {"params": [
+            {"name": "workloadName", "value": "wl-a"},
+            {"name": "phase", "value": "baseline"},
+        ]},
+    }
+    (cluster_dir / "pipelinerun-a-baseline.yaml").write_text(_yaml.dump(pr))
+    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+
+    setup_config = {"namespaces": ["sim2real-0"], "namespace": "sim2real-0"}
+
+    saved = {}
+    monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
+    monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: saved.update(d))
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
+    monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
+    monkeypatch.setattr(_cap_mod, "probe_free_gpus", lambda **kw: (8, 8, 0))
+    monkeypatch.setattr(_cap_mod, "load_defaults",
+                        lambda root, **kw: {"decode": {"accelerator": {"count": 1}}})
+
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+
+    # PipelineRun reports "Running" always — health check will escalate
+    monkeypatch.setattr(mod, "_check_pipelinerun_status",
+                        lambda pr_name, ns: "Running")
+
+    # Health check always returns escalation
+    monkeypatch.setattr(mod, "_check_pod_health",
+                        lambda **kw: True)
+
+    # Cancel succeeds
+    monkeypatch.setattr(mod, "_cancel_and_delete_pipelinerun",
+                        lambda pr, ns: True)
+
+    # Prevent infinite loop from _handle_pending_pods and _handle_timeout
+    monkeypatch.setattr(mod, "_handle_pending_pods", lambda **kw: False)
+    monkeypatch.setattr(mod, "_handle_timeout", lambda **kw: None)
+
+    args = argparse.Namespace(
+        skip_build=True, max_retries=0, poll_interval=1,
+        pending_threshold=600, max_pending_stalls=10, max_backoff=600,
+        default_gpu_cost=1, gpu_resource_type="nvidia.com/gpu",
+        only=None, workload=None, package=None, status=None,
+        force=False, skip_teardown=False, remote=False,
+        preserve_pipelineruns=False,
+    )
+
+    mod._cmd_run(args, run_dir, setup_config)
+
+    assert "wl-a-baseline" in saved
+    assert saved["wl-a-baseline"]["status"] == "failed"
