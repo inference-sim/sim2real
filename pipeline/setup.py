@@ -41,10 +41,7 @@ _tty = sys.stdout.isatty()
 def _c(code: str, text: str) -> str:
     return f"\033[{code}m{text}\033[0m" if _tty else text
 
-def info(msg: str)  -> None: print(_c("34", "[INFO]  ") + msg)
-def ok(msg: str)    -> None: print(_c("32", "[OK]    ") + msg)
-def warn(msg: str)  -> None: print(_c("33", "[WARN]  ") + msg)
-def err(msg: str)   -> None: print(_c("31", "[ERROR] ") + msg, file=sys.stderr)
+from pipeline.lib.log import info, ok, warn, err
 def step(n, total, title: str) -> None:
     print("\n" + _c("36", f"━━━ [{n}/{total}] {title} ━━━"))
 

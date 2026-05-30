@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import datetime as _dt
 
+from pipeline.lib.log import warn
+
 
 class BackoffController:
     """Manages poll-interval backoff during sustained GPU scarcity."""
@@ -88,16 +90,12 @@ class BackoffController:
         state = data.get("state", "normal")
         state_corrupted = state not in cls._VALID_STATES
         if state_corrupted:
-            import sys
-            print(f"[WARN]  Unknown backoff state {state!r} in progress — resetting to normal",
-                  file=sys.stderr)
+            warn(f"Unknown backoff state {state!r} in progress — resetting to normal")
             state = "normal"
         bc.state = state
         raw_level = 0 if state_corrupted else data.get("backoff_level", 0)
         if not isinstance(raw_level, int) or raw_level < 0:
-            import sys
-            print(f"[WARN]  Invalid backoff_level {raw_level!r} in progress — resetting to 0",
-                  file=sys.stderr)
+            warn(f"Invalid backoff_level {raw_level!r} in progress — resetting to 0")
             raw_level = 0
         bc.backoff_level = min(raw_level, bc._level_for_max())
         bc.last_scarcity_time = data.get("last_scarcity_time")

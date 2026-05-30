@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from dataclasses import dataclass
+
+from pipeline.lib.log import warn
 
 
 @dataclass
@@ -254,14 +255,12 @@ def get_all_pods(namespace: str) -> list[PodState]:
     rc, stdout = _kubectl("get", "pods", f"-n={namespace}", "-o", "json")
     if rc != 0 or not stdout.strip():
         if rc != 0:
-            print(f"[WARN]  get_all_pods({namespace}): kubectl failed (rc={rc})",
-                  file=sys.stderr)
+            warn(f"get_all_pods({namespace}): kubectl failed (rc={rc})")
         return []
     try:
         data = json.loads(stdout)
     except json.JSONDecodeError:
-        print(f"[WARN]  get_all_pods({namespace}): invalid JSON from kubectl",
-              file=sys.stderr)
+        warn(f"get_all_pods({namespace}): invalid JSON from kubectl")
         return []
     items = data.get("items", [])
     filtered = [item for item in items
