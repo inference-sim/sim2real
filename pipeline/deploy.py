@@ -654,9 +654,9 @@ def _check_pod_health(*, namespace: str, pair_key: str,
                       skip_teardown: bool) -> bool:
     """Check non-Tekton pods in namespace for health issues.
 
-    Returns True if escalation is needed (persistent tier-1 failure or tier-2
-    finding with skip_teardown=False), meaning caller should cancel the
-    PipelineRun and reclaim the slot.
+    Returns True if escalation is needed (tier-1 pod deletion failure, or
+    tier-2 finding with skip_teardown=False), meaning caller should cancel
+    the PipelineRun and reclaim the slot.
     """
     from pipeline.lib.health import (
         get_all_pods, get_events, triage_pod, delete_pod,
@@ -2100,6 +2100,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                     _last_log_state.pop("backoff_skip", None)
                     _zero_dispatch_count = 0
                     store.save(progress)
+                    continue
                 elif timeout_result is False:
                     continue
 
