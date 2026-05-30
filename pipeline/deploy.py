@@ -2631,8 +2631,15 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
     cluster_dir = run_dir / "cluster"
     discovered = _load_pairs(cluster_dir)
     if discovered:
-        progress = {k: v for k, v in discovered.items()}
-        _resolve_scope(progress, args)
+        from pipeline.lib.progress import ConfigMapProgressStore
+        store = ConfigMapProgressStore(namespace, run_name=run_dir.name)
+        try:
+            progress = store.load()
+        except (RuntimeError, OSError) as exc:
+            warn(f"ConfigMap unreachable — skipping pre-flight filter validation: {exc}")
+            progress = None
+        if progress:
+            _resolve_scope(progress, args)
 
     _cmd_build(run_dir, namespace=namespace, skip_build=args.skip_build)
 
