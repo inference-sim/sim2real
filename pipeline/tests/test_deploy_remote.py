@@ -532,3 +532,74 @@ def test_main_routes_run_local(tmp_path, monkeypatch):
             mod.main()
 
     assert len(local_calls) == 1
+
+
+# ── Pre-flight filter validation (#251) ─────────────────────────────────────
+
+
+def test_run_remote_status_filter_uses_configmap(monkeypatch, tmp_path):
+    """--status filter in --remote mode reads from ConfigMap, not disk YAML (#251)."""
+    from pipeline.lib.progress import ConfigMapProgressStore
+
+    run_dir = _setup_run_dir(tmp_path)
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
+    monkeypatch.setattr(mod, "_wait_for_job_pod", lambda *a, **kw: None)
+
+    progress_with_status = {
+        "wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "failed",
+                          "namespace": None, "retries": 0, "pending_stalls": 0, "pending_since": None},
+        "wl-a-treatment": {"workload": "wl-a", "package": "treatment", "status": "done",
+                           "namespace": None, "retries": 0, "pending_stalls": 0, "pending_since": None},
+    }
+    monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: progress_with_status.copy())
+
+    with patch("subprocess.run", side_effect=_mock_subprocess_ok):
+        args = _make_run_args(remote=True, skip_build=True, status="failed")
+        setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
+        mod._cmd_run_remote(args, run_dir, setup_config)
+
+
+def test_run_remote_status_filter_rejects_unmatched(monkeypatch, tmp_path):
+    """--status filter with no matching pairs still exits with error."""
+    from pipeline.lib.progress import ConfigMapProgressStore
+
+    run_dir = _setup_run_dir(tmp_path)
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
+
+    progress_all_done = {
+        "wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "done",
+                          "namespace": None, "retries": 0, "pending_stalls": 0, "pending_since": None},
+    }
+    monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: progress_all_done.copy())
+
+    args = _make_run_args(remote=True, skip_build=True, status="failed")
+    setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
+
+    with pytest.raises(SystemExit) as exc_info:
+        mod._cmd_run_remote(args, run_dir, setup_config)
+    assert exc_info.value.code == 1
+
+
+def test_run_remote_skips_validation_when_configmap_unreachable(monkeypatch, tmp_path):
+    """When ConfigMap is unreachable, pre-flight validation is skipped (not errored)."""
+    from pipeline.lib.progress import ConfigMapProgressStore
+
+    run_dir = _setup_run_dir(tmp_path)
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
+    monkeypatch.setattr(mod, "_wait_for_job_pod", lambda *a, **kw: None)
+
+    def failing_load(self):
+        raise RuntimeError("kubectl not available")
+
+    monkeypatch.setattr(ConfigMapProgressStore, "load", failing_load)
+
+    with patch("subprocess.run", side_effect=_mock_subprocess_ok):
+        args = _make_run_args(remote=True, skip_build=True, status="failed")
+        setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
+        mod._cmd_run_remote(args, run_dir, setup_config)
