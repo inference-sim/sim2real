@@ -576,7 +576,7 @@ def test_collect_run_flags_list_values():
         pending_threshold = 600
         max_pending_stalls = 10
         max_backoff = 600
-        dispatch_cooldown = 15
+        shadow_ttl = 120
 
     flags = _collect_run_flags(_Args())
     assert "--only" in flags
@@ -609,7 +609,7 @@ def test_collect_run_flags_single_string_status():
         pending_threshold = 600
         max_pending_stalls = 10
         max_backoff = 600
-        dispatch_cooldown = 15
+        shadow_ttl = 120
 
     flags = _collect_run_flags(_Args())
     assert flags == ["--status", "failed"]
@@ -2556,7 +2556,7 @@ def test_dispatch_sets_entry_running(tmp_path, monkeypatch):
         skip_teardown=False,
         remote=False,
         preserve_pipelineruns=False,
-        dispatch_cooldown=0,
+        shadow_ttl=0,
     )
 
     mod._cmd_run(args, run_dir, setup_config)
@@ -2664,7 +2664,7 @@ def test_derive_costs_only_for_scoped_pairs(tmp_path, monkeypatch):
         skip_teardown=False,
         remote=False,
         preserve_pipelineruns=False,
-        dispatch_cooldown=0,
+        shadow_ttl=0,
     )
 
     mod._cmd_run(args, run_dir, setup_config)
@@ -2844,7 +2844,7 @@ def test_health_escalation_cancels_pipelinerun(tmp_path, monkeypatch):
         default_gpu_cost=1, gpu_resource_type="nvidia.com/gpu",
         only=None, workload=None, package=None, status=None,
         force=False, skip_teardown=False, remote=False,
-        preserve_pipelineruns=False, dispatch_cooldown=0,
+        preserve_pipelineruns=False, shadow_ttl=0,
     )
 
     mod._cmd_run(args, run_dir, setup_config)
@@ -2916,7 +2916,7 @@ def test_dispatch_shuffles_dispatchable(tmp_path, monkeypatch):
         default_gpu_cost=1, gpu_resource_type="nvidia.com/gpu",
         only=None, workload=None, package=None, status=None,
         force=False, skip_teardown=False, remote=False,
-        preserve_pipelineruns=False, dispatch_cooldown=0,
+        preserve_pipelineruns=False, shadow_ttl=0,
     )
 
     mod._cmd_run(args, run_dir, setup_config)
@@ -2928,13 +2928,12 @@ def test_dispatch_shuffles_dispatchable(tmp_path, monkeypatch):
 # ── Dispatch cooldown (issue #249) ──────────────────────────────────────────
 
 
-def test_dispatch_cooldown_prevents_immediate_redispatch(tmp_path, monkeypatch):
-    """With dispatch_cooldown > 0, dispatch is skipped when within cooldown window.
+def test_shadow_ledger_prevents_over_subscription(tmp_path, monkeypatch):
+    """Shadow ledger limits dispatch to effective free GPU capacity.
 
-    Uses 2 pairs and 1 slot. Pair A dispatches on first iteration (cooldown
-    inactive since _last_dispatch_time=0). Pair A immediately succeeds, freeing
-    the slot. Next iterations skip dispatch until simulated time advances past
-    the cooldown window, at which point pair B dispatches.
+    With 8 probed GPUs, cost=4 per pair, and shadow_ttl=120, only 2 pairs
+    can dispatch before the ledger gates further dispatch (8/4=2). The third
+    pair waits until its predecessors complete and free the slots+probe.
     """
     import time as _time_mod
     import yaml as _yaml
@@ -2945,8 +2944,7 @@ def test_dispatch_cooldown_prevents_immediate_redispatch(tmp_path, monkeypatch):
     cluster_dir = run_dir / "cluster"
     cluster_dir.mkdir(parents=True)
 
-    # Two pairs: a-baseline, b-baseline
-    for name in ("a", "b"):
+    for name in ("a", "b", "c"):
         pr = {
             "metadata": {"name": f"pr-{name}-baseline", "namespace": "ns"},
             "spec": {"params": [
@@ -2958,8 +2956,8 @@ def test_dispatch_cooldown_prevents_immediate_redispatch(tmp_path, monkeypatch):
 
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
 
-    # Only 1 slot — forces sequential dispatch
-    setup_config = {"namespaces": ["sim2real-0"], "namespace": "sim2real-0"}
+    setup_config = {"namespaces": ["sim2real-0", "sim2real-1", "sim2real-2"],
+                    "namespace": "sim2real-ns"}
 
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
     monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
@@ -2967,11 +2965,11 @@ def test_dispatch_cooldown_prevents_immediate_redispatch(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
 
     import pipeline.lib.capacity as _cap_mod
-    monkeypatch.setattr(_cap_mod, "probe_free_gpus", lambda **kw: (8, 8, 0))
-    monkeypatch.setattr(_cap_mod, "load_defaults", lambda root: {"decode": {"accelerator": {"count": 1}}})
+    monkeypatch.setattr(_cap_mod, "probe_free_gpus", lambda **kw: (8, 16, 8))
+    monkeypatch.setattr(_cap_mod, "load_defaults",
+                        lambda root: {"decode": {"accelerator": {"count": 4}}})
 
-    # Track dispatches (kubectl apply calls only)
-    dispatch_times = []
+    dispatch_log = []
 
     def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
         class _R:
@@ -2979,19 +2977,15 @@ def test_dispatch_cooldown_prevents_immediate_redispatch(tmp_path, monkeypatch):
             stdout = ""
             stderr = ""
         if "apply" in cmd:
-            dispatch_times.append(clock[0])
+            dispatch_log.append(clock[0])
         return _R()
 
     monkeypatch.setattr(mod, "run", fake_run)
-
-    # Both pairs succeed immediately once dispatched
     monkeypatch.setattr(mod, "_check_pipelinerun_status",
                         lambda pr_name, ns: "Succeeded")
     monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
 
-    # Controlled clock: advances by 1 second per call to time.time()
-    # Cooldown is 10s, so iterations at t=1..10 will be blocked; t=11+ allows dispatch
     clock = [100.0]
 
     def fake_time():
@@ -3003,25 +2997,29 @@ def test_dispatch_cooldown_prevents_immediate_redispatch(tmp_path, monkeypatch):
     monkeypatch.setattr(mod.time, "time", fake_time)
     monkeypatch.setattr(mod.time, "sleep", lambda s: None)
 
+    import pipeline.lib.shadow as _shadow_mod
+    monkeypatch.setattr(_shadow_mod.time, "time", fake_time)
+
     args = argparse.Namespace(
         skip_build=True, max_retries=0, poll_interval=1,
         pending_threshold=600, max_pending_stalls=10, max_backoff=600,
-        default_gpu_cost=1, gpu_resource_type="nvidia.com/gpu",
+        default_gpu_cost=4, gpu_resource_type="nvidia.com/gpu",
         only=None, workload=None, package=None, status=None,
         force=False, skip_teardown=False, remote=False,
-        preserve_pipelineruns=False, dispatch_cooldown=10,
+        preserve_pipelineruns=False, shadow_ttl=120,
     )
 
     mod._cmd_run(args, run_dir, setup_config)
 
-    # Both pairs dispatched (2 kubectl apply calls)
-    assert len(dispatch_times) == 2
-    # Second dispatch happened AFTER cooldown elapsed (time gap > 10)
-    assert dispatch_times[1] - dispatch_times[0] > 10
+    # All 3 pairs eventually dispatched
+    assert len(dispatch_log) == 3
+    # First two dispatch close together (same iteration); third is later
+    # (after predecessors complete and shadow entries remain but probe allows)
+    assert dispatch_log[1] - dispatch_log[0] < 5
 
 
-def test_dispatch_cooldown_zero_disables(tmp_path, monkeypatch):
-    """dispatch_cooldown=0 preserves original behavior (no delay between dispatches)."""
+def test_shadow_ttl_zero_disables_gating(tmp_path, monkeypatch):
+    """shadow_ttl=0 disables shadow tracking — dispatch uses probe directly."""
     import yaml as _yaml
     import pipeline.deploy as mod
     from pipeline.lib.progress import ConfigMapProgressStore
@@ -3030,8 +3028,8 @@ def test_dispatch_cooldown_zero_disables(tmp_path, monkeypatch):
     cluster_dir = run_dir / "cluster"
     cluster_dir.mkdir(parents=True)
 
-    # Two pairs
-    for name in ("a", "b"):
+    # Three pairs each costing 4 GPUs
+    for name in ("a", "b", "c"):
         pr = {
             "metadata": {"name": f"pr-{name}-baseline", "namespace": "ns"},
             "spec": {"params": [
@@ -3043,8 +3041,9 @@ def test_dispatch_cooldown_zero_disables(tmp_path, monkeypatch):
 
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
 
-    # 2 slots — both can dispatch in same iteration
-    setup_config = {"namespaces": ["sim2real-0", "sim2real-1"], "namespace": "sim2real-0"}
+    # 3 slots, 12 probed free GPUs, cost 4 each — without shadow all 3 fit
+    setup_config = {"namespaces": ["sim2real-0", "sim2real-1", "sim2real-2"],
+                    "namespace": "sim2real-ns"}
 
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
     monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
@@ -3052,8 +3051,9 @@ def test_dispatch_cooldown_zero_disables(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
 
     import pipeline.lib.capacity as _cap_mod
-    monkeypatch.setattr(_cap_mod, "probe_free_gpus", lambda **kw: (8, 8, 0))
-    monkeypatch.setattr(_cap_mod, "load_defaults", lambda root: {"decode": {"accelerator": {"count": 1}}})
+    monkeypatch.setattr(_cap_mod, "probe_free_gpus", lambda **kw: (12, 16, 4))
+    monkeypatch.setattr(_cap_mod, "load_defaults",
+                        lambda root: {"decode": {"accelerator": {"count": 4}}})
 
     dispatch_count = {"n": 0}
 
@@ -3076,13 +3076,14 @@ def test_dispatch_cooldown_zero_disables(tmp_path, monkeypatch):
     args = argparse.Namespace(
         skip_build=True, max_retries=0, poll_interval=1,
         pending_threshold=600, max_pending_stalls=10, max_backoff=600,
-        default_gpu_cost=1, gpu_resource_type="nvidia.com/gpu",
+        default_gpu_cost=4, gpu_resource_type="nvidia.com/gpu",
         only=None, workload=None, package=None, status=None,
         force=False, skip_teardown=False, remote=False,
-        preserve_pipelineruns=False, dispatch_cooldown=0,
+        preserve_pipelineruns=False, shadow_ttl=0,
     )
 
     mod._cmd_run(args, run_dir, setup_config)
 
-    # Both pairs dispatched (2 kubectl apply calls)
-    assert dispatch_count["n"] == 2
+    # All 3 pairs dispatched — shadow tracking disabled, probe says 12 free
+    # which fits 3 pairs of cost 4 each
+    assert dispatch_count["n"] == 3

@@ -15,7 +15,7 @@ def _make_run_args(*, remote=False, workload=None, only=None, package=None,
                    max_retries=2, poll_interval=30, gpu_resource_type=None,
                    default_gpu_cost=1, pending_threshold=600,
                    max_pending_stalls=10, max_backoff=600,
-                   dispatch_cooldown=15):
+                   shadow_ttl=120):
     return argparse.Namespace(
         remote=remote, workload=workload, only=only, package=package,
         status=status, force=force, skip_build=skip_build,
@@ -23,7 +23,7 @@ def _make_run_args(*, remote=False, workload=None, only=None, package=None,
         max_retries=max_retries, poll_interval=poll_interval,
         gpu_resource_type=gpu_resource_type, default_gpu_cost=default_gpu_cost,
         pending_threshold=pending_threshold, max_pending_stalls=max_pending_stalls,
-        max_backoff=max_backoff, dispatch_cooldown=dispatch_cooldown,
+        max_backoff=max_backoff, shadow_ttl=shadow_ttl,
     )
 
 
@@ -69,6 +69,20 @@ def test_collect_run_flags_skip_teardown():
 def test_collect_run_flags_skip_teardown_absent_by_default():
     args = _make_run_args()
     assert "--skip-teardown" not in mod._collect_run_flags(args)
+
+
+def test_collect_run_flags_non_default_shadow_ttl():
+    args = _make_run_args(shadow_ttl=60)
+    flags = mod._collect_run_flags(args)
+    assert "--shadow-ttl" in flags
+    idx = flags.index("--shadow-ttl")
+    assert flags[idx + 1] == "60"
+
+
+def test_collect_run_flags_default_shadow_ttl_not_forwarded():
+    args = _make_run_args(shadow_ttl=120)
+    flags = mod._collect_run_flags(args)
+    assert "--shadow-ttl" not in flags
 
 
 # ── skip-teardown parser tests ─────────────────────────────────────────────
