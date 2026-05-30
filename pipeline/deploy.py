@@ -2015,8 +2015,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     from pipeline.lib.health import RemediationTracker as _HealthTracker
     _health_tracker = _HealthTracker()
 
-    dispatch_cooldown = args.dispatch_cooldown
-    _last_dispatch_time: float = 0.0
+    from pipeline.lib.shadow import ShadowLedger
+    shadow = ShadowLedger(ttl=args.shadow_ttl)
 
     while _work_remaining() or slots_busy:
 
@@ -2187,12 +2187,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 backoff.signal_capacity(free_gpus=free_gpus, max_cost=max_cost)
 
         # ── Assign pending work to free slots ────────────────────────────
-        _cooldown_elapsed = time.time() - _last_dispatch_time if _last_dispatch_time > 0 else float('inf')
-        _in_cooldown = dispatch_cooldown > 0 and _cooldown_elapsed < dispatch_cooldown
-        if _in_cooldown:
-            free_slots = []
-        else:
-            free_slots = [ns for ns in namespaces if ns not in slots_busy]
+        free_slots = [ns for ns in namespaces if ns not in slots_busy]
         pending = _pending_pairs()
         if free_gpus is not None and pending:
             min_cost = min(pair_costs[k] for k in pending)
@@ -2203,9 +2198,10 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                     _last_log_state["backoff_skip"] = _skip_state
                 dispatchable = []
             else:
+                effective_free = shadow.effective_free(free_gpus)
                 dispatchable = _capacity_limited_pairs(
                     pending,
-                    free_gpus=free_gpus, cost_map=pair_costs,
+                    free_gpus=effective_free, cost_map=pair_costs,
                 )
                 if len(dispatchable) == 0 and pending:
                     smallest = min(pair_costs[k] for k in pending)
@@ -2219,7 +2215,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                     if _disp_state != _last_log_state.get("dispatch"):
                         info(f"Dispatching {len(dispatchable)}/{len(pending)} pending pairs (capacity-limited: {free_gpus} free GPUs)")
                         _last_log_state["dispatch"] = _disp_state
-                elif not _in_cooldown and len(free_slots) < len(dispatchable):
+                elif len(free_slots) < len(dispatchable):
                     _disp_state = ("slot_limited", len(free_slots), len(pending))
                     if _disp_state != _last_log_state.get("dispatch"):
                         info(f"Dispatching {len(free_slots)}/{len(pending)} pending pairs (slot-limited)")
@@ -2294,7 +2290,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             _last_log_state.pop("dispatch", None)
             _last_log_state.pop("backoff_skip", None)
             _zero_dispatch_count = 0
-            _last_dispatch_time = time.time()
+            shadow.record(pair_cost)
 
         # Persist backoff state
         progress["_orchestrator"] = backoff.to_dict()
@@ -2515,7 +2511,7 @@ def _collect_run_flags(args) -> list[str]:
         "pending_threshold": 600,
         "max_pending_stalls": 10,
         "max_backoff": 600,
-        "dispatch_cooldown": 15,
+        "shadow_ttl": 120,
     }
     for attr, default in _defaults.items():
         val = getattr(args, attr)
@@ -2790,8 +2786,8 @@ Examples:
                        help="Max early reclaims before marking pair stalled [10]")
     run_p.add_argument("--max-backoff", type=int, default=600, dest="max_backoff",
                        help="Maximum backoff interval in seconds during GPU scarcity [600]")
-    run_p.add_argument("--dispatch-cooldown", type=int, default=15, dest="dispatch_cooldown",
-                       help="Seconds to wait after a dispatch batch before dispatching again (0 to disable) [15]")
+    run_p.add_argument("--shadow-ttl", type=int, default=120, dest="shadow_ttl",
+                       help="Seconds to retain shadow GPU reservations (prevents over-subscription from probe lag; 0 to disable) [120]")
     run_p.add_argument("--defaults-path", type=Path, default=None, dest="defaults_path",
                        help=argparse.SUPPRESS)
 
