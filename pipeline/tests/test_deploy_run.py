@@ -2849,25 +2849,73 @@ def test_health_escalation_cancels_pipelinerun(tmp_path, monkeypatch):
     assert saved["wl-a-baseline"]["status"] == "failed"
 
 
-def test_dispatch_shuffles_dispatchable(monkeypatch):
-    """Verify that dispatchable list is shuffled before slot assignment (#247)."""
-    from pipeline.deploy import _capacity_limited_pairs
+def test_dispatch_shuffles_dispatchable(tmp_path, monkeypatch):
+    """Verify that dispatchable list is shuffled before slot assignment (#247).
 
-    cost_map = {"a-baseline": 4, "b-baseline": 4, "c-baseline": 4}
-    pending = ["a-baseline", "b-baseline", "c-baseline"]
+    Exercises the actual _cmd_run dispatch path and asserts random.shuffle
+    is called on the dispatchable list as a side effect.
+    """
+    import yaml as _yaml
+    import pipeline.deploy as mod
+    from pipeline.lib.progress import ConfigMapProgressStore
 
-    dispatchable = _capacity_limited_pairs(pending, free_gpus=24, cost_map=cost_map)
-    assert len(dispatchable) == 3
+    run_dir = tmp_path / "runs" / "test-run"
+    cluster_dir = run_dir / "cluster"
+    cluster_dir.mkdir(parents=True)
+
+    pr = {
+        "metadata": {"name": "pr-a-baseline", "namespace": "ns"},
+        "spec": {"params": [
+            {"name": "workloadName", "value": "wl-a"},
+            {"name": "phase", "value": "baseline"},
+        ]},
+    }
+    (cluster_dir / "pipelinerun-a-baseline.yaml").write_text(_yaml.dump(pr))
+    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+
+    setup_config = {"namespaces": ["sim2real-0"], "namespace": "sim2real-0"}
+
+    monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
+    monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
+    monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
+
+    import pipeline.lib.capacity as _cap_mod
+    monkeypatch.setattr(_cap_mod, "probe_free_gpus", lambda **kw: (8, 8, 0))
+    monkeypatch.setattr(_cap_mod, "load_defaults", lambda root: {"decode": {"accelerator": {"count": 1}}})
+
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    monkeypatch.setattr(mod, "_check_pipelinerun_status",
+                        lambda pr_name, ns: "Succeeded")
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
 
     shuffle_calls = []
+    original_shuffle = mod.random.shuffle
 
     def tracking_shuffle(lst):
         shuffle_calls.append(list(lst))
+        original_shuffle(lst)
 
-    monkeypatch.setattr("pipeline.deploy.random.shuffle", tracking_shuffle)
+    monkeypatch.setattr(mod.random, "shuffle", tracking_shuffle)
 
-    import pipeline.deploy as mod
-    mod.random.shuffle(dispatchable)
+    args = argparse.Namespace(
+        skip_build=True, max_retries=0, poll_interval=1,
+        pending_threshold=600, max_pending_stalls=10, max_backoff=600,
+        default_gpu_cost=1, gpu_resource_type="nvidia.com/gpu",
+        only=None, workload=None, package=None, status=None,
+        force=False, skip_teardown=False, remote=False,
+        preserve_pipelineruns=False,
+    )
 
-    assert len(shuffle_calls) == 1
-    assert set(shuffle_calls[0]) == {"a-baseline", "b-baseline", "c-baseline"}
+    mod._cmd_run(args, run_dir, setup_config)
+
+    assert len(shuffle_calls) >= 1
+    assert "wl-a-baseline" in shuffle_calls[0]
