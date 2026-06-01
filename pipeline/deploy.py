@@ -2232,6 +2232,10 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             pair_cost = pair_costs[pair_key]
             source = pair_provenance[pair_key]
             _source_labels = {"derived": "derived from scenarioContent", "defaults-only": "derived from defaults only", "fallback": "fallback default"}
+            if free_gpus is not None:
+                _reserved = shadow.reserved()
+                _effective = shadow.effective_free(free_gpus)
+                info(f"Capacity: {_effective} effective free GPUs ({free_gpus} probed − {_reserved} reserved)")
             info(f"{pair_key} requires {pair_cost} GPUs ({_source_labels[source]})")
             pr_meta = discovered.get(pair_key, {})
             pr_path_str = pr_meta.get("pr_path", "")
