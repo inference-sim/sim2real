@@ -5,6 +5,7 @@ from unittest.mock import patch, MagicMock
 
 from pipeline.lib.capacity import probe_free_gpus, derive_gpu_resource_type, gpu_cost_per_pair
 from pipeline.lib.capacity import NodeFilter, node_is_eligible
+from pipeline.lib.capacity import extract_node_filters
 
 
 class TestProbeFreeGpus:
@@ -564,3 +565,127 @@ class TestNodeFilter:
             {"key": "node.kubernetes.io/unschedulable", "operator": "Exists"}
         ])
         assert node_is_eligible(node, [f]) is False
+
+
+class TestExtractNodeFilters:
+    def _scenario(self, *, helm_values=None):
+        return {
+            "scenario": [{
+                "name": "test",
+                "model": {"helmValues": helm_values or {}},
+            }]
+        }
+
+    def test_empty_scenario_returns_empty_dict(self):
+        assert extract_node_filters({}) == {}
+
+    def test_no_helm_values_returns_empty_dict(self):
+        assert extract_node_filters(self._scenario()) == {}
+
+    def test_decode_with_no_affinity_yields_unconstrained_filter(self):
+        scenario = self._scenario(helm_values={"decode": {}})
+        result = extract_node_filters(scenario)
+        assert "decode" in result
+        assert result["decode"].required_gpu_products == frozenset()
+        assert result["decode"].tolerations == ()
+
+    def test_decode_with_gpu_product_affinity(self):
+        scenario = self._scenario(helm_values={
+            "decode": {
+                "extraConfig": {
+                    "affinity": {
+                        "nodeAffinity": {
+                            "requiredDuringSchedulingIgnoredDuringExecution": {
+                                "nodeSelectorTerms": [{
+                                    "matchExpressions": [{
+                                        "key": "nvidia.com/gpu.product",
+                                        "operator": "In",
+                                        "values": ["NVIDIA-H100-80GB-HBM3"],
+                                    }]
+                                }]
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        result = extract_node_filters(scenario)
+        assert result["decode"].required_gpu_products == frozenset({"NVIDIA-H100-80GB-HBM3"})
+
+    def test_multiple_products_in_match_expression(self):
+        scenario = self._scenario(helm_values={
+            "decode": {
+                "extraConfig": {
+                    "affinity": {
+                        "nodeAffinity": {
+                            "requiredDuringSchedulingIgnoredDuringExecution": {
+                                "nodeSelectorTerms": [{
+                                    "matchExpressions": [{
+                                        "key": "nvidia.com/gpu.product",
+                                        "operator": "In",
+                                        "values": ["NVIDIA-H100-80GB-HBM3", "NVIDIA-H100-PCIe"],
+                                    }]
+                                }]
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        result = extract_node_filters(scenario)
+        assert result["decode"].required_gpu_products == frozenset({
+            "NVIDIA-H100-80GB-HBM3", "NVIDIA-H100-PCIe"
+        })
+
+    def test_tolerations_are_always_empty_for_now(self):
+        scenario = self._scenario(helm_values={
+            "decode": {"extraConfig": {"tolerations": [
+                {"key": "app", "operator": "Equal", "value": "x", "effect": "NoSchedule"}
+            ]}}
+        })
+        result = extract_node_filters(scenario)
+        assert result["decode"].tolerations == ()
+
+    def test_per_role_decode_and_prefill(self):
+        scenario = self._scenario(helm_values={
+            "decode": {"extraConfig": {"affinity": {"nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [{"matchExpressions": [{
+                        "key": "nvidia.com/gpu.product", "operator": "In",
+                        "values": ["NVIDIA-H100-80GB-HBM3"]}]}]
+                }}}}},
+            "prefill": {"extraConfig": {"affinity": {"nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [{"matchExpressions": [{
+                        "key": "nvidia.com/gpu.product", "operator": "In",
+                        "values": ["NVIDIA-A100-40GB"]}]}]
+                }}}}},
+        })
+        result = extract_node_filters(scenario)
+        assert result["decode"].required_gpu_products == frozenset({"NVIDIA-H100-80GB-HBM3"})
+        assert result["prefill"].required_gpu_products == frozenset({"NVIDIA-A100-40GB"})
+
+    def test_ignores_non_gpu_product_match_expressions(self):
+        scenario = self._scenario(helm_values={
+            "decode": {"extraConfig": {"affinity": {"nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [{"matchExpressions": [
+                        {"key": "topology.kubernetes.io/zone", "operator": "In", "values": ["us-east-1a"]},
+                        {"key": "nvidia.com/gpu.product", "operator": "In", "values": ["NVIDIA-H100-80GB-HBM3"]},
+                    ]}]
+                }}}}},
+        })
+        result = extract_node_filters(scenario)
+        assert result["decode"].required_gpu_products == frozenset({"NVIDIA-H100-80GB-HBM3"})
+
+    def test_ignores_unsupported_operators(self):
+        scenario = self._scenario(helm_values={
+            "decode": {"extraConfig": {"affinity": {"nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [{"matchExpressions": [
+                        {"key": "nvidia.com/gpu.product", "operator": "NotIn", "values": ["NVIDIA-V100"]},
+                    ]}]
+                }}}}},
+        })
+        result = extract_node_filters(scenario)
+        assert result["decode"].required_gpu_products == frozenset()

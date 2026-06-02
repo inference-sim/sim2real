@@ -249,6 +249,55 @@ def gpu_cost_per_pair(resolved_scenario: dict, defaults: dict) -> Union[int, str
     return gpu_cost
 
 
+_KNOWN_ROLES = ("decode", "prefill")
+_GPU_PRODUCT_LABEL = "nvidia.com/gpu.product"
+
+
+def _extract_required_gpu_products(affinity: dict) -> frozenset[str]:
+    """Read requiredDuringSchedulingIgnoredDuringExecution matchExpressions
+    for the nvidia.com/gpu.product key with operator In; return value set.
+
+    NotIn / Exists are not treated as positive product constraints (would
+    require negation logic outside this issue's scope).
+    """
+    node_aff = affinity.get("nodeAffinity", {}) or {}
+    required = node_aff.get("requiredDuringSchedulingIgnoredDuringExecution", {}) or {}
+    terms = required.get("nodeSelectorTerms", []) or []
+    products: set[str] = set()
+    for term in terms:
+        for expr in term.get("matchExpressions", []) or []:
+            if expr.get("key") == _GPU_PRODUCT_LABEL and expr.get("operator") == "In":
+                products.update(expr.get("values", []) or [])
+    return frozenset(products)
+
+
+def extract_node_filters(resolved_scenario: dict) -> dict[str, NodeFilter]:
+    """Build per-role NodeFilter dict from a resolved scenario.
+
+    Reads model.helmValues.{role}.extraConfig.affinity.nodeAffinity for each
+    role present. Tolerations are always returned as empty per the
+    conservative assumption in issue #261 (see follow-up #263).
+
+    Returns empty dict if the scenario has no helmValues for any known role.
+    """
+    scenarios = resolved_scenario.get("scenario", []) or []
+    if not scenarios:
+        return {}
+    entry = scenarios[0]
+    helm_values = entry.get("model", {}).get("helmValues", {}) or {}
+    out: dict[str, NodeFilter] = {}
+    for role in _KNOWN_ROLES:
+        if role not in helm_values:
+            continue
+        role_cfg = helm_values[role] or {}
+        affinity = role_cfg.get("extraConfig", {}).get("affinity", {}) or {}
+        out[role] = NodeFilter(
+            required_gpu_products=_extract_required_gpu_products(affinity),
+            tolerations=(),
+        )
+    return out
+
+
 def load_defaults(repo_root: Path, *, defaults_path: "Path | None" = None) -> Union[dict, str, None]:
     """Load llm-d-benchmark defaults.yaml.
 
