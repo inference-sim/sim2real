@@ -2,12 +2,80 @@
 
 import json
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Union
 
 import yaml
 
 from pipeline.lib.values import deep_merge
+
+
+# ── Node eligibility ───────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class NodeFilter:
+    """Per-role node eligibility constraints derived from a resolved scenario.
+
+    required_gpu_products: set of acceptable nvidia.com/gpu.product label values.
+        Empty set means no product constraint.
+    tolerations: list of K8s toleration dicts (key/operator/value/effect).
+        Empty list means no taints can be tolerated.
+    """
+    required_gpu_products: frozenset[str] = field(default_factory=frozenset)
+    tolerations: tuple[dict, ...] = field(default_factory=tuple)
+
+    def __post_init__(self):
+        if not isinstance(self.required_gpu_products, frozenset):
+            object.__setattr__(self, "required_gpu_products",
+                               frozenset(self.required_gpu_products or ()))
+        if not isinstance(self.tolerations, tuple):
+            object.__setattr__(self, "tolerations",
+                               tuple(self.tolerations or ()))
+
+
+def _toleration_matches_taint(toleration: dict, taint: dict) -> bool:
+    t_effect = toleration.get("effect", "")
+    if t_effect and t_effect != taint.get("effect"):
+        return False
+    op = toleration.get("operator", "Equal")
+    t_key = toleration.get("key", "")
+    if op == "Exists":
+        return not t_key or t_key == taint.get("key")
+    return t_key == taint.get("key") and toleration.get("value", "") == taint.get("value", "")
+
+
+def _node_is_cordoned(node: dict) -> bool:
+    return bool(node.get("spec", {}).get("unschedulable", False))
+
+
+def _node_blocking_taints(node: dict) -> list[dict]:
+    return [t for t in node.get("spec", {}).get("taints", []) or []
+            if t.get("effect") in ("NoSchedule", "NoExecute")]
+
+
+def _filter_admits_node(filt: NodeFilter, node: dict) -> bool:
+    if _node_is_cordoned(node):
+        return False
+    for taint in _node_blocking_taints(node):
+        if not any(_toleration_matches_taint(tol, taint) for tol in filt.tolerations):
+            return False
+    if filt.required_gpu_products:
+        product = node.get("metadata", {}).get("labels", {}).get("nvidia.com/gpu.product")
+        if product not in filt.required_gpu_products:
+            return False
+    return True
+
+
+def node_is_eligible(node: dict, filters: list[NodeFilter]) -> bool:
+    """A node is eligible if no filter is given, or some filter accepts it.
+
+    Empty filter list → unfiltered (legacy behavior).
+    """
+    if not filters:
+        return True
+    return any(_filter_admits_node(f, node) for f in filters)
 
 
 # ── Cluster probe ──────────────────────────────────────────────────────────────

@@ -4,6 +4,7 @@ import json
 from unittest.mock import patch, MagicMock
 
 from pipeline.lib.capacity import probe_free_gpus, derive_gpu_resource_type, gpu_cost_per_pair
+from pipeline.lib.capacity import NodeFilter, node_is_eligible
 
 
 class TestProbeFreeGpus:
@@ -325,3 +326,129 @@ def test_load_defaults_explicit_path_missing(tmp_path):
     """load_defaults with explicit path to non-existent file returns None."""
     result = load_defaults(tmp_path, defaults_path=tmp_path / "nope.yaml")
     assert result is None
+
+
+class TestNodeFilter:
+    def _node(self, *, name="n", unschedulable=False, taints=None,
+              gpu_product=None, allocatable=None):
+        labels = {}
+        if gpu_product is not None:
+            labels["nvidia.com/gpu.product"] = gpu_product
+        spec = {"unschedulable": unschedulable} if unschedulable else {}
+        if taints:
+            spec["taints"] = taints
+        status = {"allocatable": allocatable or {}}
+        return {
+            "metadata": {"name": name, "labels": labels},
+            "spec": spec,
+            "status": status,
+        }
+
+    def test_no_filter_accepts_any_node(self):
+        node = self._node(unschedulable=True, taints=[
+            {"key": "x", "effect": "NoSchedule"}
+        ])
+        # When no filter is supplied, every node is eligible (legacy behavior).
+        assert node_is_eligible(node, []) is True
+
+    def test_cordoned_node_rejected_when_filter_present(self):
+        node = self._node(unschedulable=True)
+        f = NodeFilter()
+        assert node_is_eligible(node, [f]) is False
+
+    def test_node_with_no_unschedulable_field_is_treated_as_schedulable(self):
+        node = self._node()
+        f = NodeFilter()
+        assert node_is_eligible(node, [f]) is True
+
+    def test_unschedulable_false_is_treated_as_schedulable(self):
+        node = self._node()
+        f = NodeFilter()
+        assert node_is_eligible(node, [f]) is True
+
+    def test_noschedule_taint_excludes_when_no_role_tolerates(self):
+        node = self._node(taints=[
+            {"key": "app", "value": "harness", "effect": "NoSchedule"}
+        ])
+        f = NodeFilter(tolerations=[])
+        assert node_is_eligible(node, [f]) is False
+
+    def test_noexecute_taint_excludes_when_no_role_tolerates(self):
+        node = self._node(taints=[
+            {"key": "app", "effect": "NoExecute"}
+        ])
+        f = NodeFilter(tolerations=[])
+        assert node_is_eligible(node, [f]) is False
+
+    def test_prefer_no_schedule_taint_is_ignored(self):
+        node = self._node(taints=[
+            {"key": "app", "effect": "PreferNoSchedule"}
+        ])
+        f = NodeFilter(tolerations=[])
+        assert node_is_eligible(node, [f]) is True
+
+    def test_tolerated_noschedule_taint_does_not_exclude(self):
+        node = self._node(taints=[
+            {"key": "app", "value": "harness", "effect": "NoSchedule"}
+        ])
+        f = NodeFilter(tolerations=[
+            {"key": "app", "operator": "Equal", "value": "harness", "effect": "NoSchedule"}
+        ])
+        assert node_is_eligible(node, [f]) is True
+
+    def test_tolerations_with_operator_exists_match_any_value(self):
+        node = self._node(taints=[
+            {"key": "app", "value": "harness", "effect": "NoSchedule"}
+        ])
+        f = NodeFilter(tolerations=[
+            {"key": "app", "operator": "Exists", "effect": "NoSchedule"}
+        ])
+        assert node_is_eligible(node, [f]) is True
+
+    def test_toleration_must_match_effect(self):
+        node = self._node(taints=[
+            {"key": "app", "value": "harness", "effect": "NoSchedule"}
+        ])
+        f = NodeFilter(tolerations=[
+            {"key": "app", "operator": "Equal", "value": "harness", "effect": "NoExecute"}
+        ])
+        assert node_is_eligible(node, [f]) is False
+
+    def test_required_gpu_product_match(self):
+        node = self._node(gpu_product="NVIDIA-H100-80GB-HBM3")
+        f = NodeFilter(required_gpu_products={"NVIDIA-H100-80GB-HBM3"})
+        assert node_is_eligible(node, [f]) is True
+
+    def test_required_gpu_product_mismatch(self):
+        node = self._node(gpu_product="NVIDIA-A100-40GB")
+        f = NodeFilter(required_gpu_products={"NVIDIA-H100-80GB-HBM3"})
+        assert node_is_eligible(node, [f]) is False
+
+    def test_required_gpu_product_with_missing_label(self):
+        node = self._node()
+        f = NodeFilter(required_gpu_products={"NVIDIA-H100-80GB-HBM3"})
+        assert node_is_eligible(node, [f]) is False
+
+    def test_empty_required_set_means_no_product_constraint(self):
+        node = self._node(gpu_product="NVIDIA-A100-40GB")
+        f = NodeFilter(required_gpu_products=set())
+        assert node_is_eligible(node, [f]) is True
+
+    def test_union_eligibility_across_roles(self):
+        node = self._node(gpu_product="NVIDIA-H100-80GB-HBM3")
+        decode = NodeFilter(required_gpu_products={"NVIDIA-H100-80GB-HBM3"})
+        prefill = NodeFilter(required_gpu_products={"NVIDIA-A100-40GB"})
+        assert node_is_eligible(node, [decode, prefill]) is True
+
+    def test_union_eligibility_neither_role_accepts(self):
+        node = self._node(gpu_product="NVIDIA-V100")
+        decode = NodeFilter(required_gpu_products={"NVIDIA-H100-80GB-HBM3"})
+        prefill = NodeFilter(required_gpu_products={"NVIDIA-A100-40GB"})
+        assert node_is_eligible(node, [decode, prefill]) is False
+
+    def test_cordon_excludes_regardless_of_tolerations(self):
+        node = self._node(unschedulable=True)
+        f = NodeFilter(tolerations=[
+            {"key": "node.kubernetes.io/unschedulable", "operator": "Exists"}
+        ])
+        assert node_is_eligible(node, [f]) is False
