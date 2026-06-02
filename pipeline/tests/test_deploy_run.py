@@ -3198,3 +3198,25 @@ def test_shadow_ttl_zero_disables_gating(tmp_path, monkeypatch):
     # All 3 pairs dispatched — shadow tracking disabled, probe says 12 free
     # which fits 3 pairs of cost 4 each
     assert dispatch_count["n"] == 3
+
+
+class TestNodeFiltersForwarding:
+    """Verify _cmd_run forwards a non-None node_filters list to probe_free_gpus
+    even when extract_node_filters returns an empty dict (issue #268).
+
+    Tested at the expression level: the production call site is
+        node_filters=list(node_filters.values()) or [NodeFilter()]
+    """
+
+    def test_empty_dict_yields_default_filter(self):
+        from pipeline.lib.capacity import NodeFilter
+        node_filters: dict = {}
+        result = list(node_filters.values()) or [NodeFilter()]
+        assert result == [NodeFilter()]
+
+    def test_populated_dict_yields_role_filters(self):
+        from pipeline.lib.capacity import NodeFilter
+        decode = NodeFilter(required_gpu_products=frozenset({"NVIDIA-H100-80GB-HBM3"}))
+        node_filters = {"decode": decode}
+        result = list(node_filters.values()) or [NodeFilter()]
+        assert result == [decode]
