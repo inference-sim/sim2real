@@ -2232,7 +2232,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 dispatchable = []
             else:
                 effective_free = shadow.effective_free(free_gpus)
-                dispatchable = _capacity_limited_pairs(
+                dispatchable = _select_dispatchable(
                     pending,
                     free_gpus=effective_free, cost_map=pair_costs,
                 )
@@ -2254,9 +2254,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                         info(f"Dispatching {len(free_slots)}/{len(pending)} pending pairs (slot-limited)")
                         _last_log_state["dispatch"] = _disp_state
         else:
-            dispatchable = pending
-
-        random.shuffle(dispatchable)
+            dispatchable = list(pending)
+            random.shuffle(dispatchable)
 
         for ns, pair_key in zip(free_slots, dispatchable):
             hf_secret_name = setup_config.get("hf_secret_name", "hf-secret")
