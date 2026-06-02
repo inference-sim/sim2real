@@ -775,3 +775,144 @@ class TestExtractNodeFilters:
         result = extract_node_filters(scenario)
         assert "decode" in result
         assert result["decode"].required_gpu_products == frozenset({"NVIDIA-H100-80GB-HBM3"})
+
+    def test_acceleratorType_with_non_gpu_product_label_ignored(self):
+        """A non-GPU-product labelKey produces no product constraint."""
+        scenario = {
+            "scenario": [{
+                "decode": {
+                    "acceleratorType": {
+                        "labelKey": "topology.kubernetes.io/zone",
+                        "labelValue": "us-east-1a",
+                    },
+                },
+            }],
+        }
+        result = extract_node_filters(scenario)
+        assert "decode" in result
+        assert result["decode"].required_gpu_products == frozenset()
+
+    def test_per_role_acceleratorType(self):
+        """Different acceleratorType per role yields different product sets."""
+        scenario = {
+            "scenario": [{
+                "decode": {
+                    "acceleratorType": {
+                        "labelKey": "nvidia.com/gpu.product",
+                        "labelValue": "NVIDIA-H100-80GB-HBM3",
+                    },
+                },
+                "prefill": {
+                    "acceleratorType": {
+                        "labelKey": "nvidia.com/gpu.product",
+                        "labelValue": "NVIDIA-A100-80GB",
+                    },
+                },
+            }],
+        }
+        result = extract_node_filters(scenario)
+        assert result["decode"].required_gpu_products == frozenset({"NVIDIA-H100-80GB-HBM3"})
+        assert result["prefill"].required_gpu_products == frozenset({"NVIDIA-A100-80GB"})
+
+    def test_acceleratorType_warns_on_missing_labelValue(self, capsys):
+        """labelKey set to the GPU product label with empty labelValue must warn."""
+        scenario = {
+            "scenario": [{
+                "decode": {
+                    "acceleratorType": {
+                        "labelKey": "nvidia.com/gpu.product",
+                        "labelValue": "",
+                    },
+                },
+            }],
+        }
+        result = extract_node_filters(scenario)
+        assert result["decode"].required_gpu_products == frozenset()
+        captured = capsys.readouterr()
+        output = captured.err + captured.out
+        assert "acceleratorType" in output
+        assert "labelValue" in output
+        assert "decode" in output
+
+    def test_acceleratorType_no_warn_for_non_gpu_product_label(self, capsys):
+        """A non-GPU-product labelKey is silent — not every label is a typo."""
+        scenario = {
+            "scenario": [{
+                "decode": {
+                    "acceleratorType": {
+                        "labelKey": "topology.kubernetes.io/zone",
+                        "labelValue": "us-east-1a",
+                    },
+                },
+            }],
+        }
+        extract_node_filters(scenario)
+        captured = capsys.readouterr()
+        assert "acceleratorType" not in captured.err
+        assert "acceleratorType" not in captured.out
+
+    def test_acceleratorType_takes_precedence_over_helmValues_affinity(self):
+        """When both schemas are present, the canonical acceleratorType wins."""
+        scenario = {
+            "scenario": [{
+                "decode": {
+                    "acceleratorType": {
+                        "labelKey": "nvidia.com/gpu.product",
+                        "labelValue": "NVIDIA-H100-80GB-HBM3",
+                    },
+                },
+                "model": {
+                    "helmValues": {
+                        "decode": {
+                            "extraConfig": {
+                                "affinity": {
+                                    "nodeAffinity": {
+                                        "requiredDuringSchedulingIgnoredDuringExecution": {
+                                            "nodeSelectorTerms": [{
+                                                "matchExpressions": [{
+                                                    "key": "nvidia.com/gpu.product",
+                                                    "operator": "In",
+                                                    "values": ["NVIDIA-A100-80GB"],
+                                                }],
+                                            }],
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            }],
+        }
+        result = extract_node_filters(scenario)
+        assert result["decode"].required_gpu_products == frozenset({"NVIDIA-H100-80GB-HBM3"})
+
+    def test_falls_back_to_helmValues_affinity_when_no_acceleratorType(self):
+        """Users who override affinity directly via helmValues still work."""
+        scenario = {
+            "scenario": [{
+                "model": {
+                    "helmValues": {
+                        "decode": {
+                            "extraConfig": {
+                                "affinity": {
+                                    "nodeAffinity": {
+                                        "requiredDuringSchedulingIgnoredDuringExecution": {
+                                            "nodeSelectorTerms": [{
+                                                "matchExpressions": [{
+                                                    "key": "nvidia.com/gpu.product",
+                                                    "operator": "In",
+                                                    "values": ["NVIDIA-L40S"],
+                                                }],
+                                            }],
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            }],
+        }
+        result = extract_node_filters(scenario)
+        assert result["decode"].required_gpu_products == frozenset({"NVIDIA-L40S"})
