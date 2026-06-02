@@ -757,3 +757,21 @@ class TestExtractNodeFilters:
         extract_node_filters(scenario)
         out = capsys.readouterr().out
         assert "only 'In' is supported" not in out
+
+    def test_extracts_from_acceleratorType_schema(self):
+        """Real scenarios use scenario[0].{role}.acceleratorType.labelKey/labelValue."""
+        scenario = {
+            "scenario": [{
+                "name": "expceil",
+                "decode": {
+                    "replicas": 2,
+                    "acceleratorType": {
+                        "labelKey": "nvidia.com/gpu.product",
+                        "labelValue": "NVIDIA-H100-80GB-HBM3",
+                    },
+                },
+            }],
+        }
+        result = extract_node_filters(scenario)
+        assert "decode" in result
+        assert result["decode"].required_gpu_products == frozenset({"NVIDIA-H100-80GB-HBM3"})
