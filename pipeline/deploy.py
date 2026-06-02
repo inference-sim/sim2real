@@ -1866,6 +1866,28 @@ def _capacity_limited_pairs(
     return result
 
 
+def _select_dispatchable(
+    pending: list[str],
+    *,
+    free_gpus: int,
+    cost_map: dict[str, int],
+) -> list[str]:
+    """Shuffle pending then capacity-gate.
+
+    Shuffling before the gate (rather than after) makes the chosen subset an
+    unbiased random sample of the full pending list. With all-equal costs,
+    `_capacity_limited_pairs`'s stable sort preserves shuffled order so the
+    greedy fill picks a uniform random subset. With heterogeneous costs,
+    smallest-cost-first packing is preserved across cost groups while
+    randomization applies within each group.
+
+    Does not mutate `pending` — operates on a shuffled copy.
+    """
+    shuffled = list(pending)
+    random.shuffle(shuffled)
+    return _capacity_limited_pairs(shuffled, free_gpus=free_gpus, cost_map=cost_map)
+
+
 def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     """Orchestrate parallel pool execution across namespace slots."""
     import tempfile as _tmp
@@ -2210,7 +2232,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 dispatchable = []
             else:
                 effective_free = shadow.effective_free(free_gpus)
-                dispatchable = _capacity_limited_pairs(
+                dispatchable = _select_dispatchable(
                     pending,
                     free_gpus=effective_free, cost_map=pair_costs,
                 )
@@ -2232,9 +2254,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                         info(f"Dispatching {len(free_slots)}/{len(pending)} pending pairs (slot-limited)")
                         _last_log_state["dispatch"] = _disp_state
         else:
-            dispatchable = pending
-
-        random.shuffle(dispatchable)
+            dispatchable = list(pending)
+            random.shuffle(dispatchable)
 
         for ns, pair_key in zip(free_slots, dispatchable):
             hf_secret_name = setup_config.get("hf_secret_name", "hf-secret")
