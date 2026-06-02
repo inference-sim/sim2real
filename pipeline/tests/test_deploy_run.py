@@ -2853,6 +2853,117 @@ def test_health_escalation_cancels_pipelinerun(tmp_path, monkeypatch):
     assert saved["wl-a-baseline"]["status"] == "failed"
 
 
+class TestSelectDispatchable:
+    """Tests for _select_dispatchable: shuffle then capacity-gate."""
+
+    def test_returns_empty_when_pending_empty(self):
+        from pipeline.deploy import _select_dispatchable
+        result = _select_dispatchable([], free_gpus=8, cost_map={})
+        assert result == []
+
+    def test_returns_all_when_budget_fits_all(self):
+        from pipeline.deploy import _select_dispatchable
+        pending = [f"p{i}" for i in range(5)]
+        cost_map = {k: 1 for k in pending}
+        result = _select_dispatchable(pending, free_gpus=10, cost_map=cost_map)
+        assert sorted(result) == sorted(pending)
+
+    def test_does_not_mutate_input_pending_list(self):
+        from pipeline.deploy import _select_dispatchable
+        pending = ["a", "b", "c", "d"]
+        original = list(pending)
+        cost_map = {k: 1 for k in pending}
+        _select_dispatchable(pending, free_gpus=2, cost_map=cost_map)
+        assert pending == original, "input list must not be mutated"
+
+    def test_picks_uniform_random_subset_under_equal_costs(self):
+        """The fairness criterion from issue #266.
+
+        With 24 pairs at 4 GPUs each and budget=48 (fits 12), each pair should
+        appear in roughly 12/24 = 50% of trials. Run many trials and check the
+        per-pair appearance rate is within tolerance of 0.5.
+        """
+        from pipeline.deploy import _select_dispatchable
+        import random as _random
+        pending = [f"p{i:02d}" for i in range(24)]
+        cost_map = {k: 4 for k in pending}
+        trials = 2000
+        counts = {k: 0 for k in pending}
+        rng = _random.Random(42)  # deterministic for the test
+        for _ in range(trials):
+            with patch("pipeline.deploy.random", rng):
+                picked = _select_dispatchable(pending, free_gpus=48, cost_map=cost_map)
+            assert len(picked) == 12
+            for k in picked:
+                counts[k] += 1
+        # Each pair should appear in roughly 50% ± 5% of trials.
+        for k, c in counts.items():
+            rate = c / trials
+            assert 0.40 <= rate <= 0.60, (
+                f"{k} appeared {c}/{trials} = {rate:.2%}, expected ~50%"
+            )
+
+    def test_first_half_not_overrepresented_under_equal_costs(self):
+        """Direct test of the regression #266 fixes: first-half pairs are not
+        systematically picked over second-half pairs."""
+        from pipeline.deploy import _select_dispatchable
+        import random as _random
+        pending = [f"p{i:02d}" for i in range(24)]
+        cost_map = {k: 4 for k in pending}
+        trials = 1000
+        first_half_appearances = 0
+        second_half_appearances = 0
+        rng = _random.Random(123)
+        for _ in range(trials):
+            with patch("pipeline.deploy.random", rng):
+                picked = _select_dispatchable(pending, free_gpus=48, cost_map=cost_map)
+            for k in picked:
+                idx = int(k[1:])
+                if idx < 12:
+                    first_half_appearances += 1
+                else:
+                    second_half_appearances += 1
+        # Expected: ~6000 each (12 picks/trial × 1000 trials × 0.5 from each half).
+        # Pre-fix behavior: first_half = 12000, second_half = 0.
+        ratio = first_half_appearances / (first_half_appearances + second_half_appearances)
+        assert 0.45 <= ratio <= 0.55, (
+            f"first-half got {ratio:.2%} of picks (expected ~50%); pre-fix bias?"
+        )
+
+    def test_smallest_cost_first_packing_with_heterogeneous_costs(self):
+        """When costs differ, the gate must still prefer smallest costs to
+        maximize dispatch count (existing _capacity_limited_pairs invariant).
+
+        With pairs of cost 1, 1, 1, 8, 8 and budget=4: only the three cost-1
+        pairs fit. Verify all three are picked regardless of shuffle order.
+        """
+        from pipeline.deploy import _select_dispatchable
+        pending = ["big1", "small1", "big2", "small2", "small3"]
+        cost_map = {"big1": 8, "big2": 8, "small1": 1, "small2": 1, "small3": 1}
+        # Run many trials — every trial should pick exactly the three small pairs.
+        for _ in range(50):
+            picked = _select_dispatchable(pending, free_gpus=4, cost_map=cost_map)
+            assert sorted(picked) == ["small1", "small2", "small3"], (
+                f"got {picked}; smallest-first packing violated"
+            )
+
+    def test_within_cost_group_randomization_with_heterogeneous_costs(self):
+        """Within a cost tier, the helper must randomize. With four cost-1
+        pairs and budget=2, any two of the four should be possible picks."""
+        from pipeline.deploy import _select_dispatchable
+        import random as _random
+        pending = ["a", "b", "c", "d"]
+        cost_map = {k: 1 for k in pending}
+        seen_pairs = set()
+        rng = _random.Random(7)
+        for _ in range(200):
+            with patch("pipeline.deploy.random", rng):
+                picked = _select_dispatchable(pending, free_gpus=2, cost_map=cost_map)
+            seen_pairs.add(frozenset(picked))
+        # 4-choose-2 = 6 possible 2-element subsets; expect to see most of them.
+        assert len(seen_pairs) >= 4, f"only saw {seen_pairs}; randomness too narrow"
+
+
 def test_dispatch_shuffles_dispatchable(tmp_path, monkeypatch):
     """Verify that dispatchable list is shuffled before slot assignment (#247).
 

@@ -1866,6 +1866,28 @@ def _capacity_limited_pairs(
     return result
 
 
+def _select_dispatchable(
+    pending: list[str],
+    *,
+    free_gpus: int,
+    cost_map: dict[str, int],
+) -> list[str]:
+    """Shuffle pending then capacity-gate.
+
+    Shuffling before the gate (rather than after) makes the chosen subset an
+    unbiased random sample of the full pending list. With all-equal costs,
+    `_capacity_limited_pairs`'s stable sort preserves shuffled order so the
+    greedy fill picks a uniform random subset. With heterogeneous costs,
+    smallest-cost-first packing is preserved across cost groups while
+    randomization applies within each group.
+
+    Does not mutate `pending` — operates on a shuffled copy.
+    """
+    shuffled = list(pending)
+    random.shuffle(shuffled)
+    return _capacity_limited_pairs(shuffled, free_gpus=free_gpus, cost_map=cost_map)
+
+
 def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     """Orchestrate parallel pool execution across namespace slots."""
     import tempfile as _tmp
