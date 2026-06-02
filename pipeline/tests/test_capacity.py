@@ -168,6 +168,118 @@ class TestProbeFreeGpus:
         result = probe_free_gpus()
         assert result == (16, 16, 0)
 
+    def _mock_nodes_full(self, specs):
+        """specs: list of dicts with keys: gpu, name (optional), unschedulable,
+        taints, gpu_product."""
+        nodes = []
+        for i, s in enumerate(specs):
+            name = s.get("name", f"node-{i}")
+            labels = {}
+            if "gpu_product" in s:
+                labels["nvidia.com/gpu.product"] = s["gpu_product"]
+            spec = {}
+            if s.get("unschedulable"):
+                spec["unschedulable"] = True
+            if s.get("taints"):
+                spec["taints"] = s["taints"]
+            status = {"allocatable": {"nvidia.com/gpu": str(s.get("gpu", 0))}}
+            nodes.append({
+                "metadata": {"name": name, "labels": labels},
+                "spec": spec,
+                "status": status,
+            })
+        return json.dumps({"items": nodes})
+
+    @patch("pipeline.lib.capacity.subprocess.run")
+    def test_filter_excludes_cordoned_nodes(self, mock_run):
+        nodes_json = self._mock_nodes_full([
+            {"gpu": 8, "name": "good"},
+            {"gpu": 8, "name": "cordoned", "unschedulable": True},
+        ])
+        pods_json = self._mock_pods([2], node_names=["cordoned"])
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=nodes_json),
+            MagicMock(returncode=0, stdout=pods_json),
+        ]
+        result = probe_free_gpus(node_filters=[NodeFilter()])
+        assert result == (8, 8, 0)
+
+    @patch("pipeline.lib.capacity.subprocess.run")
+    def test_filter_excludes_tainted_nodes_when_no_tolerations(self, mock_run):
+        nodes_json = self._mock_nodes_full([
+            {"gpu": 8, "name": "good"},
+            {"gpu": 8, "name": "tainted", "taints": [
+                {"key": "app", "effect": "NoSchedule"}
+            ]},
+        ])
+        pods_json = self._mock_pods([3], node_names=["good"])
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=nodes_json),
+            MagicMock(returncode=0, stdout=pods_json),
+        ]
+        result = probe_free_gpus(node_filters=[NodeFilter(tolerations=[])])
+        assert result == (5, 8, 3)
+
+    @patch("pipeline.lib.capacity.subprocess.run")
+    def test_filter_excludes_wrong_gpu_product(self, mock_run):
+        nodes_json = self._mock_nodes_full([
+            {"gpu": 8, "name": "h100", "gpu_product": "NVIDIA-H100-80GB-HBM3"},
+            {"gpu": 8, "name": "a100", "gpu_product": "NVIDIA-A100-40GB"},
+        ])
+        pods_json = self._mock_pods([])
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=nodes_json),
+            MagicMock(returncode=0, stdout=pods_json),
+        ]
+        result = probe_free_gpus(node_filters=[
+            NodeFilter(required_gpu_products={"NVIDIA-H100-80GB-HBM3"})
+        ])
+        assert result == (8, 8, 0)
+
+    @patch("pipeline.lib.capacity.subprocess.run")
+    def test_no_filter_preserves_legacy_behavior(self, mock_run):
+        nodes_json = self._mock_nodes_full([
+            {"gpu": 8, "name": "cordoned", "unschedulable": True},
+            {"gpu": 8, "name": "tainted", "taints": [
+                {"key": "x", "effect": "NoSchedule"}
+            ]},
+        ])
+        pods_json = self._mock_pods([])
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=nodes_json),
+            MagicMock(returncode=0, stdout=pods_json),
+        ]
+        result = probe_free_gpus()
+        assert result == (16, 16, 0)
+
+    @patch("pipeline.lib.capacity.subprocess.run")
+    def test_pod_request_on_filtered_node_excluded(self, mock_run):
+        nodes_json = self._mock_nodes_full([
+            {"gpu": 8, "name": "good"},
+            {"gpu": 8, "name": "wrong-product", "gpu_product": "NVIDIA-A100-40GB"},
+        ])
+        pods_json = self._mock_pods([4, 4], node_names=["good", "wrong-product"])
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=nodes_json),
+            MagicMock(returncode=0, stdout=pods_json),
+        ]
+        result = probe_free_gpus(node_filters=[
+            NodeFilter(required_gpu_products={"NVIDIA-H100-80GB-HBM3"})
+        ])
+        # Neither node is H100 → both excluded.
+        assert result == (0, 0, 0)
+
+    @patch("pipeline.lib.capacity.subprocess.run")
+    def test_pod_with_no_nodename_still_skipped_under_filter(self, mock_run):
+        nodes_json = self._mock_nodes_full([{"gpu": 8, "name": "good"}])
+        pods_json = self._mock_pods([4, 4], node_names=["good", None])
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=nodes_json),
+            MagicMock(returncode=0, stdout=pods_json),
+        ]
+        result = probe_free_gpus(node_filters=[NodeFilter()])
+        assert result == (4, 8, 4)
+
 
 # ── derive_gpu_resource_type tests ─────────────────────────────────────────────
 

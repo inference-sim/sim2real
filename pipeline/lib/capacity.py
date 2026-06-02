@@ -83,6 +83,8 @@ def node_is_eligible(node: dict, filters: list[NodeFilter]) -> bool:
 
 def probe_free_gpus(
     gpu_resource_type: str = "nvidia.com/gpu",
+    *,
+    node_filters: "list[NodeFilter] | None" = None,
 ) -> Union[tuple[int, int, int], str]:
     """Return (free_gpus, total_allocatable, total_requested) or error string.
 
@@ -94,6 +96,14 @@ def probe_free_gpus(
 
     Assumes only spec.containers request GPUs (initContainers are excluded —
     llm-d workloads do not use GPU-requesting init containers).
+
+    When node_filters is provided, restrict the sum to nodes accepted by
+    at least one filter (union eligibility across roles). A node is excluded
+    if cordoned, if it has a NoSchedule/NoExecute taint that no filter's
+    tolerations match, or if every filter requires a gpu.product label that
+    this node does not carry. Pods on excluded nodes are also excluded from
+    the requested sum, so the (free, alloc, requested) tuple stays internally
+    consistent.
 
     Note: the two kubectl calls are not atomic — cluster state may change
     between them. Acceptable for logging; consumers that gate on capacity
@@ -125,19 +135,29 @@ def probe_free_gpus(
     except json.JSONDecodeError as e:
         return f"JSON parse error: {e}"
 
+    filters = node_filters or []
+    eligible_node_names: set[str] = set()
     total_allocatable = 0
     for node in nodes.get("items", []):
+        if filters and not node_is_eligible(node, filters):
+            continue
+        name = node.get("metadata", {}).get("name", "")
+        if name:
+            eligible_node_names.add(name)
         alloc = node.get("status", {}).get("allocatable", {})
         count = alloc.get(gpu_resource_type)
         if count is not None:
             try:
                 total_allocatable += int(count)
             except ValueError:
-                return f"non-integer allocatable value {count!r} on node {node.get('metadata', {}).get('name', '?')}"
+                return f"non-integer allocatable value {count!r} on node {name or '?'}"
 
     total_requested = 0
     for pod in pods.get("items", []):
-        if pod.get("spec", {}).get("nodeName") is None:
+        node_name = pod.get("spec", {}).get("nodeName")
+        if node_name is None:
+            continue
+        if filters and node_name not in eligible_node_names:
             continue
         for container in pod.get("spec", {}).get("containers", []):
             requests = container.get("resources", {}).get("requests", {})
