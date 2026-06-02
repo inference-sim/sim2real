@@ -3198,3 +3198,117 @@ def test_shadow_ttl_zero_disables_gating(tmp_path, monkeypatch):
     # All 3 pairs dispatched — shadow tracking disabled, probe says 12 free
     # which fits 3 pairs of cost 4 each
     assert dispatch_count["n"] == 3
+
+
+def _setup_dispatch_run(tmp_path, monkeypatch, *, baseline_yaml: str):
+    """Common setup for _cmd_run integration tests.
+
+    Builds a single-pair run dir with a PipelineRun YAML and the given
+    `baseline.yaml` content, mocks the cluster and store, and returns
+    the args + setup_config + run_dir for the test to invoke _cmd_run.
+
+    Captures probe_free_gpus kwargs into the returned dict; the loop is
+    short-circuited by reporting "Succeeded" on the first poll.
+    """
+    import yaml as _yaml
+    import pipeline.deploy as mod
+    import pipeline.lib.capacity as _cap_mod
+    from pipeline.lib.progress import ConfigMapProgressStore
+
+    run_dir = tmp_path / "runs" / "test-run"
+    cluster_dir = run_dir / "cluster"
+    cluster_dir.mkdir(parents=True)
+    pr = {
+        "metadata": {"name": "pr-a-baseline", "namespace": "ns"},
+        "spec": {"params": [
+            {"name": "workloadName", "value": "wl-a"},
+            {"name": "phase", "value": "baseline"},
+        ]},
+    }
+    (cluster_dir / "pipelinerun-a-baseline.yaml").write_text(_yaml.dump(pr))
+    (cluster_dir / "baseline.yaml").write_text(baseline_yaml)
+    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+
+    monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
+    monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, data: None)
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
+    monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
+    monkeypatch.setattr(mod, "_check_pipelinerun_status", lambda pr_name, ns: "Succeeded")
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+    # _cmd_run only parses the scenario YAML when defaults_result is truthy
+    # (line ~1940 in deploy.py). Provide a minimal non-None defaults stub.
+    monkeypatch.setattr(_cap_mod, "load_defaults", lambda *a, **kw: {"accelerator": {"resource": "nvidia.com/gpu"}})
+    monkeypatch.setattr(mod, "run", lambda *a, **kw: type("_R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+
+    captured: dict = {"probe_kwargs": []}
+
+    def fake_probe(**kwargs):
+        captured["probe_kwargs"].append(kwargs)
+        return (8, 8, 0)
+
+    monkeypatch.setattr(_cap_mod, "probe_free_gpus", fake_probe)
+
+    args = argparse.Namespace(
+        skip_build=True, max_retries=0, poll_interval=1,
+        pending_threshold=600, max_pending_stalls=10, max_backoff=600,
+        default_gpu_cost=4, gpu_resource_type="nvidia.com/gpu",
+        only=None, workload=None, package=None, status=None, force=False,
+        skip_teardown=False, remote=False, preserve_pipelineruns=False,
+        shadow_ttl=0,
+    )
+    setup_config = {"namespace": "sim2real-0", "namespaces": ["sim2real-0"]}
+    return mod, args, setup_config, run_dir, captured
+
+
+class TestCmdRunForwardsNodeFilters:
+    """Issue #268: _cmd_run must forward [NodeFilter()] to probe_free_gpus
+    even when extract_node_filters yields {}, so cordon/taint screening
+    always runs."""
+
+    def test_empty_extractor_result_forwards_default_filter(self, tmp_path, monkeypatch):
+        from pipeline.lib.capacity import NodeFilter
+        # Scenario with no role keys → extract_node_filters returns {}.
+        baseline = "scenario:\n- name: test\n"
+        mod, args, setup, run_dir, captured = _setup_dispatch_run(
+            tmp_path, monkeypatch, baseline_yaml=baseline,
+        )
+        mod._cmd_run(args, run_dir, setup)
+        assert captured["probe_kwargs"], "probe_free_gpus was never called"
+        first = captured["probe_kwargs"][0]
+        assert first.get("node_filters") == [NodeFilter()]
+
+    def test_role_with_acceleratorType_forwards_role_filter(self, tmp_path, monkeypatch, capsys):
+        from pipeline.lib.capacity import NodeFilter
+        baseline = (
+            "scenario:\n"
+            "- name: test\n"
+            "  decode:\n"
+            "    acceleratorType:\n"
+            "      labelKey: nvidia.com/gpu.product\n"
+            "      labelValue: NVIDIA-H100-80GB-HBM3\n"
+        )
+        mod, args, setup, run_dir, captured = _setup_dispatch_run(
+            tmp_path, monkeypatch, baseline_yaml=baseline,
+        )
+        mod._cmd_run(args, run_dir, setup)
+        assert captured["probe_kwargs"], "probe_free_gpus was never called"
+        first = captured["probe_kwargs"][0]
+        assert first.get("node_filters") == [
+            NodeFilter(required_gpu_products=frozenset({"NVIDIA-H100-80GB-HBM3"}))
+        ]
+        out = capsys.readouterr().out
+        assert "Eligibility filter [decode]" in out
+        assert "NVIDIA-H100-80GB-HBM3" in out
+
+    def test_no_per_role_constraint_logs_info_line(self, tmp_path, monkeypatch, capsys):
+        """Issue #268 item 6: when no constraint can be extracted, the orchestrator
+        must announce that cordon/taint-only screening is in effect."""
+        baseline = "scenario:\n- name: test\n"
+        mod, args, setup, run_dir, _captured = _setup_dispatch_run(
+            tmp_path, monkeypatch, baseline_yaml=baseline,
+        )
+        mod._cmd_run(args, run_dir, setup)
+        out = capsys.readouterr().out
+        assert "No per-role GPU product constraint extracted" in out
+        assert "cordon/taint screening only" in out
