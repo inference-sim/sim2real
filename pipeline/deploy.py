@@ -1914,6 +1914,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 scenario_path = p
                 info(f"Deriving GPU config from: {scenario_path.name}")
                 break
+    resolved = None
     if defaults_result and scenario_path.exists():
         try:
             resolved = yaml.safe_load(scenario_path.read_text()) or {}
@@ -1929,14 +1930,9 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
         gpu_resource_type = "nvidia.com/gpu"
     if gpu_resource_type != "nvidia.com/gpu":
         info(f"GPU resource type: {gpu_resource_type}")
-    # Per-role node eligibility filters (issue #261). Empty dict → no filtering.
     node_filters: dict = {}
-    if defaults_result and scenario_path.exists():
-        try:
-            _resolved_for_filters = yaml.safe_load(scenario_path.read_text()) or {}
-        except yaml.YAMLError:
-            _resolved_for_filters = {}
-        node_filters = extract_node_filters(_resolved_for_filters)
+    if resolved:
+        node_filters = extract_node_filters(resolved)
         if node_filters:
             for role, f in node_filters.items():
                 if f.required_gpu_products:

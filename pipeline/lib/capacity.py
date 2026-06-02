@@ -8,6 +8,7 @@ from typing import Union
 
 import yaml
 
+from pipeline.lib.log import warn
 from pipeline.lib.values import deep_merge
 
 
@@ -20,8 +21,8 @@ class NodeFilter:
 
     required_gpu_products: set of acceptable nvidia.com/gpu.product label values.
         Empty set means no product constraint.
-    tolerations: list of K8s toleration dicts (key/operator/value/effect).
-        Empty list means no taints can be tolerated.
+    tolerations: tuple of K8s toleration dicts (key/operator/value/effect).
+        Empty tuple means no taints can be tolerated.
     """
     required_gpu_products: frozenset[str] = field(default_factory=frozenset)
     tolerations: tuple[dict, ...] = field(default_factory=tuple)
@@ -97,13 +98,17 @@ def probe_free_gpus(
     Assumes only spec.containers request GPUs (initContainers are excluded —
     llm-d workloads do not use GPU-requesting init containers).
 
-    When node_filters is provided, restrict the sum to nodes accepted by
-    at least one filter (union eligibility across roles). A node is excluded
-    if cordoned, if it has a NoSchedule/NoExecute taint that no filter's
-    tolerations match, or if every filter requires a gpu.product label that
-    this node does not carry. Pods on excluded nodes are also excluded from
-    the requested sum, so the (free, alloc, requested) tuple stays internally
-    consistent.
+    node_filters semantics:
+      - None or [] → no filtering (legacy behavior; every node counts).
+      - [NodeFilter(), ...] → filter active. A default-constructed NodeFilter
+        still applies cordon and taint screening; product screening only
+        applies when required_gpu_products is non-empty.
+      - When provided, a node is included if accepted by at least one filter
+        (union eligibility across roles): not cordoned, every blocking taint
+        is tolerated by that filter's tolerations, and the gpu.product label
+        satisfies that filter's required set if any. Pods on excluded nodes
+        are also excluded from the requested sum, so the (free, alloc,
+        requested) tuple stays internally consistent.
 
     Note: the two kubectl calls are not atomic — cluster state may change
     between them. Acceptable for logging; consumers that gate on capacity
@@ -137,8 +142,13 @@ def probe_free_gpus(
 
     filters = node_filters or []
     eligible_node_names: set[str] = set()
+    unknown_taint_effects: set[str] = set()
     total_allocatable = 0
     for node in nodes.get("items", []):
+        for taint in node.get("spec", {}).get("taints", []) or []:
+            effect = taint.get("effect", "")
+            if effect and effect not in ("NoSchedule", "NoExecute", "PreferNoSchedule"):
+                unknown_taint_effects.add(effect)
         if filters and not node_is_eligible(node, filters):
             continue
         name = node.get("metadata", {}).get("name", "")
@@ -151,6 +161,9 @@ def probe_free_gpus(
                 total_allocatable += int(count)
             except ValueError:
                 return f"non-integer allocatable value {count!r} on node {name or '?'}"
+    if unknown_taint_effects:
+        warn(f"cluster nodes carry unrecognized taint effects {sorted(unknown_taint_effects)}; "
+             "treated as non-blocking (only NoSchedule/NoExecute exclude) — verify YAML")
 
     total_requested = 0
     for pod in pods.get("items", []):
@@ -257,8 +270,9 @@ def _extract_required_gpu_products(affinity: dict) -> frozenset[str]:
     """Read requiredDuringSchedulingIgnoredDuringExecution matchExpressions
     for the nvidia.com/gpu.product key with operator In; return value set.
 
-    NotIn / Exists are not treated as positive product constraints (would
-    require negation logic outside this issue's scope).
+    Warns when a matchExpression with key nvidia.com/gpu.product is present
+    but the operator is not "In" — surfaces typos like operator: "in" that
+    would otherwise silently degrade to no product constraint.
     """
     node_aff = affinity.get("nodeAffinity", {}) or {}
     required = node_aff.get("requiredDuringSchedulingIgnoredDuringExecution", {}) or {}
@@ -266,19 +280,28 @@ def _extract_required_gpu_products(affinity: dict) -> frozenset[str]:
     products: set[str] = set()
     for term in terms:
         for expr in term.get("matchExpressions", []) or []:
-            if expr.get("key") == _GPU_PRODUCT_LABEL and expr.get("operator") == "In":
+            if expr.get("key") != _GPU_PRODUCT_LABEL:
+                continue
+            op = expr.get("operator")
+            if op == "In":
                 products.update(expr.get("values", []) or [])
+            else:
+                warn(f"nodeAffinity has {_GPU_PRODUCT_LABEL} matchExpression with operator {op!r}; "
+                     "only 'In' is supported — node product filter will not apply")
     return frozenset(products)
 
 
 def extract_node_filters(resolved_scenario: dict) -> dict[str, NodeFilter]:
     """Build per-role NodeFilter dict from a resolved scenario.
 
-    Reads model.helmValues.{role}.extraConfig.affinity.nodeAffinity for each
-    role present. Tolerations are always returned as empty per the
-    conservative assumption in issue #261 (see follow-up #263).
+    Reads only scenario[0] (parity with derive_gpu_resource_type and
+    gpu_cost_per_pair). For each known role present in
+    model.helmValues, reads extraConfig.affinity.nodeAffinity. Tolerations
+    are always returned as empty per the conservative assumption in
+    issue #261 (see follow-up #263).
 
-    Returns empty dict if the scenario has no helmValues for any known role.
+    Returns empty dict if the scenario has no entries, or if no known role
+    is present in helmValues.
     """
     scenarios = resolved_scenario.get("scenario", []) or []
     if not scenarios:

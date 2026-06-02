@@ -281,6 +281,39 @@ class TestProbeFreeGpus:
         result = probe_free_gpus(node_filters=[NodeFilter()])
         assert result == (4, 8, 4)
 
+    @patch("pipeline.lib.capacity.subprocess.run")
+    def test_mixed_eligibility_pod_accounting(self, mock_run):
+        """One eligible node, one excluded; pods on each. Eligible counts, excluded drops."""
+        nodes_json = self._mock_nodes_full([
+            {"gpu": 8, "name": "h100", "gpu_product": "NVIDIA-H100-80GB-HBM3"},
+            {"gpu": 8, "name": "a100", "gpu_product": "NVIDIA-A100-40GB"},
+        ])
+        pods_json = self._mock_pods([3, 5], node_names=["h100", "a100"])
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=nodes_json),
+            MagicMock(returncode=0, stdout=pods_json),
+        ]
+        result = probe_free_gpus(node_filters=[
+            NodeFilter(required_gpu_products={"NVIDIA-H100-80GB-HBM3"})
+        ])
+        # h100 included: 8 alloc, 3 requested. a100 and its 5-GPU pod both excluded.
+        assert result == (5, 8, 3)
+
+    @patch("pipeline.lib.capacity.subprocess.run")
+    def test_warns_on_unrecognized_taint_effect(self, mock_run, capsys):
+        nodes_json = self._mock_nodes_full([
+            {"gpu": 8, "name": "typo", "taints": [{"key": "x", "effect": "Noschedule"}]},
+        ])
+        pods_json = self._mock_pods([])
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=nodes_json),
+            MagicMock(returncode=0, stdout=pods_json),
+        ]
+        probe_free_gpus(node_filters=[NodeFilter()])
+        out = capsys.readouterr().out
+        assert "unrecognized taint effects" in out
+        assert "Noschedule" in out
+
 
 # ── derive_gpu_resource_type tests ─────────────────────────────────────────────
 
@@ -689,3 +722,38 @@ class TestExtractNodeFilters:
         })
         result = extract_node_filters(scenario)
         assert result["decode"].required_gpu_products == frozenset()
+
+    def test_warns_on_unsupported_operator_for_gpu_product(self, capsys):
+        """Operator typo on the gpu.product key (e.g. lowercase 'in') should warn.
+
+        Distinguishes intentional no-constraint from a config typo.
+        """
+        scenario = self._scenario(helm_values={
+            "decode": {"extraConfig": {"affinity": {"nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [{"matchExpressions": [
+                        {"key": "nvidia.com/gpu.product", "operator": "in",
+                         "values": ["NVIDIA-H100-80GB-HBM3"]},
+                    ]}]
+                }}}}},
+        })
+        extract_node_filters(scenario)
+        out = capsys.readouterr().out
+        assert "nvidia.com/gpu.product" in out
+        assert "'in'" in out
+        assert "only 'In' is supported" in out
+
+    def test_no_warn_when_no_gpu_product_expression(self, capsys):
+        """Affinity present for unrelated keys (zone) should not warn."""
+        scenario = self._scenario(helm_values={
+            "decode": {"extraConfig": {"affinity": {"nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [{"matchExpressions": [
+                        {"key": "topology.kubernetes.io/zone", "operator": "In",
+                         "values": ["us-east-1a"]},
+                    ]}]
+                }}}}},
+        })
+        extract_node_filters(scenario)
+        out = capsys.readouterr().out
+        assert "only 'In' is supported" not in out
