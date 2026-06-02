@@ -1872,7 +1872,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     from pipeline.lib.progress import ConfigMapProgressStore
     from pipeline.lib.backoff import BackoffController
     from pipeline.lib.capacity import (
-        probe_free_gpus, derive_gpu_resource_type, load_defaults
+        probe_free_gpus, derive_gpu_resource_type, load_defaults,
+        extract_node_filters,
     )
 
     namespaces = setup_config.get("namespaces") or [setup_config.get("namespace", "")]
@@ -1913,6 +1914,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 scenario_path = p
                 info(f"Deriving GPU config from: {scenario_path.name}")
                 break
+    resolved = None
     if defaults_result and scenario_path.exists():
         try:
             resolved = yaml.safe_load(scenario_path.read_text()) or {}
@@ -1928,6 +1930,15 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
         gpu_resource_type = "nvidia.com/gpu"
     if gpu_resource_type != "nvidia.com/gpu":
         info(f"GPU resource type: {gpu_resource_type}")
+    node_filters: dict = {}
+    if resolved:
+        node_filters = extract_node_filters(resolved)
+        if node_filters:
+            for role, f in node_filters.items():
+                if f.required_gpu_products:
+                    info(f"Eligibility filter [{role}]: gpu.product ∈ {sorted(f.required_gpu_products)}")
+                else:
+                    info(f"Eligibility filter [{role}]: no product constraint")
     _probe_fail_count = 0
     _last_probe_error = ""
     _last_log_state: dict[str, object] = {}
@@ -2141,7 +2152,10 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                         warn(f"[{pair_key}] could not cancel PipelineRun — slot remains busy")
 
         # ── Capacity probe ───────────────────────────────────────────────
-        capacity = probe_free_gpus(gpu_resource_type=gpu_resource_type)
+        capacity = probe_free_gpus(
+            gpu_resource_type=gpu_resource_type,
+            node_filters=list(node_filters.values()) or None,
+        )
         if isinstance(capacity, tuple):
             free_gpus, allocatable, requested = capacity
             _cap_state = (free_gpus, allocatable, requested)
