@@ -601,165 +601,23 @@ class TestNodeFilter:
 
 
 class TestExtractNodeFilters:
-    def _scenario(self, *, helm_values=None):
-        return {
-            "scenario": [{
-                "name": "test",
-                "model": {"helmValues": helm_values or {}},
-            }]
-        }
-
     def test_empty_scenario_returns_empty_dict(self):
         assert extract_node_filters({}) == {}
 
-    def test_no_helm_values_returns_empty_dict(self):
-        assert extract_node_filters(self._scenario()) == {}
+    def test_no_role_keys_returns_empty_dict(self):
+        scenario = {"scenario": [{"name": "test"}]}
+        assert extract_node_filters(scenario) == {}
 
-    def test_decode_with_no_affinity_yields_unconstrained_filter(self):
-        scenario = self._scenario(helm_values={"decode": {}})
+    def test_role_with_no_acceleratorType_yields_unconstrained_filter(self):
+        """A role entry without acceleratorType still produces a NodeFilter
+        so cordon/taint screening engages — just no product constraint."""
+        scenario = {"scenario": [{"decode": {"replicas": 2}}]}
         result = extract_node_filters(scenario)
         assert "decode" in result
         assert result["decode"].required_gpu_products == frozenset()
         assert result["decode"].tolerations == ()
 
-    def test_decode_with_gpu_product_affinity(self):
-        scenario = self._scenario(helm_values={
-            "decode": {
-                "extraConfig": {
-                    "affinity": {
-                        "nodeAffinity": {
-                            "requiredDuringSchedulingIgnoredDuringExecution": {
-                                "nodeSelectorTerms": [{
-                                    "matchExpressions": [{
-                                        "key": "nvidia.com/gpu.product",
-                                        "operator": "In",
-                                        "values": ["NVIDIA-H100-80GB-HBM3"],
-                                    }]
-                                }]
-                            }
-                        }
-                    }
-                }
-            }
-        })
-        result = extract_node_filters(scenario)
-        assert result["decode"].required_gpu_products == frozenset({"NVIDIA-H100-80GB-HBM3"})
-
-    def test_multiple_products_in_match_expression(self):
-        scenario = self._scenario(helm_values={
-            "decode": {
-                "extraConfig": {
-                    "affinity": {
-                        "nodeAffinity": {
-                            "requiredDuringSchedulingIgnoredDuringExecution": {
-                                "nodeSelectorTerms": [{
-                                    "matchExpressions": [{
-                                        "key": "nvidia.com/gpu.product",
-                                        "operator": "In",
-                                        "values": ["NVIDIA-H100-80GB-HBM3", "NVIDIA-H100-PCIe"],
-                                    }]
-                                }]
-                            }
-                        }
-                    }
-                }
-            }
-        })
-        result = extract_node_filters(scenario)
-        assert result["decode"].required_gpu_products == frozenset({
-            "NVIDIA-H100-80GB-HBM3", "NVIDIA-H100-PCIe"
-        })
-
-    def test_tolerations_are_always_empty_for_now(self):
-        scenario = self._scenario(helm_values={
-            "decode": {"extraConfig": {"tolerations": [
-                {"key": "app", "operator": "Equal", "value": "x", "effect": "NoSchedule"}
-            ]}}
-        })
-        result = extract_node_filters(scenario)
-        assert result["decode"].tolerations == ()
-
-    def test_per_role_decode_and_prefill(self):
-        scenario = self._scenario(helm_values={
-            "decode": {"extraConfig": {"affinity": {"nodeAffinity": {
-                "requiredDuringSchedulingIgnoredDuringExecution": {
-                    "nodeSelectorTerms": [{"matchExpressions": [{
-                        "key": "nvidia.com/gpu.product", "operator": "In",
-                        "values": ["NVIDIA-H100-80GB-HBM3"]}]}]
-                }}}}},
-            "prefill": {"extraConfig": {"affinity": {"nodeAffinity": {
-                "requiredDuringSchedulingIgnoredDuringExecution": {
-                    "nodeSelectorTerms": [{"matchExpressions": [{
-                        "key": "nvidia.com/gpu.product", "operator": "In",
-                        "values": ["NVIDIA-A100-40GB"]}]}]
-                }}}}},
-        })
-        result = extract_node_filters(scenario)
-        assert result["decode"].required_gpu_products == frozenset({"NVIDIA-H100-80GB-HBM3"})
-        assert result["prefill"].required_gpu_products == frozenset({"NVIDIA-A100-40GB"})
-
-    def test_ignores_non_gpu_product_match_expressions(self):
-        scenario = self._scenario(helm_values={
-            "decode": {"extraConfig": {"affinity": {"nodeAffinity": {
-                "requiredDuringSchedulingIgnoredDuringExecution": {
-                    "nodeSelectorTerms": [{"matchExpressions": [
-                        {"key": "topology.kubernetes.io/zone", "operator": "In", "values": ["us-east-1a"]},
-                        {"key": "nvidia.com/gpu.product", "operator": "In", "values": ["NVIDIA-H100-80GB-HBM3"]},
-                    ]}]
-                }}}}},
-        })
-        result = extract_node_filters(scenario)
-        assert result["decode"].required_gpu_products == frozenset({"NVIDIA-H100-80GB-HBM3"})
-
-    def test_ignores_unsupported_operators(self):
-        scenario = self._scenario(helm_values={
-            "decode": {"extraConfig": {"affinity": {"nodeAffinity": {
-                "requiredDuringSchedulingIgnoredDuringExecution": {
-                    "nodeSelectorTerms": [{"matchExpressions": [
-                        {"key": "nvidia.com/gpu.product", "operator": "NotIn", "values": ["NVIDIA-V100"]},
-                    ]}]
-                }}}}},
-        })
-        result = extract_node_filters(scenario)
-        assert result["decode"].required_gpu_products == frozenset()
-
-    def test_warns_on_unsupported_operator_for_gpu_product(self, capsys):
-        """Operator typo on the gpu.product key (e.g. lowercase 'in') should warn.
-
-        Distinguishes intentional no-constraint from a config typo.
-        """
-        scenario = self._scenario(helm_values={
-            "decode": {"extraConfig": {"affinity": {"nodeAffinity": {
-                "requiredDuringSchedulingIgnoredDuringExecution": {
-                    "nodeSelectorTerms": [{"matchExpressions": [
-                        {"key": "nvidia.com/gpu.product", "operator": "in",
-                         "values": ["NVIDIA-H100-80GB-HBM3"]},
-                    ]}]
-                }}}}},
-        })
-        extract_node_filters(scenario)
-        out = capsys.readouterr().out
-        assert "nvidia.com/gpu.product" in out
-        assert "'in'" in out
-        assert "only 'In' is supported" in out
-
-    def test_no_warn_when_no_gpu_product_expression(self, capsys):
-        """Affinity present for unrelated keys (zone) should not warn."""
-        scenario = self._scenario(helm_values={
-            "decode": {"extraConfig": {"affinity": {"nodeAffinity": {
-                "requiredDuringSchedulingIgnoredDuringExecution": {
-                    "nodeSelectorTerms": [{"matchExpressions": [
-                        {"key": "topology.kubernetes.io/zone", "operator": "In",
-                         "values": ["us-east-1a"]},
-                    ]}]
-                }}}}},
-        })
-        extract_node_filters(scenario)
-        out = capsys.readouterr().out
-        assert "only 'In' is supported" not in out
-
     def test_extracts_from_acceleratorType_schema(self):
-        """Real scenarios use scenario[0].{role}.acceleratorType.labelKey/labelValue."""
         scenario = {
             "scenario": [{
                 "name": "expceil",
@@ -773,11 +631,9 @@ class TestExtractNodeFilters:
             }],
         }
         result = extract_node_filters(scenario)
-        assert "decode" in result
         assert result["decode"].required_gpu_products == frozenset({"NVIDIA-H100-80GB-HBM3"})
 
     def test_acceleratorType_with_non_gpu_product_label_ignored(self):
-        """A non-GPU-product labelKey produces no product constraint."""
         scenario = {
             "scenario": [{
                 "decode": {
@@ -793,126 +649,75 @@ class TestExtractNodeFilters:
         assert result["decode"].required_gpu_products == frozenset()
 
     def test_per_role_acceleratorType(self):
-        """Different acceleratorType per role yields different product sets."""
         scenario = {
             "scenario": [{
-                "decode": {
-                    "acceleratorType": {
-                        "labelKey": "nvidia.com/gpu.product",
-                        "labelValue": "NVIDIA-H100-80GB-HBM3",
-                    },
-                },
-                "prefill": {
-                    "acceleratorType": {
-                        "labelKey": "nvidia.com/gpu.product",
-                        "labelValue": "NVIDIA-A100-80GB",
-                    },
-                },
+                "decode": {"acceleratorType": {
+                    "labelKey": "nvidia.com/gpu.product",
+                    "labelValue": "NVIDIA-H100-80GB-HBM3",
+                }},
+                "prefill": {"acceleratorType": {
+                    "labelKey": "nvidia.com/gpu.product",
+                    "labelValue": "NVIDIA-A100-80GB",
+                }},
             }],
         }
         result = extract_node_filters(scenario)
         assert result["decode"].required_gpu_products == frozenset({"NVIDIA-H100-80GB-HBM3"})
         assert result["prefill"].required_gpu_products == frozenset({"NVIDIA-A100-80GB"})
 
-    def test_acceleratorType_warns_on_missing_labelValue(self, capsys):
-        """labelKey set to the GPU product label with empty labelValue must warn."""
+    def test_warns_on_missing_labelValue_includes_example(self, capsys):
         scenario = {
             "scenario": [{
-                "decode": {
-                    "acceleratorType": {
-                        "labelKey": "nvidia.com/gpu.product",
-                        "labelValue": "",
-                    },
-                },
+                "decode": {"acceleratorType": {
+                    "labelKey": "nvidia.com/gpu.product",
+                    "labelValue": "",
+                }},
             }],
         }
         result = extract_node_filters(scenario)
         assert result["decode"].required_gpu_products == frozenset()
-        captured = capsys.readouterr()
-        output = captured.err + captured.out
-        assert "acceleratorType" in output
-        assert "labelValue" in output
-        assert "decode" in output
+        out = capsys.readouterr().out + capsys.readouterr().err
+        assert "decode" in out
+        assert "labelValue" in out
+        assert "NVIDIA-H100-80GB-HBM3" in out
 
-    def test_acceleratorType_no_warn_for_non_gpu_product_label(self, capsys):
-        """A non-GPU-product labelKey is silent — not every label is a typo."""
+    def test_no_warn_for_non_gpu_product_label(self, capsys):
         scenario = {
             "scenario": [{
-                "decode": {
-                    "acceleratorType": {
-                        "labelKey": "topology.kubernetes.io/zone",
-                        "labelValue": "us-east-1a",
-                    },
-                },
+                "decode": {"acceleratorType": {
+                    "labelKey": "topology.kubernetes.io/zone",
+                    "labelValue": "us-east-1a",
+                }},
             }],
         }
         extract_node_filters(scenario)
         captured = capsys.readouterr()
-        assert "acceleratorType" not in captured.err
         assert "acceleratorType" not in captured.out
+        assert "acceleratorType" not in captured.err
 
-    def test_acceleratorType_takes_precedence_over_helmValues_affinity(self):
-        """When both schemas are present, the canonical acceleratorType wins."""
+    def test_warns_on_non_dict_acceleratorType(self, capsys):
+        """A typo that puts a string/list/null at acceleratorType should warn,
+        not silently degrade to an empty product set."""
         scenario = {
             "scenario": [{
-                "decode": {
-                    "acceleratorType": {
-                        "labelKey": "nvidia.com/gpu.product",
-                        "labelValue": "NVIDIA-H100-80GB-HBM3",
-                    },
-                },
-                "model": {
-                    "helmValues": {
-                        "decode": {
-                            "extraConfig": {
-                                "affinity": {
-                                    "nodeAffinity": {
-                                        "requiredDuringSchedulingIgnoredDuringExecution": {
-                                            "nodeSelectorTerms": [{
-                                                "matchExpressions": [{
-                                                    "key": "nvidia.com/gpu.product",
-                                                    "operator": "In",
-                                                    "values": ["NVIDIA-A100-80GB"],
-                                                }],
-                                            }],
-                                        },
-                                    },
-                                },
-                            },
-                        },
-                    },
-                },
+                "decode": {"acceleratorType": "NVIDIA-H100-80GB-HBM3"},
             }],
         }
         result = extract_node_filters(scenario)
-        assert result["decode"].required_gpu_products == frozenset({"NVIDIA-H100-80GB-HBM3"})
+        assert result["decode"].required_gpu_products == frozenset()
+        out = capsys.readouterr().out + capsys.readouterr().err
+        assert "decode" in out
+        assert "acceleratorType" in out
+        assert "str" in out
 
-    def test_falls_back_to_helmValues_affinity_when_no_acceleratorType(self):
-        """Users who override affinity directly via helmValues still work."""
+    def test_tolerations_are_always_empty_for_now(self):
         scenario = {
             "scenario": [{
-                "model": {
-                    "helmValues": {
-                        "decode": {
-                            "extraConfig": {
-                                "affinity": {
-                                    "nodeAffinity": {
-                                        "requiredDuringSchedulingIgnoredDuringExecution": {
-                                            "nodeSelectorTerms": [{
-                                                "matchExpressions": [{
-                                                    "key": "nvidia.com/gpu.product",
-                                                    "operator": "In",
-                                                    "values": ["NVIDIA-L40S"],
-                                                }],
-                                            }],
-                                        },
-                                    },
-                                },
-                            },
-                        },
-                    },
-                },
+                "decode": {"acceleratorType": {
+                    "labelKey": "nvidia.com/gpu.product",
+                    "labelValue": "NVIDIA-H100-80GB-HBM3",
+                }},
             }],
         }
         result = extract_node_filters(scenario)
-        assert result["decode"].required_gpu_products == frozenset({"NVIDIA-L40S"})
+        assert result["decode"].tolerations == ()

@@ -266,50 +266,31 @@ _KNOWN_ROLES = ("decode", "prefill")
 _GPU_PRODUCT_LABEL = "nvidia.com/gpu.product"
 
 
-def _extract_required_gpu_products(affinity: dict) -> frozenset[str]:
-    """Read requiredDuringSchedulingIgnoredDuringExecution matchExpressions
-    for the nvidia.com/gpu.product key with operator In; return value set.
-
-    Warns when a matchExpression with key nvidia.com/gpu.product is present
-    but the operator is not "In" — surfaces typos like operator: "in" that
-    would otherwise silently degrade to no product constraint.
-    """
-    node_aff = affinity.get("nodeAffinity", {}) or {}
-    required = node_aff.get("requiredDuringSchedulingIgnoredDuringExecution", {}) or {}
-    terms = required.get("nodeSelectorTerms", []) or []
-    products: set[str] = set()
-    for term in terms:
-        for expr in term.get("matchExpressions", []) or []:
-            if expr.get("key") != _GPU_PRODUCT_LABEL:
-                continue
-            op = expr.get("operator")
-            if op == "In":
-                products.update(expr.get("values", []) or [])
-            else:
-                warn(f"nodeAffinity has {_GPU_PRODUCT_LABEL} matchExpression with operator {op!r}; "
-                     "only 'In' is supported — node product filter will not apply")
-    return frozenset(products)
-
-
 def _extract_required_gpu_products_from_accelerator_type(
     role_cfg: dict, role: str
 ) -> frozenset[str]:
     """Read scenario[0].{role}.acceleratorType.{labelKey, labelValue}.
 
     Returns labelValue as a single-element set when labelKey is
-    nvidia.com/gpu.product and labelValue is non-empty. Warns when
-    labelKey is set to the GPU product label but labelValue is empty —
-    surfaces extraction failures to the operator.
+    nvidia.com/gpu.product and labelValue is non-empty. Warns when:
+
+    - acceleratorType is present but not a dict (string/list/null typo),
+    - labelKey is set to the GPU product label but labelValue is empty.
     """
-    accel = role_cfg.get("acceleratorType")
+    if "acceleratorType" not in role_cfg:
+        return frozenset()
+    accel = role_cfg["acceleratorType"]
     if not isinstance(accel, dict):
+        warn(f"scenario.{role}.acceleratorType is {type(accel).__name__}, expected a mapping "
+             f"with labelKey/labelValue — node product filter will not apply for role {role!r}")
         return frozenset()
     if accel.get("labelKey") != _GPU_PRODUCT_LABEL:
         return frozenset()
     label_value = accel.get("labelValue")
     if not label_value:
-        warn(f"scenario.{role}.acceleratorType has labelKey={_GPU_PRODUCT_LABEL!r} "
-             f"but labelValue is missing/empty — node product filter will not apply for role {role!r}")
+        warn(f"scenario.{role}.acceleratorType has labelKey={_GPU_PRODUCT_LABEL!r} but "
+             f"labelValue is missing/empty (expected e.g. 'NVIDIA-H100-80GB-HBM3') — "
+             f"node product filter will not apply for role {role!r}")
         return frozenset()
     return frozenset({label_value})
 
@@ -318,35 +299,27 @@ def extract_node_filters(resolved_scenario: dict) -> dict[str, NodeFilter]:
     """Build per-role NodeFilter dict from a resolved scenario.
 
     Reads only scenario[0] (parity with derive_gpu_resource_type and
-    gpu_cost_per_pair). For each known role, prefers
+    gpu_cost_per_pair). For each known role, reads
     scenario[0].{role}.acceleratorType.{labelKey, labelValue} (canonical
-    schema). Falls back to model.helmValues.{role}.extraConfig.affinity
-    when no acceleratorType is present for the role. Tolerations are
-    always returned as empty per the conservative assumption in
-    issue #261 (see follow-up #263).
+    schema). Tolerations are always returned as empty per the
+    conservative assumption in issue #261 (see follow-up #263).
 
     Returns empty dict when no scenario entry is present, or when no
-    known role appears in either schema location.
+    known role appears in scenario[0].
     """
     scenarios = resolved_scenario.get("scenario", []) or []
     if not scenarios:
         return {}
     entry = scenarios[0]
-    helm_values = entry.get("model", {}).get("helmValues", {}) or {}
     out: dict[str, NodeFilter] = {}
     for role in _KNOWN_ROLES:
-        role_entry = entry.get(role) if isinstance(entry.get(role), dict) else None
-        in_helm = role in helm_values
-        if role_entry is None and not in_helm:
+        role_entry = entry.get(role)
+        if not isinstance(role_entry, dict):
             continue
-        products = _extract_required_gpu_products_from_accelerator_type(
-            role_entry or {}, role
-        )
-        if not products and in_helm:
-            affinity = (helm_values[role] or {}).get("extraConfig", {}).get("affinity", {}) or {}
-            products = _extract_required_gpu_products(affinity)
         out[role] = NodeFilter(
-            required_gpu_products=products,
+            required_gpu_products=_extract_required_gpu_products_from_accelerator_type(
+                role_entry, role
+            ),
             tolerations=(),
         )
     return out
