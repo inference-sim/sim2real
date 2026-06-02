@@ -676,7 +676,8 @@ class TestExtractNodeFilters:
         }
         result = extract_node_filters(scenario)
         assert result["decode"].required_gpu_products == frozenset()
-        out = capsys.readouterr().out + capsys.readouterr().err
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
         assert "decode" in out
         assert "labelValue" in out
         assert "NVIDIA-H100-80GB-HBM3" in out
@@ -705,9 +706,23 @@ class TestExtractNodeFilters:
         }
         result = extract_node_filters(scenario)
         assert result["decode"].required_gpu_products == frozenset()
-        out = capsys.readouterr().out + capsys.readouterr().err
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
         assert "decode" in out
         assert "acceleratorType" in out
+        assert "str" in out
+
+    def test_warns_on_non_dict_role_entry(self, capsys):
+        """A scalar/null role value (e.g. decode: null, decode: "h100") should
+        warn instead of silently being skipped."""
+        scenario = {"scenario": [{"decode": None, "prefill": "h100"}]}
+        result = extract_node_filters(scenario)
+        assert result == {}
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert "scenario.decode" in out
+        assert "NoneType" in out
+        assert "scenario.prefill" in out
         assert "str" in out
 
     def test_tolerations_are_always_empty_for_now(self):

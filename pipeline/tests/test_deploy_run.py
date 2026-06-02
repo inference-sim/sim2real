@@ -3278,7 +3278,7 @@ class TestCmdRunForwardsNodeFilters:
         first = captured["probe_kwargs"][0]
         assert first.get("node_filters") == [NodeFilter()]
 
-    def test_role_with_acceleratorType_forwards_role_filter(self, tmp_path, monkeypatch):
+    def test_role_with_acceleratorType_forwards_role_filter(self, tmp_path, monkeypatch, capsys):
         from pipeline.lib.capacity import NodeFilter
         baseline = (
             "scenario:\n"
@@ -3297,6 +3297,9 @@ class TestCmdRunForwardsNodeFilters:
         assert first.get("node_filters") == [
             NodeFilter(required_gpu_products=frozenset({"NVIDIA-H100-80GB-HBM3"}))
         ]
+        out = capsys.readouterr().out
+        assert "Eligibility filter [decode]" in out
+        assert "NVIDIA-H100-80GB-HBM3" in out
 
     def test_no_per_role_constraint_logs_info_line(self, tmp_path, monkeypatch, capsys):
         """Issue #268 item 6: when no constraint can be extracted, the orchestrator

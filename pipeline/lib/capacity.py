@@ -313,8 +313,12 @@ def extract_node_filters(resolved_scenario: dict) -> dict[str, NodeFilter]:
     entry = scenarios[0]
     out: dict[str, NodeFilter] = {}
     for role in _KNOWN_ROLES:
-        role_entry = entry.get(role)
+        if role not in entry:
+            continue
+        role_entry = entry[role]
         if not isinstance(role_entry, dict):
+            warn(f"scenario.{role} is {type(role_entry).__name__}, expected a mapping — "
+                 f"node product filter will not apply for role {role!r}")
             continue
         out[role] = NodeFilter(
             required_gpu_products=_extract_required_gpu_products_from_accelerator_type(
