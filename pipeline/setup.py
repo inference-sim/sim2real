@@ -30,6 +30,9 @@ class SetupConfig:
 
 # ── Repo layout ──────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# Ensure repo root is on sys.path when run as a script (python pipeline/setup.py)
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 TEKTONC_DIR = REPO_ROOT / "tektonc-data-collection"
 _DEFAULT_HF_SECRET_NAME = "hf-secret"
 
