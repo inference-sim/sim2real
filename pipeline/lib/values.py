@@ -18,12 +18,54 @@ def _detect_list_key(base_list: list, overlay_list: list):
     return None
 
 
-def _merge_lists(base_list: list, overlay_list: list) -> list:
-    """Merge two lists using three-tier strategy.
+def _k8s_identity(item):
+    """Return a Kubernetes identity tuple (apiVersion, kind, metadata.name), or None.
 
-    Tier 1: either list contains non-dict items → overlay replaces base.
-    Tier 2: all-dict lists with a common key field → merge by key.
-    Tier 3: all-dict lists without a common key → positional (index-based) merge.
+    Used to merge free-form `extraObjects:`-style manifest lists by object identity
+    rather than by list position. Returns None for anything that is not a dict
+    carrying all three of apiVersion, kind, and metadata.name.
+    """
+    if not isinstance(item, dict):
+        return None
+    meta = item.get("metadata")
+    if not isinstance(meta, dict) or "name" not in meta:
+        return None
+    if "apiVersion" not in item or "kind" not in item:
+        return None
+    return (item["apiVersion"], item["kind"], meta["name"])
+
+
+def _merge_by_keyfn(base_list: list, overlay_list: list, keyfn) -> list:
+    """Merge two all-dict lists by a key extractor.
+
+    Base entries are emitted first (deep-merged with the same-keyed overlay entry
+    when present); overlay-only entries are appended in order.
+    """
+    overlay_by_key = {keyfn(item): item for item in overlay_list}
+    result = []
+    seen_keys = set()
+    for bitem in base_list:
+        k = keyfn(bitem)
+        seen_keys.add(k)
+        if k in overlay_by_key:
+            result.append(deep_merge(bitem, overlay_by_key[k]))
+        else:
+            result.append(copy.deepcopy(bitem))
+    for oitem in overlay_list:
+        if keyfn(oitem) not in seen_keys:
+            result.append(copy.deepcopy(oitem))
+    return result
+
+
+def _merge_lists(base_list: list, overlay_list: list) -> list:
+    """Merge two lists using a tiered strategy.
+
+    Tier 1:  either list contains non-dict items → overlay replaces base.
+    Tier 2a: all entries are Kubernetes manifests → merge by (apiVersion, kind,
+             metadata.name) identity. Keeps distinct manifests distinct and lets an
+             overlay patch a same-identity manifest. Covers free-form `extraObjects:`.
+    Tier 2b: all-dict lists with a common top-level key field → merge by key.
+    Tier 3:  all-dict lists without a common key → positional (index-based) merge.
 
     Empty overlay → returns [] (explicit clear). Empty base → returns copy of overlay.
     """
@@ -37,23 +79,14 @@ def _merge_lists(base_list: list, overlay_list: list) -> list:
             and all(isinstance(x, dict) for x in overlay_list)):
         return copy.deepcopy(overlay_list)
 
-    # Tier 2: named-key merge
+    # Tier 2a: Kubernetes-object identity merge (apiVersion, kind, metadata.name)
+    if all(_k8s_identity(x) is not None for x in base_list + overlay_list):
+        return _merge_by_keyfn(base_list, overlay_list, _k8s_identity)
+
+    # Tier 2b: named-key merge
     key_field = _detect_list_key(base_list, overlay_list)
     if key_field is not None:
-        overlay_by_key = {item[key_field]: item for item in overlay_list}
-        result = []
-        seen_keys = set()
-        for bitem in base_list:
-            k = bitem[key_field]
-            seen_keys.add(k)
-            if k in overlay_by_key:
-                result.append(deep_merge(bitem, overlay_by_key[k]))
-            else:
-                result.append(copy.deepcopy(bitem))
-        for oitem in overlay_list:
-            if oitem[key_field] not in seen_keys:
-                result.append(copy.deepcopy(oitem))
-        return result
+        return _merge_by_keyfn(base_list, overlay_list, lambda d: d[key_field])
 
     # Tier 3: positional merge — surplus from either side preserved
     result = []

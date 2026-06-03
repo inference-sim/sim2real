@@ -3,6 +3,7 @@
 from pipeline.lib.values import (
     deep_merge,
     _merge_lists,
+    _k8s_identity,
 )
 
 
@@ -44,6 +45,95 @@ class TestMergeLists:
         assert len(result) == 2
         assert result[0]["a"] == 9
         assert result[1]["a"] == 2
+
+    # ── Kubernetes-identity tier ──────────────────────────────────────────────
+
+    def test_k8s_distinct_identities_all_preserved(self):
+        """Base RBAC + overlay InferenceObjectives: every manifest survives intact."""
+        base = [
+            {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
+             "metadata": {"name": "epp"}, "rules": [{"verbs": ["get"]}]},
+            {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
+             "metadata": {"name": "epp"}, "roleRef": {"kind": "Role"}},
+        ]
+        overlay = [
+            {"apiVersion": "inference.networking.x-k8s.io/v1alpha2", "kind": "InferenceObjective",
+             "metadata": {"name": "critical"}, "spec": {"priority": 100}},
+            {"apiVersion": "inference.networking.x-k8s.io/v1alpha2", "kind": "InferenceObjective",
+             "metadata": {"name": "sheddable"}, "spec": {"priority": -50}},
+        ]
+        result = _merge_lists(base, overlay)
+        # All four manifests present, none folded.
+        kinds = sorted((d["kind"], d["metadata"]["name"]) for d in result)
+        assert kinds == [
+            ("InferenceObjective", "critical"),
+            ("InferenceObjective", "sheddable"),
+            ("Role", "epp"),
+            ("RoleBinding", "epp"),
+        ]
+        # No cross-kind field smearing.
+        role = next(d for d in result if d["kind"] == "Role")
+        assert "spec" not in role and "rules" in role
+        objective = next(d for d in result if d["metadata"]["name"] == "critical")
+        assert "rules" not in objective and "roleRef" not in objective
+
+    def test_k8s_same_identity_merges(self):
+        """Overlay can patch a base manifest sharing the same (apiVersion, kind, name)."""
+        base = [
+            {"apiVersion": "inference.networking.x-k8s.io/v1alpha2", "kind": "InferenceObjective",
+             "metadata": {"name": "critical"}, "spec": {"priority": 100, "poolRef": {"name": "p"}}},
+        ]
+        overlay = [
+            {"apiVersion": "inference.networking.x-k8s.io/v1alpha2", "kind": "InferenceObjective",
+             "metadata": {"name": "critical"}, "spec": {"priority": 200}},
+        ]
+        result = _merge_lists(base, overlay)
+        assert len(result) == 1
+        assert result[0]["spec"]["priority"] == 200          # overlay wins
+        assert result[0]["spec"]["poolRef"] == {"name": "p"}  # base-only key survives
+
+    def test_k8s_base_entries_come_first(self):
+        """Base manifests are emitted first, overlay-only manifests appended after."""
+        base = [{"apiVersion": "v1", "kind": "Role", "metadata": {"name": "a"}}]
+        overlay = [{"apiVersion": "v1", "kind": "Role", "metadata": {"name": "b"}}]
+        result = _merge_lists(base, overlay)
+        assert [d["metadata"]["name"] for d in result] == ["a", "b"]
+
+    def test_k8s_identity_not_triggered_without_metadata_name(self):
+        """A K8s-ish list missing metadata.name falls back to positional (Tier 3)."""
+        base = [{"apiVersion": "v1", "kind": "Role", "metadata": {"generateName": "a-"}, "x": 1}]
+        overlay = [{"apiVersion": "v1", "kind": "Role", "metadata": {"generateName": "a-"}, "y": 2}]
+        result = _merge_lists(base, overlay)
+        # Positional fold of same-shaped single entries → merged dict.
+        assert result == [{"apiVersion": "v1", "kind": "Role",
+                           "metadata": {"generateName": "a-"}, "x": 1, "y": 2}]
+
+    def test_containers_still_merge_by_name_not_k8s(self):
+        """Typed config lists (no apiVersion/kind) are unaffected by the K8s tier."""
+        base = [{"name": "vllm", "image": "old"}, {"name": "sidecar", "image": "s"}]
+        overlay = [{"name": "vllm", "image": "new"}]
+        result = _merge_lists(base, overlay)
+        assert result == [{"name": "vllm", "image": "new"}, {"name": "sidecar", "image": "s"}]
+
+
+# ── _k8s_identity ─────────────────────────────────────────────────────────────
+
+class TestK8sIdentity:
+    def test_returns_tuple_for_manifest(self):
+        item = {"apiVersion": "v1", "kind": "Role", "metadata": {"name": "x"}}
+        assert _k8s_identity(item) == ("v1", "Role", "x")
+
+    def test_none_when_no_metadata_name(self):
+        assert _k8s_identity({"apiVersion": "v1", "kind": "Role", "metadata": {}}) is None
+
+    def test_none_when_metadata_not_dict(self):
+        assert _k8s_identity({"apiVersion": "v1", "kind": "Role", "metadata": "x"}) is None
+
+    def test_none_when_missing_kind(self):
+        assert _k8s_identity({"apiVersion": "v1", "metadata": {"name": "x"}}) is None
+
+    def test_none_for_non_dict(self):
+        assert _k8s_identity("not-a-dict") is None
 
 
 # ── deep_merge ───────────────────────────────────────────────────────────────
