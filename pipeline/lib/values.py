@@ -63,12 +63,18 @@ def _is_k8s_manifest(item) -> bool:
 
 
 def _k8s_markers_conflict(a: dict, b: dict) -> bool:
-    """True if a and b carry Kubernetes identity markers (apiVersion/kind) that disagree.
+    """True when a and b's (apiVersion, kind) markers differ and are not both absent.
 
-    Used to refuse a positional fold (Tier 3) of two entries that look like distinct
-    Kubernetes manifests — e.g. a malformed manifest missing apiVersion or kind that
-    failed the Tier 2a all-manifest gate and would otherwise smear two unrelated
-    objects together. Returns False for plain dicts carrying neither marker.
+    Fires whenever the two (apiVersion, kind) tuples are unequal — including the
+    one-sided case where one entry carries a marker and the other carries none. Used by
+    the Tier 3 positional merge to refuse folding two entries that look like distinct
+    Kubernetes manifests (e.g. a malformed manifest missing apiVersion or kind that
+    escaped the Tier 2a gate) rather than silently smearing unrelated objects together.
+
+    Known limitation: two malformed manifests with *identical* markers (e.g. both
+    missing apiVersion, same kind) are not a conflict here and still fold positionally.
+    Malformed-manifest handling is out of scope (kubectl/Helm reject them); see #278 and
+    the known-limitation tests in test_values.py.
     """
     a_markers = (a.get("apiVersion"), a.get("kind"))
     b_markers = (b.get("apiVersion"), b.get("kind"))
@@ -130,9 +136,9 @@ def _merge_lists(base_list: list, overlay_list: list) -> list:
              through, never folded. Covers free-form `extraObjects:`.
     Tier 2b: all-dict lists with a common top-level key field → merge by key.
     Tier 3:  all-dict lists without a common key → positional (index-based) merge;
-             refuses (raises) to fold two entries whose Kubernetes identity markers
-             (apiVersion/kind) disagree, which signals a malformed manifest that
-             escaped Tier 2a.
+             refuses (raises ValueError) to fold two entries whose (apiVersion, kind)
+             markers differ and are not both absent — a malformed manifest that escaped
+             Tier 2a. Entries with identical or wholly-absent markers still fold.
 
     Empty overlay → returns [] (explicit clear). Empty base → returns copy of overlay.
     """

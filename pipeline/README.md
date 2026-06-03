@@ -360,9 +360,11 @@ Where `baseline_bundle` is the experiment's `baseline.yaml`, `treatment_diffs` i
   through untouched (base first, then overlay), never folded. A duplicate identity
   within either list raises `ValueError`
 - Lists of dicts with a common top-level `name` field merge by name
-- Lists of dicts without a common key merge positionally (a positional fold of two
-  entries with conflicting `apiVersion`/`kind` markers — a malformed manifest — raises
-  `ValueError` rather than silently smearing them together)
+- Lists of dicts without a common key merge positionally. If the two entries at a
+  position carry `apiVersion`/`kind` markers that differ and are not both absent — e.g.
+  a malformed manifest missing one of them — the fold raises `ValueError` instead of
+  silently smearing them. (Two malformed manifests with identical markers still fold;
+  malformed manifests are out of scope — kubectl/Helm reject them.)
 - Lists of scalars are replaced entirely
 - Treatment overlay only needs the delta from baseline_resolved (shared config propagates automatically)
 

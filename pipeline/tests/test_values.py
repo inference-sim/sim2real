@@ -207,6 +207,39 @@ class TestMergeLists:
         assert any(d["kind"] == "RoleBinding" and d["metadata"] == {"generateName": "epp-"}
                    for d in result)
 
+    @pytest.mark.xfail(
+        reason="known limitation: two malformed manifests with identical markers (both "
+               "missing apiVersion, same kind) fold silently; malformed input is out of "
+               "scope (#278)",
+        strict=False,
+    )
+    def test_k8s_symmetric_malformed_manifests_fold_known_limitation(self):
+        """Boundary marker: symmetric malformed manifests still fold (data loss).
+
+        Both entries omit apiVersion and share kind, so markers match and the Tier 3
+        guard does not fire. IDEAL: both Roles preserved. CURRENT: folds to one.
+        """
+        base = [{"kind": "Role", "metadata": {"name": "alpha"}, "rules": [{"verbs": ["get"]}]}]
+        overlay = [{"kind": "Role", "metadata": {"name": "beta"}, "rules": [{"verbs": ["list"]}]}]
+        result = _merge_lists(base, overlay)
+        assert sorted(d["metadata"]["name"] for d in result) == ["alpha", "beta"]
+
+    @pytest.mark.xfail(
+        raises=ValueError,
+        reason="known limitation: the Tier 3 divergence guard over-fires on nameless "
+               "marker-bearing nested entries (malformed input); out of scope (#278)",
+        strict=False,
+    )
+    def test_k8s_nameless_marker_sublist_overfires_known_limitation(self):
+        """Boundary marker: a kind-bearing list with no top-level name and differing
+        kinds (e.g. malformed RBAC subjects) reaches Tier 3 and raises, where a plain
+        positional merge was intended. IDEAL: merge without raising.
+        """
+        base = [{"kind": "ServiceAccount", "namespace": "a"}]
+        overlay = [{"kind": "User", "apiGroup": "rbac"}]
+        result = _merge_lists(base, overlay)
+        assert len(result) == 1
+
     def test_containers_still_merge_by_name_not_k8s(self):
         """Typed config lists (no apiVersion/kind) are unaffected by the K8s tier."""
         base = [{"name": "vllm", "image": "old"}, {"name": "sidecar", "image": "s"}]
