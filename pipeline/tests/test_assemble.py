@@ -97,6 +97,62 @@ def test_baseline_merge(tmp_path):
     assert sc["model"]["name"] == "Qwen/Qwen3-14B"
 
 
+def test_baseline_extraobjects_handauthored_survive_overlay(tmp_path):
+    """Hand-authored extraObjects in the scenario survive an overlay that also
+    defines extraObjects — no positional fold (issue #278)."""
+    baseline = {
+        "scenario": [{
+            "name": "admission-control",
+            "model": {"name": "Qwen/Qwen3-14B"},
+            "extraObjects": [
+                {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
+                 "metadata": {"name": "epp"}, "rules": [{"verbs": ["get"]}]},
+                {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
+                 "metadata": {"name": "epp"}, "roleRef": {"kind": "Role", "name": "epp"}},
+            ],
+        }],
+    }
+    overlay = {
+        "scenario": [{
+            "name": "admission-control",
+            "extraObjects": [
+                {"apiVersion": "inference.networking.x-k8s.io/v1alpha2",
+                 "kind": "InferenceObjective", "metadata": {"name": "critical"},
+                 "spec": {"priority": 100}},
+                {"apiVersion": "inference.networking.x-k8s.io/v1alpha2",
+                 "kind": "InferenceObjective", "metadata": {"name": "sheddable"},
+                 "spec": {"priority": -50}},
+            ],
+        }],
+    }
+    _write(tmp_path / "baseline.yaml", baseline)
+    _write(tmp_path / "generated" / "baseline_config.yaml", overlay)
+    _write(tmp_path / "generated" / "treatment_config.yaml", {})
+
+    bl, _ = assemble_scenarios(
+        baseline_path=tmp_path / "baseline.yaml",
+        treatment_path=None,
+        baseline_overlay_path=tmp_path / "generated" / "baseline_config.yaml",
+        treatment_overlay_path=tmp_path / "generated" / "treatment_config.yaml",
+    )
+
+    objs = bl["scenario"][0]["extraObjects"]
+    identities = sorted((o["kind"], o["metadata"]["name"]) for o in objs)
+    assert identities == [
+        ("InferenceObjective", "critical"),
+        ("InferenceObjective", "sheddable"),
+        ("Role", "epp"),
+        ("RoleBinding", "epp"),
+    ]
+    # The hand-authored Role keeps its rules and gains no InferenceObjective spec.
+    role = next(o for o in objs if o["kind"] == "Role")
+    assert role["rules"] == [{"verbs": ["get"]}]
+    assert "spec" not in role
+    # The overlay's InferenceObjective gains no stray RBAC fields.
+    critical = next(o for o in objs if o["metadata"]["name"] == "critical")
+    assert "rules" not in critical and "roleRef" not in critical
+
+
 def test_treatment_merge(tmp_path):
     """Treatment = baseline + treatment diffs + treatment overlay."""
     _write(tmp_path / "baseline.yaml", BASELINE)
