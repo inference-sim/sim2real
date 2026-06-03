@@ -160,12 +160,73 @@ class TestMergeLists:
         with pytest.raises(ValueError, match="duplicate Kubernetes object identity"):
             _merge_lists(base, overlay)
 
+    def test_k8s_partial_manifest_missing_apiversion_raises(self):
+        """A malformed manifest (kind but no apiVersion) must not silently fold (#278).
+
+        It fails the Tier 2a all-manifest gate, falls to the Tier 3 positional merge,
+        and the divergence guard refuses to smear it onto a dissimilar object.
+        """
+        base = [{"kind": "Role", "metadata": {"name": "epp"}, "rules": [{"verbs": ["get"]}]}]
+        overlay = [{"apiVersion": "inf/v1", "kind": "InferenceObjective",
+                    "metadata": {"name": "critical"}, "spec": {"priority": 100}}]
+        with pytest.raises(ValueError, match="Kubernetes manifests with differing"):
+            _merge_lists(base, overlay)
+
+    def test_k8s_same_identity_patch_and_nameless_carry_through(self):
+        """A same-identity patch plus a nameless sibling merges without raising.
+
+        Pins the duplicate-identity ValueError against a regression on the legitimate
+        base+overlay patch path (where a manifest carries a nameless sublist).
+        """
+        base = [
+            {"apiVersion": "inf/v1", "kind": "InferenceObjective",
+             "metadata": {"name": "critical"}, "spec": {"priority": 100, "poolRef": {"name": "p"}}},
+            {"apiVersion": "rbac/v1", "kind": "RoleBinding",
+             "metadata": {"generateName": "epp-"}, "roleRef": {"kind": "Role"}},
+        ]
+        overlay = [
+            {"apiVersion": "inf/v1", "kind": "InferenceObjective",
+             "metadata": {"name": "critical"}, "spec": {"priority": 200}},
+        ]
+        result = _merge_lists(base, overlay)
+        assert len(result) == 2
+        crit = next(d for d in result if d["kind"] == "InferenceObjective")
+        assert crit["spec"]["priority"] == 200            # overlay patch wins
+        assert crit["spec"]["poolRef"] == {"name": "p"}    # base-only key survives
+        rb = next(d for d in result if d["kind"] == "RoleBinding")
+        assert rb["metadata"] == {"generateName": "epp-"}  # nameless sibling untouched
+
+    def test_k8s_overlay_nameless_manifest_carried_through(self):
+        """A nameless manifest contributed by the overlay is carried through, not folded."""
+        base = [{"apiVersion": "rbac/v1", "kind": "Role", "metadata": {"name": "epp"}}]
+        overlay = [{"apiVersion": "rbac/v1", "kind": "RoleBinding",
+                    "metadata": {"generateName": "epp-"}}]
+        result = _merge_lists(base, overlay)
+        assert len(result) == 2
+        assert any(d["kind"] == "Role" and d["metadata"] == {"name": "epp"} for d in result)
+        assert any(d["kind"] == "RoleBinding" and d["metadata"] == {"generateName": "epp-"}
+                   for d in result)
+
     def test_containers_still_merge_by_name_not_k8s(self):
         """Typed config lists (no apiVersion/kind) are unaffected by the K8s tier."""
         base = [{"name": "vllm", "image": "old"}, {"name": "sidecar", "image": "s"}]
         overlay = [{"name": "vllm", "image": "new"}]
         result = _merge_lists(base, overlay)
         assert result == [{"name": "vllm", "image": "new"}, {"name": "sidecar", "image": "s"}]
+
+    def test_rolebinding_subjects_merge_by_name_not_raised(self):
+        """Same-identity RoleBindings merge their `subjects` (kind-only entries) by name.
+
+        Guards against a regression where treating apiVersion-or-kind as manifest-shaped
+        would route the subjects sublist into the identity merge and wrongly raise.
+        """
+        base = [{"apiVersion": "rbac/v1", "kind": "RoleBinding", "metadata": {"name": "epp"},
+                 "subjects": [{"kind": "ServiceAccount", "name": "epp", "namespace": "a"}]}]
+        overlay = [{"apiVersion": "rbac/v1", "kind": "RoleBinding", "metadata": {"name": "epp"},
+                    "subjects": [{"kind": "ServiceAccount", "name": "epp", "namespace": "b"}]}]
+        result = _merge_lists(base, overlay)
+        assert len(result) == 1
+        assert result[0]["subjects"] == [{"kind": "ServiceAccount", "name": "epp", "namespace": "b"}]
 
 
 # ── _k8s_identity ─────────────────────────────────────────────────────────────

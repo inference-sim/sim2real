@@ -62,6 +62,21 @@ def _is_k8s_manifest(item) -> bool:
     return isinstance(item, dict) and "apiVersion" in item and "kind" in item
 
 
+def _k8s_markers_conflict(a: dict, b: dict) -> bool:
+    """True if a and b carry Kubernetes identity markers (apiVersion/kind) that disagree.
+
+    Used to refuse a positional fold (Tier 3) of two entries that look like distinct
+    Kubernetes manifests — e.g. a malformed manifest missing apiVersion or kind that
+    failed the Tier 2a all-manifest gate and would otherwise smear two unrelated
+    objects together. Returns False for plain dicts carrying neither marker.
+    """
+    a_markers = (a.get("apiVersion"), a.get("kind"))
+    b_markers = (b.get("apiVersion"), b.get("kind"))
+    if a_markers == (None, None) and b_markers == (None, None):
+        return False
+    return a_markers != b_markers
+
+
 def _merge_k8s_objects(base_list: list, overlay_list: list) -> list:
     """Merge two lists of Kubernetes manifests without ever folding dissimilar objects.
 
@@ -114,7 +129,10 @@ def _merge_lists(base_list: list, overlay_list: list) -> list:
              metadata.name) identity; manifests without metadata.name are carried
              through, never folded. Covers free-form `extraObjects:`.
     Tier 2b: all-dict lists with a common top-level key field → merge by key.
-    Tier 3:  all-dict lists without a common key → positional (index-based) merge.
+    Tier 3:  all-dict lists without a common key → positional (index-based) merge;
+             refuses (raises) to fold two entries whose Kubernetes identity markers
+             (apiVersion/kind) disagree, which signals a malformed manifest that
+             escaped Tier 2a.
 
     Empty overlay → returns [] (explicit clear). Empty base → returns copy of overlay.
     """
@@ -141,6 +159,14 @@ def _merge_lists(base_list: list, overlay_list: list) -> list:
     result = []
     for i in range(max(len(base_list), len(overlay_list))):
         if i < len(base_list) and i < len(overlay_list):
+            if _k8s_markers_conflict(base_list[i], overlay_list[i]):
+                raise ValueError(
+                    "refusing to positionally fold Kubernetes manifests with differing "
+                    f"identity markers at index {i}: "
+                    f"{(base_list[i].get('apiVersion'), base_list[i].get('kind'))} vs "
+                    f"{(overlay_list[i].get('apiVersion'), overlay_list[i].get('kind'))} "
+                    "— an entry is likely missing apiVersion or kind"
+                )
             result.append(deep_merge(base_list[i], overlay_list[i]))
         elif i < len(base_list):
             result.append(copy.deepcopy(base_list[i]))

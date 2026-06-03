@@ -228,6 +228,48 @@ def test_treatment_extraobjects_handauthored_survive_double_merge(tmp_path):
         assert "rules" not in obj and "roleRef" not in obj
 
 
+def test_duplicate_extraobjects_identity_surfaces_to_operator(tmp_path):
+    """A duplicate manifest identity across scenario + overlay raises through assembly.
+
+    Confirms the _merge_k8s_objects ValueError is not swallowed on the way out of
+    assemble_scenarios — the operator sees it rather than getting silently merged data.
+    """
+    baseline = {
+        "scenario": [{
+            "name": "admission-control",
+            "extraObjects": [
+                {"apiVersion": "inference.networking.x-k8s.io/v1alpha2",
+                 "kind": "InferenceObjective", "metadata": {"name": "critical"},
+                 "spec": {"priority": 100}},
+            ],
+        }],
+    }
+    overlay = {
+        "scenario": [{
+            "name": "admission-control",
+            "extraObjects": [
+                {"apiVersion": "inference.networking.x-k8s.io/v1alpha2",
+                 "kind": "InferenceObjective", "metadata": {"name": "critical"},
+                 "spec": {"priority": 1}},
+                {"apiVersion": "inference.networking.x-k8s.io/v1alpha2",
+                 "kind": "InferenceObjective", "metadata": {"name": "critical"},
+                 "spec": {"priority": 2}},
+            ],
+        }],
+    }
+    _write(tmp_path / "baseline.yaml", baseline)
+    _write(tmp_path / "generated" / "baseline_config.yaml", overlay)
+    _write(tmp_path / "generated" / "treatment_config.yaml", {})
+
+    with pytest.raises(ValueError, match="duplicate Kubernetes object identity"):
+        assemble_scenarios(
+            baseline_path=tmp_path / "baseline.yaml",
+            treatment_path=None,
+            baseline_overlay_path=tmp_path / "generated" / "baseline_config.yaml",
+            treatment_overlay_path=tmp_path / "generated" / "treatment_config.yaml",
+        )
+
+
 def test_treatment_merge(tmp_path):
     """Treatment = baseline + treatment diffs + treatment overlay."""
     _write(tmp_path / "baseline.yaml", BASELINE)
