@@ -352,7 +352,11 @@ Where `baseline_bundle` is the experiment's `baseline.yaml`, `treatment_diffs` i
 ### Deep merge semantics
 
 - Dict keys merge recursively (overlay overrides base)
-- Lists of dicts with a common `name` field merge by name
+- Lists where every entry is a Kubernetes manifest (has `apiVersion`, `kind`, and
+  `metadata.name` — e.g. `extraObjects:`) merge by object identity
+  `(apiVersion, kind, metadata.name)`: distinct manifests are all preserved, and an
+  overlay entry sharing an identity patches the matching base manifest
+- Lists of dicts with a common top-level `name` field merge by name
 - Lists of dicts without a common key merge positionally
 - Lists of scalars are replaced entirely
 - Treatment overlay only needs the delta from baseline_resolved (shared config propagates automatically)
