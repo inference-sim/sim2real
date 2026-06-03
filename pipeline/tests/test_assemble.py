@@ -97,6 +97,179 @@ def test_baseline_merge(tmp_path):
     assert sc["model"]["name"] == "Qwen/Qwen3-14B"
 
 
+def test_baseline_extraobjects_handauthored_survive_overlay(tmp_path):
+    """Hand-authored extraObjects in the scenario survive an overlay that also
+    defines extraObjects — no positional fold (issue #278)."""
+    baseline = {
+        "scenario": [{
+            "name": "admission-control",
+            "model": {"name": "Qwen/Qwen3-14B"},
+            "extraObjects": [
+                {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
+                 "metadata": {"name": "epp"}, "rules": [{"verbs": ["get"]}]},
+                {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
+                 "metadata": {"name": "epp"}, "roleRef": {"kind": "Role", "name": "epp"}},
+            ],
+        }],
+    }
+    overlay = {
+        "scenario": [{
+            "name": "admission-control",
+            "extraObjects": [
+                {"apiVersion": "inference.networking.x-k8s.io/v1alpha2",
+                 "kind": "InferenceObjective", "metadata": {"name": "critical"},
+                 "spec": {"priority": 100}},
+                {"apiVersion": "inference.networking.x-k8s.io/v1alpha2",
+                 "kind": "InferenceObjective", "metadata": {"name": "sheddable"},
+                 "spec": {"priority": -50}},
+            ],
+        }],
+    }
+    _write(tmp_path / "baseline.yaml", baseline)
+    _write(tmp_path / "generated" / "baseline_config.yaml", overlay)
+    _write(tmp_path / "generated" / "treatment_config.yaml", {})
+
+    bl, _ = assemble_scenarios(
+        baseline_path=tmp_path / "baseline.yaml",
+        treatment_path=None,
+        baseline_overlay_path=tmp_path / "generated" / "baseline_config.yaml",
+        treatment_overlay_path=tmp_path / "generated" / "treatment_config.yaml",
+    )
+
+    objs = bl["scenario"][0]["extraObjects"]
+    identities = sorted((o["kind"], o["metadata"]["name"]) for o in objs)
+    assert identities == [
+        ("InferenceObjective", "critical"),
+        ("InferenceObjective", "sheddable"),
+        ("Role", "epp"),
+        ("RoleBinding", "epp"),
+    ]
+    # The hand-authored Role keeps its rules and gains no InferenceObjective spec.
+    role = next(o for o in objs if o["kind"] == "Role")
+    assert role["rules"] == [{"verbs": ["get"]}]
+    assert "spec" not in role
+    # The overlay's InferenceObjective gains no stray RBAC fields.
+    critical = next(o for o in objs if o["metadata"]["name"] == "critical")
+    assert "rules" not in critical and "roleRef" not in critical
+
+
+def test_treatment_extraobjects_handauthored_survive_double_merge(tmp_path):
+    """Hand-authored extraObjects survive the treatment arm's double merge (issue #278).
+
+    The treatment arm is deep_merge(deep_merge(baseline_resolved, treatment_diffs),
+    treatment_overlay), so extraObjects pass through the merge twice. Hand-authored RBAC
+    from the baseline scenario, the baseline overlay's InferenceObjective, and the
+    treatment overlay's InferenceObjective must all coexist with no positional fold.
+    """
+    baseline = {
+        "scenario": [{
+            "name": "admission-control",
+            "model": {"name": "Qwen/Qwen3-14B"},
+            "extraObjects": [
+                {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
+                 "metadata": {"name": "epp"}, "rules": [{"verbs": ["get"]}]},
+                {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
+                 "metadata": {"name": "epp"}, "roleRef": {"kind": "Role", "name": "epp"}},
+            ],
+        }],
+    }
+    baseline_overlay = {
+        "scenario": [{
+            "name": "admission-control",
+            "extraObjects": [
+                {"apiVersion": "inference.networking.x-k8s.io/v1alpha2",
+                 "kind": "InferenceObjective", "metadata": {"name": "critical"},
+                 "spec": {"priority": 100}},
+            ],
+        }],
+    }
+    treatment_diffs = {
+        "scenario": [{
+            "name": "admission-control",
+            "images": {"inferenceScheduler": {"tag": "ac"}},
+        }],
+    }
+    treatment_overlay = {
+        "scenario": [{
+            "name": "admission-control",
+            "extraObjects": [
+                {"apiVersion": "inference.networking.x-k8s.io/v1alpha2",
+                 "kind": "InferenceObjective", "metadata": {"name": "sheddable"},
+                 "spec": {"priority": -50}},
+            ],
+        }],
+    }
+    _write(tmp_path / "baseline.yaml", baseline)
+    _write(tmp_path / "treatment.yaml", treatment_diffs)
+    _write(tmp_path / "generated" / "baseline_config.yaml", baseline_overlay)
+    _write(tmp_path / "generated" / "treatment_config.yaml", treatment_overlay)
+
+    _, tr = assemble_scenarios(
+        baseline_path=tmp_path / "baseline.yaml",
+        treatment_path=tmp_path / "treatment.yaml",
+        baseline_overlay_path=tmp_path / "generated" / "baseline_config.yaml",
+        treatment_overlay_path=tmp_path / "generated" / "treatment_config.yaml",
+    )
+
+    objs = tr["scenario"][0]["extraObjects"]
+    identities = sorted((o["kind"], o["metadata"]["name"]) for o in objs)
+    assert identities == [
+        ("InferenceObjective", "critical"),
+        ("InferenceObjective", "sheddable"),
+        ("Role", "epp"),
+        ("RoleBinding", "epp"),
+    ]
+    # RBAC survives the double merge intact, no InferenceObjective fields smeared on.
+    role = next(o for o in objs if o["kind"] == "Role")
+    assert role["rules"] == [{"verbs": ["get"]}]
+    assert "spec" not in role
+    # InferenceObjectives gain no stray RBAC fields.
+    for obj in (o for o in objs if o["kind"] == "InferenceObjective"):
+        assert "rules" not in obj and "roleRef" not in obj
+
+
+def test_duplicate_extraobjects_identity_surfaces_to_operator(tmp_path):
+    """A duplicate manifest identity across scenario + overlay raises through assembly.
+
+    Confirms the _merge_k8s_objects ValueError is not swallowed on the way out of
+    assemble_scenarios — the operator sees it rather than getting silently merged data.
+    """
+    baseline = {
+        "scenario": [{
+            "name": "admission-control",
+            "extraObjects": [
+                {"apiVersion": "inference.networking.x-k8s.io/v1alpha2",
+                 "kind": "InferenceObjective", "metadata": {"name": "critical"},
+                 "spec": {"priority": 100}},
+            ],
+        }],
+    }
+    overlay = {
+        "scenario": [{
+            "name": "admission-control",
+            "extraObjects": [
+                {"apiVersion": "inference.networking.x-k8s.io/v1alpha2",
+                 "kind": "InferenceObjective", "metadata": {"name": "critical"},
+                 "spec": {"priority": 1}},
+                {"apiVersion": "inference.networking.x-k8s.io/v1alpha2",
+                 "kind": "InferenceObjective", "metadata": {"name": "critical"},
+                 "spec": {"priority": 2}},
+            ],
+        }],
+    }
+    _write(tmp_path / "baseline.yaml", baseline)
+    _write(tmp_path / "generated" / "baseline_config.yaml", overlay)
+    _write(tmp_path / "generated" / "treatment_config.yaml", {})
+
+    with pytest.raises(ValueError, match="duplicate Kubernetes object identity"):
+        assemble_scenarios(
+            baseline_path=tmp_path / "baseline.yaml",
+            treatment_path=None,
+            baseline_overlay_path=tmp_path / "generated" / "baseline_config.yaml",
+            treatment_overlay_path=tmp_path / "generated" / "treatment_config.yaml",
+        )
+
+
 def test_treatment_merge(tmp_path):
     """Treatment = baseline + treatment diffs + treatment overlay."""
     _write(tmp_path / "baseline.yaml", BASELINE)

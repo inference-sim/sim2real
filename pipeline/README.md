@@ -352,8 +352,19 @@ Where `baseline_bundle` is the experiment's `baseline.yaml`, `treatment_diffs` i
 ### Deep merge semantics
 
 - Dict keys merge recursively (overlay overrides base)
-- Lists of dicts with a common `name` field merge by name
-- Lists of dicts without a common key merge positionally
+- Lists where every entry is a Kubernetes manifest (a dict with `apiVersion` and
+  `kind` — e.g. `extraObjects:`) merge by object identity. Entries with
+  `metadata.name` merge by `(apiVersion, kind, metadata.name)` — distinct manifests
+  are preserved, and a same-identity overlay entry patches the matching base manifest.
+  Entries without `metadata.name` (e.g. `generateName`, `List` kinds) are carried
+  through untouched (base first, then overlay), never folded. A duplicate identity
+  within either list raises `ValueError`
+- Lists of dicts with a common top-level `name` field merge by name
+- Lists of dicts without a common key merge positionally. If the two entries at a
+  position carry `apiVersion`/`kind` markers that differ and are not both absent — e.g.
+  a malformed manifest missing one of them — the fold raises `ValueError` instead of
+  silently smearing them. (Two malformed manifests with identical markers still fold;
+  malformed manifests are out of scope — kubectl/Helm reject them.)
 - Lists of scalars are replaced entirely
 - Treatment overlay only needs the delta from baseline_resolved (shared config propagates automatically)
 
