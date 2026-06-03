@@ -2,7 +2,7 @@
 import copy
 
 
-# ── Three-tier list merge strategy ───────────────────────────────────────────
+# ── Tiered list merge strategy ────────────────────────────────────────────────
 
 _LIST_KEY_CANDIDATES = ("name", "mountPath", "containerPort")
 
@@ -57,13 +57,62 @@ def _merge_by_keyfn(base_list: list, overlay_list: list, keyfn) -> list:
     return result
 
 
+def _is_k8s_manifest(item) -> bool:
+    """True if item looks like a Kubernetes manifest: a dict with apiVersion and kind."""
+    return isinstance(item, dict) and "apiVersion" in item and "kind" in item
+
+
+def _merge_k8s_objects(base_list: list, overlay_list: list) -> list:
+    """Merge two lists of Kubernetes manifests without ever folding dissimilar objects.
+
+    Manifests carrying a full identity (apiVersion, kind, metadata.name) merge by that
+    identity: distinct objects are all preserved, and an overlay entry sharing an
+    identity patches the matching base manifest. Manifests lacking metadata.name (e.g.
+    metadata.generateName, or List kinds) cannot be keyed, so they are carried through
+    untouched — base entries first, then overlay entries — rather than positionally
+    folded into a dissimilar object.
+
+    Raises ValueError on a duplicate identity within either list: duplicate
+    (apiVersion, kind, metadata.name) is an invalid manifest set that would otherwise
+    silently lose data.
+    """
+    overlay_by_key = {}
+    for oitem in overlay_list:
+        k = _k8s_identity(oitem)
+        if k is None:
+            continue
+        if k in overlay_by_key:
+            raise ValueError(f"duplicate Kubernetes object identity in overlay list: {k}")
+        overlay_by_key[k] = oitem
+
+    result = []
+    seen_keys = set()
+    for bitem in base_list:
+        k = _k8s_identity(bitem)
+        if k is None:
+            result.append(copy.deepcopy(bitem))  # nameless: carry through, never fold
+            continue
+        if k in seen_keys:
+            raise ValueError(f"duplicate Kubernetes object identity in base list: {k}")
+        seen_keys.add(k)
+        if k in overlay_by_key:
+            result.append(deep_merge(bitem, overlay_by_key[k]))
+        else:
+            result.append(copy.deepcopy(bitem))
+    for oitem in overlay_list:
+        k = _k8s_identity(oitem)
+        if k is None or k not in seen_keys:
+            result.append(copy.deepcopy(oitem))  # overlay-only (keyed or nameless)
+    return result
+
+
 def _merge_lists(base_list: list, overlay_list: list) -> list:
     """Merge two lists using a tiered strategy.
 
     Tier 1:  either list contains non-dict items → overlay replaces base.
     Tier 2a: all entries are Kubernetes manifests → merge by (apiVersion, kind,
-             metadata.name) identity. Keeps distinct manifests distinct and lets an
-             overlay patch a same-identity manifest. Covers free-form `extraObjects:`.
+             metadata.name) identity; manifests without metadata.name are carried
+             through, never folded. Covers free-form `extraObjects:`.
     Tier 2b: all-dict lists with a common top-level key field → merge by key.
     Tier 3:  all-dict lists without a common key → positional (index-based) merge.
 
@@ -79,9 +128,9 @@ def _merge_lists(base_list: list, overlay_list: list) -> list:
             and all(isinstance(x, dict) for x in overlay_list)):
         return copy.deepcopy(overlay_list)
 
-    # Tier 2a: Kubernetes-object identity merge (apiVersion, kind, metadata.name)
-    if all(_k8s_identity(x) is not None for x in base_list + overlay_list):
-        return _merge_by_keyfn(base_list, overlay_list, _k8s_identity)
+    # Tier 2a: Kubernetes manifest lists — merge by identity, never positionally fold
+    if all(_is_k8s_manifest(x) for x in base_list + overlay_list):
+        return _merge_k8s_objects(base_list, overlay_list)
 
     # Tier 2b: named-key merge
     key_field = _detect_list_key(base_list, overlay_list)
@@ -103,8 +152,9 @@ def _merge_lists(base_list: list, overlay_list: list) -> list:
 def deep_merge(base: dict, overlay: dict) -> dict:
     """Deep-merge overlay onto base. Dict keys merged recursively.
 
-    Lists of dicts are merged by named key or positional index (see _merge_lists).
-    Lists of scalars are replaced entirely. Returns a new dict (deep copy).
+    Lists of dicts are merged by Kubernetes identity, named key, or positional index
+    (see _merge_lists). Lists of scalars are replaced entirely. Returns a new dict
+    (deep copy).
     """
     result = copy.deepcopy(base)
     for key, oval in overlay.items():
