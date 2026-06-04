@@ -136,3 +136,70 @@ class TestCmdBuildScenarioIteration:
         })
         images = collect_scenario_images(cluster_dir)
         assert images[0]["image_ref"] == treatment_ref
+
+
+class TestWriteBuildMetadata:
+    """Unit tests for _write_build_metadata helper (issue #191)."""
+
+    def test_writes_epp_image_and_last_completed_step(self, tmp_path):
+        from pipeline.deploy import _write_build_metadata
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        meta = {"version": 1, "stages": {}}
+        (run_dir / "run_metadata.json").write_text(json.dumps(meta))
+
+        _write_build_metadata(run_dir, "ghcr.io/org/sched:r1")
+
+        result = json.loads((run_dir / "run_metadata.json").read_text())
+        assert result["epp_image"] == "ghcr.io/org/sched:r1"
+        assert result["stages"]["deploy"]["last_completed_step"] == "build"
+
+    def test_creates_stages_and_deploy_keys_when_missing(self, tmp_path):
+        from pipeline.deploy import _write_build_metadata
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        (run_dir / "run_metadata.json").write_text(json.dumps({"version": 1}))
+
+        _write_build_metadata(run_dir, "img:tag")
+
+        result = json.loads((run_dir / "run_metadata.json").read_text())
+        assert result["stages"]["deploy"]["last_completed_step"] == "build"
+        assert result["epp_image"] == "img:tag"
+
+    def test_preserves_other_stage_keys(self, tmp_path):
+        from pipeline.deploy import _write_build_metadata
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        (run_dir / "run_metadata.json").write_text(json.dumps({
+            "version": 1,
+            "stages": {"setup": {"status": "ok"}, "deploy": {"status": "in_progress"}},
+        }))
+
+        _write_build_metadata(run_dir, "img:tag")
+
+        result = json.loads((run_dir / "run_metadata.json").read_text())
+        assert result["stages"]["setup"] == {"status": "ok"}
+        assert result["stages"]["deploy"]["status"] == "in_progress"
+        assert result["stages"]["deploy"]["last_completed_step"] == "build"
+
+    def test_no_op_when_metadata_missing(self, tmp_path):
+        from pipeline.deploy import _write_build_metadata
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_build_metadata(run_dir, "img:tag")
+        assert not (run_dir / "run_metadata.json").exists()
+
+    def test_no_op_when_metadata_unparseable(self, tmp_path):
+        from pipeline.deploy import _write_build_metadata
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        (run_dir / "run_metadata.json").write_text("not json {{{")
+
+        _write_build_metadata(run_dir, "img:tag")
+
+        assert (run_dir / "run_metadata.json").read_text() == "not json {{{"
