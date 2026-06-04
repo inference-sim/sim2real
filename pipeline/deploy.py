@@ -114,6 +114,26 @@ def _load_setup_config() -> dict:
 
 # ── Image build ───────────────────────────────────────────────────────────────
 
+def _write_build_metadata(run_dir: Path, epp_image: str) -> None:
+    """Record a successful EPP build in run_metadata.json.
+
+    Sets ``epp_image`` and ``stages.deploy.last_completed_step = "build"`` so
+    ``run.py inspect`` (via ``run_manager.inspect_run``) shows the deploy
+    progress. No-op if run_metadata.json is missing or unparseable — the
+    caller's earlier load/validate path already surfaces those errors.
+    """
+    meta_path = run_dir / "run_metadata.json"
+    if not meta_path.exists():
+        return
+    try:
+        meta = json.loads(meta_path.read_text())
+    except json.JSONDecodeError:
+        return
+    meta["epp_image"] = epp_image
+    meta.setdefault("stages", {}).setdefault("deploy", {})["last_completed_step"] = "build"
+    meta_path.write_text(json.dumps(meta, indent=2))
+
+
 def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
     """Ensure all required scenario images exist. Returns 'built', 'skip', or 'current'.
 
@@ -182,6 +202,8 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
             ok(f"Image current (hash unchanged): {ref}")
 
     if not to_build:
+        treatment_ref = f"{registry}/{repo_name}:{run_name}"
+        _write_build_metadata(run_dir, treatment_ref)
         return "current"
 
     # Load translation output for source toggle (if available)
@@ -301,6 +323,8 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
         ok(f"Image built and hash recorded: {ref}")
         built_any = True
 
+    treatment_ref = f"{registry}/{repo_name}:{run_name}"
+    _write_build_metadata(run_dir, treatment_ref)
     return "built" if built_any else "current"
 
 
