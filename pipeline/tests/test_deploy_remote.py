@@ -696,8 +696,9 @@ def test_run_remote_status_filter_rejects_unmatched(monkeypatch, tmp_path):
     assert exc_info.value.code == 1
 
 
-def test_run_remote_skips_validation_when_configmap_unreachable(monkeypatch, tmp_path):
-    """When ConfigMap is unreachable, pre-flight validation is skipped (not errored)."""
+def test_run_remote_skips_validation_when_configmap_unreachable(monkeypatch, tmp_path, capsys):
+    """When ConfigMap is unreachable, pre-flight validation is skipped (not
+    errored), and the warning explicitly names what was skipped (issue #287)."""
     from pipeline.lib.progress import ConfigMapProgressStore
 
     run_dir = _setup_run_dir(tmp_path)
@@ -715,3 +716,8 @@ def test_run_remote_skips_validation_when_configmap_unreachable(monkeypatch, tmp
         args = _make_run_args(remote=True, skip_build=True, status="failed")
         setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
         mod._cmd_run_remote(args, run_dir, setup_config)
+
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "ConfigMap unreachable" in combined
+    assert "skipping pre-flight filter validation" in combined

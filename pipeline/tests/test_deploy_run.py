@@ -113,6 +113,35 @@ def test_status_missing_progress_file(tmp_path, capsys, monkeypatch):
     assert "0 pairs" in out
 
 
+def test_status_unreachable_configmap_exits(tmp_path, capsys, monkeypatch):
+    """Cluster-unreachable causes _cmd_status to exit non-zero with a
+    distinct message instead of printing '0 pairs' (issue #287)."""
+    from pipeline.deploy import _cmd_status
+
+    def _raise_unreachable(self):
+        raise RuntimeError("kubectl: connection refused")
+
+    monkeypatch.setattr(ConfigMapProgressStore, "load", _raise_unreachable)
+    monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
+
+    class _Args:
+        only = None
+        workload = None
+        package = None
+        status = None
+        live = False
+
+    with pytest.raises(SystemExit) as exc_info:
+        _cmd_status(_Args(), tmp_path / "run-x",
+                    setup_config={"namespace": "sim2real-ns"})
+
+    assert exc_info.value.code != 0
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "unreachable" in combined.lower()
+    assert "0 pairs" not in combined
+
+
 def test_status_filter_by_only(tmp_path, capsys, monkeypatch):
     """status subcommand supports --only filter."""
     from pipeline.deploy import _cmd_status
@@ -3516,14 +3545,22 @@ class TestLoadProgressHelper:
         with pytest.raises(RuntimeError, match="kubectl unreachable"):
             _load_progress(store)
 
-    def test_swallows_runtime_error_when_allow_unreachable(self):
-        from pipeline.deploy import _load_progress
+    def test_raises_progress_unavailable_when_allow_unreachable(self):
+        """allow_unreachable=True converts RuntimeError into ProgressUnavailable
+        so callers can distinguish unreachable from legitimate empty data
+        (issue #287)."""
+        from pipeline.deploy import _load_progress, ProgressUnavailable
 
         def boom():
             raise RuntimeError("kubectl unreachable")
         store = self._fake_store(boom)
-        result = _load_progress(store, allow_unreachable=True)
-        assert result == {}
+        with pytest.raises(ProgressUnavailable, match="kubectl unreachable"):
+            _load_progress(store, allow_unreachable=True)
+
+    def test_progress_unavailable_subclasses_runtime_error(self):
+        """Existing handlers that catch RuntimeError continue to work."""
+        from pipeline.deploy import ProgressUnavailable
+        assert issubclass(ProgressUnavailable, RuntimeError)
 
     def test_value_error_exits_even_when_allow_unreachable(self):
         from pipeline.deploy import _load_progress
