@@ -204,10 +204,44 @@ while :; do
   sleep 3
 done
 
-# ── Step 6: Clean up build pod ─────────────────────────────────────
+# ── Step 6: Set GHCR package visibility to public (best-effort) ────
+# GHCR creates new packages with private visibility (inherited from the
+# repository). Cluster pods then fail with ImagePullBackOff because no
+# imagePullSecret is wired onto their service account. Setting the package
+# to public is a one-time per-package operation; subsequent pushes are a
+# no-op. Non-GHCR registries (e.g. Quay.io) manage visibility differently
+# and are skipped.
+#
+# Best-effort: a failure here (gh not authenticated, package already public,
+# unusual nested path) is non-fatal. The user will see ImagePullBackOff
+# later and can fix visibility manually.
+IMAGE_NO_TAG="${FULL_IMAGE%:*}"
+REGISTRY_HOST="${IMAGE_NO_TAG%%/*}"
+if [ "${REGISTRY_HOST}" = "ghcr.io" ]; then
+  REST="${IMAGE_NO_TAG#ghcr.io/}"
+  if [[ "${REST}" == */* ]]; then
+    PKG_OWNER="${REST%%/*}"
+    PKG_NAME="${REST#*/}"
+    info "Setting GHCR package ${PKG_OWNER}/${PKG_NAME} visibility=public..."
+    if gh api --method PUT "/orgs/${PKG_OWNER}/packages/container/${PKG_NAME}/visibility" \
+         -f visibility=public >/dev/null 2>&1; then
+      ok "GHCR package set to public (org-owned)"
+    elif gh api --method PUT "/user/packages/container/${PKG_NAME}/visibility" \
+         -f visibility=public >/dev/null 2>&1; then
+      ok "GHCR package set to public (user-owned)"
+    else
+      warn "Could not set GHCR package visibility automatically."
+      warn "If pods fail with ImagePullBackOff, run one of:"
+      warn "  gh api --method PUT /orgs/${PKG_OWNER}/packages/container/${PKG_NAME}/visibility -f visibility=public"
+      warn "  gh api --method PUT /user/packages/container/${PKG_NAME}/visibility -f visibility=public"
+    fi
+  fi
+fi
+
+# ── Step 7: Clean up build pod ─────────────────────────────────────
 kubectl delete pod "${BUILD_POD}" -n "${NAMESPACE}" --ignore-not-found --force --grace-period=0 2>/dev/null || true
 
-# ── Step 7: Update metadata ───────────────────────────────────────
+# ── Step 8: Update metadata ───────────────────────────────────────
 if [ -z "${IMAGE_REF}" ] && [ -f "${METADATA}" ]; then
   python3 -c "
 import json
