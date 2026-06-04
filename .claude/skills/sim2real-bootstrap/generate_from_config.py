@@ -311,13 +311,11 @@ def build_additional_flags(
         f = fields["enable_chunked_prefill"]
         flags.append(("--enable-chunked-prefill", f.source))
 
-    # Always emit --no-enable-prefix-caching UNLESS explicitly True
+    # Only emit --no-enable-prefix-caching when the user explicitly disabled it.
+    # If unspecified or explicitly enabled, defer to vLLM's default.
     epc = fields.get("enable_prefix_caching")
-    if epc is None:
-        flags.append(("--no-enable-prefix-caching", "default (not specified in config.md)"))
-    elif not epc.value:
+    if epc is not None and not epc.value:
         flags.append(("--no-enable-prefix-caching", epc.source))
-    # If epc.value is True: don't emit the flag (caching enabled)
 
     if "dtype" in fields and fields["dtype"].value != "auto":
         f = fields["dtype"]
