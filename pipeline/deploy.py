@@ -2952,9 +2952,12 @@ Examples:
 def main():
     parser = build_parser()
     args = parser.parse_args()
-    machine_readable = (args.command == "pairs" and
-                         any(getattr(args, f, False)
-                             for f in ("keys_only", "workloads_only", "packages_only")))
+    machine_readable = (
+        (args.command == "pairs" and
+         any(getattr(args, f, False)
+             for f in ("keys_only", "workloads_only", "packages_only"))) or
+        (args.command == "status" and getattr(args, "silent", False))
+    )
     if not machine_readable:
         print(_c("36", "\n━━━ sim2real-deploy ━━━\n"))
 
