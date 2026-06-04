@@ -253,6 +253,68 @@ def test_wait_for_pod_failed_phase_exits(monkeypatch):
     assert exc_info.value.code == 1
 
 
+def test_wait_for_pod_failed_surfaces_logs(monkeypatch, capsys):
+    """A container exiting non-zero (empty pod.status.message) surfaces the
+    container terminated detail and the orchestrator pod logs. Issue #276."""
+    pod_json = json.dumps({
+        "items": [{
+            "metadata": {"name": "orch-pod-xyz"},
+            "status": {
+                "phase": "Failed",
+                "containerStatuses": [{
+                    "name": "orchestrator",
+                    "state": {"terminated": {"exitCode": 2, "reason": "Error"}},
+                }],
+            },
+        }],
+    })
+    log_text = "[ERROR] --workload: unrecognized values ['balanced-20']"
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 0
+            stderr = ""
+        r = _R()
+        if "logs" in cmd:
+            r.stdout = log_text
+        else:
+            r.stdout = pod_json
+        return r
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    with pytest.raises(SystemExit) as exc_info:
+        mod._wait_for_job_pod("ns", timeout=10, poll=1)
+    assert exc_info.value.code == 1
+    out = capsys.readouterr()
+    combined = out.out + out.err
+    # Container terminated detail appears in the header.
+    assert "orchestrator exited 2 (Error)" in combined
+    # The actual diagnostic from the pod logs is surfaced.
+    assert log_text in combined
+
+
+def test_report_failed_pod_no_logs_no_crash(monkeypatch, capsys):
+    """If the orchestrator container never started (no logs), reporting still
+    succeeds and prints the pod-level message."""
+    pod = {
+        "metadata": {"name": "orch-pod-xyz"},
+        "status": {"phase": "Failed", "message": "Evicted",
+                   "containerStatuses": []},
+    }
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 1
+            stdout = ""
+            stderr = "container not found"
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    mod._report_failed_pod(pod, "ns")
+    combined = "".join(capsys.readouterr())
+    assert "Orchestrator pod failed: Evicted" in combined
+
+
 def test_wait_for_pod_consecutive_kubectl_failures_exits(monkeypatch):
     """Three consecutive kubectl failures trigger early exit."""
     def fake_run(cmd, *, check=True, capture=False, cwd=None):

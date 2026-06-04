@@ -2543,6 +2543,45 @@ def _check_existing_job(namespace: str) -> "str | None":
     return "completed"
 
 
+def _report_failed_pod(pod: dict, namespace: str) -> None:
+    """Print the cause of an orchestrator pod failure before the caller exits.
+
+    `pod.status.message` is only populated for pod-level failures (evicted,
+    preempted, OOMKilled at the pod level). When a container simply exits
+    non-zero that field is empty, so fall back to the container's terminated
+    `exitCode`/`reason` and tail the orchestrator logs, where the real
+    diagnostic lives. See issue #276.
+    """
+    status = pod.get("status", {})
+    msg = status.get("message", "")
+    details = []
+    all_statuses = (status.get("initContainerStatuses", [])
+                    + status.get("containerStatuses", []))
+    for cs in all_statuses:
+        term = cs.get("state", {}).get("terminated", {})
+        if term and term.get("exitCode", 0) != 0:
+            cname = cs.get("name", "?")
+            reason = term.get("reason", "")
+            code = term.get("exitCode", "")
+            details.append(f"{cname} exited {code}"
+                           + (f" ({reason})" if reason else ""))
+
+    header = "Orchestrator pod failed"
+    if msg:
+        header += f": {msg}"
+    elif details:
+        header += ": " + "; ".join(details)
+    err(header)
+
+    pod_name = pod.get("metadata", {}).get("name", "")
+    if pod_name:
+        logs = run(["kubectl", "logs", pod_name, "-n", namespace,
+                    "-c", "orchestrator", "--tail=80"],
+                   check=False, capture=True)
+        if logs.stdout:
+            err("Orchestrator pod logs:\n" + logs.stdout)
+
+
 def _wait_for_job_pod(namespace: str, *, timeout: int = 120, poll: int = 5) -> None:
     """Poll until the orchestrator pod reaches Running or Succeeded.
 
@@ -2585,8 +2624,7 @@ def _wait_for_job_pod(namespace: str, *, timeout: int = 120, poll: int = 5) -> N
                 if phase in ("Running", "Succeeded"):
                     return
                 if phase == "Failed":
-                    msg = pod.get("status", {}).get("message", "unknown reason")
-                    err(f"Orchestrator pod failed: {msg}")
+                    _report_failed_pod(pod, namespace)
                     sys.exit(1)
                 all_statuses = (pod.get("status", {}).get("initContainerStatuses", [])
                                 + pod.get("status", {}).get("containerStatuses", []))
