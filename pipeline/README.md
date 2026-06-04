@@ -189,6 +189,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 | `--workload NAME…` | Filter by workload names (comma or space-separated) |
 | `--package NAME…` | Filter by package names (comma or space-separated) |
 | `--status STATE` | Filter by status (e.g. `running`, `done`, `failed`) |
+| `-s`, `--silent` | Suppress the per-pair table and banner; print only the summary line (machine-readable) |
 
 **`deploy.py collect`** — extracts results from the cluster PVC and writes to `workspace/runs/<run>/results/{phase}/<workload>/`. Repeated collects are incremental: each workload's remote `trace_data.csv` mtime is probed and skipped if the local copy is already up to date. If the mtime probe fails (e.g., pod not running), collection falls back to a full copy — this is the expected degradation path.
 
