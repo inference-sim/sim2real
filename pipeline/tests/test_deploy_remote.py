@@ -269,6 +269,7 @@ def test_wait_for_pod_failed_surfaces_logs(monkeypatch, capsys):
         }],
     })
     log_text = "[ERROR] --workload: unrecognized values ['balanced-20']"
+    log_cmds = []
 
     def fake_run(cmd, *, check=True, capture=False, cwd=None):
         class _R:
@@ -276,6 +277,7 @@ def test_wait_for_pod_failed_surfaces_logs(monkeypatch, capsys):
             stderr = ""
         r = _R()
         if "logs" in cmd:
+            log_cmds.append(cmd)
             r.stdout = log_text
         else:
             r.stdout = pod_json
@@ -291,6 +293,40 @@ def test_wait_for_pod_failed_surfaces_logs(monkeypatch, capsys):
     assert "orchestrator exited 2 (Error)" in combined
     # The actual diagnostic from the pod logs is surfaced.
     assert log_text in combined
+    # Logs are fetched for the orchestrator container with a bounded tail.
+    assert log_cmds, "expected a kubectl logs call"
+    cmd = log_cmds[0]
+    assert "orch-pod-xyz" in cmd
+    assert cmd[cmd.index("-c") + 1] == "orchestrator"
+    assert any(a.startswith("--tail") for a in cmd)
+
+
+def test_report_failed_pod_init_container_in_header(monkeypatch, capsys):
+    """A non-zero terminated init container surfaces in the failure header,
+    even when the orchestrator container never started. Issue #276."""
+    pod = {
+        "metadata": {"name": "orch-pod-xyz"},
+        "status": {
+            "phase": "Failed",
+            "initContainerStatuses": [{
+                "name": "fetch-inputs",
+                "state": {"terminated": {"exitCode": 1, "reason": "Error"}},
+            }],
+            "containerStatuses": [],
+        },
+    }
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 1  # orchestrator container never ran -> no logs
+            stdout = ""
+            stderr = "container orchestrator is not valid"
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    mod._report_failed_pod(pod, "ns")
+    combined = "".join(capsys.readouterr())
+    assert "fetch-inputs exited 1 (Error)" in combined
 
 
 def test_report_failed_pod_no_logs_no_crash(monkeypatch, capsys):
