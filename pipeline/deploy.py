@@ -523,9 +523,11 @@ def _handle_pending_pods(*, pr_name: str, namespace: str, entry: dict,
 
     Side effects on *entry* (caller must persist):
       On True (non-recoverable):
-        - status: "failed", namespace: None, pending_since: None
+        - status: "failed", pending_since: None
+        - namespace retained so reset/cleanup can find releases (issue #277)
       On True (recoverable threshold exceeded):
-        - status: "pending" or "stalled", namespace: None
+        - status: "pending" (re-dispatch — namespace cleared) or
+          "stalled" (terminal — namespace retained, issue #277)
         - pending_stalls: incremented, pending_since: None
       On False (no action):
         - pending_since: set on first recoverable detection, cleared when
@@ -1461,8 +1463,12 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
             action = "state-only reset"
         elif is_done:
             action = "deleting PipelineRun, checking orphaned releases"
-        else:
+        elif ns:
             action = "deleting PipelineRun, uninstalling helm releases"
+        else:
+            # ns is null but a PipelineRun is known — helm cleanup needs the
+            # namespace, so it will be skipped (issue #277). Don't claim it.
+            action = "deleting PipelineRun (namespace unknown — skipping helm cleanup)"
         info(f"Resetting {key} (status: {status}, ns: {slot}) — {action}")
 
     # No namespace and no pr_name — just reset state
@@ -1474,6 +1480,12 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
                     info(f"[DRY-RUN] {key}: would check for orphaned helm releases in {completed_ns}")
                 else:
                     _uninstall_orphaned_helm(key, completed_ns)
+        elif not dry_run:
+            # Terminal pair (callers only reset non-pending pairs) with no
+            # namespace recorded — helm cleanup is skipped. Warn rather than
+            # silently report success (issue #277).
+            warn(f"{key}: namespace unknown — skipped helm cleanup; if releases "
+                 f"were installed, remove them manually (helm list/uninstall across slots)")
         if not dry_run and not (is_done and preserve_done_status):
             entry["status"] = "pending"
             entry["retries"] = 0
@@ -1554,6 +1566,12 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
             if helm_failed:
                 warn(f"{key}: some releases failed to uninstall — state NOT reset")
                 return False
+    else:
+        # PipelineRun was known but no namespace recorded — helm needs the
+        # namespace, so cleanup is skipped. Warn rather than silently report
+        # success (issue #277).
+        warn(f"{key}: namespace unknown — skipped helm cleanup; if releases "
+             f"were installed, remove them manually (helm list/uninstall across slots)")
 
     # Reset state
     entry["status"] = "pending"
