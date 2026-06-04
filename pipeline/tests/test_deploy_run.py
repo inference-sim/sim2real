@@ -142,6 +142,113 @@ def test_status_unreachable_configmap_exits(tmp_path, capsys, monkeypatch):
     assert "0 pairs" not in combined
 
 
+def test_status_silent_prints_summary_only(tmp_path, capsys, monkeypatch):
+    """-s/--silent suppresses per-pair table; only the summary line prints (issue #290)."""
+    from pipeline.deploy import _cmd_status
+    _mock_cm(monkeypatch, _PROGRESS)
+
+    class _Args:
+        only = None
+        workload = None
+        package = None
+        status = None
+        live = False
+        silent = True
+
+    _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+    out = capsys.readouterr().out
+
+    assert "5 pairs" in out
+    assert "PAIR" not in out
+    assert "STATUS" not in out
+    for key in _PROGRESS:
+        if not key.startswith("_"):
+            assert key not in out
+
+
+def test_status_silent_composes_with_filter(tmp_path, capsys, monkeypatch):
+    """Silent summary reflects the filtered subset, not the full progress."""
+    from pipeline.deploy import _cmd_status
+    _mock_cm(monkeypatch, _PROGRESS)
+
+    class _Args:
+        only = None
+        workload = "wl-smoke"
+        package = None
+        status = None
+        live = False
+        silent = True
+
+    _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+    out = capsys.readouterr().out
+
+    assert "2 pairs" in out
+    assert "wl-smoke-baseline" not in out
+    assert "wl-load-baseline" not in out
+
+
+def test_status_silent_empty_progress(tmp_path, capsys, monkeypatch):
+    """Silent on empty progress prints just the '0 pairs (no progress data)' line."""
+    from pipeline.deploy import _cmd_status
+    _mock_cm(monkeypatch, {})
+
+    class _Args:
+        only = None
+        workload = None
+        package = None
+        status = None
+        live = False
+        silent = True
+
+    _cmd_status(_Args(), tmp_path / "missing-run-dir",
+                setup_config={"namespace": "sim2real-ns"})
+    out = capsys.readouterr().out
+    assert "0 pairs" in out
+    assert "PAIR" not in out
+
+
+def test_status_silent_unreachable_still_exits(tmp_path, capsys, monkeypatch):
+    """-s does not change the error path: cluster-unreachable still exits non-zero (issue #290)."""
+    from pipeline.deploy import _cmd_status
+
+    def _raise_unreachable(self):
+        raise RuntimeError("kubectl: connection refused")
+
+    monkeypatch.setattr(ConfigMapProgressStore, "load", _raise_unreachable)
+    monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
+
+    class _Args:
+        only = None
+        workload = None
+        package = None
+        status = None
+        live = False
+        silent = True
+
+    with pytest.raises(SystemExit) as exc_info:
+        _cmd_status(_Args(), tmp_path / "run-x",
+                    setup_config={"namespace": "sim2real-ns"})
+
+    assert exc_info.value.code != 0
+    captured = capsys.readouterr()
+    assert "unreachable" in (captured.out + captured.err).lower()
+
+
+def test_status_silent_short_and_long_flag_parse():
+    """Both -s and --silent parse to args.silent=True; default is False."""
+    from pipeline.deploy import build_parser
+    parser = build_parser()
+
+    args = parser.parse_args(["status"])
+    assert args.silent is False
+
+    args = parser.parse_args(["status", "-s"])
+    assert args.silent is True
+
+    args = parser.parse_args(["status", "--silent"])
+    assert args.silent is True
+
+
 def test_status_filter_by_only(tmp_path, capsys, monkeypatch):
     """status subcommand supports --only filter."""
     from pipeline.deploy import _cmd_status
