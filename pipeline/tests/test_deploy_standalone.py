@@ -53,3 +53,54 @@ def test_main_works_without_transfer_yaml(tmp_path, monkeypatch):
 
     assert len(status_called) == 1
     assert status_called[0] == run_dir
+
+
+def test_main_status_silent_suppresses_banner(tmp_path, monkeypatch, capsys):
+    """deploy.py status -s must not print the cyan '━━━ sim2real-deploy ━━━' banner
+    so the output is purely the summary line for scripting (issue #290)."""
+    import pipeline.deploy as deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+    ws = tmp_path / "workspace"
+    (ws / "setup_config.json").write_text(json.dumps({"current_run": "test-run", "namespace": "ns-0"}))
+
+    progress = {"wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "done", "namespace": "ns-0", "retries": 0}}
+    monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: progress)
+    monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
+
+    monkeypatch.setattr("sys.argv", ["deploy.py", "--experiment-root", str(tmp_path), "status", "-s"])
+    monkeypatch.setattr(deploy, "EXPERIMENT_ROOT", tmp_path)
+
+    with patch.object(deploy, "_load_setup_config",
+                      return_value={"current_run": "test-run", "namespace": "ns-0"}):
+        deploy.main()
+
+    out = capsys.readouterr().out
+    assert "sim2real-deploy" not in out
+    assert "1 pairs" in out
+    assert "1 done" in out
+
+
+def test_main_status_without_silent_keeps_banner(tmp_path, monkeypatch, capsys):
+    """Without -s, deploy.py status still prints the banner (regression guard)."""
+    import pipeline.deploy as deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+    ws = tmp_path / "workspace"
+    (ws / "setup_config.json").write_text(json.dumps({"current_run": "test-run", "namespace": "ns-0"}))
+
+    progress = {"wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "done", "namespace": "ns-0", "retries": 0}}
+    monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: progress)
+    monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
+
+    monkeypatch.setattr("sys.argv", ["deploy.py", "--experiment-root", str(tmp_path), "status"])
+    monkeypatch.setattr(deploy, "EXPERIMENT_ROOT", tmp_path)
+
+    with patch.object(deploy, "_load_setup_config",
+                      return_value={"current_run": "test-run", "namespace": "ns-0"}):
+        deploy.main()
+
+    out = capsys.readouterr().out
+    assert "sim2real-deploy" in out

@@ -476,35 +476,45 @@ def _cmd_status(args, run_dir: Path,
         return
 
     pairs = {k: progress[k] for k in _resolve_scope(progress, args)}
+    silent = getattr(args, "silent", False)
 
     if not pairs:
         print("  0 pairs")
-        print()
+        if not silent:
+            print()
         return
 
-    pair_w = max(len(k) for k in pairs) + 2
-    col_status = 12
-    col_slot = 14
-    col_retries = 7
-
-    header = (f"{'PAIR':<{pair_w}} {'STATUS':<{col_status}} {'SLOT':<{col_slot}} {'RETRIES':<{col_retries}}")
-    print()
-    print(header)
-    print("-" * len(header))
-
     counts: dict[str, int] = {}
-    for key, entry in sorted(pairs.items()):
-        status = entry.get("status", "unknown")
-        slot = entry.get("namespace") or "—"
-        retries = entry.get("retries", 0)
-        counts[status] = counts.get(status, 0) + 1
-        print(f"{key:<{pair_w}} {status:<{col_status}} {slot:<{col_slot}} {retries}")
 
-    print()
+    if silent:
+        for entry in pairs.values():
+            status = entry.get("status", "unknown")
+            counts[status] = counts.get(status, 0) + 1
+    else:
+        pair_w = max(len(k) for k in pairs) + 2
+        col_status = 12
+        col_slot = 14
+        col_retries = 7
+
+        header = (f"{'PAIR':<{pair_w}} {'STATUS':<{col_status}} {'SLOT':<{col_slot}} {'RETRIES':<{col_retries}}")
+        print()
+        print(header)
+        print("-" * len(header))
+
+        for key, entry in sorted(pairs.items()):
+            status = entry.get("status", "unknown")
+            slot = entry.get("namespace") or "—"
+            retries = entry.get("retries", 0)
+            counts[status] = counts.get(status, 0) + 1
+            print(f"{key:<{pair_w}} {status:<{col_status}} {slot:<{col_slot}} {retries}")
+
+        print()
+
     summary_parts = [f"{v} {k}" for k, v in sorted(counts.items())]
     print(f"  {len(pairs)} pairs: " + "  ".join(summary_parts))
 
-    print()
+    if not silent:
+        print()
 
 
 # ── Pairs command ────────────────────────────────────────────────────────────
@@ -2867,6 +2877,8 @@ Examples:
     status_p.add_argument("--workload", nargs="+", metavar="NAME",  help="Scope to pairs matching these workloads (comma or space-separated)")
     status_p.add_argument("--package",  nargs="+", metavar="NAME",  help="Scope to pairs matching these packages (comma or space-separated)")
     status_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status (e.g. running, done, failed)")
+    status_p.add_argument("-s", "--silent", action="store_true",
+                          help="Suppress the per-pair table; print only the summary line")
 
     build_p = sub.add_parser("build", help="Ensure all scenario images exist (pre-flight for run)")
     build_p.add_argument("--skip-build", action="store_true", dest="skip_build",
@@ -2940,9 +2952,12 @@ Examples:
 def main():
     parser = build_parser()
     args = parser.parse_args()
-    machine_readable = (args.command == "pairs" and
-                         any(getattr(args, f, False)
-                             for f in ("keys_only", "workloads_only", "packages_only")))
+    machine_readable = (
+        (args.command == "pairs" and
+         any(getattr(args, f, False)
+             for f in ("keys_only", "workloads_only", "packages_only"))) or
+        (args.command == "status" and getattr(args, "silent", False))
+    )
     if not machine_readable:
         print(_c("36", "\n━━━ sim2real-deploy ━━━\n"))
 
