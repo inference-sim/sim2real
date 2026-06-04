@@ -1870,3 +1870,30 @@ def test_collect_scoped_multi_slot_per_workload(tmp_path, monkeypatch):
     assert ns_to_allowed["ns-0"] == {"constantcontrol": {"mid"}}
     assert ns_to_allowed["ns-1"] == {"expceil": {"mid"}}
     assert ns_to_allowed["ns-2"] == {"expceiling": {"mid"}}
+
+
+# ── Issue #204: kubectl run failure surfaces as RuntimeError ─────────────────
+
+
+def test_extract_phases_kubectl_run_failure_raises_runtime_error(tmp_path, monkeypatch):
+    """When kubectl run fails creating the extractor pod, the function raises
+    a clean RuntimeError — not a raw CalledProcessError that escapes callers
+    catching only RuntimeError."""
+    from pipeline import deploy
+    import subprocess
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    run_dir.mkdir(parents=True)
+
+    def mock_run(cmd, **kwargs):
+        cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+        if "run" in cmd and "--image=alpine:3.19" in cmd_str:
+            return MagicMock(returncode=1, stdout="",
+                             stderr="forbidden: namespace quota exceeded")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    with pytest.raises(RuntimeError, match="create failed.*quota exceeded"):
+        deploy._extract_phases_from_pvc(
+            ["baseline"], "test-run", "ns-0", run_dir, skip_logs=False)
