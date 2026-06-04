@@ -51,42 +51,41 @@ class TestCapacityLogDedup:
         assert len(messages) == 2
 
 
-class TestBackoffLogDedup:
-    """Backoff-level and backoff-skip logs should deduplicate."""
+class TestSlotsBusyLogDedup:
+    """The all-slots-busy log (issue #274) should deduplicate per state transition."""
 
-    def test_repeated_backoff_level_not_logged(self):
+    def test_repeated_slots_busy_not_logged(self):
         messages, mock_info = _make_info_collector()
         _last_log_state = {}
 
-        def _log_backoff_level(level, interval):
-            key = "backoff_level"
-            state = (level, interval)
+        def _log_slots_busy(n_pending, total_slots):
+            key = "slots_busy"
+            state = (n_pending, total_slots)
             if state != _last_log_state.get(key):
-                mock_info(f"Backoff level {level} - next poll in {interval}s")
+                mock_info(f"Dispatching 0/{n_pending} pending — all {total_slots} slots busy")
                 _last_log_state[key] = state
 
-        _log_backoff_level(2, 120)
-        _log_backoff_level(2, 120)
-        _log_backoff_level(3, 240)
-
-        assert len(messages) == 2
-
-    def test_repeated_backoff_skip_not_logged(self):
-        messages, mock_info = _make_info_collector()
-        _last_log_state = {}
-
-        def _log_backoff_skip(n_pending, free_gpus):
-            key = "backoff_skip"
-            state = (n_pending, free_gpus)
-            if state != _last_log_state.get(key):
-                mock_info(f"Backoff: skipping dispatch ({n_pending} pending, {free_gpus} free GPUs)")
-                _last_log_state[key] = state
-
-        _log_backoff_skip(7, 2)
-        _log_backoff_skip(7, 2)
-        _log_backoff_skip(7, 2)
+        _log_slots_busy(19, 4)
+        _log_slots_busy(19, 4)
+        _log_slots_busy(19, 4)
 
         assert len(messages) == 1
+
+    def test_changed_pending_count_logs_again(self):
+        messages, mock_info = _make_info_collector()
+        _last_log_state = {}
+
+        def _log_slots_busy(n_pending, total_slots):
+            key = "slots_busy"
+            state = (n_pending, total_slots)
+            if state != _last_log_state.get(key):
+                mock_info(f"Dispatching 0/{n_pending} pending — all {total_slots} slots busy")
+                _last_log_state[key] = state
+
+        _log_slots_busy(19, 4)
+        _log_slots_busy(18, 4)
+
+        assert len(messages) == 2
 
 
 class TestDispatchLogDedup:

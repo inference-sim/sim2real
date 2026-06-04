@@ -575,7 +575,6 @@ def test_collect_run_flags_list_values():
         default_gpu_cost = 1
         pending_threshold = 600
         max_pending_stalls = 10
-        max_backoff = 600
         shadow_ttl = 120
 
     flags = _collect_run_flags(_Args())
@@ -608,7 +607,6 @@ def test_collect_run_flags_single_string_status():
         default_gpu_cost = 1
         pending_threshold = 600
         max_pending_stalls = 10
-        max_backoff = 600
         shadow_ttl = 120
 
     flags = _collect_run_flags(_Args())
@@ -1270,22 +1268,6 @@ def test_run_parser_pending_flag_defaults():
     assert args.max_pending_stalls == 10
 
 
-def test_run_parser_has_max_backoff_flag():
-    """run subcommand should have --max-backoff flag with default 600."""
-    from pipeline.deploy import build_parser
-    parser = build_parser()
-    args = parser.parse_args(["run"])
-    assert args.max_backoff == 600
-
-
-def test_run_parser_max_backoff_custom():
-    """--max-backoff should accept custom values."""
-    from pipeline.deploy import build_parser
-    parser = build_parser()
-    args = parser.parse_args(["run", "--max-backoff", "300"])
-    assert args.max_backoff == 300
-
-
 def test_early_reclaim_recoverable_threshold_exceeded(monkeypatch):
     """Recoverable pending pod past threshold: cancel PR, free slot, return to pending."""
     import datetime as _dt
@@ -1565,114 +1547,6 @@ def test_early_reclaim_pods_running_clears_pending_since(monkeypatch):
     assert entry["pending_since"] is None
 
 
-def test_pending_to_running_signals_backoff_reset(monkeypatch):
-    """When pods transition Pending→Running, caller should signal backoff reset."""
-    import json
-    import pipeline.deploy as mod
-    from pipeline.lib.backoff import BackoffController
-
-    pods_json_running = {
-        "items": [{
-            "status": {
-                "phase": "Running",
-                "conditions": [{"type": "Ready", "status": "True"}],
-            },
-        }],
-    }
-
-    entry = {
-        "workload": "wl-smoke", "package": "baseline", "status": "running",
-        "namespace": "sim2real-0", "retries": 0, "gpu_cost": 1,
-        "pending_stalls": 0,
-        "pending_since": "2026-05-09T12:00:00+00:00",
-    }
-
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
-        class _R:
-            returncode = 0
-            stdout = json.dumps(pods_json_running)
-        return _R()
-
-    monkeypatch.setattr(mod, "run", fake_run)
-
-    bc = BackoffController(base_interval=30, max_backoff=600)
-    bc.signal_scarcity(free_gpus=0, min_cost=8)
-    assert bc.state == "backing_off"
-
-    had_pending = entry.get("pending_since") is not None
-    reclaimed = mod._handle_pending_pods(
-        pr_name="baseline-smoke-run1",
-        namespace="sim2real-0",
-        entry=entry,
-        pending_threshold=600,
-        max_pending_stalls=10,
-    )
-
-    assert reclaimed is False
-    assert entry["pending_since"] is None
-    assert had_pending is True
-
-    # This mirrors the logic now in deploy.py's orchestrator loop
-    if had_pending and entry.get("pending_since") is None and not reclaimed:
-        bc.signal_scheduling_success()
-
-    assert bc.state == "normal"
-    assert bc.backoff_level == 0
-
-
-def test_no_backoff_signal_when_never_pending(monkeypatch):
-    """Pods that were never pending should NOT trigger backoff reset."""
-    import json
-    import pipeline.deploy as mod
-    from pipeline.lib.backoff import BackoffController
-
-    pods_json_running = {
-        "items": [{
-            "status": {
-                "phase": "Running",
-                "conditions": [{"type": "Ready", "status": "True"}],
-            },
-        }],
-    }
-
-    entry = {
-        "workload": "wl-smoke", "package": "baseline", "status": "running",
-        "namespace": "sim2real-0", "retries": 0, "gpu_cost": 1,
-        "pending_stalls": 0,
-        "pending_since": None,
-    }
-
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
-        class _R:
-            returncode = 0
-            stdout = json.dumps(pods_json_running)
-        return _R()
-
-    monkeypatch.setattr(mod, "run", fake_run)
-
-    bc = BackoffController(base_interval=30, max_backoff=600)
-    bc.signal_scarcity(free_gpus=0, min_cost=8)
-    assert bc.state == "backing_off"
-
-    had_pending = entry.get("pending_since") is not None
-    reclaimed = mod._handle_pending_pods(
-        pr_name="baseline-smoke-run1",
-        namespace="sim2real-0",
-        entry=entry,
-        pending_threshold=600,
-        max_pending_stalls=10,
-    )
-
-    assert reclaimed is False
-    assert had_pending is False
-
-    # Caller logic: no signal because had_pending is False
-    if had_pending and entry.get("pending_since") is None and not reclaimed:
-        bc.signal_scheduling_success()
-
-    assert bc.state == "backing_off"  # Unchanged
-
-
 def test_early_reclaim_malformed_pending_since_resets_timer(monkeypatch, capsys):
     """Malformed pending_since resets timer instead of crashing."""
     import json
@@ -1798,8 +1672,10 @@ def test_status_ignores_orchestrator_metadata_as_pair(tmp_path, capsys, monkeypa
         assert not line.strip().startswith("_orchestrator")
 
 
-def test_status_shows_orchestrator_state_backing_off(tmp_path, capsys, monkeypatch):
-    """deploy.py status should show backoff state when _orchestrator is present."""
+def test_status_backward_compat_ignores_legacy_orchestrator(tmp_path, capsys, monkeypatch):
+    """Old progress files may still carry a legacy _orchestrator key. The backoff
+    state machine is gone (issue #274), so status must render cleanly and never
+    surface the removed orchestrator/backoff section."""
     progress = {
         "wl-foo-baseline": {"workload": "foo", "package": "baseline", "status": "running", "namespace": "ns-1", "retries": 0},
         "_orchestrator": {"state": "backing_off", "backoff_level": 2, "last_probe_free_gpus": 0, "last_scarcity_time": "2026-05-08T14:32:00+00:00"},
@@ -1810,23 +1686,9 @@ def test_status_shows_orchestrator_state_backing_off(tmp_path, capsys, monkeypat
     args = argparse.Namespace(only=None, workload=None, package=None, status=None)
     _cmd_status(args, tmp_path, setup_config={"namespace": "sim2real-ns"})
     out = capsys.readouterr().out
-    assert "backing_off" in out
-    assert "level 2" in out
-
-
-def test_status_no_orchestrator_section_when_normal(tmp_path, capsys, monkeypatch):
-    """deploy.py status should not show orchestrator section when state is normal."""
-    progress = {
-        "wl-foo-baseline": {"workload": "foo", "package": "baseline", "status": "running", "namespace": "ns-1", "retries": 0},
-        "_orchestrator": {"state": "normal", "backoff_level": 0, "last_probe_free_gpus": 8},
-    }
-    _mock_cm(monkeypatch, progress)
-
-    from pipeline.deploy import _cmd_status
-    args = argparse.Namespace(only=None, workload=None, package=None, status=None)
-    _cmd_status(args, tmp_path, setup_config={"namespace": "sim2real-ns"})
-    out = capsys.readouterr().out
+    assert "wl-foo-baseline" in out
     assert "backing_off" not in out
+    assert "Orchestrator" not in out
 
 
 def test_resolve_scope_excludes_orchestrator_key(tmp_path):
@@ -2217,7 +2079,7 @@ def test_cmd_run_uses_configmap_store(monkeypatch, tmp_path):
         skip_build=True, only=None, workload=None, package=None,
         status=None, force=False, max_retries=2, poll_interval=30,
         gpu_resource_type=None, default_gpu_cost=1,
-        pending_threshold=600, max_pending_stalls=10, max_backoff=600,
+        pending_threshold=600, max_pending_stalls=10,
     )
     setup = {"namespace": "sim2real-ns", "namespaces": ["sim2real-ns"]}
 
@@ -2585,7 +2447,6 @@ def test_dispatch_sets_entry_running(tmp_path, monkeypatch):
         poll_interval=1,
         pending_threshold=600,
         max_pending_stalls=10,
-        max_backoff=600,
         default_gpu_cost=1,
         gpu_resource_type="nvidia.com/gpu",
         only=None,
@@ -2607,6 +2468,173 @@ def test_dispatch_sets_entry_running(tmp_path, monkeypatch):
     # the critical thing is that no UnboundLocalError was raised.
     # The final status should be "done" because _check_pipelinerun_status returns Succeeded.
     assert saved_progress["wl-a-baseline"]["status"] == "done"
+
+
+# ── Slot-aware probe gating (issue #274) ────────────────────────────────────
+
+def _write_pr(cluster_dir, name):
+    import yaml as _yaml
+    pr = {
+        "metadata": {"name": f"pr-{name}-baseline", "namespace": "ns"},
+        "spec": {"params": [
+            {"name": "workloadName", "value": f"wl-{name}"},
+            {"name": "phase", "value": "baseline"},
+        ]},
+    }
+    (cluster_dir / f"pipelinerun-{name}-baseline.yaml").write_text(_yaml.dump(pr))
+
+
+def _run_args():
+    return argparse.Namespace(
+        skip_build=True, max_retries=0, poll_interval=1, pending_threshold=600,
+        max_pending_stalls=10, default_gpu_cost=1, gpu_resource_type="nvidia.com/gpu",
+        only=None, workload=None, package=None, status=None, force=False,
+        skip_teardown=False, remote=False, preserve_pipelineruns=False, shadow_ttl=0,
+    )
+
+
+def test_all_slots_busy_skips_gpu_probe(tmp_path, monkeypatch, capsys):
+    """Issue #274: when every slot is busy, the cycle must NOT call probe_free_gpus
+    and must emit the all-slots-busy log; only PipelineRun status checking runs.
+    Polling stays at the base interval so slot recovery is detected next cycle."""
+    import pipeline.deploy as mod
+    from pipeline.lib.progress import ConfigMapProgressStore
+
+    run_dir = tmp_path / "runs" / "test-run"
+    cluster_dir = run_dir / "cluster"
+    cluster_dir.mkdir(parents=True)
+    _write_pr(cluster_dir, "a")
+    _write_pr(cluster_dir, "b")
+    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+    setup_config = {"namespaces": ["sim2real-0"], "namespace": "sim2real-0"}
+
+    # wl-a already running in the only slot (busy); wl-b pending.
+    preloaded = {
+        "wl-a-baseline": {"workload": "wl-a", "package": "baseline",
+                          "status": "running", "namespace": "sim2real-0",
+                          "completed_namespace": None, "retries": 0,
+                          "pending_stalls": 0, "pending_since": None},
+    }
+    saved_progress = {}
+
+    def mock_save(self, data):
+        saved_progress.clear()
+        saved_progress.update(data)
+
+    monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: dict(preloaded))
+    monkeypatch.setattr(ConfigMapProgressStore, "save", mock_save)
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
+    monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
+    # Isolate the probe-gating behavior from in-cycle health/timeout/pending checks.
+    monkeypatch.setattr(mod, "_handle_pending_pods", lambda **kw: False)
+    monkeypatch.setattr(mod, "_handle_timeout", lambda **kw: None)
+    monkeypatch.setattr(mod, "_check_pod_health", lambda **kw: False)
+
+    import pipeline.lib.capacity as _cap_mod
+    probe_calls = {"n": 0, "at_first_sleep": None}
+
+    def fake_probe(**kw):
+        probe_calls["n"] += 1
+        return (8, 8, 0)
+
+    monkeypatch.setattr(_cap_mod, "probe_free_gpus", fake_probe)
+    monkeypatch.setattr(_cap_mod, "load_defaults",
+                        lambda root: {"decode": {"accelerator": {"count": 1}}})
+
+    state = {"a_done": False}
+
+    def fake_status(pr_name, ns):
+        if pr_name == "pr-a-baseline":
+            return "Succeeded" if state["a_done"] else "Running"
+        return "Succeeded"
+
+    monkeypatch.setattr(mod, "_check_pipelinerun_status", fake_status)
+
+    def fake_sleep(secs):
+        # First sleep follows the all-slots-busy cycle: snapshot the probe count
+        # (should be 0), then free the busy slot so the loop can make progress.
+        if probe_calls["at_first_sleep"] is None:
+            probe_calls["at_first_sleep"] = probe_calls["n"]
+            assert secs == 1  # base poll interval, not a backoff-stretched value
+        state["a_done"] = True
+
+    monkeypatch.setattr(mod.time, "sleep", fake_sleep)
+
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+
+    mod._cmd_run(_run_args(), run_dir, setup_config)
+
+    # The first (all-slots-busy) cycle must not have probed GPUs.
+    assert probe_calls["at_first_sleep"] == 0
+    out = capsys.readouterr().out
+    assert "all 1 slots busy" in out
+    # No backoff/orchestrator state is ever persisted.
+    assert "_orchestrator" not in saved_progress
+
+
+def test_free_slot_runs_gpu_probe_and_dispatches(tmp_path, monkeypatch):
+    """Issue #274: with a free slot, the cycle calls probe_free_gpus and dispatches.
+    No _orchestrator key is persisted."""
+    import pipeline.deploy as mod
+    from pipeline.lib.progress import ConfigMapProgressStore
+
+    run_dir = tmp_path / "runs" / "test-run"
+    cluster_dir = run_dir / "cluster"
+    cluster_dir.mkdir(parents=True)
+    _write_pr(cluster_dir, "a")
+    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+    setup_config = {"namespaces": ["sim2real-0"], "namespace": "sim2real-0"}
+
+    saved_progress = {}
+
+    def mock_save(self, data):
+        saved_progress.clear()
+        saved_progress.update(data)
+
+    monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
+    monkeypatch.setattr(ConfigMapProgressStore, "save", mock_save)
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
+    monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
+
+    import pipeline.lib.capacity as _cap_mod
+    probe_calls = {"n": 0}
+
+    def fake_probe(**kw):
+        probe_calls["n"] += 1
+        return (8, 8, 0)
+
+    monkeypatch.setattr(_cap_mod, "probe_free_gpus", fake_probe)
+    monkeypatch.setattr(_cap_mod, "load_defaults",
+                        lambda root: {"decode": {"accelerator": {"count": 1}}})
+    monkeypatch.setattr(mod, "_check_pipelinerun_status",
+                        lambda pr_name, ns: "Succeeded")
+
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+
+    mod._cmd_run(_run_args(), run_dir, setup_config)
+
+    # The free slot triggered at least one GPU probe and the pair dispatched.
+    assert probe_calls["n"] >= 1
+    assert saved_progress["wl-a-baseline"]["status"] == "done"
+    assert "_orchestrator" not in saved_progress
 
 
 # ── Live-loop failure paths retain namespace (issue #277) ───────────────────
@@ -2668,7 +2696,7 @@ def _run_harness(tmp_path, monkeypatch, *, status_fn, extra_patches=None):
 
     args = argparse.Namespace(
         skip_build=True, max_retries=0, poll_interval=1, pending_threshold=600,
-        max_pending_stalls=10, max_backoff=600, default_gpu_cost=1,
+        max_pending_stalls=10, default_gpu_cost=1,
         gpu_resource_type="nvidia.com/gpu", only=None, workload=None,
         package=None, status=None, force=False, skip_teardown=False,
         remote=False, preserve_pipelineruns=False, shadow_ttl=0,
@@ -2787,7 +2815,6 @@ def test_derive_costs_only_for_scoped_pairs(tmp_path, monkeypatch):
         poll_interval=1,
         pending_threshold=600,
         max_pending_stalls=10,
-        max_backoff=600,
         default_gpu_cost=1,
         gpu_resource_type="nvidia.com/gpu",
         only=None,
@@ -2974,7 +3001,7 @@ def test_health_escalation_cancels_pipelinerun(tmp_path, monkeypatch):
 
     args = argparse.Namespace(
         skip_build=True, max_retries=0, poll_interval=1,
-        pending_threshold=600, max_pending_stalls=10, max_backoff=600,
+        pending_threshold=600, max_pending_stalls=10,
         default_gpu_cost=1, gpu_resource_type="nvidia.com/gpu",
         only=None, workload=None, package=None, status=None,
         force=False, skip_teardown=False, remote=False,
@@ -3157,7 +3184,7 @@ def test_dispatch_shuffles_dispatchable(tmp_path, monkeypatch):
 
     args = argparse.Namespace(
         skip_build=True, max_retries=0, poll_interval=1,
-        pending_threshold=600, max_pending_stalls=10, max_backoff=600,
+        pending_threshold=600, max_pending_stalls=10,
         default_gpu_cost=1, gpu_resource_type="nvidia.com/gpu",
         only=None, workload=None, package=None, status=None,
         force=False, skip_teardown=False, remote=False,
@@ -3247,7 +3274,7 @@ def test_shadow_ledger_prevents_over_subscription(tmp_path, monkeypatch):
 
     args = argparse.Namespace(
         skip_build=True, max_retries=0, poll_interval=1,
-        pending_threshold=600, max_pending_stalls=10, max_backoff=600,
+        pending_threshold=600, max_pending_stalls=10,
         default_gpu_cost=4, gpu_resource_type="nvidia.com/gpu",
         only=None, workload=None, package=None, status=None,
         force=False, skip_teardown=False, remote=False,
@@ -3320,7 +3347,7 @@ def test_shadow_ttl_zero_disables_gating(tmp_path, monkeypatch):
 
     args = argparse.Namespace(
         skip_build=True, max_retries=0, poll_interval=1,
-        pending_threshold=600, max_pending_stalls=10, max_backoff=600,
+        pending_threshold=600, max_pending_stalls=10,
         default_gpu_cost=4, gpu_resource_type="nvidia.com/gpu",
         only=None, workload=None, package=None, status=None,
         force=False, skip_teardown=False, remote=False,
@@ -3385,7 +3412,7 @@ def _setup_dispatch_run(tmp_path, monkeypatch, *, baseline_yaml: str):
 
     args = argparse.Namespace(
         skip_build=True, max_retries=0, poll_interval=1,
-        pending_threshold=600, max_pending_stalls=10, max_backoff=600,
+        pending_threshold=600, max_pending_stalls=10,
         default_gpu_cost=4, gpu_resource_type="nvidia.com/gpu",
         only=None, workload=None, package=None, status=None, force=False,
         skip_teardown=False, remote=False, preserve_pipelineruns=False,
