@@ -54,6 +54,9 @@ PARAMETER_ALIASES = {
     "max_model_len": {"max_model_len", "--max-model-len", "max_seq_len"},
     "enable_chunked_prefill": {"enable_chunked_prefill", "--enable-chunked-prefill"},
     "enable_prefix_caching": {"enable_prefix_caching", "--enable-prefix-caching"},
+    # Negative bare flag: presence (with empty value column) means caching OFF.
+    # Folded into enable_prefix_caching at the end of extract_fields.
+    "__no_enable_prefix_caching__": {"--no-enable-prefix-caching"},
     "replicas": {"number of pods", "instances", "replicas", "num_instances"},
     "dtype": {"dtype", "--dtype"},
     "pipeline_parallel_size": {"pipeline_parallel_size", "--pipeline-parallel-size"},
@@ -245,6 +248,10 @@ def extract_fields(table: TableSection) -> dict[str, ProvenanceValue]:
     if value_col is None:
         return fields
 
+    # Collected enable_prefix_caching observations across all four accepted forms;
+    # reconciled after the row loop.
+    epc_observations: list[tuple[bool, str, str]] = []  # (resolved_bool, source, raw_param)
+
     for row in table.rows:
         raw_param = row.get(param_col, "")
         raw_value = row.get(value_col, "")
@@ -255,10 +262,28 @@ def extract_fields(table: TableSection) -> dict[str, ProvenanceValue]:
 
         source = f'config.md row "{normalize_cell(raw_param)}"'
 
+        # Prefix caching: accept legacy keyed form (enable_prefix_caching=true|false)
+        # AND bare flags (--enable-prefix-caching / --no-enable-prefix-caching with
+        # empty value column). Reconcile after the loop.
+        if canonical == "__no_enable_prefix_caching__":
+            epc_observations.append((False, source, raw_param))
+            continue
+        if canonical == "enable_prefix_caching":
+            if normalize_cell(raw_value) == "":
+                # Bare positive flag: presence implies caching ON.
+                epc_observations.append((True, source, raw_param))
+            else:
+                bv = parse_boolean(raw_value)
+                if bv is None:
+                    print(f"  warning: could not parse boolean for {canonical}: '{raw_value}'", file=sys.stderr)
+                    continue
+                epc_observations.append((bv, source, raw_param))
+            continue
+
         # Parse value based on field type
         if canonical in ("model", "hardware", "dtype"):
             value = normalize_cell(raw_value)
-        elif canonical in ("enable_chunked_prefill", "enable_prefix_caching", "enforce_eager"):
+        elif canonical in ("enable_chunked_prefill", "enforce_eager"):
             value = parse_boolean(raw_value)
             if value is None:
                 print(f"  warning: could not parse boolean for {canonical}: '{raw_value}'", file=sys.stderr)
@@ -270,6 +295,23 @@ def extract_fields(table: TableSection) -> dict[str, ProvenanceValue]:
                 value = normalize_cell(raw_value)
 
         fields[canonical] = ProvenanceValue(value=value, source=source, raw_param=raw_param)
+
+    # Reconcile enable_prefix_caching observations.
+    if epc_observations:
+        distinct = {v for v, _, _ in epc_observations}
+        if len(distinct) > 1:
+            joined = "; ".join(f"{s} -> {v}" for v, s, _ in epc_observations)
+            print(
+                f"ERROR: conflicting enable_prefix_caching specifications in config.md ({joined})",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        resolved = next(iter(distinct))
+        first_source = epc_observations[0][1]
+        first_raw = epc_observations[0][2]
+        fields["enable_prefix_caching"] = ProvenanceValue(
+            value=resolved, source=first_source, raw_param=first_raw
+        )
 
     return fields
 
@@ -311,11 +353,15 @@ def build_additional_flags(
         f = fields["enable_chunked_prefill"]
         flags.append(("--enable-chunked-prefill", f.source))
 
-    # Only emit --no-enable-prefix-caching when the user explicitly disabled it.
-    # If unspecified or explicitly enabled, defer to vLLM's default.
+    # Emit a single bare flag matching the user's intent. If the field was not
+    # specified in config.md at all, emit nothing and defer to vLLM's per-model
+    # default (typically ON for generative models).
     epc = fields.get("enable_prefix_caching")
-    if epc is not None and not epc.value:
-        flags.append(("--no-enable-prefix-caching", epc.source))
+    if epc is not None:
+        if epc.value:
+            flags.append(("--enable-prefix-caching", epc.source))
+        else:
+            flags.append(("--no-enable-prefix-caching", epc.source))
 
     if "dtype" in fields and fields["dtype"].value != "auto":
         f = fields["dtype"]
