@@ -57,6 +57,25 @@ def _is_pair_key(key: str) -> bool:
     return not key.startswith("_")
 
 
+def _format_capacity(effective: int, probed: int, reserved: int,
+                     allocatable: int, requested: int) -> str:
+    """Return the unified orchestrator capacity log line (issue #272).
+
+    All five numbers appear in a fixed order so a single log line is
+    self-contained — the reader does not need surrounding context to know
+    which view they are seeing. The five numbers split across three layers:
+
+      - effective: derived (probed − reserved, clamped at 0)
+      - probed, allocatable, requested: cluster probe (`probe_free_gpus`)
+      - reserved: shadow ledger
+    """
+    return (
+        f"Capacity: {effective} effective free GPUs "
+        f"({probed} probed − {reserved} reserved; "
+        f"cluster: {allocatable} allocatable − {requested} requested)"
+    )
+
+
 def step(n, title: str) -> None:
     print("\n" + _c("36", f"━━━ Step {n}: {title} ━━━"))
 
@@ -2260,11 +2279,18 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 gpu_resource_type=gpu_resource_type,
                 node_filters=list(node_filters.values()) or [NodeFilter()],
             )
+            # Snapshot the shadow ledger once per cycle. Every log line and
+            # gating decision in this cycle uses the same _reserved value,
+            # so `free_gpus − _reserved == effective_free` holds in every
+            # printed line (issue #272).
             if isinstance(capacity, tuple):
                 free_gpus, allocatable, requested = capacity
-                _cap_state = (free_gpus, allocatable, requested)
+                _reserved = shadow.reserved()
+                effective_free = max(0, free_gpus - _reserved)
+                _cap_state = (effective_free, free_gpus, _reserved, allocatable, requested)
                 if pending and _cap_state != _last_log_state.get("capacity"):
-                    info(f"Capacity: {free_gpus} free GPUs ({allocatable} allocatable − {requested} requested)")
+                    info(_format_capacity(effective_free, free_gpus, _reserved,
+                                          allocatable, requested))
                     _last_log_state["capacity"] = _cap_state
                 if _probe_fail_count > 0:
                     info(f"Capacity probe recovered after {_probe_fail_count} failure(s)")
@@ -2272,6 +2298,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 _last_probe_error = ""
             else:
                 free_gpus = None
+                _reserved = 0
+                effective_free = 0
                 _probe_fail_count += 1
                 if capacity != _last_probe_error or _probe_fail_count % 10 == 0:
                     warn(f"Capacity probe failed: {capacity} — dispatching without GPU gating")
@@ -2279,17 +2307,20 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
 
             # ── Assign pending work to free slots ────────────────────────
             if free_gpus is not None and pending:
-                effective_free = shadow.effective_free(free_gpus)
                 dispatchable = _select_dispatchable(
                     pending,
                     free_gpus=effective_free, cost_map=pair_costs,
                 )
                 if len(dispatchable) == 0 and pending:
                     smallest = min(pair_costs[k] for k in pending)
-                    _disp_state = ("zero", len(pending), free_gpus, smallest)
+                    _disp_state = ("zero", len(pending), effective_free, _reserved, smallest)
                     _zero_dispatch_count += 1
                     if _disp_state != _last_log_state.get("dispatch") or _zero_dispatch_count % 10 == 0:
-                        warn(f"Dispatching 0/{len(pending)} pending pairs — smallest cost ({smallest}) exceeds free GPUs ({free_gpus})")
+                        warn(
+                            f"Dispatching 0/{len(pending)} pending pairs — "
+                            f"smallest cost ({smallest}) exceeds {effective_free} "
+                            f"effective free GPUs ({free_gpus} probed − {_reserved} reserved)"
+                        )
                         _last_log_state["dispatch"] = _disp_state
                 elif len(dispatchable) < len(pending):
                     _disp_state = ("cap_limited", len(dispatchable), len(pending), free_gpus)
@@ -2316,9 +2347,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 source = pair_provenance[pair_key]
                 _source_labels = {"derived": "derived from scenarioContent", "defaults-only": "derived from defaults only", "fallback": "fallback default"}
                 if free_gpus is not None:
-                    _reserved = shadow.reserved()
-                    _effective = shadow.effective_free(free_gpus)
-                    info(f"Capacity: {_effective} effective free GPUs ({free_gpus} probed − {_reserved} reserved)")
+                    info(_format_capacity(effective_free, free_gpus, _reserved,
+                                          allocatable, requested))
                 info(f"{pair_key} requires {pair_cost} GPUs ({_source_labels[source]})")
                 pr_meta = discovered.get(pair_key, {})
                 pr_path_str = pr_meta.get("pr_path", "")
