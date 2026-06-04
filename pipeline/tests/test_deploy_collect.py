@@ -177,8 +177,8 @@ def test_collect_custom_package_in_progress(tmp_path, monkeypatch):
     assert collected_phases == ["canary"]
 
 
-def test_collect_corrupt_configmap_raises(tmp_path, monkeypatch):
-    """ValueError from ConfigMap with invalid JSON propagates."""
+def test_collect_corrupt_configmap_exits(tmp_path, monkeypatch):
+    """Corrupt ConfigMap causes _cmd_collect to exit non-zero (issue #140)."""
     from pipeline import deploy
 
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
@@ -200,13 +200,13 @@ def test_collect_corrupt_configmap_raises(tmp_path, monkeypatch):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
-    # The ValueError is caught by _cmd_collect and treated as no progress
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
-         patch.object(deploy, "warn") as mock_warn:
+         pytest.raises(SystemExit) as exc_info:
         deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
 
-    assert collected_phases == ["baseline", "treatment"]
-    assert any("Corrupt" in str(c) or "Failed" in str(c) for c in mock_warn.call_args_list)
+    assert exc_info.value.code != 0
+    # Phase extraction must not have run — corrupt progress halts before that.
+    assert collected_phases == []
 
 
 def test_collect_only_done_phases(tmp_path, monkeypatch):

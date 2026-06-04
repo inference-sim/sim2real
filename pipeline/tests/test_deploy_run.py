@@ -3473,3 +3473,63 @@ class TestCmdRunForwardsNodeFilters:
         out = capsys.readouterr().out
         assert "No per-role GPU product constraint extracted" in out
         assert "cordon/taint screening only" in out
+
+
+class TestLoadProgressHelper:
+    """Unit tests for _load_progress helper (issue #140)."""
+
+    def _fake_store(self, behavior):
+        """Return a stub store whose load() executes ``behavior`` (a callable)."""
+        class _Store:
+            configmap_name = "sim2real-progress-fake"
+
+            def load(self_inner):
+                return behavior()
+        return _Store()
+
+    def test_returns_load_result_on_success(self):
+        from pipeline.deploy import _load_progress
+        store = self._fake_store(lambda: {"a": 1})
+        assert _load_progress(store) == {"a": 1}
+
+    def test_exits_with_message_on_value_error(self, capsys):
+        from pipeline.deploy import _load_progress
+
+        def boom():
+            raise ValueError("Corrupt ConfigMap sim2real-progress-fake in ns-x")
+        store = self._fake_store(boom)
+        with pytest.raises(SystemExit) as exc_info:
+            _load_progress(store)
+        assert exc_info.value.code != 0
+        captured = capsys.readouterr()
+        combined = captured.out + captured.err
+        assert "Corrupt" in combined
+        assert "sim2real-progress-fake" in combined
+        assert "prepare" in combined.lower() or "manually" in combined.lower()
+
+    def test_propagates_runtime_error_by_default(self):
+        from pipeline.deploy import _load_progress
+
+        def boom():
+            raise RuntimeError("kubectl unreachable")
+        store = self._fake_store(boom)
+        with pytest.raises(RuntimeError, match="kubectl unreachable"):
+            _load_progress(store)
+
+    def test_swallows_runtime_error_when_allow_unreachable(self):
+        from pipeline.deploy import _load_progress
+
+        def boom():
+            raise RuntimeError("kubectl unreachable")
+        store = self._fake_store(boom)
+        result = _load_progress(store, allow_unreachable=True)
+        assert result == {}
+
+    def test_value_error_exits_even_when_allow_unreachable(self):
+        from pipeline.deploy import _load_progress
+
+        def boom():
+            raise ValueError("Corrupt")
+        store = self._fake_store(boom)
+        with pytest.raises(SystemExit):
+            _load_progress(store, allow_unreachable=True)
