@@ -3787,3 +3787,22 @@ def test_one_cycle_emits_unified_capacity_log_and_effective_free_warn(
     # The bug fixed by Defect 2 was reporting "free GPUs (23)" when the gate
     # was actually 3. Pin against regression.
     assert "exceeds 23" not in warn_line
+
+    # The capacity line and the warn line must report the same _reserved
+    # value: both come from a single snapshot of shadow.reserved() taken at
+    # the top of the cycle, so the printed arithmetic stays consistent
+    # (free_gpus − reserved == effective_free) in every line.
+    import re
+    cap_nums = re.search(
+        r"Capacity: (\d+) effective free GPUs \((\d+) probed − (\d+) reserved",
+        line,
+    )
+    warn_nums = re.search(
+        r"exceeds (\d+) effective free GPUs \((\d+) probed − (\d+) reserved",
+        warn_line,
+    )
+    assert cap_nums and warn_nums
+    cap_eff, cap_probed, cap_res = map(int, cap_nums.groups())
+    warn_eff, warn_probed, warn_res = map(int, warn_nums.groups())
+    assert (cap_eff, cap_probed, cap_res) == (warn_eff, warn_probed, warn_res)
+    assert cap_eff == max(0, cap_probed - cap_res)
