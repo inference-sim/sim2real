@@ -568,7 +568,7 @@ def _handle_pending_pods(*, pr_name: str, namespace: str, entry: dict,
             warn(f"[{entry.get('workload', '?')}] could not remove PipelineRun {pr_name!r} in {namespace} — slot NOT freed")
             return False
         entry["status"] = "failed"
-        entry["namespace"] = None
+        # Retain namespace so reset/cleanup can find the helm releases (issue #277).
         entry["pending_since"] = None
         return True
 
@@ -596,12 +596,14 @@ def _handle_pending_pods(*, pr_name: str, namespace: str, entry: dict,
     stalls = entry.get("pending_stalls", 0) + 1
     entry["pending_stalls"] = stalls
     entry["pending_since"] = None
-    entry["namespace"] = None
     if stalls >= max_pending_stalls:
         entry["status"] = "stalled"
+        # Terminal: retain namespace so reset/cleanup can find releases (issue #277).
         warn(f"[{entry.get('workload', '?')}] reached max pending stalls ({max_pending_stalls}) → stalled")
     else:
         entry["status"] = "pending"
+        # Slot freed for re-dispatch — release the namespace.
+        entry["namespace"] = None
     return True
 
 
@@ -639,10 +641,12 @@ def _handle_timeout(*, pr_name: str, namespace: str, entry: dict,
              f"(attempt {retries + 1}/{max_retries})")
         entry["status"] = "pending"
         entry["retries"] = retries + 1
+        # Slot freed for re-dispatch — release the namespace.
+        entry["namespace"] = None
     else:
         warn(f"[{entry.get('workload', '?')}] timed out, max retries → timed-out")
         entry["status"] = "timed-out"
-    entry["namespace"] = None
+        # Terminal: retain namespace so reset/cleanup can find releases (issue #277).
     entry["pending_since"] = None
     return True
 
@@ -2083,7 +2087,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                             "PipelineRunStoppingTimeout"):
                 warn(f"[{pair_key}] hard failure ({status}) → failed")
                 entry["status"] = "failed"
-                entry["namespace"] = None
+                # Retain namespace so reset/cleanup can find the helm releases
+                # (issue #277). Mirrors _reconcile_on_resume's failure handling.
                 store.save(progress)
                 del slots_busy[ns]
                 _last_log_state.pop("capacity", None)
@@ -2165,7 +2170,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                     warn(f"[{pair_key}] pod health escalation → cancelling PipelineRun")
                     if _cancel_and_delete_pipelinerun(pr_name, ns):
                         entry["status"] = "failed"
-                        entry["namespace"] = None
+                        # Retain namespace so reset/cleanup can find the helm
+                        # releases (issue #277).
                         store.save(progress)
                         del slots_busy[ns]
                         _last_log_state.pop("capacity", None)

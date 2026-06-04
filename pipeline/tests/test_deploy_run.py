@@ -1434,7 +1434,8 @@ def test_early_reclaim_non_recoverable_fails_immediately(monkeypatch):
 
     assert reclaimed is True
     assert entry["status"] == "failed"
-    assert entry["namespace"] is None
+    # Namespace retained so reset/cleanup can find the helm releases (issue #277)
+    assert entry["namespace"] == "sim2real-0"
     assert entry["pending_stalls"] == 0
     assert cancelled == [("baseline-smoke-run1", "sim2real-0")]
 
@@ -1486,6 +1487,8 @@ def test_early_reclaim_stalled_at_max_pending_stalls(monkeypatch):
     assert reclaimed is True
     assert entry["status"] == "stalled"
     assert entry["pending_stalls"] == 10
+    # Terminal stall retains namespace so reset/cleanup can find releases (issue #277)
+    assert entry["namespace"] == "sim2real-0"
 
 
 def test_early_reclaim_kubectl_failure_returns_false(monkeypatch, capsys):
@@ -2430,6 +2433,43 @@ def test_handle_timeout_cancel_succeeds_requeues(monkeypatch):
     assert entry["namespace"] is None
 
 
+def test_handle_timeout_max_retries_retains_namespace(monkeypatch):
+    """At max retries, a timed-out pair stays timed-out and retains its
+    namespace so reset/cleanup can find the helm releases (issue #277)."""
+    import datetime as _dt
+    import pipeline.deploy as mod
+
+    old_ts = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=5)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+    entry = {
+        "workload": "wl-smoke", "package": "treatment", "status": "running",
+        "namespace": "sim2real-0", "retries": 3, "pending_since": None,
+    }
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = old_ts
+            stderr = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    monkeypatch.setattr(mod, "_cancel_and_delete_pipelinerun", lambda pr, ns: True)
+
+    result = mod._handle_timeout(
+        pr_name="treatment-smoke-run1",
+        namespace="sim2real-0",
+        entry=entry,
+        timeout_hours=4.0,
+        max_retries=3,
+    )
+
+    assert result is True
+    assert entry["status"] == "timed-out"
+    assert entry["namespace"] == "sim2real-0"
+
+
 def test_handle_timeout_not_expired_returns_none(monkeypatch):
     """When PR is not timed out, return None (no action taken)."""
     import datetime as _dt
@@ -2567,6 +2607,100 @@ def test_dispatch_sets_entry_running(tmp_path, monkeypatch):
     # the critical thing is that no UnboundLocalError was raised.
     # The final status should be "done" because _check_pipelinerun_status returns Succeeded.
     assert saved_progress["wl-a-baseline"]["status"] == "done"
+
+
+# ── Live-loop failure paths retain namespace (issue #277) ───────────────────
+
+
+def _run_harness(tmp_path, monkeypatch, *, status_fn, extra_patches=None):
+    """Drive _cmd_run through one dispatch + one poll iteration for a single pair.
+
+    status_fn is used for _check_pipelinerun_status. extra_patches is an optional
+    callable(mod, monkeypatch) for test-specific monkeypatching (e.g. pod-health
+    escalation). Returns the saved progress dict.
+    """
+    import yaml as _yaml
+    import pipeline.deploy as mod
+    import pipeline.lib.capacity as _cap_mod
+    from pipeline.lib.progress import ConfigMapProgressStore
+
+    run_dir = tmp_path / "runs" / "test-run"
+    cluster_dir = run_dir / "cluster"
+    cluster_dir.mkdir(parents=True)
+
+    pr = {
+        "metadata": {"name": "pr-a-baseline", "namespace": "ns"},
+        "spec": {"params": [
+            {"name": "workloadName", "value": "wl-a"},
+            {"name": "phase", "value": "baseline"},
+        ]},
+    }
+    (cluster_dir / "pipelinerun-a-baseline.yaml").write_text(_yaml.dump(pr))
+    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+
+    setup_config = {"namespaces": ["sim2real-0"], "namespace": "sim2real-0"}
+
+    saved_progress = {}
+    monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
+    monkeypatch.setattr(ConfigMapProgressStore, "save",
+                        lambda self, data: saved_progress.update(data))
+
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
+    monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
+    monkeypatch.setattr(_cap_mod, "probe_free_gpus", lambda **kw: (8, 8, 0))
+    monkeypatch.setattr(_cap_mod, "load_defaults",
+                        lambda root: {"decode": {"accelerator": {"count": 1}}})
+
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    monkeypatch.setattr(mod, "_check_pipelinerun_status", status_fn)
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+
+    if extra_patches is not None:
+        extra_patches(mod, monkeypatch)
+
+    args = argparse.Namespace(
+        skip_build=True, max_retries=0, poll_interval=1, pending_threshold=600,
+        max_pending_stalls=10, max_backoff=600, default_gpu_cost=1,
+        gpu_resource_type="nvidia.com/gpu", only=None, workload=None,
+        package=None, status=None, force=False, skip_teardown=False,
+        remote=False, preserve_pipelineruns=False, shadow_ttl=0,
+    )
+    mod._cmd_run(args, run_dir, setup_config)
+    return saved_progress
+
+
+def test_cmd_run_hard_failure_retains_namespace(tmp_path, monkeypatch):
+    """On a hard PipelineRun failure, the live loop marks the pair failed but
+    retains its namespace so a later reset can find and uninstall the helm
+    releases (issue #277). Mirrors _reconcile_on_resume's retain-on-failure."""
+    saved = _run_harness(tmp_path, monkeypatch,
+                         status_fn=lambda pr_name, ns: "Failed")
+    assert saved["wl-a-baseline"]["status"] == "failed"
+    assert saved["wl-a-baseline"]["namespace"] == "sim2real-0"
+
+
+def test_cmd_run_pod_health_escalation_retains_namespace(tmp_path, monkeypatch):
+    """On pod-health escalation (cancel + delete), the live loop marks the pair
+    failed but retains its namespace for reset cleanup (issue #277)."""
+    def extra(mod, mp):
+        mp.setattr(mod, "_handle_pending_pods", lambda **kw: False)
+        mp.setattr(mod, "_handle_timeout", lambda **kw: None)
+        mp.setattr(mod, "_check_pod_health", lambda **kw: True)
+        mp.setattr(mod, "_cancel_and_delete_pipelinerun", lambda pr, ns: True)
+
+    saved = _run_harness(tmp_path, monkeypatch,
+                         status_fn=lambda pr_name, ns: "Running",
+                         extra_patches=extra)
+    assert saved["wl-a-baseline"]["status"] == "failed"
+    assert saved["wl-a-baseline"]["namespace"] == "sim2real-0"
 
 
 # ── Scoped GPU cost derivation (issue #244) ─────────────────────────────────
