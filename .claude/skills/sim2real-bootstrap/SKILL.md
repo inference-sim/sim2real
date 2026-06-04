@@ -178,7 +178,7 @@ Generate llm-d-benchmark scenario YAML(s) for baseline arm(s).
    The script will:
    - Parse the vLLM configuration table from config.md
    - Apply MODEL_METADATA and HARDWARE_LABELS lookups
-   - Emit `--no-enable-prefix-caching` unless explicitly enabled
+   - Emit a single bare prefix-caching flag matching the user's intent: `--enable-prefix-caching` if explicitly enabled, `--no-enable-prefix-caching` if explicitly disabled, nothing if unspecified in config.md (defers to vLLM's per-model default). Input accepts either the legacy keyed form (`enable_prefix_caching | true|false`) or a bare flag row label (`--enable-prefix-caching` / `--no-enable-prefix-caching` with an empty value column); contradictory specifications error.
    - Write YAML with inline provenance comments showing each value's source
    - Error on unknown models/hardware (update lookup tables in the script if needed)
 
@@ -371,6 +371,6 @@ This skill ships with supporting files in its directory. Invoke in place — do 
 
 | File | Purpose |
 |------|---------|
-| `generate_from_config.py` | Parses `config.md` markdown tables → scenario YAMLs with provenance comments. Preferred for most experiments. Handles hardware normalization, safe defaults (`--no-enable-prefix-caching`), and unknown model/hardware detection. |
+| `generate_from_config.py` | Parses `config.md` markdown tables → scenario YAMLs with provenance comments. Preferred for most experiments. Handles hardware normalization, bare-flag prefix-caching input/output, and unknown model/hardware detection. |
 | `generate_scenarios.py` | Converts JSON config (`top3_selection.json`) → scenario YAMLs. Use when JSON input exists. |
 | `generate_scenarios.README.md` | Coverage map for the JSON-input path. Documents field mappings, omission rules, and gaps. |
