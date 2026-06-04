@@ -61,9 +61,10 @@ def _format_capacity(effective: int, probed: int, reserved: int,
                      allocatable: int, requested: int) -> str:
     """Return the unified orchestrator capacity log line (issue #272).
 
-    All four cluster + ledger numbers appear in a fixed order so a single
-    log line is self-contained — the reader does not need surrounding
-    context to know which view they are seeing.
+    All five numbers (three ledger: effective/probed/reserved; two cluster:
+    allocatable/requested) appear in a fixed order so a single log line is
+    self-contained — the reader does not need surrounding context to know
+    which view they are seeing.
     """
     return (
         f"Capacity: {effective} effective free GPUs "

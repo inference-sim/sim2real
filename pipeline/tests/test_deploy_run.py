@@ -3677,3 +3677,113 @@ class TestLoadProgressHelper:
         store = self._fake_store(boom)
         with pytest.raises(SystemExit):
             _load_progress(store, allow_unreachable=True)
+
+
+# ── Unified capacity log + dispatch-denied warn (issue #272) ────────────────
+
+
+class _LoopBreak(Exception):
+    """Raised inside fake_sleep to terminate _cmd_run after one cycle."""
+
+
+def test_one_cycle_emits_unified_capacity_log_and_effective_free_warn(
+    tmp_path, monkeypatch, capsys
+):
+    """Issue #272 acceptance test: drive _cmd_run through one cycle with shadow
+    reservations present, assert the unified Capacity: format is emitted with
+    all five numbers, and assert the dispatch-denied warn reports the
+    shadow-adjusted effective_free rather than the raw probed free_gpus.
+    """
+    import pipeline.deploy as mod
+    from pipeline.lib.progress import ConfigMapProgressStore
+
+    run_dir = tmp_path / "runs" / "test-run"
+    cluster_dir = run_dir / "cluster"
+    cluster_dir.mkdir(parents=True)
+    _write_pr(cluster_dir, "a")
+    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+    setup_config = {"namespaces": ["sim2real-0"], "namespace": "sim2real-0"}
+
+    monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
+    monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
+    monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
+
+    # Probe returns probed=23, allocatable=48, requested=25 — distinct values
+    # so each one's appearance in the unified format string is unambiguous.
+    import pipeline.lib.capacity as _cap_mod
+    monkeypatch.setattr(_cap_mod, "probe_free_gpus", lambda **kw: (23, 48, 25))
+    monkeypatch.setattr(_cap_mod, "load_defaults",
+                        lambda root: {"decode": {"accelerator": {"count": 4}}})
+
+    # Pre-seed the shadow ledger so reserved=16 → effective_free=7 < cost=4×N…
+    # We need effective_free < smallest-cost to trigger the dispatch-denied
+    # warn. With one pending pair of cost=4 at probed=23, even effective=7 is
+    # ≥ 4. So bump the reservation to 20 so effective_free=3 < cost=4.
+    import pipeline.lib.shadow as _shadow_mod
+    _orig_init = _shadow_mod.ShadowLedger.__init__
+
+    def _seeded_init(self, ttl):
+        _orig_init(self, ttl)
+        # A 20-GPU reservation keeps effective_free=3, less than the cost=4
+        # of the lone pending pair, so the dispatch-denied warn fires.
+        # Use a far-future timestamp so TTL pruning never drops it.
+        self._entries.append((20, 1e18))
+
+    monkeypatch.setattr(_shadow_mod.ShadowLedger, "__init__", _seeded_init)
+
+    # Terminate _cmd_run after the first cycle (no dispatch happens, pending
+    # work remains, so time.sleep is called at end of cycle).
+    def fake_sleep(secs):
+        raise _LoopBreak
+
+    monkeypatch.setattr(mod.time, "sleep", fake_sleep)
+
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+
+    args = argparse.Namespace(
+        skip_build=True, max_retries=0, poll_interval=1, pending_threshold=600,
+        max_pending_stalls=10, default_gpu_cost=4, gpu_resource_type="nvidia.com/gpu",
+        only=None, workload=None, package=None, status=None, force=False,
+        skip_teardown=False, remote=False, preserve_pipelineruns=False,
+        shadow_ttl=120,
+    )
+
+    with pytest.raises(_LoopBreak):
+        mod._cmd_run(args, run_dir, setup_config)
+
+    out = capsys.readouterr().out
+    cap_lines = [ln for ln in out.splitlines() if "Capacity:" in ln]
+
+    # Defect 1: a single unified format. The post-probe site emits it; the
+    # pre-apply site does not run because dispatch was denied. So exactly
+    # one Capacity: line in this cycle.
+    assert len(cap_lines) == 1, f"expected 1 Capacity: line, got: {cap_lines}"
+    line = cap_lines[0]
+    assert "3 effective free GPUs" in line
+    assert "23 probed" in line
+    assert "20 reserved" in line
+    assert "48 allocatable" in line
+    assert "25 requested" in line
+
+    # Defect 2: the dispatch-denied warn must report effective_free=3
+    # (shadow-adjusted), not free_gpus=23 (raw probe).
+    warn_lines = [ln for ln in out.splitlines()
+                  if "Dispatching 0/" in ln and "smallest cost" in ln]
+    assert len(warn_lines) == 1, f"expected 1 denial warn, got: {warn_lines}"
+    warn_line = warn_lines[0]
+    assert "exceeds 3 effective free GPUs" in warn_line
+    assert "23 probed" in warn_line
+    assert "20 reserved" in warn_line
+    # The bug fixed by Defect 2 was reporting "free GPUs (23)" when the gate
+    # was actually 3. Pin against regression.
+    assert "exceeds 23" not in warn_line

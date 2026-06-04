@@ -193,9 +193,11 @@ class TestDispatchLogDedup:
     def test_zero_dispatch_includes_reservation_in_state(self):
         """Changed shadow reservation triggers new warning even if probed/smallest unchanged.
 
-        Regression for issue #272 Defect 2: dedup must key on effective_free,
-        not the probed value, because effective_free is what the gating
-        decision actually uses.
+        Regression for issue #272 Defect 2: the dedup state tuple must include
+        both effective_free and reserved as independent keys. Relying on
+        probed free_gpus alone would suppress re-emission when only the
+        shadow ledger changes, even though effective_free (and therefore the
+        gating decision) has changed.
         """
         messages, mock_warn = _make_info_collector()
         _last_log_state = {}
@@ -268,7 +270,7 @@ class TestStateClearOnEvent:
 class TestUnifiedCapacityFormat:
     """The `Capacity:` log line must be a single shared format (issue #272)."""
 
-    def test_format_includes_all_four_numbers_in_fixed_order(self):
+    def test_format_includes_all_five_numbers_in_fixed_order(self):
         msg = _format_capacity(7, 23, 16, 48, 25)
         assert msg == (
             "Capacity: 7 effective free GPUs "
