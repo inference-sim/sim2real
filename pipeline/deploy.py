@@ -112,6 +112,36 @@ def _load_setup_config() -> dict:
     return {}
 
 
+# ── Progress store loading ───────────────────────────────────────────────────
+
+def _load_progress(store, *, allow_unreachable: bool = False) -> dict:
+    """Load progress data with consistent corrupt/unreachable handling.
+
+    Single entry point for ``store.load()`` across deploy.py subcommands so
+    every command surfaces corrupt-data errors with the same UX (issue #140).
+
+    On ``ValueError`` (corrupt-data signal from ``ConfigMapProgressStore.load``):
+    print a clear error pointing at the affected ConfigMap with recovery
+    guidance, then ``sys.exit(1)``. Corrupt data is never recoverable by
+    retry, so this applies regardless of ``allow_unreachable``.
+
+    On ``RuntimeError`` (e.g. kubectl cannot reach the cluster): re-raise by
+    default, or warn and return ``{}`` when ``allow_unreachable=True``.
+    """
+    try:
+        return store.load()
+    except ValueError as exc:
+        err(f"Corrupt progress data: {exc}")
+        err("Re-run prepare.py, or fix the ConfigMap manually with "
+            "`kubectl edit configmap <name> -n <namespace>`.")
+        sys.exit(1)
+    except RuntimeError as exc:
+        if allow_unreachable:
+            warn(f"Failed to load progress: {exc}")
+            return {}
+        raise
+
+
 # ── Image build ───────────────────────────────────────────────────────────────
 
 def _write_build_metadata(run_dir: Path, epp_image: str) -> None:
@@ -414,11 +444,7 @@ def _cmd_status(args, run_dir: Path,
         err("No namespace configured. Run setup.py first.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
-    try:
-        progress = store.load()
-    except (ValueError, RuntimeError) as exc:
-        err(f"Failed to load progress: {exc}")
-        progress = {}
+    progress = _load_progress(store, allow_unreachable=True)
 
     if not progress:
         suffix = " (no progress data)"
@@ -1045,11 +1071,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
         err("No namespace configured. Run setup.py first.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
-    try:
-        progress = store.load() or None
-    except (ValueError, RuntimeError) as exc:
-        warn(f"Failed to load progress: {exc}")
-        progress = None
+    progress = _load_progress(store, allow_unreachable=True) or None
 
     # ── Pair-level scoping (--only / --workload) ──────────────────────────
     scope_only = getattr(args, "only", None)
@@ -2006,7 +2028,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     _zero_dispatch_count = 0
 
     # Load or initialize progress
-    progress = store.load()
+    progress = _load_progress(store)
 
     discovered = _load_pairs(cluster_dir)
     if not discovered:
@@ -2343,7 +2365,7 @@ def _cmd_reset(args, run_dir: Path, discovered: dict,
         err("No namespace configured. Run setup.py first.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
-    progress = store.load()
+    progress = _load_progress(store)
 
     if not progress:
         info("No progress data found — nothing to reset")
@@ -2398,7 +2420,7 @@ def _cmd_wipe(args, run_dir: Path,
         err("No namespace configured. Run setup.py first.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
-    progress = store.load()
+    progress = _load_progress(store)
 
     if not progress:
         info("No progress data found — nothing to wipe")
@@ -2700,11 +2722,7 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
     if discovered:
         from pipeline.lib.progress import ConfigMapProgressStore
         store = ConfigMapProgressStore(namespace, run_name=run_dir.name)
-        try:
-            progress = store.load()
-        except (RuntimeError, OSError) as exc:
-            warn(f"ConfigMap unreachable — skipping pre-flight filter validation: {exc}")
-            progress = None
+        progress = _load_progress(store, allow_unreachable=True) or None
         if progress:
             _resolve_scope(progress, args)
 
