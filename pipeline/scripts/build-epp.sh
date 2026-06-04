@@ -175,15 +175,34 @@ spec:
 BUILDPOD
 
 # ── Step 5: Wait for build ────────────────────────────────────────
+# Poll for a terminal phase rather than `kubectl wait --for=...=Succeeded`,
+# which has no OR semantics across matchers: a pod that exits with
+# phase=Failed would otherwise be indistinguishable from a still-running
+# build and block for the full timeout. (#275)
 info "Building image (this may take several minutes)..."
-if kubectl wait --for=jsonpath='{.status.phase}'=Succeeded \
-  "pod/${BUILD_POD}" -n "${NAMESPACE}" --timeout=1800s 2>/dev/null; then
-  ok "Image built and pushed: ${FULL_IMAGE}"
-else
-  err "Build failed. Logs:"
-  kubectl logs "${BUILD_POD}" -n "${NAMESPACE}" --tail=50 2>/dev/null || true
-  exit 1
-fi
+BUILD_TIMEOUT=1800
+deadline=$(( $(date +%s) + BUILD_TIMEOUT ))
+while :; do
+  phase=$(kubectl get pod "${BUILD_POD}" -n "${NAMESPACE}" \
+    -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+  case "${phase}" in
+    Succeeded)
+      ok "Image built and pushed: ${FULL_IMAGE}"
+      break
+      ;;
+    Failed)
+      err "Build failed (phase=Failed). Logs:"
+      kubectl logs "${BUILD_POD}" -n "${NAMESPACE}" --tail=80 2>/dev/null || true
+      exit 1
+      ;;
+  esac
+  if (( $(date +%s) > deadline )); then
+    err "Timed out after ${BUILD_TIMEOUT}s waiting for build pod (phase=${phase:-unknown}). Last logs:"
+    kubectl logs "${BUILD_POD}" -n "${NAMESPACE}" --tail=80 2>/dev/null || true
+    exit 1
+  fi
+  sleep 3
+done
 
 # ── Step 6: Clean up build pod ─────────────────────────────────────
 kubectl delete pod "${BUILD_POD}" -n "${NAMESPACE}" --ignore-not-found --force --grace-period=0 2>/dev/null || true
