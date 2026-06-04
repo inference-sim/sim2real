@@ -114,6 +114,16 @@ def _load_setup_config() -> dict:
 
 # ── Progress store loading ───────────────────────────────────────────────────
 
+class ProgressUnavailable(RuntimeError):
+    """Progress store is reachable-failure (transient kubectl error).
+
+    Distinct from the empty-result case (ConfigMap NotFound or empty data),
+    which ``ConfigMapProgressStore.load`` returns as ``{}``. Only raised by
+    ``_load_progress`` when ``allow_unreachable=True`` so callers can decide
+    whether to abort or degrade. See issue #287.
+    """
+
+
 def _load_progress(store, *, allow_unreachable: bool = False) -> dict:
     """Load progress data with consistent corrupt/unreachable handling.
 
@@ -125,8 +135,10 @@ def _load_progress(store, *, allow_unreachable: bool = False) -> dict:
     guidance, then ``sys.exit(1)``. Corrupt data is never recoverable by
     retry, so this applies regardless of ``allow_unreachable``.
 
-    On ``RuntimeError`` (e.g. kubectl cannot reach the cluster): re-raise by
-    default, or warn and return ``{}`` when ``allow_unreachable=True``.
+    On ``RuntimeError`` (e.g. kubectl cannot reach the cluster): re-raise the
+    original ``RuntimeError`` by default, or raise ``ProgressUnavailable`` when
+    ``allow_unreachable=True`` so callers can distinguish unreachable from
+    legitimate empty progress data (issue #287).
     """
     try:
         return store.load()
@@ -137,8 +149,7 @@ def _load_progress(store, *, allow_unreachable: bool = False) -> dict:
         sys.exit(1)
     except RuntimeError as exc:
         if allow_unreachable:
-            warn(f"Failed to load progress: {exc}")
-            return {}
+            raise ProgressUnavailable(str(exc)) from exc
         raise
 
 
@@ -444,7 +455,12 @@ def _cmd_status(args, run_dir: Path,
         err("No namespace configured. Run setup.py first.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
-    progress = _load_progress(store, allow_unreachable=True)
+    try:
+        progress = _load_progress(store, allow_unreachable=True)
+    except ProgressUnavailable as exc:
+        err(f"Cluster unreachable — cannot read progress ConfigMap: {exc}")
+        err("Retry once kubectl can reach the cluster.")
+        sys.exit(1)
 
     if not progress:
         suffix = " (no progress data)"
@@ -1080,7 +1096,14 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
         err("No namespace configured. Run setup.py first.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
-    progress = _load_progress(store, allow_unreachable=True) or None
+    try:
+        progress = _load_progress(store, allow_unreachable=True) or None
+    except ProgressUnavailable as exc:
+        err(f"Cluster unreachable — cannot read progress ConfigMap: {exc}")
+        err("Refusing to collect from filesystem-discovered phases without "
+            "authoritative progress data. Retry once kubectl can reach the "
+            "cluster.")
+        sys.exit(1)
 
     # ── Pair-level scoping (--only / --workload) ──────────────────────────
     scope_only = getattr(args, "only", None)
@@ -2731,7 +2754,12 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
     if discovered:
         from pipeline.lib.progress import ConfigMapProgressStore
         store = ConfigMapProgressStore(namespace, run_name=run_dir.name)
-        progress = _load_progress(store, allow_unreachable=True) or None
+        try:
+            progress = _load_progress(store, allow_unreachable=True) or None
+        except ProgressUnavailable as exc:
+            warn(f"ConfigMap unreachable — skipping pre-flight filter "
+                 f"validation: {exc}")
+            progress = None
         if progress:
             _resolve_scope(progress, args)
 

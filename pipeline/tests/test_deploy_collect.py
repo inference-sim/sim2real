@@ -209,6 +209,48 @@ def test_collect_corrupt_configmap_exits(tmp_path, monkeypatch):
     assert collected_phases == []
 
 
+def test_collect_unreachable_configmap_exits(tmp_path, monkeypatch, capsys):
+    """Cluster-unreachable causes _cmd_collect to exit non-zero rather than
+    falling through to filesystem-discovered phases (issue #287)."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    cluster_dir = run_dir / "cluster"
+    cluster_dir.mkdir(parents=True)
+    # Drop a file that _discover_phases would otherwise consume — we want to
+    # confirm the unreachable path refuses this fallback.
+    (cluster_dir / "pipelinerun-baseline-wl.yaml").write_text(
+        "kind: PipelineRun\n")
+
+    def _raise_unreachable(self):
+        raise RuntimeError("kubectl: connection refused")
+
+    monkeypatch.setattr(ConfigMapProgressStore, "load", _raise_unreachable)
+    monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
+
+    class Args:
+        package = None
+        skip_logs = False
+        only = None
+        workload = None
+
+    collected_phases = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+        collected_phases.extend(phases)
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
+         pytest.raises(SystemExit) as exc_info:
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert exc_info.value.code != 0
+    assert collected_phases == []
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "unreachable" in combined.lower()
+
+
 def test_collect_only_done_phases(tmp_path, monkeypatch):
     """Only phases with status done are included."""
     from pipeline import deploy
