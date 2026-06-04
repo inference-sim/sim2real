@@ -69,7 +69,6 @@ python pipeline/run.py     --experiment-root ../admission-control switch <run-na
 | `assemble.py` | Scenario assembly: deep-merges bundles + overlays into resolved scenarios |
 | `tekton.py` | Generates PipelineRun YAMLs for scenario-based benchmarks |
 | `pod_pending.py` | Classifies pod scheduling failures as recoverable or non-recoverable |
-| `backoff.py` | Exponential backoff controller for GPU scarcity in `deploy.py run` |
 | `run_manager.py` | `list_runs`, `inspect_run`, `switch_run` logic |
 | `remote.py` | ConfigMap and Job generation for `deploy.py run --remote` |
 

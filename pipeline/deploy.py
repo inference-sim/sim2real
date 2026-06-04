@@ -413,9 +413,6 @@ def _cmd_status(args, run_dir: Path,
 
     if not pairs:
         print("  0 pairs")
-        orch = progress.get("_orchestrator")
-        if isinstance(orch, dict) and orch.get("state") not in (None, "normal"):
-            print(f"  Orchestrator: {orch.get('state', '?')} (level {orch.get('backoff_level', 0)})")
         print()
         return
 
@@ -440,11 +437,6 @@ def _cmd_status(args, run_dir: Path,
     print()
     summary_parts = [f"{v} {k}" for k, v in sorted(counts.items())]
     print(f"  {len(pairs)} pairs: " + "  ".join(summary_parts))
-
-    orch = progress.get("_orchestrator")
-    if isinstance(orch, dict) and orch.get("state") not in (None, "normal"):
-        print(f"  Orchestrator: {orch.get('state', '?')} (level {orch.get('backoff_level', 0)}, "
-              f"last probe: {orch.get('last_probe_free_gpus', '?')} free GPUs)")
 
     print()
 
@@ -1914,7 +1906,6 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     """Orchestrate parallel pool execution across namespace slots."""
     import tempfile as _tmp
     from pipeline.lib.progress import ConfigMapProgressStore
-    from pipeline.lib.backoff import BackoffController
     from pipeline.lib.capacity import (
         probe_free_gpus, derive_gpu_resource_type, load_defaults,
         extract_node_filters, NodeFilter,
@@ -1992,15 +1983,6 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
 
     # Load or initialize progress
     progress = store.load()
-
-    max_backoff = getattr(args, "max_backoff", 600)
-    existing_orch = progress.get("_orchestrator")
-    if isinstance(existing_orch, dict):
-        backoff = BackoffController.from_dict(existing_orch, base_interval=poll_interval, max_backoff=max_backoff)
-        if backoff.state != "normal":
-            info(f"Resuming in {backoff.state} state (level {backoff.backoff_level})")
-    else:
-        backoff = BackoffController(base_interval=poll_interval, max_backoff=max_backoff)
 
     discovered = _load_pairs(cluster_dir)
     if not discovered:
@@ -2097,7 +2079,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 del slots_busy[ns]
                 _last_log_state.pop("capacity", None)
                 _last_log_state.pop("dispatch", None)
-                _last_log_state.pop("backoff_skip", None)
+                _last_log_state.pop("slots_busy", None)
                 _zero_dispatch_count = 0
 
             elif status in ("Failed", "PipelineRunCancelled", "PipelineRunCouldntGetPipeline",
@@ -2111,12 +2093,11 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 del slots_busy[ns]
                 _last_log_state.pop("capacity", None)
                 _last_log_state.pop("dispatch", None)
-                _last_log_state.pop("backoff_skip", None)
+                _last_log_state.pop("slots_busy", None)
                 _zero_dispatch_count = 0
 
             elif status in ("Running", "Started"):
                 # Check for pending pods (before timeout)
-                had_pending = entry.get("pending_since") is not None
                 try:
                     reclaimed = _handle_pending_pods(
                         pr_name=pr_name, namespace=ns, entry=entry,
@@ -2129,34 +2110,13 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                     _tb.print_exc(file=sys.stderr)
                     reclaimed = False
                 if reclaimed:
-                    if entry.get("status") == "pending":
-                        try:
-                            prev_state = backoff.state
-                            backoff.signal_reclaim()
-                            if prev_state == "normal" and backoff.state == "backing_off":
-                                warn(f"Reclaims triggered backoff (next poll: {backoff.effective_interval}s)")
-                        except (ValueError, TypeError) as exc:
-                            warn(f"Backoff signal_reclaim failed: {exc} — ignoring")
                     del slots_busy[ns]
                     _last_log_state.pop("capacity", None)
                     _last_log_state.pop("dispatch", None)
-                    _last_log_state.pop("backoff_skip", None)
+                    _last_log_state.pop("slots_busy", None)
                     _zero_dispatch_count = 0
-                    progress["_orchestrator"] = backoff.to_dict()
                     store.save(progress)
                     continue
-
-                if had_pending and entry.get("pending_since") is None:
-                    if backoff.state != "normal":
-                        backoff.signal_scheduling_success()
-                        info(f"[{pair_key}] Pending→Running → backoff reset")
-                        _last_log_state.pop("capacity", None)
-                        _last_log_state.pop("dispatch", None)
-                        _last_log_state.pop("backoff_skip", None)
-                        _last_log_state.pop("backoff_level", None)
-                        _zero_dispatch_count = 0
-                        progress["_orchestrator"] = backoff.to_dict()
-                        store.save(progress)
 
                 # Check for timeout
                 timeout_result = _handle_timeout(
@@ -2167,7 +2127,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                     del slots_busy[ns]
                     _last_log_state.pop("capacity", None)
                     _last_log_state.pop("dispatch", None)
-                    _last_log_state.pop("backoff_skip", None)
+                    _last_log_state.pop("slots_busy", None)
                     _zero_dispatch_count = 0
                     store.save(progress)
                     continue
@@ -2194,69 +2154,43 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                         del slots_busy[ns]
                         _last_log_state.pop("capacity", None)
                         _last_log_state.pop("dispatch", None)
-                        _last_log_state.pop("backoff_skip", None)
+                        _last_log_state.pop("slots_busy", None)
                         _zero_dispatch_count = 0
                     else:
                         warn(f"[{pair_key}] could not cancel PipelineRun — slot remains busy")
 
-        # ── Capacity probe ───────────────────────────────────────────────
-        capacity = probe_free_gpus(
-            gpu_resource_type=gpu_resource_type,
-            node_filters=list(node_filters.values()) or [NodeFilter()],
-        )
-        if isinstance(capacity, tuple):
-            free_gpus, allocatable, requested = capacity
-            _cap_state = (free_gpus, allocatable, requested)
-            if _pending_pairs() and _cap_state != _last_log_state.get("capacity"):
-                info(f"Capacity: {free_gpus} free GPUs ({allocatable} allocatable − {requested} requested)")
-                _last_log_state["capacity"] = _cap_state
-            if _probe_fail_count > 0:
-                info(f"Capacity probe recovered after {_probe_fail_count} failure(s)")
-            _probe_fail_count = 0
-            _last_probe_error = ""
-        else:
-            free_gpus = None
-            _probe_fail_count += 1
-            if capacity != _last_probe_error or _probe_fail_count % 10 == 0:
-                warn(f"Capacity probe failed: {capacity} — dispatching without GPU gating")
-            _last_probe_error = capacity
-
-        # ── Backoff signals ──────────────────────────────────────────────
-        if free_gpus is not None:
-            backoff.last_probe_free_gpus = free_gpus
-        pending = _pending_pairs()
-        if free_gpus is not None and pending:
-            min_cost = min(pair_costs[k] for k in pending)
-            max_cost = max(pair_costs[k] for k in pending)
-            if free_gpus < min_cost:
-                prev_state = backoff.state
-                backoff.signal_scarcity(free_gpus=free_gpus, min_cost=min_cost)
-                if prev_state == "normal":
-                    warn(f"Scarcity detected: {free_gpus} free GPUs, entering backoff (next poll: {backoff.effective_interval}s)")
-                else:
-                    _bo_state = (backoff.backoff_level, backoff.effective_interval)
-                    if _bo_state != _last_log_state.get("backoff_level"):
-                        info(f"Backoff level {backoff.backoff_level} — next poll in {backoff.effective_interval}s")
-                        _last_log_state["backoff_level"] = _bo_state
-            elif free_gpus >= max_cost:
-                if backoff.state != "normal":
-                    info(f"Backoff probe: {free_gpus} free GPUs available → resuming normal dispatch")
-                    _last_log_state.pop("backoff_level", None)
-                    _last_log_state.pop("backoff_skip", None)
-                backoff.signal_capacity(free_gpus=free_gpus, max_cost=max_cost)
-
-        # ── Assign pending work to free slots ────────────────────────────
+        # ── Skip GPU probe + dispatch when no slots are free ─────────────
+        # When every slot is busy, only PipelineRun status checking (above)
+        # runs this cycle. Polling stays at the base interval so slot
+        # recovery is detected within one poll (issue #274).
         free_slots = [ns for ns in namespaces if ns not in slots_busy]
         pending = _pending_pairs()
-        if free_gpus is not None and pending:
-            min_cost = min(pair_costs[k] for k in pending)
-            if not backoff.should_dispatch(free_gpus=free_gpus, min_cost=min_cost):
-                _skip_state = (len(pending), free_gpus)
-                if _skip_state != _last_log_state.get("backoff_skip"):
-                    info(f"Backoff: skipping dispatch ({len(pending)} pending, {free_gpus} free GPUs)")
-                    _last_log_state["backoff_skip"] = _skip_state
-                dispatchable = []
+
+        if free_slots:
+            # ── Capacity probe ───────────────────────────────────────────
+            capacity = probe_free_gpus(
+                gpu_resource_type=gpu_resource_type,
+                node_filters=list(node_filters.values()) or [NodeFilter()],
+            )
+            if isinstance(capacity, tuple):
+                free_gpus, allocatable, requested = capacity
+                _cap_state = (free_gpus, allocatable, requested)
+                if pending and _cap_state != _last_log_state.get("capacity"):
+                    info(f"Capacity: {free_gpus} free GPUs ({allocatable} allocatable − {requested} requested)")
+                    _last_log_state["capacity"] = _cap_state
+                if _probe_fail_count > 0:
+                    info(f"Capacity probe recovered after {_probe_fail_count} failure(s)")
+                _probe_fail_count = 0
+                _last_probe_error = ""
             else:
+                free_gpus = None
+                _probe_fail_count += 1
+                if capacity != _last_probe_error or _probe_fail_count % 10 == 0:
+                    warn(f"Capacity probe failed: {capacity} — dispatching without GPU gating")
+                _last_probe_error = capacity
+
+            # ── Assign pending work to free slots ────────────────────────
+            if free_gpus is not None and pending:
                 effective_free = shadow.effective_free(free_gpus)
                 dispatchable = _select_dispatchable(
                     pending,
@@ -2279,87 +2213,90 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                     if _disp_state != _last_log_state.get("dispatch"):
                         info(f"Dispatching {len(free_slots)}/{len(pending)} pending pairs (slot-limited)")
                         _last_log_state["dispatch"] = _disp_state
-        else:
-            dispatchable = list(pending)
-            random.shuffle(dispatchable)
+            else:
+                dispatchable = list(pending)
+                random.shuffle(dispatchable)
 
-        for ns, pair_key in zip(free_slots, dispatchable):
-            hf_secret_name = setup_config.get("hf_secret_name", "hf-secret")
-            ready, reasons = _check_slot_ready(ns, hf_secret_name=hf_secret_name)
-            if not ready:
-                warn(f"Slot {ns} not ready: {'; '.join(reasons)}")
-                continue
+            for ns, pair_key in zip(free_slots, dispatchable):
+                hf_secret_name = setup_config.get("hf_secret_name", "hf-secret")
+                ready, reasons = _check_slot_ready(ns, hf_secret_name=hf_secret_name)
+                if not ready:
+                    warn(f"Slot {ns} not ready: {'; '.join(reasons)}")
+                    continue
 
-            pair_cost = pair_costs[pair_key]
-            source = pair_provenance[pair_key]
-            _source_labels = {"derived": "derived from scenarioContent", "defaults-only": "derived from defaults only", "fallback": "fallback default"}
-            if free_gpus is not None:
-                _reserved = shadow.reserved()
-                _effective = shadow.effective_free(free_gpus)
-                info(f"Capacity: {_effective} effective free GPUs ({free_gpus} probed − {_reserved} reserved)")
-            info(f"{pair_key} requires {pair_cost} GPUs ({_source_labels[source]})")
-            pr_meta = discovered.get(pair_key, {})
-            pr_path_str = pr_meta.get("pr_path", "")
-            if not pr_path_str:
-                warn(f"No PipelineRun path for {pair_key}"); continue
+                pair_cost = pair_costs[pair_key]
+                source = pair_provenance[pair_key]
+                _source_labels = {"derived": "derived from scenarioContent", "defaults-only": "derived from defaults only", "fallback": "fallback default"}
+                if free_gpus is not None:
+                    _reserved = shadow.reserved()
+                    _effective = shadow.effective_free(free_gpus)
+                    info(f"Capacity: {_effective} effective free GPUs ({free_gpus} probed − {_reserved} reserved)")
+                info(f"{pair_key} requires {pair_cost} GPUs ({_source_labels[source]})")
+                pr_meta = discovered.get(pair_key, {})
+                pr_path_str = pr_meta.get("pr_path", "")
+                if not pr_path_str:
+                    warn(f"No PipelineRun path for {pair_key}"); continue
 
-            pr_data = yaml.safe_load(Path(pr_path_str).read_text())
+                pr_data = yaml.safe_load(Path(pr_path_str).read_text())
 
-            # Rewrite namespace in the PipelineRun before applying
-            pr_data["metadata"]["namespace"] = ns
-            for param in pr_data.get("spec", {}).get("params", []):
-                if param["name"] == "namespace":
-                    param["value"] = ns
+                # Rewrite namespace in the PipelineRun before applying
+                pr_data["metadata"]["namespace"] = ns
+                for param in pr_data.get("spec", {}).get("params", []):
+                    if param["name"] == "namespace":
+                        param["value"] = ns
 
-            if getattr(args, "skip_teardown", False):
-                params = pr_data.setdefault("spec", {}).setdefault("params", [])
-                for param in params:
-                    if param["name"] == "skipTeardown":
-                        param["value"] = "true"
-                        break
-                else:
-                    params.append({"name": "skipTeardown", "value": "true"})
+                if getattr(args, "skip_teardown", False):
+                    params = pr_data.setdefault("spec", {}).setdefault("params", [])
+                    for param in params:
+                        if param["name"] == "skipTeardown":
+                            param["value"] = "true"
+                            break
+                    else:
+                        params.append({"name": "skipTeardown", "value": "true"})
 
-            tf_path = None
-            try:
-                with _tmp.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tf:
-                    yaml.dump(pr_data, tf, default_flow_style=False)
-                    tf_path = tf.name
-                pr_name = pr_data.get("metadata", {}).get("name", "")
-                # Delete any prior completed/failed PipelineRun before re-applying
-                if pr_name:
-                    run(["kubectl", "delete", "pipelinerun", pr_name, f"-n={ns}",
-                         "--ignore-not-found=true"],
-                        check=False, capture=True)
-                result = run(["kubectl", "apply", "-f", tf_path, "-n", ns],
-                             check=False, capture=True)
-            finally:
-                if tf_path:
-                    Path(tf_path).unlink(missing_ok=True)
+                tf_path = None
+                try:
+                    with _tmp.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tf:
+                        yaml.dump(pr_data, tf, default_flow_style=False)
+                        tf_path = tf.name
+                    pr_name = pr_data.get("metadata", {}).get("name", "")
+                    # Delete any prior completed/failed PipelineRun before re-applying
+                    if pr_name:
+                        run(["kubectl", "delete", "pipelinerun", pr_name, f"-n={ns}",
+                             "--ignore-not-found=true"],
+                            check=False, capture=True)
+                    result = run(["kubectl", "apply", "-f", tf_path, "-n", ns],
+                                 check=False, capture=True)
+                finally:
+                    if tf_path:
+                        Path(tf_path).unlink(missing_ok=True)
 
-            if result.returncode != 0:
-                warn(f"[{pair_key}] kubectl apply failed: {result.stderr.strip()}")
-                continue
+                if result.returncode != 0:
+                    warn(f"[{pair_key}] kubectl apply failed: {result.stderr.strip()}")
+                    continue
 
-            entry = progress[pair_key]
-            entry["status"] = "running"
-            entry["namespace"] = ns
-            entry["pending_since"] = None
-            slots_busy[ns] = pair_key
-            store.save(progress)
-            ok(f"[{pair_key}] → {ns} ({pr_name})")
-            _last_log_state.pop("capacity", None)
-            _last_log_state.pop("dispatch", None)
-            _last_log_state.pop("backoff_skip", None)
-            _zero_dispatch_count = 0
-            shadow.record(pair_cost)
+                entry = progress[pair_key]
+                entry["status"] = "running"
+                entry["namespace"] = ns
+                entry["pending_since"] = None
+                slots_busy[ns] = pair_key
+                store.save(progress)
+                ok(f"[{pair_key}] → {ns} ({pr_name})")
+                _last_log_state.pop("capacity", None)
+                _last_log_state.pop("dispatch", None)
+                _last_log_state.pop("slots_busy", None)
+                _zero_dispatch_count = 0
+                shadow.record(pair_cost)
+        elif pending:
+            _busy_state = (len(pending), len(namespaces))
+            if _busy_state != _last_log_state.get("slots_busy"):
+                info(f"Dispatching 0/{len(pending)} pending — all {len(namespaces)} slots busy")
+                _last_log_state["slots_busy"] = _busy_state
 
-        # Persist backoff state
-        progress["_orchestrator"] = backoff.to_dict()
         store.save(progress)
 
         if _work_remaining() or slots_busy:
-            time.sleep(backoff.effective_interval)
+            time.sleep(poll_interval)
 
     # Final summary
     counts: dict[str, int] = {}
@@ -2572,7 +2509,6 @@ def _collect_run_flags(args) -> list[str]:
         "default_gpu_cost": 1,
         "pending_threshold": 600,
         "max_pending_stalls": 10,
-        "max_backoff": 600,
         "shadow_ttl": 120,
     }
     for attr, default in _defaults.items():
@@ -2846,8 +2782,6 @@ Examples:
                        help="Seconds a pod may remain Pending (recoverable) before early reclaim [600]")
     run_p.add_argument("--max-pending-stalls", type=int, default=10, dest="max_pending_stalls",
                        help="Max early reclaims before marking pair stalled [10]")
-    run_p.add_argument("--max-backoff", type=int, default=600, dest="max_backoff",
-                       help="Maximum backoff interval in seconds during GPU scarcity [600]")
     run_p.add_argument("--shadow-ttl", type=int, default=120, dest="shadow_ttl",
                        help="Seconds to retain shadow GPU reservations (prevents over-subscription from probe lag; 0 to disable) [120]")
     run_p.add_argument("--defaults-path", type=Path, default=None, dest="defaults_path",
