@@ -114,6 +114,77 @@ def test_reset_pair_none_namespace_resets_state(monkeypatch):
     assert entry["retries"] == 0
 
 
+def test_timed_out_entry_flows_to_reset_helm_uninstall(monkeypatch):
+    """End-to-end (issue #277): a pair driven to timed-out by _handle_timeout
+    retains its namespace, and feeding that same entry to _reset_pair actually
+    uninstalls the helm releases. Reverting retain-on-failure breaks this — the
+    consumer would see namespace=None and skip helm cleanup."""
+    import datetime as _dt
+    import pipeline.deploy as mod
+
+    old_ts = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=5)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+    entry = {"workload": "wl-heavy", "package": "baseline", "status": "running",
+             "namespace": "sim2real-0", "retries": 3, "pending_since": None}
+
+    calls = []
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        calls.append(cmd)
+        class _R:
+            returncode = 0
+            stdout = (old_ts if "creationTimestamp" in " ".join(cmd)
+                      else ("release-a\n" if cmd[:2] == ["helm", "list"] else ""))
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    monkeypatch.setattr(mod, "_cancel_and_delete_pipelinerun", lambda pr, ns: True)
+
+    # Producer: timeout at max retries → timed-out, namespace retained.
+    assert mod._handle_timeout(
+        pr_name="baseline-heavy-run1", namespace="sim2real-0",
+        entry=entry, timeout_hours=4.0, max_retries=3) is True
+    assert entry["status"] == "timed-out"
+    assert entry["namespace"] == "sim2real-0"
+
+    # Consumer: reset uses the retained namespace to actually uninstall helm.
+    calls.clear()
+    assert mod._reset_pair("wl-heavy-baseline", entry, _DISCOVERED) is True
+    helm_uninstalls = [c for c in calls if c[:2] == ["helm", "uninstall"]]
+    assert len(helm_uninstalls) == 1
+    assert "release-a" in helm_uninstalls[0]
+    assert entry["status"] == "pending"
+
+
+def test_reset_pair_null_namespace_skips_helm_and_warns(monkeypatch, capsys):
+    """Negative companion (issue #277): a terminal pair with no namespace cannot
+    run helm cleanup — _reset_pair must skip helm AND warn the operator rather
+    than silently reporting success."""
+    import pipeline.deploy as mod
+
+    entry = {"workload": "wl-load", "package": "baseline", "status": "timed-out",
+             "namespace": None, "retries": 1}
+
+    calls = []
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        calls.append(cmd)
+        class _R:
+            returncode = 0
+            stdout = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    result = mod._reset_pair("wl-load-baseline", entry, _DISCOVERED)
+    assert result is True
+    assert [c for c in calls if c[:2] == ["helm", "uninstall"]] == []
+    assert [c for c in calls if c[:2] == ["helm", "list"]] == []
+    out = capsys.readouterr().out.lower()
+    assert "helm" in out and "manual" in out
+
+
 def test_reset_pair_kubectl_delete_failure_does_not_reset(monkeypatch):
     """When kubectl delete pipelinerun fails, state is NOT reset."""
     import pipeline.deploy as mod
