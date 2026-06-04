@@ -275,8 +275,15 @@ def extract_fields(table: TableSection) -> dict[str, ProvenanceValue]:
             else:
                 bv = parse_boolean(raw_value)
                 if bv is None:
-                    print(f"  warning: could not parse boolean for {canonical}: '{raw_value}'", file=sys.stderr)
-                    continue
+                    # The user expressed an intent we cannot parse; treat as a
+                    # configuration error rather than silently dropping the row,
+                    # which would re-introduce the silent-default behavior the
+                    # bare-flag rewrite was meant to eliminate.
+                    print(
+                        f"ERROR: could not parse boolean for {canonical}: '{raw_value}' (expected true/false)",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
                 epc_observations.append((bv, source, raw_param))
             continue
 

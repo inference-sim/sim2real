@@ -27,4 +27,4 @@ jobs:
         run: ruff check pipeline/ .claude/skills/ --select F
 
       - name: Run tests
-        run: python -m pytest pipeline/ .claude/skills/sim2real-analyze/tests/ .claude/skills/sim2real-translate/tests/ -v
+        run: python -m pytest pipeline/ .claude/skills/sim2real-analyze/tests/ .claude/skills/sim2real-bootstrap/tests/ .claude/skills/sim2real-translate/tests/ -v
