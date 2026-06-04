@@ -866,8 +866,17 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
             "restartPolicy": "Never",
         }
     })
-    run(["kubectl", "run", pod_name, "--image=alpine:3.19", "--restart=Never",
-         "--overrides", overrides, "-n", namespace], capture=True)
+    create_result = run(
+        ["kubectl", "run", pod_name, "--image=alpine:3.19", "--restart=Never",
+         "--overrides", overrides, "-n", namespace],
+        check=False, capture=True,
+    )
+    if create_result.returncode != 0:
+        run(["kubectl", "delete", "pod", pod_name, "-n", namespace,
+             "--ignore-not-found", "--force", "--grace-period=0"],
+            check=False, capture=True)
+        raise RuntimeError(
+            f"Extractor pod {pod_name} create failed: {create_result.stderr.strip()}")
 
     result = run(
         ["kubectl", "wait", f"pod/{pod_name}", "--for=condition=Ready",
