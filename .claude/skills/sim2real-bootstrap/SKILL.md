@@ -178,7 +178,7 @@ Generate llm-d-benchmark scenario YAML(s) for baseline arm(s).
    The script will:
    - Parse the vLLM configuration table from config.md
    - Apply MODEL_METADATA and HARDWARE_LABELS lookups
-   - Emit a single bare prefix-caching flag matching the user's intent: `--enable-prefix-caching` if explicitly enabled, `--no-enable-prefix-caching` if explicitly disabled, nothing if unspecified in config.md (defers to vLLM's per-model default). Input accepts either the legacy keyed form (`enable_prefix_caching | true|false`) or a bare flag row label (`--enable-prefix-caching` / `--no-enable-prefix-caching` with an empty value column); contradictory specifications error.
+   - Emit a single bare prefix-caching flag matching the user's intent: `--enable-prefix-caching` if explicitly enabled, `--no-enable-prefix-caching` if explicitly disabled, `--enable-prefix-caching` (with a `sim2real-bootstrap default` provenance source) if unspecified in config.md. The deployed vLLM version predates per-model default resolution, so silent → OFF rather than ON; defaulting to ON keeps caching enabled for our scenarios (see issue #295). Input accepts either the legacy keyed form (`enable_prefix_caching | true|false`) or a bare flag row label (`--enable-prefix-caching` / `--no-enable-prefix-caching` with an empty value column); contradictory specifications error.
    - Write YAML with inline provenance comments showing each value's source
    - Error on unknown models/hardware (update lookup tables in the script if needed)
 

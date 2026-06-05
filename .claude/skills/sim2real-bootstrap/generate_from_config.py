@@ -360,15 +360,22 @@ def build_additional_flags(
         f = fields["enable_chunked_prefill"]
         flags.append(("--enable-chunked-prefill", f.source))
 
-    # Emit a single bare flag matching the user's intent. If the field was not
-    # specified in config.md at all, emit nothing and defer to vLLM's per-model
-    # default (typically ON for generative models).
+    # Emit a single bare flag matching the user's intent. When config.md is
+    # silent on prefix caching, default to --enable-prefix-caching: the
+    # deployed vLLM version predates per-model default resolution
+    # (vllm/engine/arg_utils.py:_set_default_chunked_prefill_and_prefix_caching_args),
+    # so an unset value would otherwise fall back to OFF rather than ON for
+    # supported models. See issue #295.
     epc = fields.get("enable_prefix_caching")
-    if epc is not None:
-        if epc.value:
-            flags.append(("--enable-prefix-caching", epc.source))
-        else:
-            flags.append(("--no-enable-prefix-caching", epc.source))
+    if epc is None:
+        flags.append((
+            "--enable-prefix-caching",
+            "sim2real-bootstrap default (config.md silent; deployed vLLM requires explicit ON)",
+        ))
+    elif epc.value:
+        flags.append(("--enable-prefix-caching", epc.source))
+    else:
+        flags.append(("--no-enable-prefix-caching", epc.source))
 
     if "dtype" in fields and fields["dtype"].value != "auto":
         f = fields["dtype"]
