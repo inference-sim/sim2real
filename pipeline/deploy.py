@@ -1101,12 +1101,144 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                     if on_workload_done:
                         on_workload_done(phase, wl_name, namespace, wl_exc)
                 errors[phase] = RuntimeError("; ".join(phase_errors)) if phase_errors else None
+
+            # Pull resolved llm-d-benchmark plan YAMLs alongside trace data.
+            # Best-effort and non-fatal; multi-slot dedup via mtime skip.
+            try:
+                _extract_phase_plans(pod_name, run_name, phase, namespace, run_dir)
+            except Exception as exc:
+                warn(f"[{phase}/plans] extraction failed: {exc}")
     finally:
         run(["kubectl", "delete", "pod", pod_name, "-n", namespace,
              "--ignore-not-found", "--force", "--grace-period=0"],
             check=False, capture=True)
 
     return errors
+
+
+def _extract_phase_plans(pod_name: str, run_name: str, phase: str,
+                         namespace: str, run_dir: Path) -> None:
+    """Copy resolved llm-d-benchmark plan YAMLs for one phase from data-pvc.
+
+    PVC layout:
+      /data/{run_name}/plans/{phase}/{workload}/root-<ts>/plan/{flow}/*.yaml
+
+    Workload does not impact system config, so plans are phase-invariant
+    across workloads — pick one workload (lex-first) to source the phase's
+    plans. Multiple roots correspond to render passes (standup, smoketest,
+    teardown) and are expected to be byte-identical; pick the latest by
+    lex-sortable name (root-YYYYMMDD-HHMMSS-mmm).
+
+    Destination: <run_dir>/results/{phase}/plans/{flow}/*.yaml
+
+    Best-effort: errors are warned but never fatal — plan collection must
+    not block trace collection.
+
+    Multi-slot dedup: each namespace slot has its own data-pvc with its own
+    copy of plans. mtime-based skip means the first slot copies, and
+    subsequent slots see local files newer than remote and skip the cp.
+    """
+    plans_root = f"/data/{run_name}/plans/{phase}"
+
+    # Discover workloads under plans/{phase}/
+    ls_wl = run(
+        ["kubectl", "exec", pod_name, f"-n={namespace}", "--",
+         "sh", "-c", f"ls {plans_root} 2>/dev/null"],
+        check=False, capture=True,
+    )
+    if ls_wl.returncode != 0 or not ls_wl.stdout.strip():
+        info(f"[{phase}/plans] no plans directory on PVC — skipping")
+        return
+    workloads = sorted(ls_wl.stdout.strip().split())
+    if not workloads:
+        info(f"[{phase}/plans] no workloads under plans dir — skipping")
+        return
+    workload = workloads[0]
+    wl_path = f"{plans_root}/{workload}"
+
+    # Discover roots, pick latest by lex sort
+    ls_roots = run(
+        ["kubectl", "exec", pod_name, f"-n={namespace}", "--",
+         "sh", "-c", f"ls {wl_path} 2>/dev/null"],
+        check=False, capture=True,
+    )
+    if ls_roots.returncode != 0 or not ls_roots.stdout.strip():
+        warn(f"[{phase}/plans] no contents under {wl_path} — skipping")
+        return
+    roots = sorted(
+        r for r in ls_roots.stdout.strip().split() if r.startswith("root-")
+    )
+    if not roots:
+        warn(f"[{phase}/plans] no root-* dirs under {wl_path} — skipping")
+        return
+    latest_root = roots[-1]
+    plan_dir = f"{wl_path}/{latest_root}/plan"
+
+    # Discover flow dirs (skip the metadata 'setup' dir)
+    ls_flows = run(
+        ["kubectl", "exec", pod_name, f"-n={namespace}", "--",
+         "sh", "-c",
+         f"find {plan_dir} -mindepth 1 -maxdepth 1 -type d 2>/dev/null"],
+        check=False, capture=True,
+    )
+    if ls_flows.returncode != 0 or not ls_flows.stdout.strip():
+        warn(f"[{phase}/plans] no flow dirs under {plan_dir} — skipping")
+        return
+    flows = sorted(
+        Path(p.strip()).name
+        for p in ls_flows.stdout.strip().splitlines()
+        if p.strip() and Path(p.strip()).name != "setup"
+    )
+    if not flows:
+        warn(f"[{phase}/plans] no flow dirs (after filtering) — skipping")
+        return
+
+    dest_root = run_dir / "results" / phase / "plans"
+    for flow in flows:
+        remote_flow = f"{plan_dir}/{flow}"
+        stat_result = run(
+            ["kubectl", "exec", pod_name, f"-n={namespace}", "--",
+             "sh", "-c",
+             f"find {remote_flow} -mindepth 1 -maxdepth 1 -name '*.yaml' "
+             f"-exec stat -c '%Y %n' {{}} \\; 2>/dev/null"],
+            check=False, capture=True,
+        )
+        if stat_result.returncode != 0 or not stat_result.stdout.strip():
+            warn(f"[{phase}/plans/{flow}] no top-level YAMLs found — skipping")
+            continue
+        flow_dest = dest_root / flow
+        flow_dest.mkdir(parents=True, exist_ok=True)
+        copied = 0
+        skipped = 0
+        copy_errors: list[str] = []
+        for line in stat_result.stdout.strip().splitlines():
+            parts = line.split(None, 1)
+            if len(parts) != 2:
+                continue
+            try:
+                remote_mtime = float(parts[0])
+            except ValueError:
+                continue
+            remote_path = parts[1]
+            yaml_name = Path(remote_path).name
+            local_path = flow_dest / yaml_name
+            if _is_up_to_date(local_path, remote_mtime):
+                skipped += 1
+                continue
+            cp_result = run(
+                ["kubectl", "cp",
+                 f"{namespace}/{pod_name}:{remote_path}",
+                 str(local_path), "--retries=3"],
+                check=False, capture=True,
+            )
+            if cp_result.returncode != 0:
+                copy_errors.append(f"{yaml_name}: {cp_result.stderr.strip()}")
+            else:
+                copied += 1
+        if copy_errors:
+            warn(f"[{phase}/plans/{flow}] copy errors: {'; '.join(copy_errors)}")
+        if copied or skipped:
+            info(f"[{phase}/plans/{flow}] copied={copied} skipped={skipped}")
 
 
 def _cmd_collect(args, run_dir: Path, setup_config: dict):
