@@ -193,6 +193,8 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 **`deploy.py collect`** — extracts results from the cluster PVC and writes to `workspace/runs/<run>/results/{phase}/<workload>/`. Repeated collects are incremental: each workload's remote `trace_data.csv` mtime is probed and skipped if the local copy is already up to date. If the mtime probe fails (e.g., pod not running), collection falls back to a full copy — this is the expected degradation path.
 
+Per phase, the resolved llm-d-benchmark plan YAMLs are also pulled into `workspace/runs/<run>/results/{phase}/plans/{flow}/*.yaml` (top-level numbered manifests + `config.yaml`, no `helm/` subdir). Plans are workload-invariant within a phase, so collect picks one workload's latest `root-*` render to source the phase's plans. Plan extraction is best-effort and non-fatal — failures warn but do not block trace collection.
+
 | Flag | Description |
 |------|-------------|
 | `--only PAIR…` | Scope to specific pair keys — narrows both workload and package (comma or space-separated, `wl-` prefix optional; takes precedence over `--workload`) |
