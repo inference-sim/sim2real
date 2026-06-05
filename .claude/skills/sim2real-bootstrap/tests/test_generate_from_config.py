@@ -1,10 +1,11 @@
 """Tests for generate_from_config.py — prefix-caching input + output contract.
 
-Covers the acceptance criteria from issue #293:
+Covers the acceptance criteria from issues #293 and #295:
   - Legacy keyed input (enable_prefix_caching | true|false)
   - Bare positive flag input (--enable-prefix-caching, empty value column)
   - Bare negative flag input (--no-enable-prefix-caching, empty value column)
-  - Field absent → no flag emitted
+  - Field absent → emit --enable-prefix-caching as a sim2real-bootstrap default
+    (deployed vLLM predates per-model default resolution; see #295)
   - Contradictory specifications → sys.exit(1)
   - Unparseable boolean → sys.exit(1)
   - Duplicate same-value rows → reconciled silently
@@ -59,13 +60,16 @@ def test_accepted_input_forms_resolve_correctly(row, expected_value, expected_fl
     assert epc_flag(fields) == expected_flag
 
 
-def test_field_absent_emits_no_flag():
-    """Per #293: when enable_prefix_caching is absent, defer to vLLM (emit nothing)."""
+def test_field_absent_emits_enable_prefix_caching_default():
+    """Per #295: when enable_prefix_caching is absent, emit --enable-prefix-caching
+    as a sim2real-bootstrap default. The deployed vLLM version predates per-model
+    default resolution, so silent would otherwise resolve to OFF."""
     fields = gfc.extract_fields(make_table([
         {"Parameter": "model", "Value": "meta-llama/Llama-3.1-8B"},
     ]))
+    # extract_fields itself does not synthesize the field; only build_additional_flags does.
     assert "enable_prefix_caching" not in fields
-    assert epc_flag(fields) is None
+    assert epc_flag(fields) == "--enable-prefix-caching"
 
 
 def test_negative_bare_flag_value_column_is_ignored():
@@ -169,8 +173,13 @@ def test_output_uses_bare_form_not_keyed():
     assert not any("=" in f and "prefix-caching" in f for f in flag_strs)
 
 
-def test_output_absent_emits_nothing():
-    """No prefix-caching key in fields → no prefix-caching flag in output."""
+def test_output_absent_emits_default_enable_with_bootstrap_provenance():
+    """No prefix-caching key in fields → emit --enable-prefix-caching with a
+    sim2real-bootstrap provenance source (issue #295)."""
     fields = {}
     flags = gfc.build_additional_flags(fields)
-    assert not any("prefix-caching" in f for f, _ in flags)
+    pc_flags = [(f, src) for f, src in flags if "prefix-caching" in f]
+    assert len(pc_flags) == 1
+    flag, source = pc_flags[0]
+    assert flag == "--enable-prefix-caching"
+    assert "sim2real-bootstrap default" in source
