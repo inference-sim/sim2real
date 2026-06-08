@@ -14,6 +14,7 @@ Re-running skips completed phases (tracked in .state.json).
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import yaml
@@ -274,6 +275,44 @@ def _phase_context(args, state: StateMachine, manifest: dict, run_dir: Path) -> 
 
 # ── Phase 3: Translation Checkpoint ──────────────────────────────────────────
 
+def _arm_overlay_complete(algo_dir: Path, algo_name: str) -> tuple[bool, str | None]:
+    """Check whether an algorithm's overlay is structurally complete.
+
+    An arm is complete iff `<algo>_output.json` exists, parses as JSON, and
+    every path listed in its `files_created` + `files_modified` arrays exists
+    on disk under `algo_dir`.
+
+    Existence of `<algo>_output.json` alone is not sufficient: the writer
+    agent authors that file before the post-review approval gate, so a half-
+    finished run can leave the JSON behind without the source overlay. See
+    the translate skill's Step 6 (`copy_generated`) — that is the only step
+    that materializes the source overlay, and it only runs after the operator
+    explicitly approves the arm.
+
+    Returns (True, None) when complete, otherwise (False, reason).
+    """
+    algo_output = algo_dir / f"{algo_name}_output.json"
+    if not algo_output.exists():
+        return False, f"{algo_name}_output.json not found"
+    try:
+        o = json.loads(algo_output.read_text())
+    except json.JSONDecodeError as e:
+        return False, f"{algo_name}_output.json is not valid JSON: {e}"
+    expected = list(o.get("files_created", [])) + list(o.get("files_modified", []))
+    missing = [f for f in expected if not (algo_dir / f).exists()]
+    if missing:
+        sample = missing[0]
+        more = f" (and {len(missing) - 1} more)" if len(missing) > 1 else ""
+        return False, (
+            f"overlay incomplete: {len(missing)}/{len(expected)} files listed in "
+            f"{algo_name}_output.json are missing under generated/{algo_name}/ "
+            f"(e.g. {sample}{more}). The /sim2real-translate run for this arm "
+            f"likely never reached Step 6 — re-run the skill and reply 'done' "
+            f"at the post-review prompt to finalize."
+        )
+    return True, None
+
+
 def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
                      resolved: dict, context_path: Path):
     """Phase 3: Per-algorithm translation checkpoint.
@@ -310,15 +349,24 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
             sys.exit(1)
 
         if "per_algorithm" in output:
-            # Per-algorithm index format — check completeness
-            all_present = all(
-                (generated_dir / a["name"] / f"{a['name']}_output.json").exists()
-                for a in algorithms
-            )
-            if all_present:
+            # Per-algorithm index format — check structural completeness of
+            # every arm's overlay, not just existence of <algo>_output.json.
+            incomplete = []
+            for a in algorithms:
+                ok_arm, reason = _arm_overlay_complete(
+                    generated_dir / a["name"], a["name"]
+                )
+                if not ok_arm:
+                    incomplete.append((a["name"], reason))
+            if not incomplete:
                 state.mark_done("translate", algorithms=[a["name"] for a in algorithms])
                 ok(f"All {len(algorithms)} algorithms translated")
                 return
+            for name, reason in incomplete:
+                warn(f"[{name}] {reason}")
+            err(f"{len(incomplete)} of {len(algorithms)} algorithm overlay(s) "
+                f"incomplete. Refusing to mark translate phase done.")
+            sys.exit(1)
         elif "plugin_type" in output:
             # Legacy single-algo format — validate and mark done
             for f in ["plugin_type", "files_created", "files_modified",
@@ -343,14 +391,21 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
                 "Delete the file and re-run the /sim2real-translate skill.")
             sys.exit(1)
 
-    # Determine which algorithms still need translation
+    # Determine which algorithms still need translation. An arm only counts
+    # as translated when its overlay is structurally complete — the existence
+    # of <algo>_output.json alone is not sufficient (see _arm_overlay_complete).
     translated = []
     pending = []
     for algo in algorithms:
-        algo_output = generated_dir / algo["name"] / f"{algo['name']}_output.json"
-        if algo_output.exists():
+        algo_dir = generated_dir / algo["name"]
+        ok_arm, reason = _arm_overlay_complete(algo_dir, algo["name"])
+        if ok_arm:
             translated.append(algo)
         else:
+            if (algo_dir / f"{algo['name']}_output.json").exists():
+                # The arm has metadata but is structurally incomplete — surface
+                # this to the operator before silently re-targeting it.
+                warn(f"[{algo['name']}] {reason}")
             pending.append(algo)
 
     if not pending:
@@ -1010,6 +1065,139 @@ def _cmd_validate_assembly(args, manifest, run_dir):
     _validate_assembly(run_dir, resolved, algorithm_packages=algo_names or None)
 
 
+def _cmd_reset(args, manifest, run_dir: Path):
+    """Reset one or more algorithm arms.
+
+    Removes the named arm's translate output and any downstream artifacts that
+    were derived from it, so prepare.py will re-target the arm on the next
+    invocation. Default behavior preserves the arm's `<algo>_config.yaml`
+    (the approved treatment derivation); pass `--full` to wipe that too and
+    force a fresh treatment-derivation pass.
+
+    Removes:
+      - generated/<algo>/<algo>_output.json
+      - generated/<algo>/{cmd,pkg}/  (any partial overlay)
+      - generated/<algo>/<algo>_config.yaml          [only with --full]
+      - translation_output.json
+      - cluster/                       (assembly output)
+      - run_summary.md                 (summary output)
+
+    Resets state phases: translate, assembly, summary, gate
+    Plus treatment_derivation when --full is set.
+    """
+    if not run_dir.exists():
+        err(f"run directory does not exist: {run_dir}")
+        sys.exit(1)
+
+    declared = {a["name"] for a in manifest.get("algorithms", [])}
+    targets: list[str] = list(args.algos)
+    unknown = [a for a in targets if a not in declared]
+    if unknown:
+        err(f"unknown algorithm(s): {', '.join(unknown)}. "
+            f"Manifest declares: {', '.join(sorted(declared)) or '(none)'}")
+        sys.exit(1)
+
+    generated_dir = run_dir / "generated"
+    plan: list[tuple[str, Path]] = []   # (action, path)
+
+    for algo in targets:
+        algo_dir = generated_dir / algo
+        if not algo_dir.exists():
+            warn(f"[{algo}] generated/{algo}/ does not exist — nothing to reset")
+            continue
+        out_json = algo_dir / f"{algo}_output.json"
+        cfg_yaml = algo_dir / f"{algo}_config.yaml"
+        if out_json.exists():
+            plan.append(("rm-file", out_json))
+        for sub in ("cmd", "pkg"):
+            d = algo_dir / sub
+            if d.exists():
+                plan.append(("rm-tree", d))
+        if args.full and cfg_yaml.exists():
+            plan.append(("rm-file", cfg_yaml))
+
+    for shared in ("translation_output.json", "run_summary.md"):
+        p = run_dir / shared
+        if p.exists():
+            plan.append(("rm-file", p))
+    cluster_dir = run_dir / "cluster"
+    if cluster_dir.exists():
+        plan.append(("rm-tree", cluster_dir))
+
+    phases_to_reset = ["translate", "assembly", "summary", "gate"]
+    if args.full:
+        phases_to_reset.append("treatment_derivation")
+
+    print(f"\nReset plan for run: {run_dir}")
+    print(f"  algorithms: {', '.join(targets)}{' (--full)' if args.full else ''}")
+    if plan:
+        for action, path in plan:
+            try:
+                rel = path.relative_to(run_dir)
+                disp = str(rel)
+            except ValueError:
+                disp = str(path)
+            verb = "delete file" if action == "rm-file" else "delete tree"
+            print(f"  {verb:13s} {disp}")
+    else:
+        print("  (no files to delete)")
+    print(f"  state reset:  phases {', '.join(phases_to_reset)}\n")
+
+    if args.dry_run:
+        ok("dry-run complete — no changes made")
+        return
+
+    if not args.yes:
+        try:
+            ans = input("Proceed? [y/N] ").strip().lower()
+        except EOFError:
+            ans = ""
+        if ans not in ("y", "yes"):
+            err("aborted")
+            sys.exit(1)
+
+    for action, path in plan:
+        if action == "rm-file":
+            path.unlink()
+        elif action == "rm-tree":
+            shutil.rmtree(path)
+
+    # Clean up now-empty per-arm dirs.
+    for algo in targets:
+        algo_dir = generated_dir / algo
+        if algo_dir.exists() and not any(algo_dir.iterdir()):
+            algo_dir.rmdir()
+
+    try:
+        state = StateMachine.load(run_dir)
+        for phase in phases_to_reset:
+            state.reset(phase)
+        ok(f"state phases cleared: {', '.join(phases_to_reset)}")
+    except FileNotFoundError:
+        warn("no .state.json found — skipping state rollback")
+
+    ok("reset complete.")
+    info("Note: this command does not touch the target submodule (e.g. llm-d-router).")
+    info("If its working tree contains leftovers from a prior run, reset it manually:")
+    info("  git -C <submodule> reset --hard HEAD && git -C <submodule> clean -fd")
+
+    if args.no_retarget:
+        info(f"Re-target skipped (--no-retarget). Run prepare.py to re-target {', '.join(targets)}.")
+        return
+
+    # Re-run the init → context → translate prefix so the user can immediately
+    # invoke /sim2real-translate without an intermediate `prepare.py` call.
+    # init and context are idempotent when already done; _phase_translate will
+    # write a fresh skill_input.json targeting the first pending arm and exit
+    # with the standard translation-checkpoint output.
+    print()
+    info("Re-targeting translate checkpoint...")
+    state = _phase_init(args, manifest, run_dir)
+    resolved = _load_resolved_config(manifest)
+    context_path = _phase_context(args, state, manifest, run_dir)
+    _phase_translate(args, state, manifest, run_dir, resolved, context_path)
+
+
 def _cmd_status(run_dir):
     """Print current state."""
     try:
@@ -1056,6 +1244,33 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("validate-assembly", help="Validate assembly consistency (standalone)")
     sub.add_parser("status", help="Show current run state")
 
+    reset = sub.add_parser(
+        "reset",
+        help="Reset one or more algorithm arms (undo translate + downstream)",
+    )
+    reset.add_argument(
+        "algos", nargs="+", metavar="ALGO",
+        help="Algorithm name(s) to reset (must appear in transfer.yaml).",
+    )
+    reset.add_argument(
+        "--full", action="store_true",
+        help="Also remove <algo>_config.yaml and reset treatment_derivation",
+    )
+    reset.add_argument(
+        "--dry-run", action="store_true", dest="dry_run",
+        help="Print the plan without making any changes",
+    )
+    reset.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Skip the interactive confirmation prompt",
+    )
+    reset.add_argument(
+        "--no-retarget", action="store_true", dest="no_retarget",
+        help="Skip the re-run of init/context/translate-checkpoint after cleanup. "
+             "By default `reset` rewrites skill_input.json so /sim2real-translate "
+             "can be invoked immediately.",
+    )
+
     return p
 
 
@@ -1086,6 +1301,8 @@ def main():
         _cmd_assemble(args, manifest, run_dir)
     elif cmd == "validate-assembly":
         _cmd_validate_assembly(args, manifest, run_dir)
+    elif cmd == "reset":
+        _cmd_reset(args, manifest, run_dir)
     else:
         _cmd_run(args, manifest, run_dir)
 
