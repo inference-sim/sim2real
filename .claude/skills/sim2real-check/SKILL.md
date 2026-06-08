@@ -73,14 +73,18 @@ Run ALL checks below.
 
 ### 1. WORKLOAD PARITY
 
-For each workload in the real bundle, find the matching sim workload YAML in `<sim>/workloads/`.
+For each workload in the real bundle, find the matching workload YAML spec. **Lookup order:**
+1. First check `<real>/workloads/` — if the real bundle contains its own workload YAMLs, use those as the source of truth (they reflect any rate rescaling done during sim2real translation).
+2. If not found there, fall back to `<sim>/workloads/`.
+
+When both exist, note any differences (especially `aggregate_rate`) and use the **real bundle's workload YAML** as the expected value for parity checks.
 
 **1a. Arrival Rate (QPS)**
 - **Intended QPS**: compute from `trace_data.csv` `arrival_time_us` column: `num_requests / (max - min arrival)`. This is the rate the load generator *scheduled* requests at.
 - **Actual QPS**: compute from `trace_data.csv` `send_time_us` column: `num_requests / (max - min send_time)`. This is the rate requests were *actually sent* to the server. If actual QPS << intended QPS, the load generator hit a concurrency ceiling and requests queued client-side.
-- From sim: `aggregate_rate` in workload YAML
-- Tolerance: intended QPS within 5% of sim spec. If actual QPS is more than 5% below intended QPS, emit WARN — this means the load generator couldn't keep up with the schedule (likely concurrency ceiling or server backpressure), so the server saw less load than intended and results are not comparable to simulation.
-- Show: table with sim spec rate, intended QPS, actual QPS — all three columns so the reader can spot concurrency bottlenecks
+- From workload YAML: `aggregate_rate` (prefer `<real>/workloads/`, fall back to `<sim>/workloads/`)
+- Tolerance: intended QPS within 5% of spec. If actual QPS is more than 5% below intended QPS, emit WARN — this means the load generator couldn't keep up with the schedule (likely concurrency ceiling or server backpressure), so the server saw less load than intended and results are not comparable to simulation.
+- Show: table with spec rate (note source: real or sim YAML), intended QPS, actual QPS — all three columns so the reader can spot concurrency bottlenecks
 
 **1b. SLO Class Distribution**
 - From sim: each client's `rate_fraction`
@@ -141,6 +145,38 @@ Show: table with each config param — expected (from config.md), actual (from s
 - From sim: `--num-instances` in run commands or config.md
 - From real: count distinct server log files in `server_logs/`
 - Show: expected count vs actual count
+
+**2c. Variant Isolation — CRITICAL CHECK**
+
+The real bundle may contain multiple experiment variants (e.g., `baseline/`, `treatment/` or `quartic/`, `control/`). This check verifies that the variants are **identical in all respects except the flow control policy** — ensuring a clean A/B comparison.
+
+**Locate configs:** Find all EndpointPickerConfig YAMLs in `<real>/generated/` (e.g., `baseline_config.yaml`, `<treatment>/treatment_config.yaml`, `<control>/control_config.yaml`).
+
+**For each pair of configs, diff the following sections and classify:**
+
+| Section | Must be IDENTICAL across all variants | Expected to DIFFER |
+|---------|--------------------------------------|-------------------|
+| `featureGates` | Yes | — |
+| `plugins` (list of plugin types) | Mostly — see below | Only the flow control policy plugin entry |
+| `schedulingProfiles` (scorers, weights, picker) | Yes | — |
+| `flowControl` | — | Yes — this is the independent variable |
+| `extraObjects` (InferenceObjective CRDs) | Yes (priority bands) | — |
+| Instance count (from server_logs) | Yes | — |
+| vLLM config (from server logs) | Yes | — |
+
+**Specifically verify:**
+1. **Routing is identical**: same scorer plugins, same weights, same picker in all variants.
+2. **Priority bands are identical**: same InferenceObjective CRDs (or same priority values) applied to all variants.
+3. **Feature gates are identical**: all variants enable/disable the same gates.
+4. **The ONLY difference is the `flowControl` section**: baseline has `flowControl: {}` (built-in default ceiling 1.0), treatment references a custom policy plugin, control references a plugin that implements the same behavior as baseline (ceiling 1.0) but through the custom plugin registration path.
+
+**Why control exists**: Control uses the same plugin registration mechanism as treatment but with baseline-equivalent logic. Comparing baseline vs control isolates plugin framework overhead. Comparing control vs treatment isolates the algorithm effect.
+
+**Show:**
+- Side-by-side diff of all config YAMLs (redacting identical sections, highlighting differences)
+- Table: for each config section, state whether it matches across variants
+- The generated Go code for each variant's policy plugin — confirm control returns constant 1.0 and treatment implements the sim algorithm
+- Verdict: PASS if only flow control policy differs, FAIL if routing/scheduling/priority/feature-gates diverge
 
 ---
 
@@ -248,27 +284,53 @@ Extract: model, TP size, max_model_len, gpu_memory_utilization, enable_prefix_ca
 **5b. Instance Health & Request Distribution**
 - Count `/completions` requests per instance by grepping each server log file in `server_logs/` for `/completions` (or `/chat/completions` if chat API). This is the authoritative per-instance request count — `trace_data.csv` does not have an instance identifier column.
 - Compute total served requests (sum across instances), per-instance percentage, and spread (max-min as % of average).
-- Check for even distribution (for random/round-robin routing): no instance should get <10% or >40% of total (for 4 instances, expect ~25% each). Spread should be < 10%.
 - Compare total served vs total sent (from trace_data.csv row count) — the difference is requests shed by admission before reaching any instance.
 - Flag any instance that appears unhealthy (no requests, errors in logs)
-- Show: table with instance name, `/completions` request count, percentage of total served, and a summary row with total served vs total sent and spread %
 
-**5c. Prefix Hit Ratio**
+**Distribution expectation depends on routing policy:**
+- **Even-distribution routers** (`random-picker`, `round-robin`, or load-aware scorers like `queue-scorer` + `kv-cache-utilization-scorer`): expect roughly uniform distribution. Each instance should get approximately `100%/N` of requests. Spread (max−min as % of average) should be < 20%. WARN if > 20%, FAIL if > 40%.
+- **Affinity routers** (`prefix-cache-affinity`, `session-affinity`, `lora-affinity`): expect skewed distribution aligned with the affinity key. Verify that the skew correlates with the affinity signal (e.g., prefix groups cluster on specific instances) rather than random hot-spotting.
+- **Custom/experimental routers**: infer the expected distribution from the routing policy description in `<sim>/README.md` or config, and check whether the real distribution matches. Document the expectation and rationale.
+
+**Run this check for ALL variants** (baseline, treatment, control) × ALL workloads. The distribution should be consistent across variants — if routing config is identical (verified in 2c), the distribution pattern should be similar. Flag any variant that shows significantly different distribution from others at the same workload (this would indicate a deployment issue, not an algorithm effect).
+
+- Show: table with variant/workload, per-instance request count and percentage, total served, spread %, and verdict. One row per variant×workload combination.
+
+**5c. EPP Runtime Proof — Treatment Active**
+
+Verify from EPP logs (`epp_logs/`) that the configured policy is actually executing at runtime. This is the proof that config translation resulted in correct runtime behavior — not just correct YAML.
+
+**For each variant, check:**
+1. **Flow control is active**: grep EPP logs for flow controller messages (e.g., `flow-controller`, `FlowControlAdmissionController`, `enqueued`, `dispatched`). If absent, the feature gate may not have activated despite being in config.
+2. **Priority bands recognized**: grep for priority values in request processing logs. Confirm both configured priorities appear (e.g., priority:100 and priority:-50 for critical/sheddable). If only one priority appears, the InferenceObjective CRDs may not have been applied.
+3. **Policy-specific behavior**: 
+   - For treatment (e.g., quartic): at high saturation, expect some requests to show gating/queueing delays or shed outcomes. At low saturation, all requests dispatched immediately (dormant behavior is valid).
+   - For baseline/control: all requests should be dispatched (ceiling=1.0 means no gating).
+4. **Pod discovery**: confirm the EPP sees all expected pods (extract unique PodNames from scheduling logs). Count should match instance count from 2b.
+5. **Hardware parity**: extract `CacheNumBlocks` and `CacheBlockSize` from EPP endpoint data — must be identical across variants (confirms same GPU memory allocation / model config).
+
+**Cross-variant deployment check:**
+- Note whether variants share the same physical deployment (same pod-template-hash) or use separate deployments. If separate, confirm identical hardware config (CacheNumBlocks, CacheBlockSize, GPU type).
+- Flag if variants run in different namespaces — not a problem per se, but document it as it means separate clusters or separate resource quotas.
+
+- Show: table per variant with: flow control active (yes/no), priorities seen, dispatch outcomes (Dispatched/Shed/Timeout counts), pod count, CacheNumBlocks, deployment hash, namespace.
+
+**5d. Prefix Hit Ratio**
 If `enable_prefix_caching=True`, grep server logs for prefix cache hit metrics.
 If `enable_prefix_caching=False`, confirm no unexpected prefix hits.
 - Show: prefix caching status and any hit/miss metrics found
 
-**5d. Request Status**
+**5e. Request Status**
 - Baseline: expect nearly 100% `status=ok` (no admission shedding)
 - Treatment: check `status` column for rejection patterns. Compute shed rate per SLO class.
 - Verify shed behavior matches algorithm expectations (sheddable shed most, batch shed less, critical/standard never shed)
 - Show: table with SLO class, total requests, ok count, shed count, shed rate %
 
-**5e. Error Analysis**
+**5f. Error Analysis**
 Grep server logs for `ERROR`, `WARNING`, `OOM`, `CUDA`, `timeout` patterns.
 - Show: count of each pattern per log file, and any particularly concerning lines
 
-**5f. KV Cache Utilization**
+**5g. KV Cache Utilization**
 From server logs, look for KV cache size info:
 - `GPU KV cache size: N tokens`
 - `Maximum concurrency for X tokens per request: Y.Zx`
@@ -291,6 +353,7 @@ Structure the report as follows. Every section must have evidence tables/snippet
 |----------|------|------|------|
 | Workload | X | Y | Z |
 | Config   | X | Y | Z |
+| Variant Isolation | X | Y | Z |
 | Signal   | X | Y | Z |
 | Policy   | X | Y | Z |
 | Runtime  | X | Y | Z |

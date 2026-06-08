@@ -486,15 +486,25 @@ python3 -c "print(open('$RUN_DIR/generated/$CURRENT_ALGORITHM/${CURRENT_ALGORITH
 
 Print to user:
 ```
-━━━ Review Passed ━━━
+━━━ Review Passed — ACTION REQUIRED ━━━
 Treatment Config: <contents above>
 Plugin files: <list above>
 
-Provide feedback for another round, or type 'done' to finish.
+⚠ This arm is INCOMPLETE until you reply. Source files have NOT yet been
+  written to generated/<algo>/. Choose one:
+
+  • Reply `done`            → finalize: copy source overlay to generated/<algo>/
+                              and let prepare.py advance to the next algorithm
+  • Reply `feedback: <text>` → iterate one more review round with the feedback
+
+Without a reply, the writer agent will wait indefinitely and the run will
+not progress.
 ```
 
-If feedback: `SendMessage("writer", "feedback: <text>")`
-If "done": `SendMessage("writer", "done")`
+If reply is exactly "done": `SendMessage("writer", "done")`
+If reply starts with "feedback:": `SendMessage("writer", "feedback: <text>")`
+Otherwise: re-print the prompt and wait — do NOT silently treat ambiguous
+input as either branch.
 
 **On "done: ...":**
 
