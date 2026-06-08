@@ -459,3 +459,39 @@ python pipeline/deploy.py --package baseline treatment
 # Collect results for a specific package
 python pipeline/deploy.py collect --package treatment
 ```
+
+## Troubleshooting
+
+Pipeline-level recovery and operational commands. For experiment-config issues (EPP RBAC, logging verbosity), see [`docs/troubleshooting.md`](../docs/troubleshooting.md).
+
+### Rerun failed pairs
+
+```bash
+python pipeline/deploy.py run [--remote] --status failed --force
+```
+
+### Stop orchestration
+
+```bash
+python pipeline/deploy.py stop
+```
+
+### Clean up cluster artifacts
+
+Removes `PipelineRun` objects and deployed Helm charts:
+
+```bash
+python pipeline/deploy.py reset
+```
+
+### Erase collected data
+
+```bash
+python pipeline/deploy.py wipe
+```
+
+### Keep cluster artifacts (skip llmdbenchmark teardown)
+
+```bash
+python pipeline/deploy.py run [--remote] --skip-teardown
+```
