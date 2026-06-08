@@ -57,6 +57,8 @@ For EVERY check, you MUST show:
 
 For numerical checks, always show a comparison table. For code/config checks, show the relevant snippets side by side.
 
+**Declared-vs-observed principle.** Every "declared X" check must be paired with an "observed X" check whenever X has a runtime expression. Static parity (config matches source) is necessary but not sufficient — wiring can be silently wrong (e.g., a CRD apiVersion that the cluster accepts but the running EPP commit does not watch) and the run will still produce plausible-looking artifacts. If the declared and observed sets disagree, FAIL.
+
 ## Reference Paths (resolved after Step 0)
 
 - **Simulation codebase** (`BLIS`): confirmed by user
@@ -234,6 +236,29 @@ Verify the generated Go plugin dispatches thresholds to the correct priority val
 Cross-check against `<sim>/README.md` transfer instructions.
 - Show: the Go switch/case block from the generated plugin, annotated with which tier gets which ramp. Show the GAIE priority definitions as proof. Highlight if the mapping is wrong.
 
+**4e. Priority Bands Registered at Runtime — declared-vs-observed check**
+
+This is the runtime-expression pair for 4d. The bug class it catches: the InferenceObjective CRDs in the generated config are valid YAML and the cluster accepts them, but the running EPP commit watches a *different* API group/version and silently ignores them. The flow controller falls back to a single default band at priority 0; the policy still runs but has only one queue to draw from, so it cannot discriminate between priority classes. The trace looks normal — no errors, all status=ok — but the experiment is invalid: any stratification the algorithm is designed to produce will be invisible.
+
+- **Declared (expected)**: parse all `InferenceObjective` blocks across `<real>/generated/baseline_config.yaml` and any treatment configs; collect each `spec.priority` value into the expected set.
+- **Observed (actual)**: pick any one workload's `epp_logs/*.log` under `<real>/results.*/<scenario>/<workload>/` and run:
+  ```
+  grep -hoE '"flowPriority":-?[0-9]+' <log> | sort -u
+  ```
+  The `flow-controller.sweepFinalizedItems` log line at `processor.go:452` emits one event per registered flow per sweep; its `flowPriority` field is the band's runtime priority value. Build the observed set from these.
+- **Verdict**:
+  - **PASS** if `observed ⊇ expected` (every declared band shows up at runtime).
+  - **FAIL** otherwise. The canonical failure mode is `expected = {100, -50, ...}` and `observed = {0}` — meaning the EPP saw no priorities and is operating on a single default band. **Halt the analysis here and report this first**: no downstream policy comparison (4a–4d, 5d) is meaningful while bands are unregistered.
+- **Show**:
+  ```
+  Declared (baseline_config.yaml InferenceObjective specs): {100, -50}
+  Observed (epp_logs/*.log flowPriority field):             {0}
+  Sample observed line:
+    {"caller":"internal/processor.go:452", "flowKey":"default-flow:0", "flowPriority":0, ...}
+  ```
+  Plus one citation per declared priority showing the file:line in `baseline_config.yaml` where it appears.
+- **Why it matters in plain English**: the EPP's flow controller maintains one queue per priority band. If only one band is registered, every request — regardless of its `slo_class` / `vllm_priority` field — lands in the same queue. There is nothing for the admission policy to prefer. Charts will show critical and sheddable accumulating proportionally, latency will look identical across `slo_class` values, and the experiment cannot validly compare baseline vs treatment. Most likely cause when this fires: an `apiVersion` in the generated YAML (e.g. `inference.networking.x-k8s.io/v1alpha2`) that the chosen component commit doesn't watch (it watches `llm-d.ai/v1alpha2`, or vice versa). Both groups may be installed in the cluster as valid CRDs, so this does not surface as a kubectl error — only as a missing runtime registration.
+
 ---
 
 ### 5. RUNTIME ANALYSIS
@@ -317,7 +342,7 @@ Expected 210 req/s (from workloads/w3.yaml:aggregate_rate), measured 210.4 req/s
 
 Use the Agent tool to parallelize independent checks:
 - Agent 1: Workload parity (trace_data.csv analysis via python3)
-- Agent 2: Config + Signal parity (YAML/Go file comparison)
+- Agent 2: Config + Signal + Policy parity (YAML/Go file comparison; includes 4e runtime band-registration grep against epp_logs)
 - Agent 3: Runtime analysis (server log parsing)
 
 Combine results into the final report.
