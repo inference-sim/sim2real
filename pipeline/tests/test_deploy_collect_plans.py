@@ -232,3 +232,58 @@ def test_setup_dir_filtered_from_flows(tmp_path):
     assert setup_stats == [], "should not have stat'd files under plan/setup"
     cp_calls = [c for c in router.calls if c[:2] == ["kubectl", "cp"]]
     assert len(cp_calls) == 1
+
+
+def test_secret_redacted_after_copy(tmp_path, monkeypatch):
+    """End-to-end: cp lands a Secret YAML; local file is redacted in-place."""
+    run_name = "demo-run"
+    phase = "baseline"
+    plans_root = f"/data/{run_name}/plans/{phase}"
+    workload = "balanced_20"
+    wl_path = f"{plans_root}/{workload}"
+    root = "root-20260101-120000-000"
+    plan_dir = f"{wl_path}/{root}/plan"
+    flow = "flow-control-baseline"
+    flow_dir = f"{plan_dir}/{flow}"
+
+    run_dir = tmp_path / "workspace" / "runs" / run_name
+    run_dir.mkdir(parents=True)
+
+    secret_yaml = (
+        "apiVersion: v1\n"
+        "kind: Secret\n"
+        "metadata:\n"
+        "  name: hf-token\n"
+        "  namespace: jchen4\n"
+        "type: Opaque\n"
+        "data:\n"
+        "  token: aGZfYWJjMTIzZGVmNDU2\n"
+    )
+
+    from pathlib import Path as _P
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["kubectl", "cp"]:
+            dest = _P(cmd[3])
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(secret_yaml)
+            return _cp_result()
+        if _is_ls(cmd, plans_root):
+            return _cp_result(stdout=f"{workload}\n")
+        if _is_ls(cmd, wl_path):
+            return _cp_result(stdout=f"{root}\n")
+        if _is_find_dirs(cmd, plan_dir):
+            return _cp_result(stdout=f"{plan_dir}/{flow}\n")
+        if _is_find_yaml_stat(cmd, flow_dir):
+            return _cp_result(stdout=f"100 {flow_dir}/secret.yaml\n")
+        return _cp_result()
+
+    monkeypatch.setattr(deploy, "run", fake_run)
+    deploy._extract_phase_plans("pod-x", run_name, phase, "ns-0", run_dir)
+
+    local = run_dir / "results" / phase / "plans" / flow / "secret.yaml"
+    assert local.exists()
+    text = local.read_text()
+    assert text.startswith("# REDACTED by sim2real collect: 1 Secret stubbed\n")
+    assert "REDACTED" in text
+    assert "aGZfYWJjMTIzZGVmNDU2" not in text
