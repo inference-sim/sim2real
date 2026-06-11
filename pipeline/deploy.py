@@ -50,6 +50,7 @@ def _c(code: str, text: str) -> str:
 
 
 from pipeline.lib.log import info, ok, warn, err
+from pipeline.lib.redact import redact_yaml_file, redact_yaml_tree
 
 
 def _is_pair_key(key: str) -> bool:
@@ -1023,6 +1024,8 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                             check=False, capture=True)
                     if r.returncode != 0 and "no such file" not in r.stderr.lower():
                         wl_errors.append(f"{wl_name}/resources: {r.stderr.strip()}")
+                    else:
+                        redact_yaml_tree(res_dest)
                     if wl_errors:
                         phase_errors.extend(wl_errors)
                     if on_workload_done:
@@ -1243,6 +1246,7 @@ def _extract_phase_plans(pod_name: str, run_name: str, phase: str,
                 copy_errors.append(f"{yaml_name}: {cp_result.stderr.strip()}")
             else:
                 copied += 1
+                redact_yaml_file(local_path)
         if copy_errors:
             warn(f"[{phase}/plans/{flow}] copy errors: {'; '.join(copy_errors)}")
         if copied or skipped:
