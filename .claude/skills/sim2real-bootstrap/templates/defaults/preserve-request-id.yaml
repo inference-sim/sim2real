@@ -1,5 +1,5 @@
 # Workaround: preserve external request-id so requests can be correlated to pods/nodes.
-# See docs/troubleshooting.md "Corrolate requests with pods (and hence nodes)".
+# See docs/troubleshooting.md "Correlate requests with pods (and hence nodes)".
 # scenario[0].name is realigned to the experiment baseline at merge time.
 scenario:
 - name: defaults
