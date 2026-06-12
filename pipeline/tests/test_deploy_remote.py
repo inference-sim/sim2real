@@ -503,6 +503,32 @@ def test_run_remote_creates_configmap_and_job(monkeypatch, tmp_path):
     assert apply_inputs[1]["kind"] == "Job"
 
 
+def test_run_remote_uses_server_side_apply(monkeypatch, tmp_path):
+    """ConfigMap and Job apply use --server-side to avoid the 256 KiB last-applied-configuration cap."""
+    run_dir = _setup_run_dir(tmp_path)
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
+    monkeypatch.setattr(mod, "_wait_for_job_pod", lambda *a, **kw: None)
+
+    apply_cmds = []
+
+    def fake_subprocess_run(cmd, *, input=None, text=True, check=False, capture_output=True, **kw):
+        if input:
+            apply_cmds.append(cmd)
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    with patch("subprocess.run", side_effect=fake_subprocess_run):
+        args = _make_run_args(remote=True, skip_build=True)
+        setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
+        mod._cmd_run_remote(args, run_dir, setup_config)
+
+    assert len(apply_cmds) == 2
+    for cmd in apply_cmds:
+        assert "--server-side" in cmd
+        assert "--force-conflicts" in cmd
+
+
 def test_run_remote_job_uses_initcontainer_and_emptydir(monkeypatch, tmp_path):
     """Job uses initContainer to copy ConfigMap to a writable emptyDir."""
     run_dir = _setup_run_dir(tmp_path)
