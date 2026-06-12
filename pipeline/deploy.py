@@ -2972,9 +2972,12 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
         sys.exit(1)
     # subprocess.run used directly because the module's run() helper doesn't
     # support stdin input, which kubectl apply -f - requires.
+    # --server-side avoids writing the kubectl.kubernetes.io/last-applied-configuration
+    # annotation, which is capped at 256 KiB and overflowed once the run-inputs
+    # ConfigMap accumulated enough cluster--*.yaml entries.
     info("Applying run-inputs ConfigMap")
     result = subprocess.run(
-        ["kubectl", "apply", "-f", "-"],
+        ["kubectl", "apply", "--server-side", "--force-conflicts", "-f", "-"],
         input=json.dumps(cm), text=True, check=False, capture_output=True,
     )
     if result.returncode != 0:
@@ -2992,7 +2995,7 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
     )
     info("Applying orchestrator Job")
     result = subprocess.run(
-        ["kubectl", "apply", "-f", "-"],
+        ["kubectl", "apply", "--server-side", "--force-conflicts", "-f", "-"],
         input=json.dumps(job), text=True, check=False, capture_output=True,
     )
     if result.returncode != 0:
