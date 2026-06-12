@@ -4,6 +4,7 @@ Deep-merges bundle inputs (baseline.yaml, treatment.yaml) with skill-generated
 overlay files (generated/baseline_config.yaml, generated/treatment_config.yaml)
 to produce fully resolved scenario files.
 """
+import copy
 import yaml
 from pathlib import Path
 from typing import NamedTuple
@@ -103,6 +104,25 @@ class Package(NamedTuple):
     resolved: dict
 
 
+def _load_defaults_overlay(defaults_dir: Path | None, disable: list[str]) -> dict:
+    """Load YAML fragments from defaults_dir and deep-merge them into one overlay.
+
+    Fragments are partial scenario YAMLs whose stem (filename without .yaml) is
+    used as the opt-out key. Files whose stem appears in `disable` are skipped.
+    Returns {} when defaults_dir is None or the directory does not exist, so
+    experiments without a baselines/defaults/ directory are unaffected.
+    """
+    if defaults_dir is None or not defaults_dir.exists():
+        return {}
+    disable_set = set(disable or [])
+    merged: dict = {}
+    for fragment in sorted(defaults_dir.glob("*.yaml")):
+        if fragment.stem in disable_set:
+            continue
+        merged = deep_merge(merged, _load_yaml(fragment))
+    return merged
+
+
 def _resolve_overlay(name: str, generated_dir: Path, kind: str) -> dict:
     """Find overlay for a package.
 
@@ -134,14 +154,24 @@ def assemble_packages(
     algorithms: list[dict],
     generated_dir: Path,
     overlays_expected: bool = False,
+    defaults_dir: Path | None = None,
+    defaults_disable: list[str] | None = None,
 ) -> list[Package]:
     """Assemble all packages (baselines + algorithms) into resolved scenarios.
 
     Each baseline entry: {name, scenario_path, defaults_path?}
     Each algorithm entry: {name, scenario_path, defaults (baseline name)}
+
+    When ``defaults_dir`` is provided, YAML fragments under it are merged UNDER
+    each baseline (precedence: framework_defaults → experiment_defaults_path →
+    experiment_baseline → skill_overlay). Treatment scenarios inherit the
+    framework defaults transitively through ``resolved_baselines``. Fragment
+    stems listed in ``defaults_disable`` are skipped.
     """
     resolved_baselines: dict[str, dict] = {}
     packages: list[Package] = []
+
+    framework_defaults = _load_defaults_overlay(defaults_dir, defaults_disable or [])
 
     for bl in baselines:
         name = bl["name"]
@@ -152,6 +182,10 @@ def assemble_packages(
             raw = deep_merge(defaults, scenario)
         else:
             raw = scenario
+
+        if framework_defaults:
+            aligned = _align_overlay_name(raw, copy.deepcopy(framework_defaults))
+            raw = deep_merge(aligned, raw)
 
         overlay = _resolve_overlay(name, generated_dir, "baseline")
         overlay = _align_overlay_name(raw, overlay)

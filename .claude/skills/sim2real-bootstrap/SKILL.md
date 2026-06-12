@@ -247,10 +247,32 @@ ls "$EXPERIMENT_ROOT"/workloads/*.yaml
 
 ---
 
+### Task 4b: Copy framework defaults overlay
+
+**action:** shell
+
+Framework workarounds documented in `docs/troubleshooting.md` (EPP llm-d.ai
+RBAC, request-id preservation, EPP/vLLM verbosity) are applied automatically
+by `prepare.py` Phase 4 from `<experiment-root>/baselines/defaults/`. Copy
+the framework templates into the experiment so each experiment is
+self-contained and reproducible.
+
+```bash
+mkdir -p "$EXPERIMENT_ROOT/baselines/defaults"
+cp "$SKILL_DIR/templates/defaults/"*.yaml "$EXPERIMENT_ROOT/baselines/defaults/"
+ls "$EXPERIMENT_ROOT/baselines/defaults/"
+```
+
+Each fragment is a partial scenario YAML — operators can edit individual
+fragments in place to tweak them for the experiment, or list a fragment
+stem under `defaults.disable` in `transfer.yaml` to opt out entirely.
+
+---
+
 ### Task 5: Create transfer.yaml
 
 **action:** derive-and-approve  
-**depends:** task-2, task-3, task-4
+**depends:** task-2, task-3, task-4, task-4b
 
 Assemble transfer manifest from all prior task outputs.
 
@@ -302,6 +324,14 @@ workloads: <list from task-4>
 context:
   text: <derived summary>
   files: <list of context files>
+
+defaults:
+  disable: []
+  # Available fragments (filename stems in baselines/defaults/):
+  #   - llm-d-rbac
+  #   - preserve-request-id
+  #   - epp-verbosity
+  #   - vllm-logging
 ```
 
 **Constraints:**
@@ -347,6 +377,11 @@ Exit code 0 and all fields printed = success.
   transfer.yaml                  <- task-5
   baselines/
     <name>.yaml                  <- task-3
+    defaults/                    <- task-4b
+      llm-d-rbac.yaml
+      preserve-request-id.yaml
+      epp-verbosity.yaml
+      vllm-logging.yaml
   <component-name>/             <- task-2 (submodule)
   algorithms/
     <algorithm>.go               <- pre-existing
@@ -374,3 +409,4 @@ This skill ships with supporting files in its directory. Invoke in place — do 
 | `generate_from_config.py` | Parses `config.md` markdown tables → scenario YAMLs with provenance comments. Preferred for most experiments. Handles hardware normalization, bare-flag prefix-caching input/output, and unknown model/hardware detection. |
 | `generate_scenarios.py` | Converts JSON config (`top3_selection.json`) → scenario YAMLs. Use when JSON input exists. |
 | `generate_scenarios.README.md` | Coverage map for the JSON-input path. Documents field mappings, omission rules, and gaps. |
+| `templates/defaults/*.yaml` | Framework-owned baseline workaround fragments (RBAC, request-id, verbosity). Copied into `<experiment-root>/baselines/defaults/` at task-4b so each experiment is self-contained and reproducible. |

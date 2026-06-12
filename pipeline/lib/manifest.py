@@ -123,6 +123,32 @@ def load_manifest(path: "Path | str") -> dict:
         raise ManifestError("context.files must be a list")
     data["context"] = {"text": ctx_text, "files": ctx_files}
 
+    # Defaults section (optional): controls the framework defaults overlay
+    # applied from <experiment-root>/baselines/defaults/. Currently only
+    # 'disable' is recognized (list of fragment stems to skip).
+    defaults_raw = data.get("defaults")
+    if defaults_raw is None:
+        data["defaults"] = {"disable": []}
+    elif not isinstance(defaults_raw, dict):
+        raise ManifestError("defaults must be a mapping")
+    else:
+        _valid_defaults_keys = {"disable"}
+        unknown_defaults = set(defaults_raw.keys()) - _valid_defaults_keys
+        if unknown_defaults:
+            raise ManifestError(
+                f"defaults contains unknown keys: {sorted(unknown_defaults)}. "
+                f"Valid keys: disable"
+            )
+        disable = defaults_raw.get("disable", []) or []
+        if not isinstance(disable, list):
+            raise ManifestError("defaults.disable must be a list")
+        for i, entry in enumerate(disable):
+            if not isinstance(entry, str) or not entry.strip():
+                raise ManifestError(
+                    f"defaults.disable[{i}] must be a non-empty string (fragment stem)"
+                )
+        data["defaults"] = {"disable": disable}
+
     _validate_v3_fields(data)
 
     return data

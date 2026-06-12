@@ -1,0 +1,28 @@
+# Workaround: preserve external request-id so requests can be correlated to pods/nodes.
+# See docs/troubleshooting.md "Correlate requests with pods (and hence nodes)".
+# scenario[0].name is realigned to the experiment baseline at merge time.
+scenario:
+- name: defaults
+  extraObjects:
+    - apiVersion: networking.istio.io/v1alpha3
+      kind: EnvoyFilter
+      metadata:
+        name: preserve-external-request-id
+      spec:
+        workloadSelector:
+          labels:
+            gateway.networking.k8s.io/gateway-name: infra-llmdbench-inference-gateway
+        configPatches:
+          - applyTo: NETWORK_FILTER
+            match:
+              context: GATEWAY
+              listener:
+                filterChain:
+                  filter:
+                    name: envoy.filters.network.http_connection_manager
+            patch:
+              operation: MERGE
+              value:
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                  preserve_external_request_id: true

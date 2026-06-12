@@ -542,12 +542,17 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     translation_happened = translation_output_path.exists()
     generated_dir = run_dir / "generated"
 
+    defaults_dir = EXPERIMENT_ROOT / "baselines" / "defaults"
+    defaults_disable = (manifest.get("defaults") or {}).get("disable") or []
+
     try:
         packages = assemble_packages(
             baselines=baselines_spec,
             algorithms=algorithms_spec if translation_happened else [],
             generated_dir=generated_dir,
             overlays_expected=translation_happened,
+            defaults_dir=defaults_dir,
+            defaults_disable=defaults_disable,
         )
     except AssemblyError as e:
         err(str(e))
