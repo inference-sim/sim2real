@@ -620,3 +620,54 @@ def test_no_algorithm_no_algorithms_is_baseline_only(tmp_path):
     path = _write_manifest(tmp_path, data)
     m = load_manifest(path)
     assert m.get("algorithms", []) == []
+
+
+# ── defaults block tests ───────────────────────────────────────────────────
+
+def test_defaults_block_absent_normalizes_to_empty_disable(tmp_path):
+    """No defaults: key in manifest → defaults.disable == []."""
+    path = _write_manifest(tmp_path, MINIMAL_V3)
+    m = load_manifest(path)
+    assert m["defaults"] == {"disable": []}
+
+
+def test_defaults_block_explicit_disable_loaded(tmp_path):
+    data = {**MINIMAL_V3, "defaults": {"disable": ["llm-d-rbac", "vllm-logging"]}}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["defaults"]["disable"] == ["llm-d-rbac", "vllm-logging"]
+
+
+def test_defaults_block_empty_disable_list(tmp_path):
+    data = {**MINIMAL_V3, "defaults": {"disable": []}}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["defaults"] == {"disable": []}
+
+
+def test_defaults_block_must_be_mapping(tmp_path):
+    data = {**MINIMAL_V3, "defaults": "not_a_mapping"}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="defaults must be a mapping"):
+        load_manifest(path)
+
+
+def test_defaults_disable_must_be_list(tmp_path):
+    data = {**MINIMAL_V3, "defaults": {"disable": "rbac"}}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="defaults.disable must be a list"):
+        load_manifest(path)
+
+
+def test_defaults_disable_entries_must_be_strings(tmp_path):
+    data = {**MINIMAL_V3, "defaults": {"disable": ["valid", 42]}}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match=r"defaults.disable\[1\]"):
+        load_manifest(path)
+
+
+def test_defaults_block_rejects_unknown_keys(tmp_path):
+    data = {**MINIMAL_V3, "defaults": {"disable": [], "enable": ["foo"]}}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="defaults contains unknown keys.*enable"):
+        load_manifest(path)

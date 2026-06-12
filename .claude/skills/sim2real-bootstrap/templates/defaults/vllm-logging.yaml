@@ -1,0 +1,10 @@
+# Workaround: enable vLLM uvicorn access log + INFO logging for diagnosability.
+# See docs/troubleshooting.md "Increasing logging verbosity / vLLM".
+# scenario[0].name is realigned to the experiment baseline at merge time.
+scenario:
+- name: defaults
+  decode:
+    vllm:
+      additionalFlags:
+      - --no-disable-uvicorn-access-log
+      loggingLevel: INFO

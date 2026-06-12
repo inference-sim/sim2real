@@ -158,13 +158,14 @@ If a fix only exists in `workspace/`, it will be silently lost the next time tha
 **Bundle inputs** (version-controlled in experiment repo):
 - `baseline.yaml` — baseline scenario (model config, baseline scorer EPP config)
 - `treatment.yaml` (optional) — diffs from baseline for the treatment arm
+- `baselines/defaults/*.yaml` (optional) — framework workaround fragments (RBAC, request-id, verbosity); enabled set controlled by `defaults.disable` in `transfer.yaml`. See [`docs/troubleshooting.md`](docs/troubleshooting.md#framework-defaults-overlay).
 
 **Skill-generated overlays** (in `workspace/runs/<run>/generated/`):
 - `baseline_config.yaml` — baseline scorer plugin config overlay
 - `treatment_config.yaml` — evolved treatment scorer plugin config overlay
 
 **Assembly** is performed by `prepare.py` Phase 4 via `pipeline/lib/assemble.py`:
-- `baseline_resolved = deep_merge(baseline_bundle, baseline_overlay)`
-- `treatment_resolved = deep_merge(deep_merge(baseline_resolved, treatment_diffs), treatment_overlay)`
+- `baseline_resolved = deep_merge(deep_merge(framework_defaults, baseline_bundle), baseline_overlay)` (defaults are no-op when `baselines/defaults/` is absent)
+- `treatment_resolved = deep_merge(deep_merge(baseline_resolved, treatment_diffs), treatment_overlay)` (treatment inherits framework defaults transitively through `baseline_resolved`)
 - EPP image injected into treatment scenarios from `run_metadata.json`
 - PipelineRuns generated per workload × {baseline, treatment}

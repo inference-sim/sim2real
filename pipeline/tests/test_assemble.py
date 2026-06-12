@@ -524,6 +524,245 @@ def test_assemble_packages_multi_algo_independent_overlays(tmp_path):
     assert "quintic-shed" not in algo2_plugins
 
 
+# ── Framework defaults overlay tests ───────────────────────────────────────
+
+# Minimal RBAC fragment in the same shape baselines/*.yaml use; scenario name
+# is intentionally a placeholder — _align_overlay_name realigns it at merge time.
+DEFAULTS_RBAC = {
+    "scenario": [{
+        "name": "defaults",
+        "extraObjects": [
+            {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
+             "metadata": {"name": "epp-llm-d"},
+             "rules": [{"apiGroups": ["llm-d.ai"], "resources": ["inferenceobjectives"], "verbs": ["get"]}]},
+            {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
+             "metadata": {"name": "epp-llm-d"},
+             "roleRef": {"kind": "Role", "name": "epp-llm-d"}},
+        ],
+    }],
+}
+
+DEFAULTS_VERBOSITY = {
+    "scenario": [{
+        "name": "defaults",
+        "inferenceExtension": {"verbosity": "5"},
+    }],
+}
+
+DEFAULTS_VLLM = {
+    "scenario": [{
+        "name": "defaults",
+        "decode": {"vllm": {
+            "additionalFlags": ["--no-disable-uvicorn-access-log"],
+            "loggingLevel": "INFO",
+        }},
+    }],
+}
+
+
+def test_defaults_overlay_all_enabled_applies_to_baseline(tmp_path):
+    """All fragments in baselines/defaults/ are merged under the experiment baseline."""
+    _write(tmp_path / "b1.yaml", BASELINE)
+    _write(tmp_path / "defaults" / "llm-d-rbac.yaml", DEFAULTS_RBAC)
+    _write(tmp_path / "defaults" / "epp-verbosity.yaml", DEFAULTS_VERBOSITY)
+    _write(tmp_path / "defaults" / "vllm-logging.yaml", DEFAULTS_VLLM)
+
+    pkgs = assemble_packages(
+        baselines=[{"name": "b1", "scenario_path": tmp_path / "b1.yaml"}],
+        algorithms=[],
+        generated_dir=tmp_path / "generated",
+        defaults_dir=tmp_path / "defaults",
+    )
+    sc = pkgs[0].resolved["scenario"][0]
+
+    # Baseline overrides defaults — verbosity from BASELINE wins ("3", not "5")
+    assert sc["inferenceExtension"]["verbosity"] == "3"
+    # vllm-logging fields appear (no conflict in BASELINE)
+    assert sc["decode"]["vllm"]["loggingLevel"] == "INFO"
+    assert "--no-disable-uvicorn-access-log" in sc["decode"]["vllm"]["additionalFlags"]
+    # RBAC manifests survive intact
+    objs = sc["extraObjects"]
+    identities = sorted((o["kind"], o["metadata"]["name"]) for o in objs)
+    assert ("Role", "epp-llm-d") in identities
+    assert ("RoleBinding", "epp-llm-d") in identities
+    # Baseline scenario name preserved
+    assert sc["name"] == "admission-control"
+
+
+def test_defaults_disable_skips_listed_fragments(tmp_path):
+    """A fragment whose stem appears in defaults_disable is not applied."""
+    _write(tmp_path / "b1.yaml", BASELINE)
+    _write(tmp_path / "defaults" / "llm-d-rbac.yaml", DEFAULTS_RBAC)
+    _write(tmp_path / "defaults" / "vllm-logging.yaml", DEFAULTS_VLLM)
+
+    pkgs = assemble_packages(
+        baselines=[{"name": "b1", "scenario_path": tmp_path / "b1.yaml"}],
+        algorithms=[],
+        generated_dir=tmp_path / "generated",
+        defaults_dir=tmp_path / "defaults",
+        defaults_disable=["llm-d-rbac"],
+    )
+    sc = pkgs[0].resolved["scenario"][0]
+
+    # vllm-logging applied
+    assert sc["decode"]["vllm"]["loggingLevel"] == "INFO"
+    # RBAC fragment skipped — Role/RoleBinding not present
+    objs = sc.get("extraObjects", [])
+    kinds = {o.get("kind") for o in objs}
+    assert "Role" not in kinds
+    assert "RoleBinding" not in kinds
+
+
+def test_defaults_missing_dir_is_noop(tmp_path):
+    """A non-existent defaults_dir leaves the baseline unchanged."""
+    _write(tmp_path / "b1.yaml", BASELINE)
+    pkgs_with = assemble_packages(
+        baselines=[{"name": "b1", "scenario_path": tmp_path / "b1.yaml"}],
+        algorithms=[],
+        generated_dir=tmp_path / "generated",
+        defaults_dir=tmp_path / "does_not_exist",
+    )
+    pkgs_without = assemble_packages(
+        baselines=[{"name": "b1", "scenario_path": tmp_path / "b1.yaml"}],
+        algorithms=[],
+        generated_dir=tmp_path / "generated",
+    )
+    assert pkgs_with[0].resolved == pkgs_without[0].resolved
+
+
+def test_defaults_collision_with_experiment_extraobject_experiment_wins(tmp_path):
+    """Baseline-supplied extraObject of the same K8s identity overrides the fragment."""
+    fragment = {
+        "scenario": [{
+            "name": "defaults",
+            "extraObjects": [
+                {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
+                 "metadata": {"name": "epp-llm-d"},
+                 "rules": [{"apiGroups": ["llm-d.ai"], "verbs": ["get"]}]},
+            ],
+        }],
+    }
+    experiment_baseline = {
+        "scenario": [{
+            "name": "admission-control",
+            "model": {"name": "Qwen/Qwen3-14B"},
+            "extraObjects": [
+                {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
+                 "metadata": {"name": "epp-llm-d"},
+                 "rules": [{"apiGroups": ["llm-d.ai"], "verbs": ["get", "watch", "list"]}]},
+            ],
+        }],
+    }
+    _write(tmp_path / "b1.yaml", experiment_baseline)
+    _write(tmp_path / "defaults" / "llm-d-rbac.yaml", fragment)
+
+    pkgs = assemble_packages(
+        baselines=[{"name": "b1", "scenario_path": tmp_path / "b1.yaml"}],
+        algorithms=[],
+        generated_dir=tmp_path / "generated",
+        defaults_dir=tmp_path / "defaults",
+    )
+    role = next(o for o in pkgs[0].resolved["scenario"][0]["extraObjects"]
+                if o["kind"] == "Role" and o["metadata"]["name"] == "epp-llm-d")
+    # Experiment baseline's wider verbs win
+    assert role["rules"][0]["verbs"] == ["get", "watch", "list"]
+
+
+def test_defaults_edited_in_place_honored(tmp_path):
+    """An edited fragment's content is what gets merged — no framework override."""
+    edited_fragment = {
+        "scenario": [{
+            "name": "defaults",
+            "inferenceExtension": {"verbosity": "9"},  # not "5"
+        }],
+    }
+    _write(tmp_path / "b1.yaml", {"scenario": [{"name": "ac", "model": {"name": "M"}}]})
+    _write(tmp_path / "defaults" / "epp-verbosity.yaml", edited_fragment)
+
+    pkgs = assemble_packages(
+        baselines=[{"name": "b1", "scenario_path": tmp_path / "b1.yaml"}],
+        algorithms=[],
+        generated_dir=tmp_path / "generated",
+        defaults_dir=tmp_path / "defaults",
+    )
+    assert pkgs[0].resolved["scenario"][0]["inferenceExtension"]["verbosity"] == "9"
+
+
+def test_defaults_apply_to_multiple_baselines(tmp_path):
+    """Each baseline picks up the same defaults overlay independently."""
+    _write(tmp_path / "b1.yaml", BASELINE)
+    _write(tmp_path / "b2.yaml", BASELINE_ALT)
+    _write(tmp_path / "defaults" / "vllm-logging.yaml", DEFAULTS_VLLM)
+
+    pkgs = assemble_packages(
+        baselines=[
+            {"name": "b1", "scenario_path": tmp_path / "b1.yaml"},
+            {"name": "b2", "scenario_path": tmp_path / "b2.yaml"},
+        ],
+        algorithms=[],
+        generated_dir=tmp_path / "generated",
+        defaults_dir=tmp_path / "defaults",
+    )
+    for pkg in pkgs:
+        assert pkg.resolved["scenario"][0]["decode"]["vllm"]["loggingLevel"] == "INFO"
+
+
+def test_defaults_inherited_by_treatment_through_baseline(tmp_path):
+    """Treatment scenarios inherit framework defaults transitively via the resolved baseline."""
+    _write(tmp_path / "b1.yaml", BASELINE)
+    _write(tmp_path / "treatment.yaml", TREATMENT_DIFFS)
+    _write(tmp_path / "defaults" / "llm-d-rbac.yaml", DEFAULTS_RBAC)
+    _write(tmp_path / "generated" / "ac1_config.yaml", TREATMENT_OVERLAY)
+
+    pkgs = assemble_packages(
+        baselines=[{"name": "b1", "scenario_path": tmp_path / "b1.yaml"}],
+        algorithms=[{"name": "ac1", "scenario_path": tmp_path / "treatment.yaml", "defaults": "b1"}],
+        generated_dir=tmp_path / "generated",
+        defaults_dir=tmp_path / "defaults",
+        overlays_expected=True,
+    )
+    # Treatment package inherits the defaults' Role/RoleBinding via the resolved baseline.
+    treatment_objs = pkgs[1].resolved["scenario"][0]["extraObjects"]
+    kinds = {o["kind"] for o in treatment_objs}
+    assert "Role" in kinds
+    assert "RoleBinding" in kinds
+
+
+def test_defaults_skill_overlay_overrides_defaults(tmp_path):
+    """Skill-generated overlay wins over framework defaults (precedence: defaults < baseline < overlay)."""
+    _write(tmp_path / "b1.yaml", {"scenario": [{"name": "ac", "model": {"name": "M"}}]})
+    _write(tmp_path / "defaults" / "epp-verbosity.yaml", DEFAULTS_VERBOSITY)
+    overlay = {"scenario": [{"name": "ac", "inferenceExtension": {"verbosity": "1"}}]}
+    _write(tmp_path / "generated" / "b1_config.yaml", overlay)
+
+    pkgs = assemble_packages(
+        baselines=[{"name": "b1", "scenario_path": tmp_path / "b1.yaml"}],
+        algorithms=[],
+        generated_dir=tmp_path / "generated",
+        defaults_dir=tmp_path / "defaults",
+    )
+    # Overlay's "1" beats defaults' "5".
+    assert pkgs[0].resolved["scenario"][0]["inferenceExtension"]["verbosity"] == "1"
+
+
+def test_defaults_empty_directory_is_noop(tmp_path):
+    """An empty defaults/ directory applies no fragments."""
+    _write(tmp_path / "b1.yaml", BASELINE)
+    (tmp_path / "defaults").mkdir()
+    pkgs = assemble_packages(
+        baselines=[{"name": "b1", "scenario_path": tmp_path / "b1.yaml"}],
+        algorithms=[],
+        generated_dir=tmp_path / "generated",
+        defaults_dir=tmp_path / "defaults",
+    )
+    pkgs_baseline = assemble_packages(
+        baselines=[{"name": "b1", "scenario_path": tmp_path / "b1.yaml"}],
+        algorithms=[],
+        generated_dir=tmp_path / "generated",
+    )
+    assert pkgs[0].resolved == pkgs_baseline[0].resolved
+
+
 class TestInjectHfSecretName:
     """inject_hf_secret_name sets huggingface.secretName on all scenario entries."""
 

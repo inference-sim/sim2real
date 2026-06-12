@@ -289,6 +289,12 @@ context:
   text: |                   # freeform instructions for translation skill
   files: [<path>, ...]      # files assembled into context document (Phase 2)
 
+defaults:                   # optional — controls framework defaults overlay
+  disable: []               # fragment stems (filename without .yaml) to skip;
+                            # fragments live in <experiment-root>/baselines/defaults/
+                            # and are merged UNDER each baseline at Phase 4. See
+                            # docs/troubleshooting.md#framework-defaults-overlay.
+
 # v3 fields (required unless noted)
 target:
   repo: <path>              # llm-d-inference-scheduler repo path
