@@ -28,8 +28,7 @@ Read and hold in context:
    available plugin types and their type strings
 2. **Algorithm source** `{ALGO_SOURCE}` — the simulation Go file being translated
 3. If `{ALGO_CONFIG}` is non-empty: read it — weights and thresholds (ground truth)
-4. If `{BASELINE_REAL_CONFIG}` is non-null: read it — the real config structure for reference
-5. **Pipeline overlay format** `{REPO_ROOT}/pipeline/README.md` — "Scenario Overlay Format"
+4. **Pipeline overlay format** `{REPO_ROOT}/pipeline/README.md` — "Scenario Overlay Format"
    section defines valid overlay structure
 
 You will read the generated plugin files and treatment config fresh on each review request.

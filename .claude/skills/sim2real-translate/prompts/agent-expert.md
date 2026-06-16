@@ -31,9 +31,7 @@ Read the following to build your foundation:
 1. Read `{EXPERIMENT_ROOT}/transfer.yaml` — understand scenario, algorithm, baseline, context
 2. Read `{ALGO_SOURCE}` — the simulation algorithm being translated
 3. If `{ALGO_CONFIG}` is non-empty: read it — algorithm weights and thresholds (ground truth)
-4. If `{BASELINE_SIM_CONFIG}` is non-empty: read it — the simulation baseline policy
-5. If `{BASELINE_REAL_CONFIG}` is not null: read it — real config template
-6. Read all files in context.files (listed in transfer.yaml)
+4. Read all files in context.files (listed in transfer.yaml)
 
 Then do targeted exploration of the target repo:
 

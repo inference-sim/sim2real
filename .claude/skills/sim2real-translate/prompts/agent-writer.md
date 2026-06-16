@@ -76,12 +76,7 @@ SendMessage({MAIN_SESSION_NAME}, "baseline-ready: {RUN_DIR}/generated/baseline_c
 ```
 and wait for "continue". Baseline config is shared across algorithms.
 
-Read:
-1. `{REPO_ROOT}/pipeline/README.md` — the "Scenario Overlay Format" section defines the
-   required output structure. Follow it exactly.
-2. `{BASELINE_SIM_CONFIG}` (if non-null) — the sim baseline policy
-3. `{BASELINE_REAL_CONFIG}` (if not null) — a reference real config (for guidance, not literal copy)
-4. `{BASELINE_REAL_NOTES}` — translation hints describing what the baseline should contain
+Use the inputs listed in the upfront "Inputs — Read These Now" table.
 
 Your goal: produce `{RUN_DIR}/generated/baseline_config.yaml` — a **llmdbenchmark scenario overlay**
 that will be deep-merged onto the experiment's `baseline.yaml` by `prepare.py`.
@@ -101,12 +96,9 @@ that will be deep-merged onto the experiment's `baseline.yaml` by `prepare.py`.
 - Only include fields you are adding or overriding
 
 **Content rules:**
-- Use `{BASELINE_REAL_NOTES}`, `{BASELINE_SIM_CONFIG}`, and the context document to
-  determine what plugin config and priorities to include
+- Use `{CONTEXT_PATH}` to determine what plugin config and priorities to include
 - Map sim concepts to real plugin type strings via the signal mapping in `{CONTEXT_PATH}`
 - Ask the Expert if you are unsure about any plugin type string or config field name
-- If `{BASELINE_REAL_CONFIG}` is null and `{BASELINE_SIM_CONFIG}` is null, derive content
-  entirely from the context document and Expert
 
 Create the `generated/` directory if needed, then write `{RUN_DIR}/generated/baseline_config.yaml`.
 Then send to main session:

@@ -138,7 +138,7 @@ python3 -c "
 import json, sys
 si = json.load(open('$RUN_DIR/skill_input.json'))
 required = ['run_name', 'run_dir', 'scenario', 'context_path', 'manifest_path',
-            'algorithm_source', 'baseline_sim_config',
+            'algorithm_source',
             'target', 'build_commands', 'config_kind', 'context',
             'current_algorithm']
 missing = [f for f in required if f not in si]
@@ -169,9 +169,6 @@ TARGET_REPO=$EXPERIMENT_ROOT/$(python3 -c "import json; print(json.load(open('$R
 CONFIG_KIND=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['config_kind'])")
 CURRENT_ALGORITHM=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['current_algorithm'])")
 CONTEXT_TEXT=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json')).get('context', {}).get('text', ''))")
-BASELINE_SIM_CONFIG=$(python3 -c "import json; v=json.load(open('$RUN_DIR/skill_input.json'))['baseline_sim_config']; print('$EXPERIMENT_ROOT/' + v if v else '')")
-BASELINE_REAL_CONFIG=$(python3 -c "import json; v=json.load(open('$RUN_DIR/skill_input.json')).get('baseline_real_config'); print('$EXPERIMENT_ROOT/' + v if v else 'null')")
-BASELINE_REAL_NOTES=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json')).get('baseline_real_notes', ''))")
 ```
 
 Verify source files exist:
@@ -361,9 +358,6 @@ corresponding shell variables:
 - `{CONTEXT_PATH}` → `$CONTEXT_PATH`
 - `{ALGO_SOURCE}` → `$ALGO_SOURCE`
 - `{ALGO_CONFIG}` → `$ALGO_CONFIG`
-- `{BASELINE_SIM_CONFIG}` → `$BASELINE_SIM_CONFIG`
-- `{BASELINE_REAL_CONFIG}` → `$BASELINE_REAL_CONFIG`
-- `{BASELINE_REAL_NOTES}` → `$BASELINE_REAL_NOTES`
 - `{EXPERT_AGENT_NAME}` → `"expert"`
 - `{TARGET_REPO}` → `$TARGET_REPO`
 - `{CONFIG_KIND}` → `$CONFIG_KIND`
