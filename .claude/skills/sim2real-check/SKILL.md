@@ -178,6 +178,34 @@ The real bundle may contain multiple experiment variants (e.g., `baseline/`, `tr
 - The generated Go code for each variant's policy plugin — confirm control returns constant 1.0 and treatment implements the sim algorithm
 - Verdict: PASS if only flow control policy differs, FAIL if routing/scheduling/priority/feature-gates diverge
 
+**2d. EPP & InferenceObjective Config Parity vs `config.md`**
+
+Step 2c is a cross-variant **identity** check — all variants can be wrong in the same way and 2c still passes. This sub-section is the **correctness** check against the project-supplied truth in `<sim>/config.md`.
+
+**Conditional**: run only if `<sim>/config.md` contains EPP config blocks (markdown sections matching `## llm-d EPP Configuration — Baseline|Treatment|Control`) and/or InferenceObjective entries (`## Priority Bands`, or any fenced YAML with `kind: InferenceObjective`). Otherwise SKIP with note "no EPP / InferenceObjective blocks in config.md."
+
+**Source-of-truth → generated artifact mapping:**
+
+| `config.md` block | Generated artifact |
+|---|---|
+| `## llm-d EPP Configuration — Baseline` | `<real>/generated/baseline_config.yaml` → `inferenceExtension.pluginsCustomConfig.custom-plugins.yaml` (parse the inner YAML string) |
+| `## llm-d EPP Configuration — Treatment` | `<real>/generated/<treatment>/<treatment>_config.yaml` deep-merged onto baseline |
+| `## llm-d EPP Configuration — Control` | `<real>/generated/<control>/<control>_config.yaml` deep-merged onto baseline |
+| InferenceObjective entries (`kind: InferenceObjective`) | `<real>/generated/baseline_config.yaml` → `extraObjects` filtered to `kind: InferenceObjective` |
+
+**Compare these fields (order-independent for lists):**
+
+- `apiVersion`, `kind`
+- `featureGates` (set equality)
+- `plugins` — list of `(type, name, parameters)` tuples
+- `schedulingProfiles` — for each profile, the `(pluginRef, weight)` map
+- `flowControl.usageLimitPolicyPluginRef`
+- For each InferenceObjective: `metadata.name`, `spec.priority`, `spec.poolRef.name`, `spec.poolRef.group`
+
+**Show:** side-by-side table — `field path | config.md value | generated value | match`.
+
+**Verdict**: PASS only if every field matches. FAIL on any mismatch — call out the mismatched field path and both values. This catches the apiVersion / poolRef class of translation bug (e.g., #332) statically, before compute is burned.
+
 ---
 
 ### 3. SIGNAL PARITY
@@ -314,6 +342,34 @@ Verify from EPP logs (`epp_logs/`) that the configured policy is actually execut
 - Flag if variants run in different namespaces — not a problem per se, but document it as it means separate clusters or separate resource quotas.
 
 - Show: table per variant with: flow control active (yes/no), priorities seen, dispatch outcomes (Dispatched/Shed/Timeout counts), pod count, CacheNumBlocks, deployment hash, namespace.
+
+**5c.6. InferenceObjective Resolution at Runtime**
+
+Step 5c.2 (priority bands recognized) is a downstream symptom check — it sees that priorities are missing without saying why. This sub-section pins the runtime cause: it confirms the EPP loaded the configured InferenceObjective CRs and associated them with requests.
+
+**Conditional**: run only if `<real>/generated/baseline_config.yaml` declares at least one `kind: InferenceObjective` in `extraObjects`. Otherwise SKIP with note "no objectives configured."
+
+**Verbosity prerequisite.** Both checks below depend on log lines that are gated on EPP verbosity. The llm-d-router defines `VERBOSE = 3` and `DEBUG = 4` in `pkg/common/observability/logging/const.go`; an EPP deployed at the default Info level (`V=0`) will emit neither. Before relying on the absence of the failure string in Check 1, confirm VERBOSE-level logging is active by greping `epp_logs/*.log` for any line containing `"objectiveKey"` (added at `director.go:275` and emitted at `V(logutil.DEBUG)` further down). If no such line appears, treat both checks as INAPPLICABLE and surface that the EPP must be redeployed with `-v=4` (or at minimum `-v=3` for Check 1 alone). Otherwise the absence of the failure string is indistinguishable from "logging too quiet to detect failure."
+
+**Check 1 — Negative signal absent.** Grep all `epp_logs/*.log` for the literal string:
+
+```
+"No associated InferenceObjective found, using default"
+```
+
+This message is emitted at `pkg/epp/requestcontrol/director.go:219` (in the llm-d-router source) at `V(logutil.VERBOSE)` (requires `-v=3` or higher) whenever `datastore.ObjectiveGet(reqCtx.ObjectiveKey)` returns nil — i.e., the InferenceObjective CR isn't loaded into the API group the EPP watches, or the request's `objectiveKey` doesn't match any loaded objective name.
+
+- PASS: 0 occurrences across all per-pod EPP logs **and** the verbosity prerequisite above is met (some `"objectiveKey"` line is present).
+- FAIL: any occurrence. Emit: *"InferenceObjective wiring broken (apiVersion or poolRef mismatch) — see #332-class issues. Skipping downstream signal/policy analysis."*
+- INAPPLICABLE: 0 occurrences but no `"objectiveKey"` lines anywhere in the logs — verbosity too low to evaluate.
+
+**Check 2 — Positive signal present.** Grep `epp_logs/*.log` for the message `"LLM request assembled"`, emitted at `director.go:277` at `V(logutil.DEBUG)` (requires `-v=4` or higher). Each such line carries the `priority` field set from the resolved `infObjective.Spec.Priority` (attached via `logger.WithValues(...)` at `director.go:275`). For each `spec.priority` value declared in the configured InferenceObjectives, expect at least one matching log line. If only `"priority":0` (the `defaultPriority` fallback at `director.go:222`) appears, the request flow never associated configured priorities with requests.
+
+- PASS: every configured priority value appears at least once.
+- FAIL: any configured priority value missing. (Less common than Check 1; usually means objectives loaded but request headers don't match objective names.)
+- INAPPLICABLE: no `"LLM request assembled"` lines at all — EPP verbosity is below `-v=4`.
+
+**Show:** table per pod — `failure-string count | distinct priority values seen | verdict`.
 
 **5d. Prefix Hit Ratio**
 If `enable_prefix_caching=True`, grep server logs for prefix cache hit metrics.
