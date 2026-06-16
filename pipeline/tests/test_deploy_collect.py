@@ -1514,7 +1514,7 @@ def test_collect_per_workload_clears_stale_files(tmp_path, monkeypatch):
 
 
 def test_collect_skip_logs_clears_stale_log_dirs(tmp_path, monkeypatch):
-    """--skip-logs path removes stale server_logs/ and epp_logs/ before copying."""
+    """--skip-logs path removes stale server_logs/, epp_logs/, and gpu_logs/ before copying."""
     from pipeline import deploy
     import subprocess
 
@@ -1530,6 +1530,10 @@ def test_collect_skip_logs_clears_stale_log_dirs(tmp_path, monkeypatch):
     stale_epp = results_dir / "epp_logs" / "stale.log"
     stale_epp.parent.mkdir(parents=True)
     stale_epp.write_text("stale epp log")
+
+    stale_gpu = results_dir / "gpu_logs" / "stale.log"
+    stale_gpu.parent.mkdir(parents=True)
+    stale_gpu.write_text("stale gpu log")
 
     data = {
         "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
@@ -1553,6 +1557,45 @@ def test_collect_skip_logs_clears_stale_log_dirs(tmp_path, monkeypatch):
     assert not stale_server.exists()
     assert not (results_dir / "server_logs").exists()
     assert not stale_epp.exists()
+    assert not stale_gpu.exists()
+
+
+def test_collect_skip_logs_invokes_gpu_logs_copy(tmp_path, monkeypatch):
+    """--skip-logs path issues a kubectl cp for gpu_logs/ alongside epp_logs/."""
+    from pipeline import deploy
+    import subprocess
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+
+    data = {
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    cp_targets = []
+
+    def mock_run(cmd, **kwargs):
+        mock = MagicMock(returncode=0, stdout="", stderr="")
+        cmd_list = cmd if isinstance(cmd, list) else cmd.split()
+        cmd_str = " ".join(cmd_list)
+        if "exec" in cmd_str and "ls" in cmd_str:
+            mock.stdout = "wl-smoke"
+        if "exec" in cmd_str and "stat" in cmd_str:
+            mock.stdout = ""
+        if "cp" in cmd_list and len(cmd_list) >= 4:
+            cp_targets.append(cmd_list[2])  # the source spec, e.g. ns/pod:/path/...
+        return mock
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    deploy._extract_phases_from_pvc(
+        ["baseline"], "test-run", "ns-0", run_dir, skip_logs=True)
+
+    sources = " ".join(cp_targets)
+    assert "/wl-smoke/gpu_logs/" in sources, f"no gpu_logs/ copy issued; saw: {cp_targets}"
+    assert "/wl-smoke/epp_logs/" in sources, f"sanity: epp_logs/ copy still issued; saw: {cp_targets}"
+    assert "/wl-smoke/gpu_stream_done" in sources, f"no gpu_stream_done sentinel copy; saw: {cp_targets}"
 
 
 def test_collect_idempotent_no_stale_accumulation(tmp_path, monkeypatch):

@@ -90,3 +90,61 @@ class TestStreamEppLogsTask:
         s_rd = next(p["value"] for p in s["params"] if p["name"] == "resultsDir")
         w_rd = next(p["value"] for p in w["params"] if p["name"] == "resultsDir")
         assert s_rd == w_rd, f"resultsDir mismatch: streamer={s_rd!r} workload={w_rd!r}"
+
+
+class TestStreamGpuStatsTask:
+    """stream-gpu-stats task invocation in pipeline.yaml."""
+
+    def _get_stream_gpu_stats_task(self):
+        pipeline = yaml.safe_load(PIPELINE_YAML.read_text())
+        tasks = pipeline["spec"]["tasks"]
+        s = [t for t in tasks if t["name"] == "stream-gpu-stats"]
+        assert len(s) == 1, "Expected exactly one stream-gpu-stats task"
+        return s[0]
+
+    def test_task_present(self):
+        """stream-gpu-stats must be wired into the pipeline."""
+        self._get_stream_gpu_stats_task()
+
+    def test_task_ref(self):
+        """taskRef points at the stream-gpu-stats Task resource."""
+        task = self._get_stream_gpu_stats_task()
+        assert task["taskRef"]["name"] == "stream-gpu-stats"
+
+    def test_runs_after_standup(self):
+        """Streamer starts as soon as the model stack is up — in parallel with the workload."""
+        task = self._get_stream_gpu_stats_task()
+        assert task["runAfter"] == ["llmdbenchmark-standup"], (
+            "Streamer must start after standup (when vLLM pods exist) and "
+            "in parallel with the workload, not after it."
+        )
+
+    def test_data_workspace_bound(self):
+        """data workspace must be bound to data-storage so logs land on the shared PVC."""
+        task = self._get_stream_gpu_stats_task()
+        ws = {w["name"]: w["workspace"] for w in task["workspaces"]}
+        assert ws.get("data") == "data-storage"
+
+    def test_has_namespace_param(self):
+        """stream-gpu-stats must receive the namespace param."""
+        task = self._get_stream_gpu_stats_task()
+        param_names = [p["name"] for p in task["params"]]
+        assert "namespace" in param_names
+
+    def test_has_results_dir_param(self):
+        """stream-gpu-stats must receive the resultsDir param so its output sits next to the workload's."""
+        task = self._get_stream_gpu_stats_task()
+        param_names = [p["name"] for p in task["params"]]
+        assert "resultsDir" in param_names
+
+    def test_results_dir_matches_workload(self):
+        """The streamer's resultsDir must be identical to the workload's, so they write into the same per-workload subdir."""
+        pipeline = yaml.safe_load(PIPELINE_YAML.read_text())
+        tasks = pipeline["spec"]["tasks"]
+
+        s = next(t for t in tasks if t["name"] == "stream-gpu-stats")
+        w = next(t for t in tasks if t["name"] == "run-workload-blis-observe-binary")
+
+        s_rd = next(p["value"] for p in s["params"] if p["name"] == "resultsDir")
+        w_rd = next(p["value"] for p in w["params"] if p["name"] == "resultsDir")
+        assert s_rd == w_rd, f"resultsDir mismatch: streamer={s_rd!r} workload={w_rd!r}"

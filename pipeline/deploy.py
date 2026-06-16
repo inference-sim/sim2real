@@ -997,12 +997,12 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                         continue
                     wl_dest = dest_dir / wl_name
                     wl_dest.mkdir(parents=True, exist_ok=True)
-                    for log_dir in (wl_dest / "server_logs", wl_dest / "epp_logs", wl_dest / "resources"):
+                    for log_dir in (wl_dest / "server_logs", wl_dest / "epp_logs", wl_dest / "gpu_logs", wl_dest / "resources"):
                         if log_dir.exists():
                             shutil.rmtree(log_dir)
                     # Copy trace files
                     wl_errors = []
-                    for fname in ("trace_data.csv", "trace_header.yaml", "epp_stream_done"):
+                    for fname in ("trace_data.csv", "trace_header.yaml", "epp_stream_done", "gpu_stream_done"):
                         src = f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{wl_name}/{fname}"
                         r = run(["kubectl", "cp", src, str(wl_dest / fname), "--retries=3"],
                                 check=False, capture=True)
@@ -1016,6 +1016,14 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                             check=False, capture=True)
                     if r.returncode != 0 and "no such file" not in r.stderr.lower():
                         wl_errors.append(f"{wl_name}/epp_logs: {r.stderr.strip()}")
+                    # Copy gpu_logs directory
+                    gpu_src = f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{wl_name}/gpu_logs/"
+                    gpu_dest = wl_dest / "gpu_logs"
+                    gpu_dest.mkdir(exist_ok=True)
+                    r = run(["kubectl", "cp", gpu_src, str(gpu_dest), "--retries=3"],
+                            check=False, capture=True)
+                    if r.returncode != 0 and "no such file" not in r.stderr.lower():
+                        wl_errors.append(f"{wl_name}/gpu_logs: {r.stderr.strip()}")
                     # Copy resources directory
                     res_src = f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{wl_name}/resources/"
                     res_dest = wl_dest / "resources"
