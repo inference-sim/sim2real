@@ -1,4 +1,10 @@
-"""Tests for scenario assembly (baseline/treatment merge logic)."""
+"""Tests for scenario assembly (baseline/treatment merge logic).
+
+Note: the apiVersion/kind fields in these fixtures are illustrative.
+These tests verify deep-merge identity behavior, not the canonical
+apiVersion of any resource. Real apiVersion comes from the project's
+context document at translate time.
+"""
 import pytest
 import yaml
 
