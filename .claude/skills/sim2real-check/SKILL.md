@@ -349,21 +349,25 @@ Step 5c.2 (priority bands recognized) is a downstream symptom check — it sees 
 
 **Conditional**: run only if `<real>/generated/baseline_config.yaml` declares at least one `kind: InferenceObjective` in `extraObjects`. Otherwise SKIP with note "no objectives configured."
 
+**Verbosity prerequisite.** Both checks below depend on log lines that are gated on EPP verbosity. The llm-d-router defines `VERBOSE = 3` and `DEBUG = 4` in `pkg/common/observability/logging/const.go`; an EPP deployed at the default Info level (`V=0`) will emit neither. Before relying on the absence of the failure string in Check 1, confirm VERBOSE-level logging is active by greping `epp_logs/*.log` for any line containing `"objectiveKey"` (added at `director.go:275` and emitted at `V(logutil.DEBUG)` further down). If no such line appears, treat both checks as INAPPLICABLE and surface that the EPP must be redeployed with `-v=4` (or at minimum `-v=3` for Check 1 alone). Otherwise the absence of the failure string is indistinguishable from "logging too quiet to detect failure."
+
 **Check 1 — Negative signal absent.** Grep all `epp_logs/*.log` for the literal string:
 
 ```
 "No associated InferenceObjective found, using default"
 ```
 
-This message is emitted at `pkg/epp/requestcontrol/director.go:219` (in the llm-d-router source) whenever `datastore.ObjectiveGet(reqCtx.ObjectiveKey)` returns nil — i.e., the InferenceObjective CR isn't loaded into the API group the EPP watches, or the request's `objectiveKey` doesn't match any loaded objective name.
+This message is emitted at `pkg/epp/requestcontrol/director.go:219` (in the llm-d-router source) at `V(logutil.VERBOSE)` (requires `-v=3` or higher) whenever `datastore.ObjectiveGet(reqCtx.ObjectiveKey)` returns nil — i.e., the InferenceObjective CR isn't loaded into the API group the EPP watches, or the request's `objectiveKey` doesn't match any loaded objective name.
 
-- PASS: 0 occurrences across all per-pod EPP logs.
+- PASS: 0 occurrences across all per-pod EPP logs **and** the verbosity prerequisite above is met (some `"objectiveKey"` line is present).
 - FAIL: any occurrence. Emit: *"InferenceObjective wiring broken (apiVersion or poolRef mismatch) — see #332-class issues. Skipping downstream signal/policy analysis."*
+- INAPPLICABLE: 0 occurrences but no `"objectiveKey"` lines anywhere in the logs — verbosity too low to evaluate.
 
-**Check 2 — Positive signal present.** Grep `epp_logs/*.log` for log lines emitted at `director.go:275` carrying a `priority` field with non-default values. For each `spec.priority` value declared in the configured InferenceObjectives, expect at least one matching log line. If only `"priority":0` (the `defaultPriority` fallback at `director.go:222`) appears, the request flow never associated configured priorities with requests.
+**Check 2 — Positive signal present.** Grep `epp_logs/*.log` for the message `"LLM request assembled"`, emitted at `director.go:277` at `V(logutil.DEBUG)` (requires `-v=4` or higher). Each such line carries the `priority` field set from the resolved `infObjective.Spec.Priority` (attached via `logger.WithValues(...)` at `director.go:275`). For each `spec.priority` value declared in the configured InferenceObjectives, expect at least one matching log line. If only `"priority":0` (the `defaultPriority` fallback at `director.go:222`) appears, the request flow never associated configured priorities with requests.
 
 - PASS: every configured priority value appears at least once.
 - FAIL: any configured priority value missing. (Less common than Check 1; usually means objectives loaded but request headers don't match objective names.)
+- INAPPLICABLE: no `"LLM request assembled"` lines at all — EPP verbosity is below `-v=4`.
 
 **Show:** table per pod — `failure-string count | distinct priority values seen | verdict`.
 
