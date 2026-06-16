@@ -33,6 +33,21 @@ spec:
     - name: skipTeardown
       type: string
       default: "false"
+    - name: maxConcurrency
+      type: string
+      default: "10000"
+    - name: timeout
+      type: string
+      default: "1800"
+    - name: warmupRequests
+      type: string
+      default: "50"
+    - name: prewarmDuration
+      type: string
+      default: "60s"
+    - name: extraArgs
+      type: string
+      default: ""
   workspaces:
     - name: source
     - name: data-storage
@@ -113,6 +128,16 @@ spec:
           value: "$(params.workloadSpec)"
         - name: resultsDir
           value: "$(params.runName)/$(params.phase)/$(params.workloadName)"
+        - name: maxConcurrency
+          value: "$(params.maxConcurrency)"
+        - name: timeout
+          value: "$(params.timeout)"
+        - name: warmupRequests
+          value: "$(params.warmupRequests)"
+        - name: prewarmDuration
+          value: "$(params.prewarmDuration)"
+        - name: extraArgs
+          value: "$(params.extraArgs)"
 
     - name: collect-results
       runAfter: ["run-workload-blis-observe-binary"]
