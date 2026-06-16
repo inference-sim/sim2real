@@ -390,24 +390,6 @@ scenario:
     images: {...}
 ```
 
-### InferenceObjective requirements
-
-InferenceObjectives go in `extraObjects`. Each must include `spec.poolRef.name` referencing the InferencePool created by the gaie Helm chart:
-
-```yaml
-extraObjects:
-  - apiVersion: inference.networking.x-k8s.io/v1alpha2
-    kind: InferenceObjective
-    metadata:
-      name: critical
-    spec:
-      poolRef:
-        name: ${model.idLabel}-gaie
-      priority: 100
-```
-
-`${model.idLabel}` is resolved by llm-d-benchmark at render time (requires llm-d-benchmark >= PR #1103).
-
 ### Plugin config
 
 The EPP plugin configuration goes inside `inferenceExtension.pluginsCustomConfig` as a YAML-in-YAML string:
