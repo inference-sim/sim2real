@@ -85,13 +85,18 @@ that will be deep-merged onto the experiment's `baseline.yaml` by `prepare.py`.
 - Top-level `scenario:` list with one dict
 - The `name` field MUST match the scenario name in the experiment's baseline file exactly
   (mismatched names cause llmdbenchmark to deploy multiple scenarios instead of merging)
-- InferenceObjectives go in `extraObjects`. The only field this format pins is:
-  - `spec.poolRef.name: ${model.idLabel}-gaie` — llm-d-benchmark substitutes
-    `${model.idLabel}` at render time (requires llm-d-benchmark >= PR #1103).
+- InferenceObjectives go in `extraObjects`. The format pins one rule:
+  - `spec.poolRef.name` MUST equal `${model.idLabel}-gaie` so llm-d-benchmark
+    substitutes `${model.idLabel}` at render time (requires llm-d-benchmark
+    >= PR #1103).
 
-  All other InferenceObjective fields (`apiVersion`, `spec.priority`,
-  `spec.poolRef.group`, etc.) come from the project's context document
-  (typically `config.md`) — copy them from there, not from any example.
+  Everything else MUST be copied verbatim from the project's context document
+  (typically `config.md`) at the field level. In particular: copy the entire
+  `spec.poolRef` block (including `group`, `name`, and any other keys), not
+  just `name`. Same applies to `apiVersion`, `metadata`, `spec.priority`, and
+  any other nested fields the project's `config.md` declares — if it's in
+  config.md's InferenceObjective, it MUST appear in the generated output.
+  Do not paraphrase or selectively include fields.
 - Plugin config in `inferenceExtension.pluginsCustomConfig` as a YAML-in-YAML string
 - Only include fields you are adding or overriding
 
