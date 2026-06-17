@@ -392,6 +392,46 @@ From server logs, look for KV cache size info:
 - `Maximum concurrency for X tokens per request: Y.Zx`
 - Show: these values per instance
 
+**5h. GPU Thermal/Power Health**
+
+Verify that GPU hardware was operating within nominal range during the workload window — that the metrics being compared are not influenced by thermal or power throttling. A FAIL here invalidates latency-based conclusions for that cell.
+
+**Source data:**
+- `<run>/gpu_logs/<pod>.uuids` — pod ↔ GPU UUID (one line per pod, format `GPU 0: <name> (UUID: GPU-...)`)
+- `<run>/gpu_logs/<node>.gpus.csv` — UUID ↔ host index ↔ bus-id (deterministic per-node map; format `index, uuid, gpu_bus_id` no header)
+- `<run>/gpu_logs/<node>.log` — per-sample temp / power / power_cap / util / mem (sampled `nvidia-smi` table)
+- `<run>/trace_data.csv` — workload window (`min(send_time_us)` to `max(last_chunk_time_us)`, status==ok)
+
+**Resolution rule:** pod → UUID (.uuids) → host index (.gpus.csv) → metric rows in `<node>.log`. The `0` in `.uuids` is the **container-local** index and is NOT the host index — use the `.gpus.csv` join. If any artifact is missing for a cell, **SKIP** that cell with `reason: missing <artifact>`. Skipping is not failing — throttle status unknown.
+
+**Sample filter:** restrict to samples in the workload window where `util_pct == 100` (steady-state running). If fewer than 30 such samples, **SKIP** with `reason: insufficient steady-state samples` (typical for very-low-QPS workloads with no sustained-busy phase).
+
+**Compute per (cell × pod):**
+- `temp_p95`, `temp_max` (°C)
+- `power_cap_min` (W) — was the host/rack cap reduced below the accelerator's design TDP?
+- `power_p10` (W) at sustained `util==100` — workload-driven, but a low p10 at high util suggests forced downclock
+- `throttle_frac` — fraction of `util==100` samples that satisfy `temp ≥ 80 °C AND power ≤ (cell_power_mean − 50W)` (combined thermal-induced power-throttle inference)
+
+**Thresholds (H100 SXM5; per-accelerator override expected for other parts — key the lookup on the GPU model name reported in `<node>.log`):**
+
+| Check | PASS | WARN | FAIL |
+|---|---|---|---|
+| `temp_p95` | < 70 °C | 70–79 °C | ≥ 80 °C |
+| `temp_max` | < 75 °C | 75–84 °C | ≥ 85 °C |
+| `power_cap_min` vs design TDP | matches | within 5% below | > 5% below |
+| `throttle_frac` | 0% | 0–5% | > 5% |
+
+**Cell verdict:** PASS if all checks PASS; FAIL if any check FAILs; WARN otherwise.
+
+**Show:** per `(cell × pod)` row with `variant | workload | pod | node | gpu_index | temp_p95 | temp_max | power_p10 | power_cap_min | throttle_frac | verdict`. Roll up:
+- PASS / WARN / FAIL counts across all cells
+- Cells excluded from clean-comparison stratum (= any non-PASS); these are tagged `thermal-FAIL` for cross-referencing
+- **Persistent hotspots**: same `(node, host_index)` failing across ≥ 2 distinct (variant, workload) pairs — surfaces hardware-positional thermal issues independent of any single run
+
+**Cross-reference with §5b/§5e:** any cell that FAILs §5h must be flagged `thermal-FAIL` in the §5e/§5b summary tables and excluded from any latency-based parity claim that aggregates across cells. Run §5h first within the runtime-analysis agent so its verdicts are available when §5b/§5e are assembled.
+
+**Inferential limit (note in report):** the table-format `nvidia-smi` capture does not include `clocks_throttle_reasons.*` or `clocks.current.sm/mem`, so throttle detection is inferred from temp/power coupling rather than read directly. If those fields are added to per-sample collection in a future revision of the data pipeline, the WARN/FAIL temperature thresholds can tighten by ~10 °C.
+
 ---
 
 ## Output Format
@@ -413,6 +453,7 @@ Structure the report as follows. Every section must have evidence tables/snippet
 | Signal   | X | Y | Z |
 | Policy   | X | Y | Z |
 | Runtime  | X | Y | Z |
+| GPU Thermal/Power | X | Y | Z |
 | **Total** | **X** | **Y** | **Z** |
 
 ## 1. Workload Parity
@@ -427,6 +468,16 @@ Expected 210 req/s (from workloads/w3.yaml:aggregate_rate), measured 210.4 req/s
 
 [... continue for each check with tables and explanations ...]
 
+## 5h. GPU Thermal/Power Health
+
+| variant | workload | pod | node | gpu | temp_p95 | temp_max | pwr_p10 | cap_min | throttle% | verdict |
+|---------|----------|-----|------|-----|----------|----------|---------|---------|-----------|---------|
+| ...     | ...      | ... | ...  | ... | ...      | ...      | ...     | ...     | ...       | ...     |
+
+**Persistent hotspots:** `<list of (node, host_index) repeated FAILs across runs, e.g. "pokprod-b93r39s2 / GPU 6 — 6/8 cells FAIL, temp_p95 mean 85 °C">`
+
+**Cells excluded from clean-comparison stratum:** `<list>`
+
 ## Action Items
 1. [FAIL] <what to fix and why>
 2. [WARN] <what to investigate>
@@ -437,6 +488,6 @@ Expected 210 req/s (from workloads/w3.yaml:aggregate_rate), measured 210.4 req/s
 Use the Agent tool to parallelize independent checks:
 - Agent 1: Workload parity (trace_data.csv analysis via python3)
 - Agent 2: Config + Signal parity (YAML/Go file comparison)
-- Agent 3: Runtime analysis (server log parsing)
+- Agent 3: Runtime analysis (server log parsing, including §5h GPU thermal/power health). Within Agent 3, run §5h **before** §5b/§5e so the per-cell `thermal-FAIL` flag is available when those subsections build their tables.
 
 Combine results into the final report.
