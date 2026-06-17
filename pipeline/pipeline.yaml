@@ -97,8 +97,18 @@ spec:
         - name: smoketest_delay
           value: "30"
 
+    - name: prepare-results-dir
+      taskRef:
+        name: prepare-results-dir
+      workspaces:
+        - name: data
+          workspace: data-storage
+      params:
+        - name: resultsDir
+          value: "$(params.runName)/$(params.phase)/$(params.workloadName)"
+
     - name: stream-epp-logs
-      runAfter: ["llmdbenchmark-standup"]
+      runAfter: ["llmdbenchmark-standup", "prepare-results-dir"]
       taskRef:
         name: stream-epp-logs
       workspaces:
@@ -111,7 +121,7 @@ spec:
           value: "$(params.runName)/$(params.phase)/$(params.workloadName)"
 
     - name: stream-gpu-stats
-      runAfter: ["llmdbenchmark-standup"]
+      runAfter: ["llmdbenchmark-standup", "prepare-results-dir"]
       taskRef:
         name: stream-gpu-stats
       workspaces:
@@ -124,7 +134,7 @@ spec:
           value: "$(params.runName)/$(params.phase)/$(params.workloadName)"
 
     - name: run-workload-blis-observe-binary
-      runAfter: ["llmdbenchmark-standup", "install-blis"]
+      runAfter: ["llmdbenchmark-standup", "install-blis", "prepare-results-dir"]
       taskRef:
         name: run-workload-blis-observe-binary
       workspaces:
