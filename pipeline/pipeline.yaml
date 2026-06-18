@@ -53,6 +53,7 @@ spec:
     - name: data-storage
   tasks:
     - name: install-llmdbenchmark
+      retries: 2
       taskRef:
         name: install-llmdbenchmark
       workspaces:
