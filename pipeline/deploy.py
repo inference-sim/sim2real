@@ -523,7 +523,16 @@ def _cmd_status(args, run_dir: Path,
 
         for key, entry in sorted(pairs.items()):
             status = entry.get("status", "unknown")
-            slot = entry.get("namespace") or entry.get("completed_namespace") or "—"
+            # `completed_namespace` is meaningful only while status == "done"
+            # (set on completion in `_reconcile_on_resume`'s done branch and
+            # in the orchestrator's per-cycle drain; cleared on every reset
+            # path inside `_reset_pair`). Gate the fallback on status so any
+            # leftover stale value on a non-done entry does not leak into
+            # the display (issue #366).
+            if status == "done":
+                slot = entry.get("completed_namespace") or "—"
+            else:
+                slot = entry.get("namespace") or "—"
             retries = entry.get("retries", 0)
             counts[status] = counts.get(status, 0) + 1
             print(f"{key:<{pair_w}} {status:<{col_status}} {slot:<{col_slot}} {retries}")
@@ -1742,6 +1751,11 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
             entry["retries"] = 0
             entry["pending_stalls"] = 0
             entry["pending_since"] = None
+            # Maintain the invariant: completed_namespace is meaningful only
+            # while status == "done". Reset clears it alongside the live slot
+            # so subsequent display/diagnostic reads do not surface stale
+            # history (issue #366).
+            entry["completed_namespace"] = None
         return True
 
     if dry_run:
@@ -1793,6 +1807,9 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
             entry["retries"] = 0
             entry["pending_stalls"] = 0
             entry["pending_since"] = None
+            # See note above: completed_namespace is only meaningful while
+            # status == "done" (issue #366).
+            entry["completed_namespace"] = None
         return True
 
     if ns and not pr_deleted and pr_name:
@@ -1830,6 +1847,9 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
     entry["retries"] = 0
     entry["pending_stalls"] = 0
     entry["pending_since"] = None
+    # See note above: completed_namespace is only meaningful while
+    # status == "done" (issue #366).
+    entry["completed_namespace"] = None
     return True
 
 
