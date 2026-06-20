@@ -61,6 +61,7 @@ def make_pipelinerun_scenario(
 
     spec: dict = {
         "pipelineRef": {"name": pipeline_name},
+        "taskRunTemplate": {"serviceAccountName": "helm-installer"},
         "params": [
             {"name": "experimentId",      "value": run_name},
             {"name": "runName",           "value": run_name},

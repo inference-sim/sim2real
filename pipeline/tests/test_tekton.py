@@ -66,6 +66,18 @@ def test_make_pipelinerun_scenario_spec_content_custom():
     assert params["specContent"] == custom_spec
 
 
+def test_make_pipelinerun_scenario_service_account():
+    """PipelineRun pins taskRunTemplate.serviceAccountName so TaskRuns do not
+    fall back to the namespace `default` SA."""
+    pr = make_pipelinerun_scenario(
+        phase="baseline", workload={"name": "wl"}, run_name="r",
+        namespace="ns", pipeline_name="sim2real-r",
+        scenario_content="{}",
+        workspace_bindings=_WORKSPACE_BINDINGS,
+    )
+    assert pr["spec"]["taskRunTemplate"]["serviceAccountName"] == "helm-installer"
+
+
 def test_make_pipelinerun_scenario_workspace_bindings():
     pr = make_pipelinerun_scenario(
         phase="baseline", workload={"name": "wl"}, run_name="r",
