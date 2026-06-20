@@ -1742,6 +1742,11 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
             entry["retries"] = 0
             entry["pending_stalls"] = 0
             entry["pending_since"] = None
+            # Maintain the invariant: completed_namespace is meaningful only
+            # while status == "done". Reset clears it alongside the live slot
+            # so subsequent display/diagnostic reads do not surface stale
+            # history (issue #366).
+            entry["completed_namespace"] = None
         return True
 
     if dry_run:
@@ -1793,6 +1798,9 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
             entry["retries"] = 0
             entry["pending_stalls"] = 0
             entry["pending_since"] = None
+            # See note above: completed_namespace is only meaningful while
+            # status == "done" (issue #366).
+            entry["completed_namespace"] = None
         return True
 
     if ns and not pr_deleted and pr_name:
@@ -1830,6 +1838,9 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
     entry["retries"] = 0
     entry["pending_stalls"] = 0
     entry["pending_since"] = None
+    # See note above: completed_namespace is only meaningful while
+    # status == "done" (issue #366).
+    entry["completed_namespace"] = None
     return True
 
 
