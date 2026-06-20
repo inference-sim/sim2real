@@ -8,7 +8,7 @@ from pipeline.lib.progress import ConfigMapProgressStore
 
 
 _PROGRESS = {
-    "wl-smoke-baseline":   {"workload": "wl-smoke",  "package": "baseline",   "status": "done",      "namespace": "sim2real-0", "retries": 0},
+    "wl-smoke-baseline":   {"workload": "wl-smoke",  "package": "baseline",   "status": "done",      "namespace": None,         "completed_namespace": "sim2real-0", "retries": 0},
     "wl-smoke-treatment":  {"workload": "wl-smoke",  "package": "treatment",  "status": "running",   "namespace": "sim2real-1", "retries": 0},
     "wl-load-baseline":    {"workload": "wl-load",   "package": "baseline",   "status": "pending",   "namespace": None,         "retries": 0},
     "wl-load-treatment":   {"workload": "wl-load",   "package": "treatment",  "status": "timed-out", "namespace": "sim2real-2", "retries": 1},
@@ -39,6 +39,31 @@ def test_status_output_contains_all_pairs(tmp_path, capsys, monkeypatch):
     for key in _PROGRESS:
         if not key.startswith("_"):
             assert key in out
+
+
+def test_status_done_pair_shows_completed_namespace(tmp_path, capsys, monkeypatch):
+    """Done pair's SLOT column displays completed_namespace, not '—' (issue #366).
+
+    `entry["namespace"]` is cleared by the orchestrator on completion so the
+    slot can be reused; the namespace where the pair ran is preserved under
+    `completed_namespace`. The status display falls back to that field so an
+    operator can see where each completed pair ran.
+    """
+    from pipeline.deploy import _cmd_status
+    _mock_cm(monkeypatch, _PROGRESS)
+
+    class _Args:
+        only = None
+        workload = "wl-smoke"
+        package = "baseline"
+        status = None
+        live = False
+
+    _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+    out = capsys.readouterr().out
+    done_line = next(line for line in out.splitlines() if "wl-smoke-baseline" in line)
+    assert "sim2real-0" in done_line
+    assert "—" not in done_line
 
 
 def test_status_filter_by_workload(tmp_path, capsys, monkeypatch):
