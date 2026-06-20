@@ -524,9 +524,11 @@ def _cmd_status(args, run_dir: Path,
         for key, entry in sorted(pairs.items()):
             status = entry.get("status", "unknown")
             # `completed_namespace` is meaningful only while status == "done"
-            # (set on completion at deploy.py:2040, 2330; cleared on reset).
-            # Gate the fallback on status so any leftover stale value on a
-            # non-done entry does not leak into the display (issue #366).
+            # (set on completion in `_reconcile_on_resume`'s done branch and
+            # in the orchestrator's per-cycle drain; cleared on every reset
+            # path inside `_reset_pair`). Gate the fallback on status so any
+            # leftover stale value on a non-done entry does not leak into
+            # the display (issue #366).
             if status == "done":
                 slot = entry.get("completed_namespace") or "—"
             else:

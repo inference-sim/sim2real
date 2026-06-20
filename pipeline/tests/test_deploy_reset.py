@@ -101,6 +101,41 @@ def test_reset_pair_running_cancels_first(monkeypatch):
     assert entry["namespace"] is None
 
 
+def test_reset_pair_failed_with_stale_completed_namespace_clears_it(monkeypatch):
+    """A non-done terminal pair (failed/timed-out/stalled) carrying a stale
+    completed_namespace from a prior life — pair completed in sim2real-0,
+    was reset, ran again, then failed — must have completed_namespace
+    cleared by _reset_pair's main path (the non-done terminal "Reset state"
+    block). Without this, the stale value leaks back to the display when
+    the pair returns to pending (issue #366).
+    """
+    import pipeline.deploy as mod
+
+    # status="failed", with both namespace (current run) AND
+    # completed_namespace (stale prior-life value) set. This shape can occur
+    # if a pair: ran in sim2real-0 → done → reset (cleared on the new fix
+    # path) → re-ran in sim2real-0 → failed (retains namespace per #277).
+    # Set both to the same ns to make the assertion sharp: only the data
+    # layer can clear cns; the display fallback can't help here.
+    entry = {"workload": "wl-heavy", "package": "baseline", "status": "failed",
+             "namespace": "sim2real-0", "completed_namespace": "sim2real-0",
+             "retries": 0}
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = ""
+        return _R()
+
+    monkeypatch.setattr(mod, "run", fake_run)
+    monkeypatch.setattr(mod, "_uninstall_orphaned_helm", lambda *a, **k: None)
+
+    assert mod._reset_pair("wl-heavy-baseline", entry, _DISCOVERED) is True
+    assert entry["status"] == "pending"
+    assert entry["namespace"] is None
+    assert entry["completed_namespace"] is None
+
+
 def test_reset_pair_clears_completed_namespace_when_done_reset_to_pending(monkeypatch):
     """Invariant: completed_namespace is meaningful only while status == 'done'.
 
