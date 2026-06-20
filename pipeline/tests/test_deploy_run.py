@@ -13,6 +13,10 @@ _PROGRESS = {
     "wl-load-baseline":    {"workload": "wl-load",   "package": "baseline",   "status": "pending",   "namespace": None,         "retries": 0},
     "wl-load-treatment":   {"workload": "wl-load",   "package": "treatment",  "status": "timed-out", "namespace": "sim2real-2", "retries": 1},
     "wl-heavy-baseline":   {"workload": "wl-heavy",  "package": "baseline",   "status": "failed",    "namespace": "sim2real-0", "retries": 0},
+    # Stale-cns pending: simulates a pair that completed in sim2real-3 then
+    # was reset by an older orchestrator that didn't clear completed_namespace.
+    # The display must show "—" for this row, NOT "sim2real-3" (issue #366).
+    "wl-stale-baseline":   {"workload": "wl-stale",  "package": "baseline",   "status": "pending",   "namespace": None,         "completed_namespace": "sim2real-3", "retries": 0},
     "_orchestrator":       {"state": "normal", "backoff_level": 0, "last_probe_free_gpus": 8},
 }
 
@@ -66,6 +70,33 @@ def test_status_done_pair_shows_completed_namespace(tmp_path, capsys, monkeypatc
     assert "—" not in done_line
 
 
+def test_status_pending_pair_with_stale_completed_namespace_shows_dash(tmp_path, capsys, monkeypatch):
+    """Pending pair with a stale completed_namespace value renders SLOT as '—'
+    (issue #366).
+
+    Defense-in-depth from the display side: even if an upstream component
+    leaves completed_namespace set on a pending entry (legacy data, missed
+    reset path, manually-edited ConfigMap), the status display must not
+    surface that stale namespace as if it were the live slot. _PROGRESS
+    fixture's wl-stale-baseline row carries this exact shape.
+    """
+    from pipeline.deploy import _cmd_status
+    _mock_cm(monkeypatch, _PROGRESS)
+
+    class _Args:
+        only = None
+        workload = "wl-stale"
+        package = "baseline"
+        status = None
+        live = False
+
+    _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+    out = capsys.readouterr().out
+    pending_line = next(line for line in out.splitlines() if "wl-stale-baseline" in line)
+    assert "—" in pending_line
+    assert "sim2real-3" not in pending_line
+
+
 def test_status_filter_by_workload(tmp_path, capsys, monkeypatch):
     from pipeline.deploy import _cmd_status
     _mock_cm(monkeypatch, _PROGRESS)
@@ -115,10 +146,10 @@ def test_status_summary_line(tmp_path, capsys, monkeypatch):
 
     _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
     out = capsys.readouterr().out
-    assert "5 pairs" in out
+    assert "6 pairs" in out
     assert "1 done" in out
     assert "1 running" in out
-    assert "1 pending" in out
+    assert "2 pending" in out
 
 
 def test_status_missing_progress_file(tmp_path, capsys, monkeypatch):
@@ -183,7 +214,7 @@ def test_status_silent_prints_summary_only(tmp_path, capsys, monkeypatch):
     _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
     out = capsys.readouterr().out
 
-    assert "5 pairs" in out
+    assert "6 pairs" in out
     assert "PAIR" not in out
     assert "STATUS" not in out
     for key in _PROGRESS:
@@ -559,7 +590,7 @@ def test_apply_run_filters_multi_package():
 
     result = _apply_run_filters(dict(_PROGRESS), _Args())
     assert result == {"wl-smoke-baseline", "wl-load-baseline", "wl-heavy-baseline",
-                      "wl-smoke-treatment", "wl-load-treatment"}
+                      "wl-stale-baseline", "wl-smoke-treatment", "wl-load-treatment"}
 
 
 def test_apply_run_filters_multi_only():
@@ -1858,7 +1889,7 @@ def test_resolve_scope_excludes_orchestrator_key(tmp_path):
     args = argparse.Namespace(only=None, workload=None, package=None, status=None)
     scope = _resolve_scope(_PROGRESS, args)
     assert "_orchestrator" not in scope
-    assert len(scope) == 5  # only the real pair keys
+    assert len(scope) == 6  # only the real pair keys
 
 
 def test_apply_run_filters_excludes_orchestrator_key():

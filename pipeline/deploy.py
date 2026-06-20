@@ -523,7 +523,14 @@ def _cmd_status(args, run_dir: Path,
 
         for key, entry in sorted(pairs.items()):
             status = entry.get("status", "unknown")
-            slot = entry.get("namespace") or entry.get("completed_namespace") or "—"
+            # `completed_namespace` is meaningful only while status == "done"
+            # (set on completion at deploy.py:2040, 2330; cleared on reset).
+            # Gate the fallback on status so any leftover stale value on a
+            # non-done entry does not leak into the display (issue #366).
+            if status == "done":
+                slot = entry.get("completed_namespace") or "—"
+            else:
+                slot = entry.get("namespace") or "—"
             retries = entry.get("retries", 0)
             counts[status] = counts.get(status, 0) + 1
             print(f"{key:<{pair_w}} {status:<{col_status}} {slot:<{col_slot}} {retries}")
