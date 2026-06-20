@@ -14,6 +14,7 @@ The fragments shipped today:
 | `preserve-request-id` | `EnvoyFilter` that preserves the external request-id |
 | `epp-verbosity` | `inferenceExtension.verbosity: "5"` |
 | `vllm-logging` | `vllm.additionalFlags: [--no-disable-uvicorn-access-log]` + `loggingLevel: INFO` |
+| `routing-proxy-resources` | `routing.proxy.resources.requests` set to `memory: 16Gi`, `cpu: 4` (chart leaves it unset) |
 
 **Opt out** by listing fragment stems under `defaults.disable` in `transfer.yaml`:
 
