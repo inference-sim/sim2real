@@ -523,7 +523,7 @@ def _cmd_status(args, run_dir: Path,
 
         for key, entry in sorted(pairs.items()):
             status = entry.get("status", "unknown")
-            slot = entry.get("namespace") or "—"
+            slot = entry.get("namespace") or entry.get("completed_namespace") or "—"
             retries = entry.get("retries", 0)
             counts[status] = counts.get(status, 0) + 1
             print(f"{key:<{pair_w}} {status:<{col_status}} {slot:<{col_slot}} {retries}")
