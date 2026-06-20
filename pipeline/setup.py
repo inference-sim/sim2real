@@ -400,7 +400,6 @@ def step_rbac(cfg: SetupConfig) -> None:
             ["add-scc-to-user",          "anyuid",       "-z", "default",        "-n", cfg.namespace],
             ["add-scc-to-user",          "anyuid",       "-z", "helm-installer", "-n", cfg.namespace],
             ["add-scc-to-user",          "privileged",   "-z", "helm-installer", "-n", cfg.namespace],
-            ["add-cluster-role-to-user", "cluster-admin", "-z", "helm-installer"],
         ]:
             run(["oc", "adm", "policy"] + policy_args, check=False)
     ok("RBAC roles applied")
