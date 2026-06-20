@@ -1,0 +1,13 @@
+# Workaround: declare explicit resource requests for the routing proxy sidecar.
+# The chart leaves routing.proxy.resources unset; without requests the proxy
+# can be scheduled with no real CPU/memory budget. See docs/troubleshooting.md
+# "Framework defaults overlay".
+# scenario[0].name is realigned to the experiment baseline at merge time.
+scenario:
+- name: defaults
+  routing:
+    proxy:
+      resources:
+        requests:
+          memory: 16Gi
+          cpu: 4

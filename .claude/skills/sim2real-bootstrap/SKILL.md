@@ -252,10 +252,10 @@ ls "$EXPERIMENT_ROOT"/workloads/*.yaml
 **action:** shell
 
 Framework workarounds documented in `docs/troubleshooting.md` (EPP llm-d.ai
-RBAC, request-id preservation, EPP/vLLM verbosity) are applied automatically
-by `prepare.py` Phase 4 from `<experiment-root>/baselines/defaults/`. Copy
-the framework templates into the experiment so each experiment is
-self-contained and reproducible.
+RBAC, request-id preservation, EPP/vLLM verbosity, routing-proxy resource
+requests) are applied automatically by `prepare.py` Phase 4 from
+`<experiment-root>/baselines/defaults/`. Copy the framework templates into
+the experiment so each experiment is self-contained and reproducible.
 
 ```bash
 mkdir -p "$EXPERIMENT_ROOT/baselines/defaults"
@@ -332,6 +332,7 @@ defaults:
   #   - preserve-request-id
   #   - epp-verbosity
   #   - vllm-logging
+  #   - routing-proxy-resources
 ```
 
 **Constraints:**
@@ -382,6 +383,7 @@ Exit code 0 and all fields printed = success.
       preserve-request-id.yaml
       epp-verbosity.yaml
       vllm-logging.yaml
+      routing-proxy-resources.yaml
   <component-name>/             <- task-2 (submodule)
   algorithms/
     <algorithm>.go               <- pre-existing
