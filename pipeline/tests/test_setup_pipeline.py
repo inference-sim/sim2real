@@ -334,3 +334,100 @@ class TestRedeployTasksPipeline:
             result = main()
 
         assert result == 1
+
+
+class TestRunMetadataIdempotent:
+    """Re-running setup must preserve deploy-owned fields in run_metadata.json (issue #365)."""
+
+    def _run_setup(self, tmp_path, **cfg_overrides):
+        from pipeline.setup import step_config_output
+        import pipeline.setup as setup_module
+
+        original = setup_module.EXPERIMENT_ROOT
+        setup_module.EXPERIMENT_ROOT = tmp_path
+        try:
+            run_dir = tmp_path / "workspace" / "runs" / "test-run"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            cfg = _make_config(**cfg_overrides)
+            step_config_output(cfg, run_dir, "podman")
+            return run_dir
+        finally:
+            setup_module.EXPERIMENT_ROOT = original
+
+    def test_preserves_source_hashes_on_rerun(self, tmp_path):
+        """Deploy-written source_hashes must survive a setup re-run."""
+        run_dir = self._run_setup(tmp_path)
+        meta_path = run_dir / "run_metadata.json"
+
+        meta = json.loads(meta_path.read_text())
+        meta["source_hashes"] = {"quay.io/test/llm-d-inference-scheduler:test-run": "abc123def456"}
+        meta_path.write_text(json.dumps(meta))
+
+        self._run_setup(tmp_path)
+
+        meta2 = json.loads(meta_path.read_text())
+        assert meta2.get("source_hashes") == {
+            "quay.io/test/llm-d-inference-scheduler:test-run": "abc123def456"
+        }
+
+    def test_preserves_epp_image_on_rerun(self, tmp_path):
+        """Deploy-written epp_image must survive a setup re-run."""
+        run_dir = self._run_setup(tmp_path)
+        meta_path = run_dir / "run_metadata.json"
+
+        meta = json.loads(meta_path.read_text())
+        meta["epp_image"] = "quay.io/test/llm-d-inference-scheduler:test-run"
+        meta_path.write_text(json.dumps(meta))
+
+        self._run_setup(tmp_path)
+
+        meta2 = json.loads(meta_path.read_text())
+        assert meta2.get("epp_image") == "quay.io/test/llm-d-inference-scheduler:test-run"
+
+    def test_preserves_stages_deploy_last_completed_step(self, tmp_path):
+        """stages.deploy.last_completed_step (deploy-owned) must survive a setup re-run."""
+        run_dir = self._run_setup(tmp_path)
+        meta_path = run_dir / "run_metadata.json"
+
+        meta = json.loads(meta_path.read_text())
+        meta.setdefault("stages", {}).setdefault("deploy", {})["last_completed_step"] = "build"
+        meta_path.write_text(json.dumps(meta))
+
+        self._run_setup(tmp_path)
+
+        meta2 = json.loads(meta_path.read_text())
+        assert meta2["stages"]["deploy"].get("last_completed_step") == "build"
+
+    def test_refreshes_setup_owned_fields_on_rerun(self, tmp_path):
+        """Setup-owned fields (registry, namespace, container_runtime) reflect the latest cfg on re-run."""
+        from pipeline.setup import step_config_output
+        import pipeline.setup as setup_module
+
+        run_dir = self._run_setup(tmp_path)
+        meta_path = run_dir / "run_metadata.json"
+
+        original = setup_module.EXPERIMENT_ROOT
+        setup_module.EXPERIMENT_ROOT = tmp_path
+        try:
+            cfg2 = _make_config(registry="quay.io/new-registry", namespace="new-ns")
+            step_config_output(cfg2, run_dir, "docker")
+        finally:
+            setup_module.EXPERIMENT_ROOT = original
+
+        meta2 = json.loads(meta_path.read_text())
+        assert meta2["registry"] == "quay.io/new-registry"
+        assert meta2["namespace"] == "new-ns"
+        assert meta2["container_runtime"] == "docker"
+
+    def test_first_run_creates_full_metadata(self, tmp_path):
+        """First-run path (no existing file) still produces all setup-owned fields."""
+        run_dir = self._run_setup(tmp_path)
+        meta = json.loads((run_dir / "run_metadata.json").read_text())
+        assert meta["version"] == 1
+        assert meta["namespace"] == "test-ns"
+        assert meta["registry"] == "quay.io/test"
+        assert meta["component_image"] == "quay.io/test/llm-d-inference-scheduler:test-run"
+        assert meta["stages"]["setup"]["status"] == "completed"
+        assert meta["stages"]["prepare"] == {"status": "pending"}
+        assert meta["stages"]["deploy"] == {"status": "pending"}
+        assert meta["stages"]["results"] == {"status": "pending"}

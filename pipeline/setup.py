@@ -700,8 +700,19 @@ def step_config_output(cfg: SetupConfig, run_dir: Path, container_rt: str) -> No
     setup_path.write_text(json.dumps(setup_config, indent=2))
     ok(f"Setup config → {setup_path}")
 
-    # run_metadata.json (with version: 1 per spec)
-    metadata = {
+    # run_metadata.json — read-modify-write so deploy-owned keys
+    # (source_hashes, epp_image, stages.deploy.last_completed_step) survive
+    # setup re-runs. See issue #365.
+    meta_path = run_dir / "run_metadata.json"
+    if meta_path.exists():
+        try:
+            existing = json.loads(meta_path.read_text())
+        except json.JSONDecodeError:
+            existing = {}
+    else:
+        existing = {}
+
+    existing.update({
         "version": 1,
         "namespace": cfg.namespace,
         "registry": cfg.registry,
@@ -711,18 +722,22 @@ def step_config_output(cfg: SetupConfig, run_dir: Path, container_rt: str) -> No
         "container_runtime": container_rt,
         "created_at": now_iso,
         "pipeline_commit": commit,
-        **({"component_image": f"{cfg.registry}/{cfg.repo_name}:{cfg.run_name}"} if cfg.registry else {}),
-        "stages": {
-            "setup":   {"status": "completed", "completed_at": now_iso,
-                        "summary": f"Namespace {cfg.namespace} configured, "
-                                   f"PVCs created, Tekton tasks deployed"},
-            "prepare": {"status": "pending"},
-            "deploy":  {"status": "pending"},
-            "results": {"status": "pending"},
-        },
+    })
+    if cfg.registry:
+        existing["component_image"] = f"{cfg.registry}/{cfg.repo_name}:{cfg.run_name}"
+
+    stages = existing.setdefault("stages", {})
+    stages["setup"] = {
+        "status": "completed",
+        "completed_at": now_iso,
+        "summary": f"Namespace {cfg.namespace} configured, "
+                   f"PVCs created, Tekton tasks deployed",
     }
-    meta_path = run_dir / "run_metadata.json"
-    meta_path.write_text(json.dumps(metadata, indent=2))
+    stages.setdefault("prepare", {"status": "pending"})
+    stages.setdefault("deploy",  {"status": "pending"})
+    stages.setdefault("results", {"status": "pending"})
+
+    meta_path.write_text(json.dumps(existing, indent=2))
     ok(f"Run metadata → {meta_path}")
 
 
