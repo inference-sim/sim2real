@@ -2181,6 +2181,41 @@ def _select_dispatchable(
     return _capacity_limited_pairs(shuffled, free_gpus=free_gpus, cost_map=cost_map)
 
 
+def _refresh_namespaces(current: list[str]) -> list[str]:
+    """Re-read the slot list from setup_config.json for live mid-run updates.
+
+    Returns the refreshed list, or ``current`` unchanged when:
+      - the file is unreadable / unparseable (best-effort: keep prior list),
+      - the refreshed list is empty (treat as transient or accidental wipe),
+      - ``namespaces[0]`` (the primary) differs from the startup primary
+        (the run-scoped progress ConfigMap is bound there for the lifetime
+        of the run; mismatches are logged and ignored).
+
+    Logs once per actual change so quiet cycles stay silent.
+    """
+    try:
+        fresh = _load_setup_config()
+    except Exception as exc:
+        warn(f"setup_config.json re-read failed: {exc} — keeping current slot list")
+        return current
+    fresh_ns = [n for n in (fresh.get("namespaces") or [fresh.get("namespace", "")]) if n]
+    if not fresh_ns:
+        return current
+    if fresh_ns[0] != current[0]:
+        warn(f"setup_config.json primary namespace changed "
+             f"({current[0]} → {fresh_ns[0]}); ignoring (primary is pinned for the run)")
+        return current
+    if fresh_ns == current:
+        return current
+    added = [n for n in fresh_ns if n not in current]
+    removed = [n for n in current if n not in fresh_ns]
+    if added:
+        info(f"Slot pool: +{','.join(added)}")
+    if removed:
+        info(f"Slot pool: -{','.join(removed)} (will drain on their own)")
+    return fresh_ns
+
+
 def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     """Orchestrate parallel pool execution across namespace slots."""
     import tempfile as _tmp
@@ -2442,6 +2477,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
         # When every slot is busy, only PipelineRun status checking (above)
         # runs this cycle. Polling stays at the base interval so slot
         # recovery is detected within one poll (issue #274).
+        namespaces = _refresh_namespaces(namespaces)
         free_slots = [ns for ns in namespaces if ns not in slots_busy]
         pending = _pending_pairs()
 

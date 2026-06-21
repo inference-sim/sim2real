@@ -3862,3 +3862,112 @@ def test_one_cycle_emits_unified_capacity_log_and_effective_free_warn(
     warn_eff, warn_probed, warn_res = map(int, warn_nums.groups())
     assert (cap_eff, cap_probed, cap_res) == (warn_eff, warn_probed, warn_res)
     assert cap_eff == max(0, cap_probed - cap_res)
+
+
+# ── _refresh_namespaces (issue #372) ─────────────────────────────────────────
+# The dispatch loop calls _refresh_namespaces() once per cycle so live edits
+# of setup_config.json (mid-run namespace add/remove) take effect without an
+# orchestrator restart. The tests below pin each branch of the helper.
+
+def _patch_setup_config(monkeypatch, value):
+    """Patch _load_setup_config to return *value* (or raise if it's an Exception)."""
+    from pipeline import deploy as _deploy
+
+    def _fake():
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    monkeypatch.setattr(_deploy, "_load_setup_config", _fake)
+
+
+def test_refresh_namespaces_no_change(monkeypatch, capsys):
+    """Equal lists return the same list and emit no log lines."""
+    from pipeline.deploy import _refresh_namespaces
+
+    _patch_setup_config(monkeypatch, {"namespaces": ["ns0", "ns1"]})
+    result = _refresh_namespaces(["ns0", "ns1"])
+    assert result == ["ns0", "ns1"]
+    assert capsys.readouterr().out == ""
+
+
+def test_refresh_namespaces_add(monkeypatch, capsys):
+    """Adding a namespace returns the new list and logs '+' for additions."""
+    from pipeline.deploy import _refresh_namespaces
+
+    _patch_setup_config(monkeypatch, {"namespaces": ["ns0", "ns1", "ns2"]})
+    result = _refresh_namespaces(["ns0", "ns1"])
+    assert result == ["ns0", "ns1", "ns2"]
+    out = capsys.readouterr().out
+    assert "Slot pool: +ns2" in out
+    assert "Slot pool: -" not in out
+
+
+def test_refresh_namespaces_remove_drains_naturally(monkeypatch, capsys):
+    """Removing a namespace returns the new list and logs '-' (no cancellation)."""
+    from pipeline.deploy import _refresh_namespaces
+
+    _patch_setup_config(monkeypatch, {"namespaces": ["ns0", "ns1"]})
+    result = _refresh_namespaces(["ns0", "ns1", "ns2"])
+    assert result == ["ns0", "ns1"]
+    out = capsys.readouterr().out
+    assert "Slot pool: -ns2" in out
+    assert "will drain on their own" in out
+    assert "Slot pool: +" not in out
+
+
+def test_refresh_namespaces_add_and_remove(monkeypatch, capsys):
+    """Mixed add+remove emits both info lines in a single cycle."""
+    from pipeline.deploy import _refresh_namespaces
+
+    _patch_setup_config(monkeypatch, {"namespaces": ["ns0", "ns2", "ns3"]})
+    result = _refresh_namespaces(["ns0", "ns1", "ns2"])
+    assert result == ["ns0", "ns2", "ns3"]
+    out = capsys.readouterr().out
+    assert "Slot pool: +ns3" in out
+    assert "Slot pool: -ns1" in out
+
+
+def test_refresh_namespaces_primary_change_ignored(monkeypatch, capsys):
+    """Primary (namespaces[0]) mismatch warns and returns current; pinning protects ConfigMap binding."""
+    from pipeline.deploy import _refresh_namespaces
+
+    _patch_setup_config(monkeypatch, {"namespaces": ["ns-other", "ns1"]})
+    result = _refresh_namespaces(["ns0", "ns1"])
+    assert result == ["ns0", "ns1"]
+    out = capsys.readouterr().out
+    assert "primary namespace changed" in out
+    assert "ns0" in out and "ns-other" in out
+
+
+def test_refresh_namespaces_empty_keeps_current(monkeypatch, capsys):
+    """An empty / wiped setup_config returns the current list silently."""
+    from pipeline.deploy import _refresh_namespaces
+
+    _patch_setup_config(monkeypatch, {})
+    result = _refresh_namespaces(["ns0", "ns1"])
+    assert result == ["ns0", "ns1"]
+    captured = capsys.readouterr()
+    assert "Slot pool" not in (captured.out + captured.err)
+
+
+def test_refresh_namespaces_parse_error_keeps_current(monkeypatch, capsys):
+    """Best-effort: any exception from _load_setup_config keeps the prior list and warns."""
+    from pipeline.deploy import _refresh_namespaces
+
+    _patch_setup_config(monkeypatch, ValueError("bad json"))
+    result = _refresh_namespaces(["ns0", "ns1"])
+    assert result == ["ns0", "ns1"]
+    out = capsys.readouterr().out
+    assert "setup_config.json re-read failed" in out
+    assert "bad json" in out
+
+
+def test_refresh_namespaces_singular_namespace_field(monkeypatch, capsys):
+    """Falls back to the legacy singular `namespace` field when `namespaces` is absent."""
+    from pipeline.deploy import _refresh_namespaces
+
+    _patch_setup_config(monkeypatch, {"namespace": "ns0"})
+    result = _refresh_namespaces(["ns0"])
+    assert result == ["ns0"]
+    assert capsys.readouterr().out == ""
