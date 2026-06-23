@@ -20,6 +20,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      issues: write
 
     steps:
       - uses: actions/checkout@v4
@@ -58,7 +59,67 @@ jobs:
           docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} --help
           docker run --rm --entrypoint kubectl ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} version --client
           docker run --rm --entrypoint helm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} version --short
-          docker run --rm --entrypoint python ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} -c "from pipeline.lib import assemble, backoff, capacity, context_builder, epp, health, manifest, pod_pending, progress, run_manager, state_machine, tekton, values; print('OK')"
+          docker run --rm --entrypoint python ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} -c "
+          import pkgutil, importlib, pipeline.lib as p
+          failures = []
+          for m in pkgutil.iter_modules(p.__path__):
+              try:
+                  importlib.import_module(f'pipeline.lib.{m.name}')
+              except Exception as e:
+                  failures.append(f'{m.name}: {type(e).__name__}: {e}')
+          if failures:
+              raise SystemExit(chr(10).join(failures))
+          print('OK: all pipeline.lib modules imported')
+          "
 
       - name: Push
         run: docker push --all-tags ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Notify on failure
+        if: failure() && github.event_name == 'push'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = ['ci-broken', 'orchestrator-image'];
+            const colors = { 'ci-broken': 'd93f0b', 'orchestrator-image': 'c5def5' };
+
+            // Idempotent label creation: 422 = already exists, anything else propagates.
+            for (const name of labels) {
+              try {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name,
+                  color: colors[name],
+                });
+              } catch (e) {
+                if (e.status !== 422) throw e;
+              }
+            }
+
+            const { data: existing } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: labels.join(','),
+            });
+
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `Run [${context.runId}](${runUrl}) failed on \`${context.sha.slice(0, 7)}\`.`;
+
+            if (existing.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: 'CI: Build Orchestrator Image is failing on main',
+                body,
+                labels,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing[0].number,
+                body,
+              });
+            }
