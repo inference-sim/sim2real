@@ -376,28 +376,48 @@ def step_rbac(cfg: SetupConfig) -> None:
 
     primary_ns = cfg.namespaces[0]
     env = {**os.environ, "NAMESPACE": cfg.namespace, "PRIMARY_NAMESPACE": primary_ns}
-    for yaml_path in [
-        TEKTONC_DIR / "tekton" / "roles.yaml",
-        TEKTONC_DIR / "tekton" / "rbac" / "sim2real-runner.yaml",
-        REPO_ROOT / "pipeline" / "rbac" / "sim2real-runner-cluster.yaml",
-        REPO_ROOT / "pipeline" / "rbac" / "sim2real-runner-ns.yaml",
-    ]:
+    # Apply RBAC as paired (namespaced base, optional cluster augment) bundles.
+    # Required files exit on failure. Best-effort files exit-gracefully on a
+    # `forbidden` reply (operator lacks cluster-scoped RBAC create) — the
+    # corresponding ClusterRole/ClusterRoleBinding is skipped and downstream
+    # consumers degrade as documented:
+    #   - tektonc roles-cluster.yaml absent → llm-d-benchmark auto-discovery
+    #     unavailable; cross-ns DCGM exec for stream-gpu-stats Phase 2/2.5/3
+    #     skipped (admin-only stack installs already gated by --non-admin).
+    #   - sim2real-runner-cluster.yaml absent → orchestrator GPU capacity
+    #     probe (kubectl get nodes/pods) fails; deploy.py falls through to
+    #     ungated dispatch with a rate-limited warn (deploy.py:2511-2545).
+    yaml_paths = [
+        (TEKTONC_DIR / "tekton" / "roles-ns.yaml",                          True),
+        (TEKTONC_DIR / "tekton" / "roles-cluster.yaml",                     False),
+        (TEKTONC_DIR / "tekton" / "rbac" / "sim2real-runner.yaml",          True),
+        (REPO_ROOT / "pipeline" / "rbac" / "sim2real-runner-ns.yaml",       True),
+        (REPO_ROOT / "pipeline" / "rbac" / "sim2real-runner-cluster.yaml",  False),
+    ]
+    for yaml_path, required in yaml_paths:
         if not yaml_path.exists():
             err(f"{yaml_path.name} not found at {yaml_path} — did submodule init fail?"); sys.exit(1)
         subst = subprocess.run(
             ["envsubst", "$NAMESPACE $PRIMARY_NAMESPACE"],
             input=yaml_path.read_text(), capture_output=True, text=True, env=env, check=True,
         )
-        run(["kubectl", "apply", "-f", "-"], input=subst.stdout)
+        result = run(["kubectl", "apply", "-f", "-"], input=subst.stdout,
+                     check=False, capture=True)
+        if result.stdout: print(result.stdout, end="")
+        if result.returncode == 0:
+            continue
+        combined = (result.stdout + result.stderr).lower()
+        if not required and "forbidden" in combined:
+            warn(f"Skipped {yaml_path.name} — user lacks cluster-scoped RBAC. "
+                 "Downstream features that depend on this augment will degrade; "
+                 "see step_rbac docstring for which.")
+            continue
+        if result.stderr: print(result.stderr, end="", file=sys.stderr)
+        sys.exit(result.returncode)
 
-    if cfg.is_openshift:
-        warn("OpenShift: adding SCC policies")
-        for policy_args in [
-            ["add-scc-to-user",          "anyuid",       "-z", "default",        "-n", cfg.namespace],
-            ["add-scc-to-user",          "anyuid",       "-z", "helm-installer", "-n", cfg.namespace],
-            ["add-scc-to-user",          "privileged",   "-z", "helm-installer", "-n", cfg.namespace],
-        ]:
-            run(["oc", "adm", "policy"] + policy_args, check=False)
+    # SCC bindings are now carried by tekton/roles-ns.yaml (helm-installer-
+    # restricted-scc, helm-installer-anyuid-scc, helm-installer-privileged-scc).
+    # No imperative `oc adm policy add-scc-to-user` calls needed.
     ok("RBAC roles applied")
 
 # ── Step 4: Secrets ──────────────────────────────────────────────────
