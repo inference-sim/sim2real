@@ -466,6 +466,100 @@ def _delete_pipelinerun(pr_name: str, namespace: str) -> None:
 
 # ── Status command ───────────────────────────────────────────────────────────
 
+# ── Runtime tracking helpers ─────────────────────────────────────────────────
+# Issue #378: progress entries carry `running_since` (ISO-8601 UTC, set on
+# dispatch) and `last_duration` (float seconds, set on terminal transitions).
+# The two are mutually exclusive: a row that's running has running_since set
+# and last_duration None; a row that completed has last_duration set and
+# running_since None. Entries that predate this feature are missing both —
+# helpers and the status renderer treat that as "—".
+
+def _mark_running(entry: dict) -> None:
+    """Stamp ``running_since=now``, clear ``last_duration``. Call on dispatch.
+
+    Pairs with :func:`_finalize_run` (terminal sites) and :func:`_clear_runtime`
+    (reset / requeue sites) to maintain the running_since vs. last_duration
+    invariant: a running entry has running_since set and last_duration None;
+    a terminated entry has the inverse.
+    """
+    import datetime as _dt
+    entry["running_since"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    entry["last_duration"] = None
+
+
+def _finalize_run(entry: dict) -> None:
+    """Record the just-ended attempt's duration on terminal transitions.
+
+    Call when status transitions to done / failed / timed-out / stalled. If
+    ``running_since`` is set, computes ``now - running_since`` (seconds) and
+    stores it as ``last_duration``; clears ``running_since`` either way. If
+    ``running_since`` was not set (pair wasn't running, e.g. transitioning
+    from pending → failed), this is a no-op other than ensuring the field
+    stays None.
+    """
+    import datetime as _dt
+    started = entry.get("running_since")
+    if started:
+        try:
+            start_dt = _dt.datetime.fromisoformat(started)
+            now = _dt.datetime.now(_dt.timezone.utc)
+            entry["last_duration"] = (now - start_dt).total_seconds()
+        except (ValueError, TypeError):
+            # Malformed timestamp: just clear without recording.
+            pass
+    entry["running_since"] = None
+
+
+def _clear_runtime(entry: dict) -> None:
+    """Clear both runtime fields. Call on reset / requeue / pending transitions
+    where the previous attempt's duration is being discarded (the next
+    dispatch will start fresh)."""
+    entry["running_since"] = None
+    entry["last_duration"] = None
+
+
+def _fmt_duration(seconds: "float | None") -> str:
+    """Format a duration as a ≤7-char string: 42s / 5m12s / 1h08m / 2d04h.
+
+    Returns "—" for None or negative values (defensive — clock skew, malformed
+    data). Width budget keeps the RUNTIME column at 7 chars without re-flow.
+    """
+    if seconds is None or seconds < 0:
+        return "—"
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s//60}m{s%60:02d}s"
+    if s < 86400:
+        return f"{s//3600}h{(s%3600)//60:02d}m"
+    return f"{s//86400}d{(s%86400)//3600:02d}h"
+
+
+def _runtime_str(entry: dict) -> str:
+    """RUNTIME column value for the status table.
+
+    - running: live ``now - running_since``, ticks per watch refresh
+    - done / failed / timed-out / stalled: frozen ``last_duration``
+    - pending or any state with missing fields: "—"
+    """
+    import datetime as _dt
+    status = entry.get("status", "")
+    if status == "running":
+        started = entry.get("running_since")
+        if not started:
+            return "—"
+        try:
+            start_dt = _dt.datetime.fromisoformat(started)
+        except (ValueError, TypeError):
+            return "—"
+        now = _dt.datetime.now(_dt.timezone.utc)
+        return _fmt_duration((now - start_dt).total_seconds())
+    if status in ("done", "failed", "timed-out", "stalled"):
+        return _fmt_duration(entry.get("last_duration"))
+    return "—"
+
+
 def _cmd_status(args, run_dir: Path,
                 setup_config: dict | None = None) -> None:
     """Print a snapshot table of all (workload, package) pair statuses."""
@@ -514,9 +608,9 @@ def _cmd_status(args, run_dir: Path,
         pair_w = max(len(k) for k in pairs) + 2
         col_status = 12
         col_slot = 14
-        col_retries = 7
+        col_runtime = 7
 
-        header = (f"{'PAIR':<{pair_w}} {'STATUS':<{col_status}} {'SLOT':<{col_slot}} {'RETRIES':<{col_retries}}")
+        header = (f"{'PAIR':<{pair_w}} {'STATUS':<{col_status}} {'SLOT':<{col_slot}} {'RUNTIME':<{col_runtime}}")
         print()
         print(header)
         print("-" * len(header))
@@ -533,9 +627,9 @@ def _cmd_status(args, run_dir: Path,
                 slot = entry.get("completed_namespace") or "—"
             else:
                 slot = entry.get("namespace") or "—"
-            retries = entry.get("retries", 0)
+            runtime = _runtime_str(entry)
             counts[status] = counts.get(status, 0) + 1
-            print(f"{key:<{pair_w}} {status:<{col_status}} {slot:<{col_slot}} {retries}")
+            print(f"{key:<{pair_w}} {status:<{col_status}} {slot:<{col_slot}} {runtime}")
 
         print()
 
@@ -669,6 +763,7 @@ def _handle_pending_pods(*, pr_name: str, namespace: str, entry: dict,
         entry["status"] = "failed"
         # Retain namespace so reset/cleanup can find the helm releases (issue #277).
         entry["pending_since"] = None
+        _finalize_run(entry)
         return True
 
     # category == "recoverable"
@@ -699,10 +794,12 @@ def _handle_pending_pods(*, pr_name: str, namespace: str, entry: dict,
         entry["status"] = "stalled"
         # Terminal: retain namespace so reset/cleanup can find releases (issue #277).
         warn(f"[{entry.get('workload', '?')}] reached max pending stalls ({max_pending_stalls}) → stalled")
+        _finalize_run(entry)
     else:
         entry["status"] = "pending"
         # Slot freed for re-dispatch — release the namespace.
         entry["namespace"] = None
+        _clear_runtime(entry)
     return True
 
 
@@ -742,10 +839,12 @@ def _handle_timeout(*, pr_name: str, namespace: str, entry: dict,
         entry["retries"] = retries + 1
         # Slot freed for re-dispatch — release the namespace.
         entry["namespace"] = None
+        _clear_runtime(entry)
     else:
         warn(f"[{entry.get('workload', '?')}] timed out, max retries → timed-out")
         entry["status"] = "timed-out"
         # Terminal: retain namespace so reset/cleanup can find releases (issue #277).
+        _finalize_run(entry)
     entry["pending_since"] = None
     return True
 
@@ -1751,6 +1850,7 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
             entry["retries"] = 0
             entry["pending_stalls"] = 0
             entry["pending_since"] = None
+            _clear_runtime(entry)
             # Maintain the invariant: completed_namespace is meaningful only
             # while status == "done". Reset clears it alongside the live slot
             # so subsequent display/diagnostic reads do not surface stale
@@ -1807,6 +1907,7 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
             entry["retries"] = 0
             entry["pending_stalls"] = 0
             entry["pending_since"] = None
+            _clear_runtime(entry)
             # See note above: completed_namespace is only meaningful while
             # status == "done" (issue #366).
             entry["completed_namespace"] = None
@@ -1847,6 +1948,7 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
     entry["retries"] = 0
     entry["pending_stalls"] = 0
     entry["pending_since"] = None
+    _clear_runtime(entry)
     # See note above: completed_namespace is only meaningful while
     # status == "done" (issue #366).
     entry["completed_namespace"] = None
@@ -2057,6 +2159,7 @@ def _reconcile_on_resume(progress: dict, discovered: dict, *,
                 if actual in ("Succeeded", "Completed"):
                     entry["status"] = "done"
                     entry["pending_since"] = None
+                    _finalize_run(entry)
                     entry["completed_namespace"] = ns
                     if not preserve_pipelineruns:
                         try:
@@ -2072,20 +2175,24 @@ def _reconcile_on_resume(progress: dict, discovered: dict, *,
                     entry["status"] = "failed"
                     # Retain namespace so reset/cleanup can find the resources
                     entry["pending_since"] = None
+                    _finalize_run(entry)
                 elif actual == "Unknown":
                     warn(f"[{key}] PipelineRun not found on cluster → resetting to pending")
                     entry["status"] = "pending"
                     entry["namespace"] = None
                     entry["pending_since"] = None
+                    _clear_runtime(entry)
             else:
                 entry["status"] = "pending"
                 entry["namespace"] = None
                 entry["pending_since"] = None
+                _clear_runtime(entry)
         elif entry["status"] not in _known:
             warn(f"[{key}] unrecognized status '{entry['status']}' → resetting to pending")
             entry["status"] = "pending"
             entry["namespace"] = None
             entry["pending_since"] = None
+            _clear_runtime(entry)
 
 
 def _derive_pair_gpu_costs(
@@ -2314,6 +2421,8 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 "retries":  0,
                 "pending_stalls": 0,
                 "pending_since": None,
+                "running_since": None,
+                "last_duration": None,
             }
 
     _scope = _resolve_scope(progress, args)
@@ -2382,6 +2491,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
             if status in ("Succeeded", "Completed"):
                 ok(f"[{pair_key}] {status} → done")
                 entry["status"] = "done"
+                _finalize_run(entry)
                 entry["completed_namespace"] = ns
                 entry["namespace"] = None
                 store.save(progress)
@@ -2401,6 +2511,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                             "PipelineRunStoppingTimeout"):
                 warn(f"[{pair_key}] hard failure ({status}) → failed")
                 entry["status"] = "failed"
+                _finalize_run(entry)
                 # Retain namespace so reset/cleanup can find the helm releases
                 # (issue #277). Mirrors _reconcile_on_resume's failure handling.
                 store.save(progress)
@@ -2462,6 +2573,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                     warn(f"[{pair_key}] pod health escalation → cancelling PipelineRun")
                     if _cancel_and_delete_pipelinerun(pr_name, ns):
                         entry["status"] = "failed"
+                        _finalize_run(entry)
                         # Retain namespace so reset/cleanup can find the helm
                         # releases (issue #277).
                         store.save(progress)
@@ -2605,6 +2717,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 entry["status"] = "running"
                 entry["namespace"] = ns
                 entry["pending_since"] = None
+                _mark_running(entry)
                 slots_busy[ns] = pair_key
                 store.save(progress)
                 ok(f"[{pair_key}] → {ns} ({pr_name})")

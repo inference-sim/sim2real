@@ -8,11 +8,11 @@ from pipeline.lib.progress import ConfigMapProgressStore
 
 
 _PROGRESS = {
-    "wl-smoke-baseline":   {"workload": "wl-smoke",  "package": "baseline",   "status": "done",      "namespace": None,         "completed_namespace": "sim2real-0", "retries": 0},
-    "wl-smoke-treatment":  {"workload": "wl-smoke",  "package": "treatment",  "status": "running",   "namespace": "sim2real-1", "retries": 0},
+    "wl-smoke-baseline":   {"workload": "wl-smoke",  "package": "baseline",   "status": "done",      "namespace": None,         "completed_namespace": "sim2real-0", "retries": 0, "last_duration": 42.0},
+    "wl-smoke-treatment":  {"workload": "wl-smoke",  "package": "treatment",  "status": "running",   "namespace": "sim2real-1", "retries": 0, "running_since": "2024-01-01T00:00:00+00:00"},
     "wl-load-baseline":    {"workload": "wl-load",   "package": "baseline",   "status": "pending",   "namespace": None,         "retries": 0},
-    "wl-load-treatment":   {"workload": "wl-load",   "package": "treatment",  "status": "timed-out", "namespace": "sim2real-2", "retries": 1},
-    "wl-heavy-baseline":   {"workload": "wl-heavy",  "package": "baseline",   "status": "failed",    "namespace": "sim2real-0", "retries": 0},
+    "wl-load-treatment":   {"workload": "wl-load",   "package": "treatment",  "status": "timed-out", "namespace": "sim2real-2", "retries": 1, "last_duration": 7320.0},
+    "wl-heavy-baseline":   {"workload": "wl-heavy",  "package": "baseline",   "status": "failed",    "namespace": "sim2real-0", "retries": 0, "last_duration": 312.5},
     # Stale-cns pending: simulates a pair that completed in sim2real-3 then
     # was reset by an older orchestrator that didn't clear completed_namespace.
     # The display must show "—" for this row, NOT "sim2real-3" (issue #366).
@@ -261,6 +261,230 @@ def test_status_silent_empty_progress(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "0 pairs" in out
     assert "PAIR" not in out
+
+
+# ── Issue #378: RUNTIME column tests ────────────────────────────────────────
+
+
+@pytest.mark.parametrize("seconds,expected", [
+    (0, "0s"),
+    (1, "1s"),
+    (42, "42s"),
+    (59, "59s"),
+    (60, "1m00s"),
+    (61, "1m01s"),
+    (312, "5m12s"),
+    (3599, "59m59s"),
+    (3600, "1h00m"),
+    (4080, "1h08m"),
+    (86399, "23h59m"),
+    (86400, "1d00h"),
+    (180000, "2d02h"),
+    (42.7, "42s"),  # truncates float to int seconds
+])
+def test_fmt_duration_formats(seconds, expected):
+    from pipeline.deploy import _fmt_duration
+    assert _fmt_duration(seconds) == expected
+
+
+@pytest.mark.parametrize("value", [None, -1, -0.5])
+def test_fmt_duration_invalid_returns_dash(value):
+    from pipeline.deploy import _fmt_duration
+    assert _fmt_duration(value) == "—"
+
+
+def test_fmt_duration_width_budget_holds():
+    """Every formatted duration in the realistic range fits in 7 chars.
+
+    The realistic upper bound is set by `activeDeadlineSeconds: 18000` (5h)
+    on the orchestrator Job, multiplied by retries — at most a handful of
+    hours, never near a day. The 7-char column budget holds comfortably for
+    anything operators will actually see; values past ~999 days would
+    overflow but cannot occur in practice."""
+    from pipeline.deploy import _fmt_duration
+    for s in (0, 59, 60, 3599, 3600, 86399, 86400, 86400 * 30):
+        assert len(_fmt_duration(s)) <= 7, f"_fmt_duration({s})={_fmt_duration(s)!r} exceeds width"
+
+
+def test_runtime_str_running_shows_live_duration():
+    import datetime as _dt
+    from pipeline.deploy import _runtime_str
+    started = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=10)).isoformat()
+    entry = {"status": "running", "running_since": started}
+    out = _runtime_str(entry)
+    # ~10 minutes elapsed; allow a few-second window for test execution time.
+    assert out in {"9m59s", "10m00s", "10m01s", "10m02s", "10m03s"}
+
+
+def test_runtime_str_done_shows_frozen_duration():
+    from pipeline.deploy import _runtime_str
+    entry = {"status": "done", "last_duration": 42.0}
+    assert _runtime_str(entry) == "42s"
+
+
+def test_runtime_str_failed_shows_frozen_duration():
+    from pipeline.deploy import _runtime_str
+    entry = {"status": "failed", "last_duration": 312.0}
+    assert _runtime_str(entry) == "5m12s"
+
+
+def test_runtime_str_timed_out_shows_frozen_duration():
+    from pipeline.deploy import _runtime_str
+    entry = {"status": "timed-out", "last_duration": 7200.0}
+    assert _runtime_str(entry) == "2h00m"
+
+
+def test_runtime_str_stalled_shows_frozen_duration():
+    from pipeline.deploy import _runtime_str
+    entry = {"status": "stalled", "last_duration": 90.0}
+    assert _runtime_str(entry) == "1m30s"
+
+
+def test_runtime_str_pending_shows_dash():
+    from pipeline.deploy import _runtime_str
+    assert _runtime_str({"status": "pending"}) == "—"
+
+
+def test_runtime_str_running_missing_field_shows_dash():
+    """Pre-feature data: a running entry with no running_since renders '—' and
+    does not crash. (One-time, self-resolving migration: next dispatch
+    populates the field.)"""
+    from pipeline.deploy import _runtime_str
+    assert _runtime_str({"status": "running"}) == "—"
+
+
+def test_runtime_str_running_malformed_timestamp_shows_dash():
+    from pipeline.deploy import _runtime_str
+    assert _runtime_str({"status": "running", "running_since": "not-a-timestamp"}) == "—"
+
+
+def test_runtime_str_done_missing_field_shows_dash():
+    from pipeline.deploy import _runtime_str
+    assert _runtime_str({"status": "done"}) == "—"
+
+
+def test_runtime_str_unknown_status_shows_dash():
+    from pipeline.deploy import _runtime_str
+    assert _runtime_str({"status": "wat"}) == "—"
+
+
+def test_mark_running_sets_running_since_clears_last_duration():
+    import datetime as _dt
+    from pipeline.deploy import _mark_running
+    entry = {"running_since": None, "last_duration": 99.0}
+    _mark_running(entry)
+    assert entry["running_since"] is not None
+    assert entry["last_duration"] is None
+    # Round-trip: parses as ISO-8601 UTC.
+    parsed = _dt.datetime.fromisoformat(entry["running_since"])
+    assert parsed.tzinfo is not None
+
+
+def test_finalize_run_records_duration_and_clears_running_since():
+    import datetime as _dt
+    from pipeline.deploy import _finalize_run
+    started = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=30)).isoformat()
+    entry = {"running_since": started, "last_duration": None}
+    _finalize_run(entry)
+    assert entry["running_since"] is None
+    assert entry["last_duration"] is not None
+    assert 29 <= entry["last_duration"] <= 35  # ~30s + test overhead
+
+
+def test_finalize_run_no_running_since_is_noop_on_duration():
+    """If running_since was never stamped (e.g. transition from pending to
+    failed without a running phase), don't fabricate a duration. Just ensure
+    running_since stays None."""
+    from pipeline.deploy import _finalize_run
+    entry = {"running_since": None, "last_duration": None}
+    _finalize_run(entry)
+    assert entry["running_since"] is None
+    assert entry["last_duration"] is None
+
+
+def test_finalize_run_malformed_timestamp_clears_without_recording():
+    from pipeline.deploy import _finalize_run
+    entry = {"running_since": "not-a-timestamp", "last_duration": None}
+    _finalize_run(entry)
+    assert entry["running_since"] is None
+    assert entry["last_duration"] is None
+
+
+def test_clear_runtime_clears_both_fields():
+    from pipeline.deploy import _clear_runtime
+    entry = {"running_since": "2024-01-01T00:00:00+00:00", "last_duration": 42.0}
+    _clear_runtime(entry)
+    assert entry["running_since"] is None
+    assert entry["last_duration"] is None
+
+
+def test_status_table_header_says_runtime_not_retries(tmp_path, capsys, monkeypatch):
+    """The column header is RUNTIME, not RETRIES (issue #378)."""
+    from pipeline.deploy import _cmd_status
+    _mock_cm(monkeypatch, _PROGRESS)
+
+    class _Args:
+        only = None
+        workload = None
+        package = None
+        status = None
+        live = False
+
+    _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+    out = capsys.readouterr().out
+    assert "RUNTIME" in out
+    assert "RETRIES" not in out
+
+
+def test_status_table_done_row_shows_formatted_duration(tmp_path, capsys, monkeypatch):
+    """Done row's RUNTIME column shows last_duration formatted (issue #378).
+
+    The fixture's wl-smoke-baseline carries last_duration=42.0 → '42s'.
+    """
+    from pipeline.deploy import _cmd_status
+    _mock_cm(monkeypatch, _PROGRESS)
+
+    class _Args:
+        only = None
+        workload = "wl-smoke"
+        package = "baseline"
+        status = None
+        live = False
+
+    _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+    out = capsys.readouterr().out
+    done_line = next(line for line in out.splitlines() if "wl-smoke-baseline" in line)
+    assert "42s" in done_line
+
+
+def test_status_table_pre_feature_done_row_shows_dash(tmp_path, capsys, monkeypatch):
+    """A done row with no last_duration field (pre-feature data) renders '—'
+    in RUNTIME without crashing (issue #378)."""
+    from pipeline.deploy import _cmd_status
+    fixture = {
+        "wl-old-baseline": {
+            "workload": "wl-old", "package": "baseline",
+            "status": "done", "namespace": None,
+            "completed_namespace": "sim2real-0", "retries": 0,
+            # no running_since, no last_duration — pre-feature shape
+        },
+    }
+    _mock_cm(monkeypatch, fixture)
+
+    class _Args:
+        only = None
+        workload = None
+        package = None
+        status = None
+        live = False
+
+    _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+    out = capsys.readouterr().out
+    line = next(li for li in out.splitlines() if "wl-old-baseline" in li)
+    # SLOT shows the completed namespace; RUNTIME shows '—'. The line should
+    # contain both: completed namespace AND a dash.
+    assert "sim2real-0" in line
+    assert "—" in line
 
 
 def test_status_silent_unreachable_still_exits(tmp_path, capsys, monkeypatch):
