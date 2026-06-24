@@ -431,3 +431,26 @@ class TestRunMetadataIdempotent:
         assert meta["stages"]["prepare"] == {"status": "pending"}
         assert meta["stages"]["deploy"] == {"status": "pending"}
         assert meta["stages"]["results"] == {"status": "pending"}
+
+
+class TestResolveStorageClass:
+    """_resolve_storage_class: flag overrides; otherwise empty (cluster default)."""
+
+    def _args(self, storage_class):
+        from argparse import Namespace
+        return Namespace(storage_class=storage_class)
+
+    def test_default_returns_empty_so_cluster_default_applies(self):
+        """No flag → empty string → PVC writer omits storageClassName entirely."""
+        from pipeline.setup import _resolve_storage_class
+        assert _resolve_storage_class(self._args(None)) == ""
+
+    def test_flag_overrides(self):
+        """Flag value is returned verbatim."""
+        from pipeline.setup import _resolve_storage_class
+        assert _resolve_storage_class(self._args("ibm-spectrum-scale-fileset")) == "ibm-spectrum-scale-fileset"
+
+    def test_empty_flag_treated_as_unset(self):
+        """`--storage-class ""` falls through to empty (cluster default)."""
+        from pipeline.setup import _resolve_storage_class
+        assert _resolve_storage_class(self._args("")) == ""
