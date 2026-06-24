@@ -611,8 +611,11 @@ def step_pvcs(cfg: SetupConfig) -> None:
             if result.returncode == 0:
                 ok(f"PVC {name} is Bound")
             else:
-                warn(f"PVC {name} not yet Bound — check storageClass: "
-                     f"{cfg.storage_class or '(default)'}")
+                warn(f"PVC {name} not yet Bound after 120s — check storageClass: "
+                     f"{cfg.storage_class or '(cluster default)'}. "
+                     f"If the cluster has no default StorageClass, or the default "
+                     f"is unsuitable, re-run setup.py with --storage-class <name>. "
+                     f"Available classes: kubectl get storageclass")
 
 # ── Step 7: Tekton ───────────────────────────────────────────────────
 
