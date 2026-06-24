@@ -50,6 +50,7 @@ python pipeline/setup.py [flags]
 | `--registry-user USER` | `REGISTRY_USER` | interactive |
 | `--registry-token TOKEN` | `REGISTRY_TOKEN` | interactive |
 | `--run NAME` | — | `sim2real-YYYY-MM-DD` |
+| `--storage-class SC` | — | cluster default |
 | `--no-cluster` | — | false |
 | `--pipeline-yaml PATH` | — | `pipeline/pipeline.yaml` |
 | `--redeploy-tasks` | — | false |
