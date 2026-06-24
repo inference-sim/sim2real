@@ -77,7 +77,7 @@ Examples:
                                                         help="Registry repository name [llm-d-inference-scheduler]")
     p.add_argument("--registry-user",  metavar="USER",  help="Registry username")
     p.add_argument("--registry-token", metavar="TOKEN", help="Registry token")
-    p.add_argument("--storage-class",  metavar="SC",    help="PVC storageClassName (auto-detected for OpenShift)")
+    p.add_argument("--storage-class",  metavar="SC",    help="PVC storageClassName (default: cluster default)")
     p.add_argument("--run",            metavar="NAME",  help="Run name [sim2real-YYYY-MM-DD]")
     p.add_argument("--experiment-root", metavar="PATH", dest="experiment_root",
                    help="Root of the experiment repo (default: framework directory)")
@@ -146,25 +146,11 @@ def _detect_container_runtime() -> str:
     return next((rt for rt in ["podman", "docker"] if which(rt)), "")
 
 
-def _resolve_storage_class(args: argparse.Namespace, is_openshift: bool) -> str:
-    """Resolve storage class: flag > OpenShift auto-detect > interactive prompt."""
-    if args.storage_class:
-        return args.storage_class
-    if is_openshift:
-        sc = "ibm-spectrum-scale-fileset"
-        info(f"OpenShift detected — using storageClass: {sc}")
-        return sc
-    if not args.no_cluster:
-        result = run(["kubectl", "get", "storageclass", "--no-headers"],
-                     check=False, capture=True)
-        if result.returncode == 0 and result.stdout.strip():
-            info("Available storage classes:")
-            for line in result.stdout.strip().splitlines():
-                parts = line.split()
-                marker = "  [default]" if "(default)" in line else ""
-                print(f"  • {parts[0]}{marker}")
-    return prompt("storage_class",
-                  "Enter PVC storageClassName (leave blank for cluster default)", default="")
+def _resolve_storage_class(args: argparse.Namespace) -> str:
+    """Resolve storage class: flag overrides; otherwise leave empty so the
+    cluster's default StorageClass applies (annotation
+    `storageclass.kubernetes.io/is-default-class: "true"`)."""
+    return args.storage_class or ""
 
 
 def _resolve_run_name(args: argparse.Namespace) -> tuple[str, Path]:
@@ -203,6 +189,12 @@ def check_cluster_reachable() -> None:
 
     combined = (result.stdout + result.stderr).lower()
 
+    # A `forbidden` reply proves the API server responded and we're authenticated;
+    # the user just lacks permission for whatever cluster-info probed (e.g. listing
+    # services in kube-system). Treat as reachable.
+    if "forbidden" in combined:
+        return
+
     # Classify the failure and give an actionable suggestion
     if "no such host" in combined or "name resolution" in combined or "lookup" in combined:
         reason = "DNS resolution failed — the cluster hostname is not reachable."
@@ -213,7 +205,7 @@ def check_cluster_reachable() -> None:
     elif "i/o timeout" in combined or "timeout" in combined:
         reason = "Connection timed out — the cluster API server did not respond."
         hint   = "Check your VPN or firewall; the cluster may be stopped or unreachable."
-    elif "unauthorized" in combined or "forbidden" in combined:
+    elif "unauthorized" in combined:
         reason = "Authentication failed — your credentials or kubeconfig may be expired."
         hint   = "Try: kubectl config view  or re-run your cluster login command."
     elif "no configuration" in combined or "no such file" in combined:
@@ -286,7 +278,7 @@ def collect_config(args: argparse.Namespace) -> tuple[SetupConfig, Path, str]:
     is_openshift = detect_openshift()
 
     # Storage class
-    storage_class = _resolve_storage_class(args, is_openshift)
+    storage_class = _resolve_storage_class(args)
 
     # Run name + directory
     run_name, run_dir = _resolve_run_name(args)
@@ -350,8 +342,12 @@ def step_namespace(cfg: SetupConfig) -> None:
         ok(f"Namespace {cfg.namespace} (skipped — --no-cluster)"); return
 
     check_cluster_reachable()
-    exists = run(["kubectl", "get", "ns", cfg.namespace],
-                 check=False, capture=True).returncode == 0
+    if cfg.is_openshift:
+        exists = run(["oc", "get", "project", cfg.namespace],
+                     check=False, capture=True).returncode == 0
+    else:
+        exists = run(["kubectl", "get", "ns", cfg.namespace],
+                     check=False, capture=True).returncode == 0
     if exists:
         ok(f"Namespace {cfg.namespace} already exists")
     else:
