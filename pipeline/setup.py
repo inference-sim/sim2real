@@ -369,35 +369,74 @@ def step_namespace(cfg: SetupConfig) -> None:
 # ── Step 3: RBAC ─────────────────────────────────────────────────────
 
 def step_rbac(cfg: SetupConfig) -> None:
-    """Step 3: Apply RBAC roles and OpenShift SCC policies."""
+    """Step 3: Apply RBAC bundles for the helm-installer and sim2real-runner SAs.
+
+    Each SA has a namespaced base (always required) and an optional cluster
+    augment (best-effort). On a kubectl Forbidden reply that specifically
+    targets cluster-scoped RBAC resources (ClusterRole/ClusterRoleBinding),
+    a best-effort file is skipped with a warn and the run continues. Any
+    other failure (network, malformed YAML, SCC/webhook/quota denial
+    unrelated to cluster-scoped RBAC) still aborts the run.
+
+    SCC RoleBindings (restricted, anyuid, privileged) ride along in the
+    namespaced bases — no imperative `oc adm policy add-scc-to-user` calls.
+
+    Degradations when a cluster augment is skipped:
+      - tektonc roles-cluster.yaml: llm-d-benchmark node auto-discovery is
+        unavailable; cross-ns DCGM exec for stream-gpu-stats Phase 2/2.5/3
+        is skipped. Admin-only stack installs are already gated by the
+        install task's `--non-admin` flag (set by llmdbenchmark-standup).
+      - sim2real-runner-cluster.yaml: orchestrator GPU capacity probe
+        (kubectl get nodes/pods) fails; the probe-failure branch of
+        deploy.py's dispatch loop falls through to ungated dispatch with
+        a rate-limited warn.
+    """
     step(3, 8, "RBAC")
     if cfg.no_cluster:
         ok("RBAC (skipped — --no-cluster)"); return
 
     primary_ns = cfg.namespaces[0]
     env = {**os.environ, "NAMESPACE": cfg.namespace, "PRIMARY_NAMESPACE": primary_ns}
-    for yaml_path in [
-        TEKTONC_DIR / "tekton" / "roles.yaml",
-        TEKTONC_DIR / "tekton" / "rbac" / "sim2real-runner.yaml",
-        REPO_ROOT / "pipeline" / "rbac" / "sim2real-runner-cluster.yaml",
-        REPO_ROOT / "pipeline" / "rbac" / "sim2real-runner-ns.yaml",
-    ]:
+    yaml_paths = [
+        (TEKTONC_DIR / "tekton" / "roles-ns.yaml",                          True),
+        (TEKTONC_DIR / "tekton" / "roles-cluster.yaml",                     False),
+        (TEKTONC_DIR / "tekton" / "rbac" / "sim2real-runner.yaml",          True),
+        (REPO_ROOT / "pipeline" / "rbac" / "sim2real-runner-ns.yaml",       True),
+        (REPO_ROOT / "pipeline" / "rbac" / "sim2real-runner-cluster.yaml",  False),
+    ]
+    for yaml_path, required in yaml_paths:
         if not yaml_path.exists():
             err(f"{yaml_path.name} not found at {yaml_path} — did submodule init fail?"); sys.exit(1)
         subst = subprocess.run(
             ["envsubst", "$NAMESPACE $PRIMARY_NAMESPACE"],
             input=yaml_path.read_text(), capture_output=True, text=True, env=env, check=True,
         )
-        run(["kubectl", "apply", "-f", "-"], input=subst.stdout)
+        result = run(["kubectl", "apply", "-f", "-"], input=subst.stdout,
+                     check=False, capture=True)
+        if result.stdout: print(result.stdout, end="")
+        if result.returncode == 0:
+            continue
+        combined = (result.stdout + result.stderr).lower()
+        # Narrow predicate: only skip when the failure is a Forbidden on
+        # cluster-scoped RBAC resources (clusterrole/clusterrolebinding).
+        # Other Forbidden reasons (SCC admission, webhook denials, quota
+        # exhaustion) signal that the operator's intent isn't being met
+        # and the run should abort.
+        is_cluster_rbac_forbidden = (
+            not required
+            and "forbidden" in combined
+            and "clusterrole" in combined
+        )
+        if result.stderr: print(result.stderr, end="", file=sys.stderr)
+        if is_cluster_rbac_forbidden:
+            warn(f"Skipped {yaml_path.name} — user lacks cluster-scoped RBAC. "
+                 "Downstream features that depend on this augment will degrade; "
+                 "see step_rbac docstring for the catalog.")
+            continue
+        err(f"kubectl apply failed for {yaml_path.name} "
+            f"(exit {result.returncode}) — RBAC setup aborted")
+        sys.exit(result.returncode)
 
-    if cfg.is_openshift:
-        warn("OpenShift: adding SCC policies")
-        for policy_args in [
-            ["add-scc-to-user",          "anyuid",       "-z", "default",        "-n", cfg.namespace],
-            ["add-scc-to-user",          "anyuid",       "-z", "helm-installer", "-n", cfg.namespace],
-            ["add-scc-to-user",          "privileged",   "-z", "helm-installer", "-n", cfg.namespace],
-        ]:
-            run(["oc", "adm", "policy"] + policy_args, check=False)
     ok("RBAC roles applied")
 
 # ── Step 4: Secrets ──────────────────────────────────────────────────

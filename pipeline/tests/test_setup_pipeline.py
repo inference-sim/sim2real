@@ -454,3 +454,156 @@ class TestResolveStorageClass:
         """`--storage-class ""` falls through to empty (cluster default)."""
         from pipeline.setup import _resolve_storage_class
         assert _resolve_storage_class(self._args("")) == ""
+
+
+class TestStepRbacApply:
+    """step_rbac applies five YAMLs with required/best-effort semantics.
+
+    Tests stub out the five YAML paths under tmp_path so they don't depend
+    on the tektonc-data-collection submodule being checked out — CI runs
+    with `submodules: false`.
+    """
+
+    APPLY_PREFIX = ["kubectl", "apply", "-f", "-"]
+    _STUB_YAML = (
+        "apiVersion: v1\n"
+        "kind: ServiceAccount\n"
+        "metadata:\n"
+        "  name: stub\n"
+        "  namespace: $NAMESPACE\n"
+    )
+    _STUB_RELPATHS = [
+        "tekton/roles-ns.yaml",
+        "tekton/roles-cluster.yaml",
+        "tekton/rbac/sim2real-runner.yaml",
+        "pipeline/rbac/sim2real-runner-ns.yaml",
+        "pipeline/rbac/sim2real-runner-cluster.yaml",
+    ]
+
+    def _stage(self, tmp_path, monkeypatch, *, omit=()):
+        """Create stub YAMLs (omitting any in `omit`) and patch path constants."""
+        import pipeline.setup as setup_mod
+        for relpath in self._STUB_RELPATHS:
+            if relpath in omit:
+                continue
+            target = tmp_path / relpath
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(self._STUB_YAML)
+        monkeypatch.setattr(setup_mod, "TEKTONC_DIR", tmp_path)
+        monkeypatch.setattr(setup_mod, "REPO_ROOT", tmp_path)
+
+    def _apply_calls(self, mock_run):
+        return [c for c in mock_run.call_args_list
+                if c.args and list(c.args[0][:4]) == self.APPLY_PREFIX]
+
+    def _index_aware_side_effect(self, mock_run, fail_indices, fail_stderr):
+        """Build a side_effect that returns Forbidden on the given apply indices."""
+        def side_effect(cmd, *args, **kwargs):
+            r = type("R", (), {})()
+            if list(cmd[:4]) == self.APPLY_PREFIX:
+                idx = len([c for c in mock_run.call_args_list
+                           if c.args and list(c.args[0][:4]) == self.APPLY_PREFIX]) - 1
+                if idx in fail_indices:
+                    r.returncode = 1; r.stdout = ""; r.stderr = fail_stderr
+                else:
+                    r.returncode = 0; r.stdout = "ok\n"; r.stderr = ""
+            else:
+                r.returncode = 0; r.stdout = ""; r.stderr = ""
+            return r
+        return side_effect
+
+    @patch("pipeline.setup.run")
+    def test_all_succeed(self, mock_run, tmp_path, monkeypatch):
+        """Five YAMLs apply cleanly — five kubectl apply calls, no exit."""
+        from pipeline.setup import step_rbac
+        self._stage(tmp_path, monkeypatch)
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = "role.rbac.../helm-access configured\n"
+        mock_run.return_value.stderr = ""
+        step_rbac(_make_config())
+        assert len(self._apply_calls(mock_run)) == 5
+
+    @patch("pipeline.setup.run")
+    def test_required_failure_aborts(self, mock_run, tmp_path, monkeypatch, capsys):
+        """Required file with non-zero apply causes sys.exit, with file name in stderr."""
+        import pytest
+        from pipeline.setup import step_rbac
+        self._stage(tmp_path, monkeypatch)
+        mock_run.return_value.returncode = 1
+        mock_run.return_value.stdout = ""
+        mock_run.return_value.stderr = "Error from server: something broke\n"
+        with pytest.raises(SystemExit) as exc:
+            step_rbac(_make_config())
+        assert exc.value.code == 1
+        # Aborts on the FIRST required file (roles-ns.yaml) — only one apply call.
+        assert len(self._apply_calls(mock_run)) == 1
+        # The labeled err() should name the file so the operator knows what failed.
+        captured = capsys.readouterr()
+        assert "roles-ns.yaml" in captured.err
+
+    @patch("pipeline.setup.run")
+    def test_cluster_rbac_forbidden_skips_with_warn(self, mock_run, tmp_path, monkeypatch, capsys):
+        """Best-effort file with Forbidden on clusterrole resource skips and continues."""
+        from pipeline.setup import step_rbac
+        self._stage(tmp_path, monkeypatch)
+        cluster_forbidden = (
+            'Error from server (Forbidden): error when creating "STDIN": '
+            'clusterroles.rbac.authorization.k8s.io is forbidden: User "x" '
+            'cannot create resource "clusterroles" at the cluster scope'
+        )
+        # Indices in the apply order: 0=ns, 1=cluster (best-effort), 2=runner, 3=runner-ns, 4=runner-cluster (best-effort)
+        mock_run.side_effect = self._index_aware_side_effect(
+            mock_run, fail_indices={1, 4}, fail_stderr=cluster_forbidden,
+        )
+        step_rbac(_make_config())
+        # Both best-effort skips should have produced a warn line.
+        captured = capsys.readouterr()
+        assert captured.out.count("Skipped") + captured.err.count("Skipped") >= 2
+        assert len(self._apply_calls(mock_run)) == 5
+
+    @patch("pipeline.setup.run")
+    def test_cluster_augment_non_rbac_forbidden_aborts(self, mock_run, tmp_path, monkeypatch):
+        """Best-effort file with Forbidden NOT on a clusterrole resource still aborts."""
+        import pytest
+        from pipeline.setup import step_rbac
+        self._stage(tmp_path, monkeypatch)
+        # Forbidden from an SCC admission webhook — no clusterrole text in error.
+        scc_forbidden = (
+            'Error from server (Forbidden): admission webhook "scc.openshift.io" '
+            'denied the request: pod "x" requires anyuid SCC'
+        )
+        mock_run.side_effect = self._index_aware_side_effect(
+            mock_run, fail_indices={1}, fail_stderr=scc_forbidden,
+        )
+        with pytest.raises(SystemExit) as exc:
+            step_rbac(_make_config())
+        assert exc.value.code == 1
+        # Aborts on the second file (cluster augment) — exactly two apply calls.
+        assert len(self._apply_calls(mock_run)) == 2
+
+    @patch("pipeline.setup.run")
+    def test_skip_branch_emits_stderr(self, mock_run, tmp_path, monkeypatch, capsys):
+        """Forbidden-skip branch prints kubectl's stderr before the warn."""
+        from pipeline.setup import step_rbac
+        self._stage(tmp_path, monkeypatch)
+        cluster_forbidden = "Error from server (Forbidden): clusterroles cannot create"
+        mock_run.side_effect = self._index_aware_side_effect(
+            mock_run, fail_indices={1, 4}, fail_stderr=cluster_forbidden,
+        )
+        step_rbac(_make_config())
+        captured = capsys.readouterr()
+        # The actual kubectl Forbidden text should reach stderr — not be silently swallowed.
+        assert "clusterroles cannot create" in captured.err
+
+    @patch("pipeline.setup.run")
+    def test_required_file_not_found_aborts(self, mock_run, tmp_path, monkeypatch):
+        """Missing required YAML (e.g. submodule init failed) exits before apply."""
+        import pytest
+        import pipeline.setup as setup_mod
+        # Stage everything EXCEPT the first required file.
+        self._stage(tmp_path, monkeypatch, omit=("tekton/roles-ns.yaml",))
+        with pytest.raises(SystemExit) as exc:
+            setup_mod.step_rbac(_make_config())
+        assert exc.value.code == 1
+        # No kubectl apply should have been issued.
+        assert len(self._apply_calls(mock_run)) == 0
