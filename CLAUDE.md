@@ -50,7 +50,7 @@ python pipeline/run.py     --experiment-root ../admission-control switch <run-na
 | 3 | Translate checkpoint | Write `skill_input.json`; exit and wait for `/sim2real-translate` skill |
 | 4 | Assembly | Assemble resolved scenarios from bundles + overlays, generate PipelineRuns |
 | 5 | Summary | Write `run_summary.md` |
-| 6 | Gate | Human review: `[d]eploy / [e]dit / [q]uit` |
+| 6 | Gate | Print summary; mark run `READY TO DEPLOY` |
 
 **`/sim2real-translate`** — AI skill that reads `skill_input.json` and writes `translation_output.json`. Run this after prepare exits at Phase 3, then re-run prepare to continue.
 

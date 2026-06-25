@@ -7,7 +7,7 @@ Phases:
   3. Translate  — checkpoint: write skill_input.json, check for translation_output.json
   4. Assembly   — assemble resolved scenarios, generate PipelineRuns
   5. Summary    — generate run_summary.md
-  6. Gate       — human review: [d]eploy / [e]dit / [q]uit
+  6. Gate       — print summary, mark READY TO DEPLOY
 
 Re-running skips completed phases (tracked in .state.json).
 """
@@ -981,7 +981,7 @@ def _phase_summary(state: StateMachine, manifest: dict, run_dir: Path, resolved:
 # ── Phase 6: Gate ────────────────────────────────────────────────────────────
 
 def _phase_gate(state: StateMachine, run_dir: Path):
-    """Phase 6: Human review gate."""
+    """Phase 6: print run summary and mark the run ready to deploy."""
     step(6, "Gate")
 
     if state.is_done("gate"):
@@ -991,25 +991,10 @@ def _phase_gate(state: StateMachine, run_dir: Path):
 
     summary_path = run_dir / "run_summary.md"
     print("\n" + summary_path.read_text())
-
-    while True:
-        choice = input("\n  [d]eploy / [e]dit / [q]uit: ").strip().lower()
-        if choice in ("d", "deploy"):
-            with open(summary_path, "a") as f:
-                f.write("\n**Verdict: READY TO DEPLOY**\n")
-            state.mark_done("gate", verdict="READY TO DEPLOY")
-            ok("Gate: READY TO DEPLOY")
-            return
-        elif choice in ("e", "edit"):
-            info(f"Edit files in {run_dir}, then press Enter to re-display.")
-            input("  Press Enter when done editing...")
-            print("\n" + summary_path.read_text())
-        elif choice in ("q", "quit"):
-            state.mark_done("gate", verdict="abandoned")
-            warn("Gate: abandoned")
-            sys.exit(0)
-        else:
-            print("  Enter 'd' to deploy, 'e' to edit, or 'q' to quit.")
+    with open(summary_path, "a") as f:
+        f.write("\n**Verdict: READY TO DEPLOY**\n")
+    state.mark_done("gate", verdict="READY TO DEPLOY")
+    ok("Gate: READY TO DEPLOY")
 
 
 # ── Subcommands ──────────────────────────────────────────────────────────────

@@ -1348,13 +1348,7 @@ class TestBaselineOnlyNoAlgorithm:
             manifest = None
             rebuild_context = False
 
-        # Mock _phase_gate to avoid interactive input
-        original_gate = mod._phase_gate
-        mod._phase_gate = lambda *a, **kw: None
-        try:
-            mod._cmd_run(Args(), manifest, run_dir)
-        finally:
-            mod._phase_gate = original_gate
+        mod._cmd_run(Args(), manifest, run_dir)
 
         # Verify: translate was skipped, summary was written
         assert (run_dir / "run_summary.md").exists()
@@ -1389,3 +1383,48 @@ class TestBaselineOnlyNoAlgorithm:
         mod._phase_summary(state, manifest, run_dir, resolved)
         summary = (run_dir / "run_summary.md").read_text()
         assert "Source: `N/A`" in summary
+
+
+class TestPhaseGate:
+    def test_gate_is_non_interactive(self, repo):
+        """_phase_gate must complete without reading stdin."""
+        mod = _import_prepare_with_root(repo)
+        run_dir = repo / "workspace" / "runs" / "test-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "run_summary.md").write_text("# Run summary\n")
+
+        state = StateMachine("test-run", "routing", run_dir)
+        state.mark_done("init")
+        state.mark_done("summary")
+
+        # If anything tries to read stdin the test will deadlock; instead, swap
+        # builtins.input for a sentinel that raises.
+        import builtins
+        original_input = builtins.input
+        builtins.input = lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("_phase_gate must not call input()")
+        )
+        try:
+            mod._phase_gate(state, run_dir)
+        finally:
+            builtins.input = original_input
+
+        assert state.is_done("gate")
+        assert state.get_phase("gate").get("verdict") == "READY TO DEPLOY"
+        assert "**Verdict: READY TO DEPLOY**" in (run_dir / "run_summary.md").read_text()
+
+    def test_gate_idempotent_on_completed_run(self, repo):
+        """_phase_gate must skip on a run whose gate is already done."""
+        mod = _import_prepare_with_root(repo)
+        run_dir = repo / "workspace" / "runs" / "test-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "run_summary.md").write_text("# Already done\n")
+
+        state = StateMachine("test-run", "routing", run_dir)
+        state.mark_done("init")
+        state.mark_done("summary")
+        state.mark_done("gate", verdict="READY TO DEPLOY")
+
+        # Already-done gate must not re-append the verdict line.
+        mod._phase_gate(state, run_dir)
+        assert (run_dir / "run_summary.md").read_text() == "# Already done\n"

@@ -84,7 +84,7 @@ python pipeline/prepare.py [--force] [--rebuild-context] [--manifest PATH] [--ru
 | 3 | **Translate checkpoint** — write `skill_input.json`, wait (skipped if no algorithm) | resumes on re-run |
 | 4 | Assembly — resolved scenarios, cluster YAMLs, PipelineRuns | on re-run |
 | 5 | Summary — write `run_summary.md` | on re-run |
-| 6 | **Gate** — `[d]eploy / [e]dit / [q]uit` | on re-run |
+| 6 | **Gate** — print summary, mark `READY TO DEPLOY` | on re-run |
 
 **Phase 1 ref validation**: If `component.ref` is set in the manifest, Phase 1 resolves it via `git rev-parse` in the component submodule and compares against HEAD. A mismatch produces a warning (not a hard error) with the expected/actual SHA and a checkout command. Missing submodule or non-git directory with `component.ref` set is a hard error with an init command.
 
@@ -92,7 +92,7 @@ python pipeline/prepare.py [--force] [--rebuild-context] [--manifest PATH] [--ru
 
 **Phase 4 assembly** reads baseline scenario files from the experiment root, merges them with skill-generated overlay files from `generated/`. For multi-algorithm runs, each algorithm's overlay is in `generated/{algo_name}/{algo_name}_config.yaml`. For single-algorithm runs, the overlay may be at `generated/{name}_config.yaml` or `generated/treatment_config.yaml` (legacy). Resolved scenario files are written to `cluster/`. PipelineRuns are generated with a `scenarioContent` param containing the fully resolved scenario YAML. Workloads are loaded from the manifest.
 
-**Phase 6 gate**: `d` marks the run `READY TO DEPLOY` (required by `deploy.py`). `e` drops you back to edit files, then re-displays the summary. `q` marks `abandoned` and exits.
+**Phase 6 gate**: prints `run_summary.md`, appends `**Verdict: READY TO DEPLOY**` to it, and marks the `gate` phase done. Non-interactive — abort the run by Ctrl-C before invoking `deploy.py`. The recorded verdict is surfaced by `run.py list/inspect` but is not enforced by `deploy.py`.
 
 **Subcommands:**
 
