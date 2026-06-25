@@ -78,6 +78,24 @@ def test_make_pipelinerun_scenario_service_account():
     assert pr["spec"]["taskRunTemplate"]["serviceAccountName"] == "helm-installer"
 
 
+def test_make_pipelinerun_scenario_task_run_specs():
+    """taskRunSpecs entries gate per-task timeouts on the long-running tasks."""
+    from pipeline.lib.tekton import _TASK_TIMEOUTS
+    pr = make_pipelinerun_scenario(
+        phase="baseline", workload={"name": "wl"}, run_name="r",
+        namespace="ns", pipeline_name="sim2real-r",
+        scenario_content="{}",
+        workspace_bindings=_WORKSPACE_BINDINGS,
+    )
+    specs = pr["spec"]["taskRunSpecs"]
+    by_task = {s["pipelineTaskName"]: s["timeout"] for s in specs}
+    assert by_task == _TASK_TIMEOUTS
+    # The override must not collide with the global serviceAccountName or the
+    # pipeline-level timeout — both stay where they are.
+    assert pr["spec"]["taskRunTemplate"]["serviceAccountName"] == "helm-installer"
+    assert pr["spec"]["timeouts"] == {"pipeline": "4h"}
+
+
 def test_make_pipelinerun_scenario_workspace_bindings():
     pr = make_pipelinerun_scenario(
         phase="baseline", workload={"name": "wl"}, run_name="r",
