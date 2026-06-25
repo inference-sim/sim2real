@@ -369,24 +369,34 @@ def step_namespace(cfg: SetupConfig) -> None:
 # ── Step 3: RBAC ─────────────────────────────────────────────────────
 
 def step_rbac(cfg: SetupConfig) -> None:
-    """Step 3: Apply RBAC roles and OpenShift SCC policies."""
+    """Step 3: Apply RBAC bundles for the helm-installer and sim2real-runner SAs.
+
+    Each SA has a namespaced base (always required) and an optional cluster
+    augment (best-effort). On a kubectl Forbidden reply that specifically
+    targets cluster-scoped RBAC resources (ClusterRole/ClusterRoleBinding),
+    a best-effort file is skipped with a warn and the run continues. Any
+    other failure (network, malformed YAML, SCC/webhook/quota denial
+    unrelated to cluster-scoped RBAC) still aborts the run.
+
+    SCC RoleBindings (restricted, anyuid, privileged) ride along in the
+    namespaced bases — no imperative `oc adm policy add-scc-to-user` calls.
+
+    Degradations when a cluster augment is skipped:
+      - tektonc roles-cluster.yaml: llm-d-benchmark node auto-discovery is
+        unavailable; cross-ns DCGM exec for stream-gpu-stats Phase 2/2.5/3
+        is skipped. Admin-only stack installs are already gated by the
+        install task's `--non-admin` flag (set by llmdbenchmark-standup).
+      - sim2real-runner-cluster.yaml: orchestrator GPU capacity probe
+        (kubectl get nodes/pods) fails; the probe-failure branch of
+        deploy.py's dispatch loop falls through to ungated dispatch with
+        a rate-limited warn.
+    """
     step(3, 8, "RBAC")
     if cfg.no_cluster:
         ok("RBAC (skipped — --no-cluster)"); return
 
     primary_ns = cfg.namespaces[0]
     env = {**os.environ, "NAMESPACE": cfg.namespace, "PRIMARY_NAMESPACE": primary_ns}
-    # Apply RBAC as paired (namespaced base, optional cluster augment) bundles.
-    # Required files exit on failure. Best-effort files exit-gracefully on a
-    # `forbidden` reply (operator lacks cluster-scoped RBAC create) — the
-    # corresponding ClusterRole/ClusterRoleBinding is skipped and downstream
-    # consumers degrade as documented:
-    #   - tektonc roles-cluster.yaml absent → llm-d-benchmark auto-discovery
-    #     unavailable; cross-ns DCGM exec for stream-gpu-stats Phase 2/2.5/3
-    #     skipped (admin-only stack installs already gated by --non-admin).
-    #   - sim2real-runner-cluster.yaml absent → orchestrator GPU capacity
-    #     probe (kubectl get nodes/pods) fails; deploy.py falls through to
-    #     ungated dispatch with a rate-limited warn (deploy.py:2511-2545).
     yaml_paths = [
         (TEKTONC_DIR / "tekton" / "roles-ns.yaml",                          True),
         (TEKTONC_DIR / "tekton" / "roles-cluster.yaml",                     False),
@@ -407,17 +417,24 @@ def step_rbac(cfg: SetupConfig) -> None:
         if result.returncode == 0:
             continue
         combined = (result.stdout + result.stderr).lower()
-        if not required and "forbidden" in combined:
+        # Narrow predicate: only skip when the failure is a Forbidden on
+        # cluster-scoped RBAC resources (clusterrole/clusterrolebinding).
+        # Other Forbidden reasons (SCC admission, webhook denials, quota
+        # exhaustion) signal that the operator's intent isn't being met
+        # and the run should abort.
+        is_cluster_rbac_forbidden = (
+            not required
+            and "forbidden" in combined
+            and "clusterrole" in combined
+        )
+        if result.stderr: print(result.stderr, end="", file=sys.stderr)
+        if is_cluster_rbac_forbidden:
             warn(f"Skipped {yaml_path.name} — user lacks cluster-scoped RBAC. "
                  "Downstream features that depend on this augment will degrade; "
-                 "see step_rbac docstring for which.")
+                 "see step_rbac docstring for the catalog.")
             continue
-        if result.stderr: print(result.stderr, end="", file=sys.stderr)
         sys.exit(result.returncode)
 
-    # SCC bindings are now carried by tekton/roles-ns.yaml (helm-installer-
-    # restricted-scc, helm-installer-anyuid-scc, helm-installer-privileged-scc).
-    # No imperative `oc adm policy add-scc-to-user` calls needed.
     ok("RBAC roles applied")
 
 # ── Step 4: Secrets ──────────────────────────────────────────────────
