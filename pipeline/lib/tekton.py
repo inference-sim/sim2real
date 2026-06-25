@@ -4,6 +4,15 @@ import yaml
 _SPEC_BASE_DIR = "/workspace/source/llm-d-benchmark"
 _SCENARIO_FILE_PATH = "/tmp/llmdbench-config/scenario.yaml"
 
+# Per-pipelineTask timeout overrides. These ride on top of the pipeline-level
+# 4h ceiling and catch a stuck task earlier so the slot frees up. Values must
+# stay below spec.timeouts.pipeline below; Tekton rejects taskRunSpecs entries
+# whose timeout exceeds the enclosing pipeline timeout.
+_TASK_TIMEOUTS: dict[str, str] = {
+    "stream-epp-logs": "2h",
+    "run-workload-blis-observe-binary": "90m",
+}
+
 
 def _default_spec_content(base_dir: str = _SPEC_BASE_DIR,
                           scenario_file: str = _SCENARIO_FILE_PATH) -> str:
@@ -78,6 +87,10 @@ def make_pipelinerun_scenario(
             {"name": "model",            "value": model},
         ],
         "timeouts": {"pipeline": "4h"},
+        "taskRunSpecs": [
+            {"pipelineTaskName": name, "timeout": dur}
+            for name, dur in _TASK_TIMEOUTS.items()
+        ],
     }
 
     if workspace_bindings is not None:
