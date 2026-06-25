@@ -433,6 +433,8 @@ def step_rbac(cfg: SetupConfig) -> None:
                  "Downstream features that depend on this augment will degrade; "
                  "see step_rbac docstring for the catalog.")
             continue
+        err(f"kubectl apply failed for {yaml_path.name} "
+            f"(exit {result.returncode}) — RBAC setup aborted")
         sys.exit(result.returncode)
 
     ok("RBAC roles applied")
