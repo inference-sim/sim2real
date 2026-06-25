@@ -155,9 +155,9 @@ def _make_pod(**kwargs):
     return PodState(**defaults)
 
 
-def _make_event(reason="", message="", involved_object="p"):
+def _make_event(reason="", message="", involved_object="p", count=1):
     from pipeline.lib.health import EventRecord
-    return EventRecord(reason=reason, message=message, count=1,
+    return EventRecord(reason=reason, message=message, count=count,
                        last_timestamp="", involved_object=involved_object)
 
 
@@ -256,11 +256,30 @@ def test_triage_does_not_modify_tracker():
     assert tracker.count("p") == before, "triage_pod must not modify tracker"
 
 
-def test_triage_startup_probe_unhealthy():
+def test_triage_startup_probe_unhealthy_below_threshold_returns_none():
+    """A few early Unhealthy events while a model loads should not escalate.
+
+    vLLM model pods routinely fail the startup probe a few times while
+    weights load from a cold PVC. Escalating on the first event cancels
+    the PipelineRun before the helm chart's failureThreshold gets a
+    chance to recover the pod.
+    """
     from pipeline.lib.health import triage_pod, RemediationTracker
     pod = _make_pod(phase="Running", ready=False)
     events = [_make_event(reason="Unhealthy",
-                          message="Startup probe failed: connection refused")]
+                          message="Startup probe failed: connection refused",
+                          count=1)]
+    assert triage_pod(pod, events, RemediationTracker()) is None
+
+
+def test_triage_startup_probe_unhealthy_at_threshold_escalates():
+    from pipeline.lib.health import (
+        triage_pod, RemediationTracker, _STARTUP_PROBE_MIN_EVENT_COUNT,
+    )
+    pod = _make_pod(phase="Running", ready=False)
+    events = [_make_event(reason="Unhealthy",
+                          message="Startup probe failed: connection refused",
+                          count=_STARTUP_PROBE_MIN_EVENT_COUNT)]
     result = triage_pod(pod, events, RemediationTracker())
     assert result is not None
     assert result.tier == 2

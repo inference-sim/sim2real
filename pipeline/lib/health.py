@@ -114,6 +114,14 @@ def parse_events(json_str: str) -> list[EventRecord]:
 
 _OOM_MAX_ATTEMPTS = 2  # tier-1 retries before escalating
 
+# Tolerate this many startup-probe Unhealthy events before escalating to
+# Tier 2. vLLM model pods loading from a cold PVC routinely fail the
+# startup probe a few times while weights load; the helm chart's
+# failureThreshold lets the pod recover on its own. k8s coalesces
+# similar events with a ~6-min window, so the count is coarser than
+# wall-clock failures — 10 is generous in coalesced units.
+_STARTUP_PROBE_MIN_EVENT_COUNT = 10
+
 
 def triage_pod(
     pod: PodState,
@@ -202,10 +210,11 @@ def triage_pod(
              if e.reason == "Unhealthy" and "startup probe" in e.message.lower()),
             None,
         )
-        if startup_fail:
+        if startup_fail and startup_fail.count >= _STARTUP_PROBE_MIN_EVENT_COUNT:
             return TriageResult(
                 tier=2, action="suggest", needs_logs=False,
-                message=f"{pod.name}: startup probe failing",
+                message=(f"{pod.name}: startup probe failing "
+                         f"(count={startup_fail.count})"),
                 suggestion=(
                     "Startup probe timing out before model finishes loading.\n"
                     "Increase failureThreshold in "
