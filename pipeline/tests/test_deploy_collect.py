@@ -1982,3 +1982,165 @@ def test_extract_phases_kubectl_run_failure_raises_runtime_error(tmp_path, monke
     with pytest.raises(RuntimeError, match="create failed.*quota exceeded"):
         deploy._extract_phases_from_pvc(
             ["baseline"], "test-run", "ns-0", run_dir, skip_logs=False)
+
+
+# ─── Issue 398: --package composes with --workload as a pair-scope filter ───
+# Pair-scope filters (--only, --workload, --package, --status) compose as an
+# intersection across every deploy.py subcommand.  Before the fix, collect
+# silently dropped --package from pair scope and only used it for phase scope,
+# so --workload X --package Y resolved to "every package of X" for pair-scope
+# checks (with spurious warnings about pairs of other packages).
+
+def test_collect_package_baseline_with_workload_no_spurious_warn(tmp_path, monkeypatch):
+    """`--workload X --package baseline` must not warn about non-baseline pairs of X.
+
+    Regression for issue #398. Pre-fix, the synthetic _ScopeArgs dropped
+    --package, so a pending wl-X-treatment pair landed in in_scope and the
+    "skipping" warn loop fired on it even though the user only asked about
+    baseline.
+    """
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    data = {
+        "wl-reason-baseline":  {"workload": "reason", "package": "baseline",
+                                "status": "done", "completed_namespace": "ns-0"},
+        "wl-reason-treatment": {"workload": "reason", "package": "treatment",
+                                "status": "pending"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        only = None
+        workload = "reason"
+        package = ["baseline"]
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False,
+                     workload=None, allowed_workloads=None, on_workload_done=None):
+        extract_calls.append({"phases": sorted(phases),
+                              "allowed_workloads": allowed_workloads})
+        if on_workload_done and allowed_workloads:
+            for phase in phases:
+                for wl in allowed_workloads.get(phase, set()):
+                    on_workload_done(phase, wl, namespace, None)
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
+         patch.object(deploy, "warn") as mock_warn:
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert len(extract_calls) == 1
+    assert extract_calls[0]["phases"] == ["baseline"]
+    assert extract_calls[0]["allowed_workloads"] == {"baseline": {"reason"}}
+    # The treatment pair is out of scope (user filtered to --package baseline),
+    # so the "Scoped pair ... skipping" warn must not fire on it.
+    warn_msgs = [str(c) for c in mock_warn.call_args_list]
+    assert not any("wl-reason-treatment" in m for m in warn_msgs), (
+        f"Spurious warn about out-of-scope pair: {warn_msgs}"
+    )
+
+
+def test_collect_package_experiment_with_workload_still_warns_nondone(tmp_path, monkeypatch):
+    """`--package experiment` keeps today's behavior: warns on every non-done pair of X.
+
+    The synthetic 'experiment' value doesn't name a pair package, so it
+    cannot narrow pair scope — the fix's carve-out preserves that.
+    """
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    data = {
+        "wl-reason-baseline":  {"workload": "reason", "package": "baseline",
+                                "status": "done", "completed_namespace": "ns-0"},
+        "wl-reason-treatment": {"workload": "reason", "package": "treatment",
+                                "status": "pending"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        only = None
+        workload = "reason"
+        package = ["experiment"]
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False,
+                     workload=None, allowed_workloads=None, on_workload_done=None):
+        extract_calls.append({"phases": sorted(phases),
+                              "allowed_workloads": allowed_workloads})
+        if on_workload_done and allowed_workloads:
+            for phase in phases:
+                for wl in allowed_workloads.get(phase, set()):
+                    on_workload_done(phase, wl, namespace, None)
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
+         patch.object(deploy, "warn") as mock_warn:
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert len(extract_calls) == 1
+    # Only baseline is done, so that's all that gets extracted, but every
+    # package of every scoped pair was in-scope — the warn about the pending
+    # treatment pair must fire.
+    assert extract_calls[0]["phases"] == ["baseline"]
+    warn_msgs = [str(c) for c in mock_warn.call_args_list]
+    assert any("wl-reason-treatment" in m and "pending" in m for m in warn_msgs), (
+        f"Expected warn about pending wl-reason-treatment under --package experiment: {warn_msgs}"
+    )
+
+
+def test_collect_multi_package_with_workload(tmp_path, monkeypatch):
+    """`--workload X --package baseline,softreflective` narrows to those two packages."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    data = {
+        "wl-reason-baseline": {"workload": "reason", "package": "baseline",
+                               "status": "done", "completed_namespace": "ns-0"},
+        "wl-reason-softreflective": {"workload": "reason", "package": "softreflective",
+                                     "status": "done", "completed_namespace": "ns-0"},
+        "wl-reason-treatment": {"workload": "reason", "package": "treatment",
+                                "status": "pending"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        only = None
+        workload = "reason"
+        package = ["baseline", "softreflective"]
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False,
+                     workload=None, allowed_workloads=None, on_workload_done=None):
+        extract_calls.append({"phases": sorted(phases),
+                              "allowed_workloads": allowed_workloads})
+        if on_workload_done and allowed_workloads:
+            for phase in phases:
+                for wl in allowed_workloads.get(phase, set()):
+                    on_workload_done(phase, wl, namespace, None)
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
+         patch.object(deploy, "warn") as mock_warn:
+        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+
+    assert len(extract_calls) == 1
+    assert extract_calls[0]["phases"] == ["baseline", "softreflective"]
+    assert extract_calls[0]["allowed_workloads"] == {
+        "baseline": {"reason"},
+        "softreflective": {"reason"},
+    }
+    # treatment was excluded from pair scope, so no warn about it.
+    warn_msgs = [str(c) for c in mock_warn.call_args_list]
+    assert not any("wl-reason-treatment" in m for m in warn_msgs), (
+        f"Spurious warn about out-of-scope pair: {warn_msgs}"
+    )
