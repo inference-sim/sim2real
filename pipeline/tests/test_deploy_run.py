@@ -3053,6 +3053,117 @@ def test_free_slot_runs_gpu_probe_and_dispatches(tmp_path, monkeypatch):
     assert "_orchestrator" not in saved_progress
 
 
+# ── Orphan pair_key handling (issue #408) ────────────────────────────────────
+
+def _orphan_harness(tmp_path, monkeypatch, *, initial_progress):
+    """Boilerplate for the orphan tests: cluster/ has one pair ('a'), progress
+    starts with whatever initial_progress dict the caller provides. Returns the
+    final saved_progress dict and the captured stderr after _cmd_run returns."""
+    import pipeline.deploy as mod
+    from pipeline.lib.progress import ConfigMapProgressStore
+
+    run_dir = tmp_path / "runs" / "test-run"
+    cluster_dir = run_dir / "cluster"
+    cluster_dir.mkdir(parents=True)
+    _write_pr(cluster_dir, "a")
+    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+    setup_config = {"namespaces": ["sim2real-0"], "namespace": "sim2real-0"}
+
+    saved_progress = {}
+
+    def mock_save(self, data):
+        saved_progress.clear()
+        saved_progress.update(data)
+
+    monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: dict(initial_progress))
+    monkeypatch.setattr(ConfigMapProgressStore, "save", mock_save)
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
+    monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
+
+    import pipeline.lib.capacity as _cap_mod
+    monkeypatch.setattr(_cap_mod, "probe_free_gpus", lambda **kw: (8, 8, 0))
+    monkeypatch.setattr(_cap_mod, "load_defaults",
+                        lambda root: {"decode": {"accelerator": {"count": 1}}})
+    monkeypatch.setattr(mod, "_check_pipelinerun_status",
+                        lambda pr_name, ns: "Succeeded")
+
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return _R()
+    monkeypatch.setattr(mod, "run", fake_run)
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+
+    mod._cmd_run(_run_args(), run_dir, setup_config)
+    return saved_progress
+
+
+def _pending_entry(workload, package):
+    return {
+        "workload": workload, "package": package, "status": "pending",
+        "namespace": None, "completed_namespace": None,
+        "retries": 0, "pending_stalls": 0,
+        "pending_since": None, "running_since": None, "last_duration": None,
+    }
+
+
+def test_cmd_run_orphan_pending_does_not_crash(tmp_path, monkeypatch, capsys):
+    """Regression for #408: a pending entry in progress with no matching YAML in
+    cluster/ used to KeyError at pair_costs[pair_key]. Now it's skipped with a
+    warning and the in-discovered pair still completes."""
+    initial = {
+        "wl-orphan-baseline": _pending_entry("orphan", "baseline"),
+    }
+    saved = _orphan_harness(tmp_path, monkeypatch, initial_progress=initial)
+
+    # The in-discovered pair completes.
+    assert saved["wl-a-baseline"]["status"] == "done"
+    # The orphan is surfaced but not auto-removed.
+    assert "wl-orphan-baseline" in saved
+    assert saved["wl-orphan-baseline"]["status"] == "pending"
+    # Warning naming the orphan is emitted to stderr.
+    err = capsys.readouterr().out
+    assert "wl-orphan-baseline" in err
+    assert "no PipelineRun in cluster/" in err
+
+
+def test_cmd_run_orphan_running_does_not_block_completion(tmp_path, monkeypatch, capsys):
+    """An orphan with status=running (left over from a prior run whose YAML was
+    removed) must not keep _work_remaining alive. _reconcile_on_resume already
+    resets it to pending when discovered[k]['pr_name'] is missing; the new gate
+    then ensures it's skipped from dispatch consideration."""
+    initial = {
+        "wl-orphan-baseline": {
+            **_pending_entry("orphan", "baseline"),
+            "status": "running", "namespace": "sim2real-9", "running_since": None,
+        },
+    }
+    saved = _orphan_harness(tmp_path, monkeypatch, initial_progress=initial)
+
+    assert saved["wl-a-baseline"]["status"] == "done"
+    # Reconcile resets orphan running → pending (pr_name absent in discovered);
+    # the gate then keeps it out of dispatch. The entry stays for operator review.
+    assert saved["wl-orphan-baseline"]["status"] == "pending"
+    err = capsys.readouterr().out
+    assert "wl-orphan-baseline" in err
+
+
+def test_cmd_run_no_orphan_no_warning(tmp_path, monkeypatch, capsys):
+    """Negative control: when every progress key is in discovered, no orphan
+    warning fires."""
+    initial = {
+        "wl-a-baseline": _pending_entry("a", "baseline"),
+    }
+    saved = _orphan_harness(tmp_path, monkeypatch, initial_progress=initial)
+
+    assert saved["wl-a-baseline"]["status"] == "done"
+    err = capsys.readouterr().out
+    assert "no PipelineRun in cluster/" not in err
+
+
 # ── Live-loop failure paths retain namespace (issue #277) ───────────────────
 
 
