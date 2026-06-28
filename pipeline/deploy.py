@@ -2457,6 +2457,22 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                          preserve_pipelineruns=preserve_pipelineruns)
     store.save(progress)
 
+    # Orphans: pair_keys in progress (in scope, still active) but absent from
+    # cluster/. Happens when prepare.py is re-run with a different workload set
+    # between stop and the next run. Without this guard, _pending_pairs would
+    # surface them and the dispatch loop's pair_costs[pair_key] would KeyError
+    # at startup (#408).
+    orphans = sorted(
+        k for k, v in progress.items()
+        if _is_pair_key(k) and k in _scope and k not in discovered
+        and v.get("status") in ("pending", "running")
+    )
+    if orphans:
+        warn(f"{len(orphans)} progress entries have no PipelineRun in cluster/ "
+             f"(likely from a prior prepare.py): {orphans}. Skipping. "
+             f"Remove the entries manually or via `deploy.py reset --only <key>` "
+             f"if they should not return.")
+
     # Track which namespace is assigned to which pair
     slots_busy: dict[str, str] = {
         entry["namespace"]: key
@@ -2466,11 +2482,13 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
 
     def _pending_pairs() -> list[str]:
         return [k for k, v in progress.items()
-                if _is_pair_key(k) and v.get("status") == "pending" and k in _scope]
+                if _is_pair_key(k) and v.get("status") == "pending"
+                and k in _scope and k in discovered]
 
     def _work_remaining() -> bool:
         return any(v.get("status") in ("pending", "running")
-                   for k, v in progress.items() if _is_pair_key(k) and k in _scope)
+                   for k, v in progress.items()
+                   if _is_pair_key(k) and k in _scope and k in discovered)
 
     timeout_hours = 4
     info(f"Orchestrator: {len(_scope)} pairs in scope, {len(namespaces)} slot(s)")
