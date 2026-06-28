@@ -183,6 +183,64 @@ def test_load_valid_v3_minimal(tmp_path):
     assert m["algorithms"][0]["name"] == "treatment"
 
 
+# ── blis_observe section ────────────────────────────────────────────────────
+
+def test_blis_observe_absent_defaults_to_empty(tmp_path):
+    """When absent, blis_observe loads as an empty dict (fall-through to Pipeline defaults)."""
+    path = _write_manifest(tmp_path, MINIMAL_V3)
+    m = load_manifest(path)
+    assert m["blis_observe"] == {}
+
+
+def test_blis_observe_full_section_loaded(tmp_path):
+    data = {**MINIMAL_V3, "blis_observe": {
+        "maxConcurrency": 5000,
+        "timeout": 3600,
+        "warmupRequests": 25,
+        "prewarmDuration": "30s",
+        "extraArgs": "--foo bar",
+    }}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["blis_observe"] == {
+        "maxConcurrency": 5000,
+        "timeout": 3600,
+        "warmupRequests": 25,
+        "prewarmDuration": "30s",
+        "extraArgs": "--foo bar",
+    }
+
+
+def test_blis_observe_partial_section_loaded(tmp_path):
+    """Partial sections are preserved; absent keys stay absent (no defaulting in the loader)."""
+    data = {**MINIMAL_V3, "blis_observe": {"timeout": 3600}}
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["blis_observe"] == {"timeout": 3600}
+
+
+def test_blis_observe_rejects_non_mapping(tmp_path):
+    data = {**MINIMAL_V3, "blis_observe": "not_a_mapping"}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="blis_observe must be a mapping"):
+        load_manifest(path)
+
+
+def test_blis_observe_rejects_unknown_keys(tmp_path):
+    data = {**MINIMAL_V3, "blis_observe": {"timeout": 3600, "bogus": 1}}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="blis_observe.*unknown.*bogus"):
+        load_manifest(path)
+
+
+@pytest.mark.parametrize("bad_value", [True, [1, 2], {"nested": 1}, None])
+def test_blis_observe_rejects_non_scalar_values(tmp_path, bad_value):
+    data = {**MINIMAL_V3, "blis_observe": {"timeout": bad_value}}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="blis_observe.timeout.*scalar"):
+        load_manifest(path)
+
+
 
 
 # ── component section ─────────────────────────────────────────────────────────

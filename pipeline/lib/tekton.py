@@ -42,6 +42,11 @@ def _apply_workspace_bindings(ws_names: list, bindings: dict) -> list:
     ]
 
 
+_OBSERVE_PARAM_ORDER = (
+    "maxConcurrency", "timeout", "warmupRequests", "prewarmDuration", "extraArgs",
+)
+
+
 def make_pipelinerun_scenario(
     phase: str,
     workload: dict,
@@ -56,6 +61,7 @@ def make_pipelinerun_scenario(
     blis_git_commit: str = "",
     blis_git_repo_url: str = "",
     model: str = "",
+    observe: dict | None = None,
 ) -> dict:
     """Generate a PipelineRun with resolved scenario content."""
     if spec_content is None:
@@ -68,24 +74,32 @@ def make_pipelinerun_scenario(
     wl_spec = {k: v for k, v in workload.items() if k != "workload_name"}
     wl_spec_str = yaml.dump(wl_spec, default_flow_style=True).strip()
 
+    params: list[dict] = [
+        {"name": "experimentId",      "value": run_name},
+        {"name": "runName",           "value": run_name},
+        {"name": "namespace",         "value": namespace},
+        {"name": "phase",             "value": phase},
+        {"name": "scenarioContent",   "value": scenario_content},
+        {"name": "specContent",       "value": spec_content},
+        {"name": "workloadName",      "value": wl_name},
+        {"name": "workloadSpec",      "value": wl_spec_str},
+        {"name": "benchmarkGitRepoUrl", "value": benchmark_git_repo_url},
+        {"name": "benchmarkGitCommit", "value": benchmark_git_commit},
+        {"name": "blisGitRepoUrl",   "value": blis_git_repo_url},
+        {"name": "blisGitCommit",     "value": blis_git_commit},
+        {"name": "model",            "value": model},
+    ]
+    if observe:
+        # Emit only specified keys; omitted ones fall through to Pipeline-level
+        # defaults declared in pipeline/pipeline.yaml. Tekton params are strings.
+        for k in _OBSERVE_PARAM_ORDER:
+            if k in observe:
+                params.append({"name": k, "value": str(observe[k])})
+
     spec: dict = {
         "pipelineRef": {"name": pipeline_name},
         "taskRunTemplate": {"serviceAccountName": "helm-installer"},
-        "params": [
-            {"name": "experimentId",      "value": run_name},
-            {"name": "runName",           "value": run_name},
-            {"name": "namespace",         "value": namespace},
-            {"name": "phase",             "value": phase},
-            {"name": "scenarioContent",   "value": scenario_content},
-            {"name": "specContent",       "value": spec_content},
-            {"name": "workloadName",      "value": wl_name},
-            {"name": "workloadSpec",      "value": wl_spec_str},
-            {"name": "benchmarkGitRepoUrl", "value": benchmark_git_repo_url},
-            {"name": "benchmarkGitCommit", "value": benchmark_git_commit},
-            {"name": "blisGitRepoUrl",   "value": blis_git_repo_url},
-            {"name": "blisGitCommit",     "value": blis_git_commit},
-            {"name": "model",            "value": model},
-        ],
+        "params": params,
         "timeouts": {"pipeline": "4h"},
         "taskRunSpecs": [
             {"pipelineTaskName": name, "timeout": dur}

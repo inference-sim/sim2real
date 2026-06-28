@@ -172,3 +172,74 @@ def test_workspace_bindings():
     ws = pr["spec"]["workspaces"]
     assert ws[0]["name"] == "data-storage"
     assert ws[0]["persistentVolumeClaim"]["claimName"] == "my-pvc"
+
+
+# ── observe dict → PipelineRun params ─────────────────────────────────────────
+
+_OBSERVE_KEYS = ("maxConcurrency", "timeout", "warmupRequests", "prewarmDuration", "extraArgs")
+
+
+def _names(pr):
+    return [p["name"] for p in pr["spec"]["params"]]
+
+
+def test_observe_absent_emits_no_observe_params():
+    """observe=None (or absent) leaves the PipelineRun param list at its base set."""
+    pr = make_pipelinerun_scenario(
+        phase="baseline", workload={"name": "wl"}, run_name="r",
+        namespace="ns", pipeline_name="sim2real-r",
+        scenario_content="{}",
+    )
+    names = _names(pr)
+    for k in _OBSERVE_KEYS:
+        assert k not in names, f"absent observe leaked {k}"
+
+
+def test_observe_empty_dict_emits_no_observe_params():
+    """observe={} (the manifest default when section is absent) emits nothing."""
+    pr = make_pipelinerun_scenario(
+        phase="baseline", workload={"name": "wl"}, run_name="r",
+        namespace="ns", pipeline_name="sim2real-r",
+        scenario_content="{}",
+        observe={},
+    )
+    names = _names(pr)
+    for k in _OBSERVE_KEYS:
+        assert k not in names
+
+
+def test_observe_partial_emits_only_specified_keys():
+    """Omitted keys are left for Tekton to fall through to Pipeline-level defaults."""
+    pr = make_pipelinerun_scenario(
+        phase="baseline", workload={"name": "wl"}, run_name="r",
+        namespace="ns", pipeline_name="sim2real-r",
+        scenario_content="{}",
+        observe={"timeout": 3600, "maxConcurrency": 5000},
+    )
+    params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
+    assert params["timeout"] == "3600"
+    assert params["maxConcurrency"] == "5000"
+    for k in ("warmupRequests", "prewarmDuration", "extraArgs"):
+        assert k not in params
+
+
+def test_observe_full_dict_emits_all_keys_as_strings():
+    """All five keys flow through; values are coerced to strings for Tekton."""
+    pr = make_pipelinerun_scenario(
+        phase="baseline", workload={"name": "wl"}, run_name="r",
+        namespace="ns", pipeline_name="sim2real-r",
+        scenario_content="{}",
+        observe={
+            "maxConcurrency": 5000,
+            "timeout": 3600,
+            "warmupRequests": 25,
+            "prewarmDuration": "30s",
+            "extraArgs": "--foo bar",
+        },
+    )
+    params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
+    assert params["maxConcurrency"] == "5000"
+    assert params["timeout"] == "3600"
+    assert params["warmupRequests"] == "25"
+    assert params["prewarmDuration"] == "30s"
+    assert params["extraArgs"] == "--foo bar"

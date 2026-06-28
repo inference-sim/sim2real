@@ -317,6 +317,13 @@ epp_image:                  # optional
 pipeline:                   # optional — defaults applied if absent
   name: sim2real            # Pipeline resource name referenced in PipelineRuns (default: "sim2real")
   yaml: pipeline/pipeline.yaml  # path relative to repo root (default: "pipeline/pipeline.yaml")
+
+blis_observe:               # optional — per-transfer overrides for blis observe tuning
+  maxConcurrency: 10000     # all keys optional; absent keys fall through to the
+  timeout: 1800             # Pipeline-level defaults in pipeline/pipeline.yaml
+  warmupRequests: 50        # (currently 10000 / 1800 / 50 / 60s / "").
+  prewarmDuration: 60s      # Values are emitted as PipelineRun params to override
+  extraArgs: ""             # the Pipeline defaults — Tekton handles the merge.
 ```
 
 All paths are relative to the repo root and validated at Phase 1.
