@@ -86,7 +86,6 @@ def build_orchestrator_job(
         "metadata": {"name": JOB_NAME, "namespace": namespace},
         "spec": {
             "backoffLimit": 0,
-            "activeDeadlineSeconds": 18000,
             "template": {
                 "spec": {
                     "serviceAccountName": SERVICE_ACCOUNT,
