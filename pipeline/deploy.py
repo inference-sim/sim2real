@@ -1394,9 +1394,10 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
             "cluster.")
         sys.exit(1)
 
-    # ── Pair-level scoping (--only / --workload) ──────────────────────────
+    # ── Pair-level scoping (--only / --workload / --package) ─────────────
     scope_only = getattr(args, "only", None)
     scope_workload = getattr(args, "workload", None)
+    scope_package = _parse_list(getattr(args, "package", None))
     scoped = scope_only is not None or scope_workload is not None
 
     if scoped and not progress:
@@ -1404,13 +1405,19 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
         sys.exit(1)
 
     if scoped and progress:
-        # Build a lightweight args namespace for _resolve_scope with only
-        # pair-level filters (--only, --workload).  Collect's --package is
-        # a phase-level filter (nargs="+") and must NOT be mixed in.
+        # Build a lightweight args namespace for _resolve_scope. --package
+        # acts as a pair-scope filter (cumulative-filter rule) — same as
+        # every other deploy.py subcommand — unless the user passed the
+        # synthetic 'experiment' value, which doesn't name a pair package
+        # and so cannot narrow the pair set. In that case pass None and
+        # let the phase-scope logic below expand 'experiment' to every
+        # package directory of the scoped pairs.
+        _pair_scope_pkg = None if scope_package == ["experiment"] else scope_package
+
         class _ScopeArgs:
             only = scope_only
             workload = scope_workload
-            package = None
+            package = _pair_scope_pkg
             status = None
 
         in_scope = _resolve_scope(progress, _ScopeArgs())
@@ -1432,7 +1439,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
         if not scoped_phases:
             warn("No done phases for scoped pairs.")
             phases_to_collect: list[str] = []
-        elif (pkg_filter := _parse_list(args.package)):
+        elif (pkg_filter := scope_package):
             valid = set(scoped_phases) | {"experiment"}
             unknown = set(pkg_filter) - valid
             if unknown:

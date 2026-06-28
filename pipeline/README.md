@@ -202,10 +202,10 @@ Per phase, the resolved llm-d-benchmark plan YAMLs are also pulled into `workspa
 |------|-------------|
 | `--only PAIR…` | Scope to specific pair keys — narrows both workload and package (comma or space-separated, `wl-` prefix optional; takes precedence over `--workload`) |
 | `--workload NAME…` | Scope to pairs matching these workloads (comma or space-separated) |
-| `--package NAME…` | Collect only these packages (comma or space-separated, phase-level filter) |
+| `--package NAME…` | Scope to pairs matching these packages (comma or space-separated). Pass the synthetic value `experiment` to collect every package directory of the scoped pairs. |
 | `--skip-logs` | Skip vLLM and EPP log files, collect only traces |
 
-When `--only` or `--workload` is given, only matching workload subdirectories are pulled from the PVC (instead of entire phase directories). Multiple values within a flag use OR (union): `--workload X Y` matches pairs for workload X or Y. Different flags compose as AND: `--workload X Y --package baseline` pulls workloads X and Y from the baseline phase only. Requires progress data to resolve pairs.
+When `--only` or `--workload` is given, only matching workload subdirectories are pulled from the PVC (instead of entire phase directories). Multiple values within a flag use OR (union): `--workload X Y` matches pairs for workload X or Y. Different flags compose as AND: `--workload X Y --package baseline` scopes to baseline pairs whose workload is X or Y, and pulls those workloads from the baseline phase only — pairs of other packages are not in scope and do not trigger "skipping" warnings. The synthetic `--package experiment` value is the carve-out: it does not narrow the pair set, so it preserves today's "every package of the scoped pairs" behavior. Requires progress data to resolve pairs.
 
 **`deploy.py stop`** — deletes the `sim2real-orchestrator` Kubernetes Job (with cascading pod deletion) in the primary namespace. Only meaningful when the orchestrator runs as an in-cluster Job. Pair state is left as-is. If no remote orchestrator Job exists, prints a message and returns. Use `reset` separately to clear failed/stalled pair state.
 
