@@ -349,27 +349,33 @@ Step 5c.2 (priority bands recognized) is a downstream symptom check — it sees 
 
 **Conditional**: run only if `<real>/generated/baseline_config.yaml` declares at least one `kind: InferenceObjective` in `extraObjects`. Otherwise SKIP with note "no objectives configured."
 
-**Verbosity prerequisite.** Both checks below depend on log lines that are gated on EPP verbosity. The llm-d-router defines `VERBOSE = 3` and `DEBUG = 4` in `pkg/common/observability/logging/const.go`; an EPP deployed at the default Info level (`V=0`) will emit neither. Before relying on the absence of the failure string in Check 1, confirm VERBOSE-level logging is active by greping `epp_logs/*.log` for any line containing `"objectiveKey"` (added at `director.go:275` and emitted at `V(logutil.DEBUG)` further down). If no such line appears, treat both checks as INAPPLICABLE and surface that the EPP must be redeployed with `-v=4` (or at minimum `-v=3` for Check 1 alone). Otherwise the absence of the failure string is indistinguishable from "logging too quiet to detect failure."
+**Verbosity prerequisite.** This check reads `objectiveKey` and `priority` fields from `Request handled` log lines, attached at `director.go:275` (`logger.WithValues("objectiveKey", ..., "priority", ...)`). These fields are present whenever the EPP is at `-v=3` (`V(logutil.VERBOSE)`) or higher. Before evaluating, grep `epp_logs/*.log` for any line containing `"objectiveKey"`. If absent, this check is INAPPLICABLE — surface that the EPP must be redeployed with `-v=3` or higher.
 
-**Check 1 — Negative signal absent.** Grep all `epp_logs/*.log` for the literal string:
+**Why a positive resolution check rather than a negative-string grep.** A previous version of this check greped for `"No associated InferenceObjective found, using default"` and FAILed on any occurrence. That doesn't work in production-shaped deployments: k8s readiness/liveness probes from the gateway / Service hit the EPP without the `x-llm-d-objective` header by design, so they always trigger that fallback path. The grep can't distinguish that benign infrastructure traffic from a real workload-resolution bug, and it produces FAILs on every run. The positive check below tests what the bug-grep was *meant* to detect — that workload requests resolve to their configured objectives — without false-positiving on infrastructure traffic.
 
-```
-"No associated InferenceObjective found, using default"
-```
+**Inputs.** Parse every `Request handled` line in `epp_logs/*.log` and extract `(objectiveKey, priority)`. Read the configured set of `(name, spec.priority)` pairs from `<real>/generated/baseline_config.yaml` `extraObjects` filtered to `kind: InferenceObjective`. Read `trace_data.csv` row count per cell.
 
-This message is emitted at `pkg/epp/requestcontrol/director.go:219` (in the llm-d-router source) at `V(logutil.VERBOSE)` (requires `-v=3` or higher) whenever `datastore.ObjectiveGet(reqCtx.ObjectiveKey)` returns nil — i.e., the InferenceObjective CR isn't loaded into the API group the EPP watches, or the request's `objectiveKey` doesn't match any loaded objective name.
+**Five criteria — all must PASS for the check to PASS:**
 
-- PASS: 0 occurrences across all per-pod EPP logs **and** the verbosity prerequisite above is met (some `"objectiveKey"` line is present).
-- FAIL: any occurrence. Emit: *"InferenceObjective wiring broken (apiVersion or poolRef mismatch) — see #332-class issues. Skipping downstream signal/policy analysis."*
-- INAPPLICABLE: 0 occurrences but no `"objectiveKey"` lines anywhere in the logs — verbosity too low to evaluate.
+1. **Coverage.** Every configured `InferenceObjective` name appears at least once in the `Request handled` lines, resolving to its configured `spec.priority`. *Every configured objective receives traffic.*
+2. **Determinism.** Each distinct `objectiveKey` value resolves to a singleton `priority`. No `objectiveKey` fans out to multiple priorities. *No mis-mapping mid-run.*
+3. **Workload resolution rate.** `count(Request handled lines with objectiveKey != "")` ≥ `count(rows in trace_data.csv)` per cell. *Every workload request carried the header and resolved to a configured objective.*
+4. **Priority value set.** The set of `priority` values seen across all `Request handled` lines is a subset of `{configured priorities} ∪ {0}`. The 0 is the documented `defaultPriority` fallback at `director.go:222`. *No stray priorities, e.g. from a misloaded CR.*
+5. **Empty-key budget.** `count(objectiveKey == "")` is bounded — explainable as warmup + plausible probe rate × runtime. The fallback path is reserved for infrastructure traffic, not workload. A reasonable default budget: `≤ 5%` of total handled, or `≤ harness warmup_requests + 60 × runtime_seconds` (k8s default probe cadence ~1 Hz per replica). *The default-objective path is for probes, not workload.*
 
-**Check 2 — Positive signal present.** Grep `epp_logs/*.log` for the message `"LLM request assembled"`, emitted at `director.go:277` at `V(logutil.DEBUG)` (requires `-v=4` or higher). Each such line carries the `priority` field set from the resolved `infObjective.Spec.Priority` (attached via `logger.WithValues(...)` at `director.go:275`). For each `spec.priority` value declared in the configured InferenceObjectives, expect at least one matching log line. If only `"priority":0` (the `defaultPriority` fallback at `director.go:222`) appears, the request flow never associated configured priorities with requests.
+**Verdicts:**
+- PASS: all five criteria pass for every cell.
+- FAIL: any criterion fails. Common failure modes:
+  - Coverage fails → InferenceObjective CR not loaded by the EPP (apiVersion / poolRef mismatch — `#332`-class).
+  - Determinism fails → mid-run reload assigning the same `objectiveKey` to a different priority — config drift.
+  - Workload resolution rate < trace count → workload requests landing in the empty-key bucket (header not propagating through gateway, or CR not yet loaded at workload start).
+  - Priority value set has extras → stray priority from a misloaded CR.
+  - Empty-key over budget → either probe traffic spike or workload requests slipping into the fallback path; cross-reference with §5b distribution to disambiguate.
+- INAPPLICABLE: no `objectiveKey` field in any log line — EPP verbosity below `-v=3`.
 
-- PASS: every configured priority value appears at least once.
-- FAIL: any configured priority value missing. (Less common than Check 1; usually means objectives loaded but request headers don't match objective names.)
-- INAPPLICABLE: no `"LLM request assembled"` lines at all — EPP verbosity is below `-v=4`.
+**Show:** per-cell table — `cell | configured objectives | resolved (key→priority) | trace rows | workload-resolved | empty-key | verdict`.
 
-**Show:** table per pod — `failure-string count | distinct priority values seen | verdict`.
+**Trend diagnostic (secondary, do not gate on this).** The literal-string `"No associated InferenceObjective found, using default"` count is still useful as a **cross-run regression** signal. A jump in this count between two runs with the same workload shape and probe cadence indicates regression even if the absolute count is non-zero in both. Report as `delta vs prior run` if a prior run is available; do not pass/fail on it.
 
 **5d. Prefix Hit Ratio**
 If `enable_prefix_caching=True`, grep server logs for prefix cache hit metrics.
