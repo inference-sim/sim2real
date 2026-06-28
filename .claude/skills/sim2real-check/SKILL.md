@@ -93,16 +93,20 @@ When both exist, note any differences (especially `aggregate_rate`) and use the 
 - Show: table with each class — expected %, actual %, difference
 
 **1c. Input Token Distribution**
-- From sim: `input_distribution` params (mean, std_dev, min, max)
-- From real: compute mean, stdev, min, max of `input_tokens` column
-- Tolerance: mean within 5%, stdev within 10%
-- Show: table with expected vs actual for mean, stdev, min, max
+- From sim: `input_distribution` params (e.g. for lognormal: mu, sigma, min, max).
+- From real: compute mean, stdev, min, max of `input_tokens` column.
+- **Expected-moment derivation (critical):** use sample-then-clamp Monte Carlo matching the BLIS sampler semantics (`inference-sim/sim/workload/distribution.go`). For each draw: sample from the configured distribution → round to int → clamp to `[min, max]` when bounds are set → floor at 1. Compute the expected mean and stdev as moments of the clamped samples (N ≥ 100k for stable means).
+  - For lognormal (`LognormalSampler.Sample` at `distribution.go:105`), the closed-form `exp(mu + sigma²/2)` is correct ONLY when no clamp bounds are set. When `min > 0` (the common case — e.g. `code_generation` output at `mu=5.2711, sigma=1.2498, min=50`), a non-trivial below-min mass is piled at `min` by clamping, shifting the mean materially below the closed-form value.
+  - Do not use rejection-sampling truncation (resample if outside `[min, max]`) for expected-moment computation. BLIS clamps; rejection produces a different distribution and a measurably different mean.
+- Tolerance: mean within 5%, stdev within 10%.
+- Show: table with expected vs actual for mean, stdev, min, max. Note the expected-mean derivation (`clamped MC` vs `closed-form`) in the table caption so the reader knows which path was used.
 
 **1d. Output Token Distribution**
-- From sim: `output_distribution` params
-- From real: compute from `output_tokens` column
-- Same tolerances as input
-- Show: same table format as 1c
+- From sim: `output_distribution` params.
+- From real: compute from `output_tokens` column.
+- Use the same sample-then-clamp expected-moment derivation as 1c.
+- Same tolerances as 1c.
+- Show: same table format as 1c.
 
 **1e. Prefix Tokens**
 - From sim: check if any client has `prefix_group` or prefix config
@@ -115,11 +119,15 @@ When both exist, note any differences (especially `aggregate_rate`) and use the 
 - Show: expected vs actual streaming fraction
 
 **1g. Burstiness / Arrival Pattern**
-- From sim: `arrival.process` (poisson, constant, etc.)
-- From real: compute coefficient of variation (CV) of inter-arrival times
-  - Poisson: CV should be ~1.0 (0.8-1.2 acceptable)
-  - Constant: CV should be ~0 (<0.1)
-- Show: expected arrival process, measured CV, interpretation
+- From sim: each client's `arrival.process` (poisson, constant, etc.) — every client carries its own spec.
+- From real: compute coefficient of variation (CV) of inter-arrival times **per `client_id`**, not on the merged stream.
+  - Group `trace_data.csv` by `client_id`. For each group: sort by `arrival_time_us`, take consecutive diffs, compute `CV = stdev / mean`.
+  - Verdict each client against its own configured `arrival.process`:
+    - Poisson: CV ~1.0 (0.8-1.2 acceptable)
+    - Constant: CV ~0 (<0.1)
+- **Why per-client.** Each client's IAT sampler runs independently (`inference-sim/sim/workload/arrival.go`); a `constant` client's per-client CV is 0 exactly. The aggregate stream is `concat(per_client_arrivals).sort_by(arrival_time)` (`sim/workload/generator.go`), so when two `constant` clients run at different rates the merged CV is whatever the deterministic superposition produces (e.g. ~0.5 for streams at 1.2 + 2.8 req/s). Pure Poisson superposition is approached only as N → ∞ (Palm-Khintchine). Gating on aggregate CV produces FAILs on workloads where every client is a perfect metronome.
+- **Aggregate CV (diagnostic only).** Also compute the CV of the fully merged stream and report it for context, but do not pass/fail on it. Label it "merged-stream CV — informational; does not gate verdict."
+- Show: per-`client_id` table — `client_id | configured process | measured CV | verdict` — plus a single-row "merged-stream CV" diagnostic below.
 
 ---
 
