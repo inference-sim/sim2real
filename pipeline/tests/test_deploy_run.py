@@ -296,11 +296,11 @@ def test_fmt_duration_invalid_returns_dash(value):
 def test_fmt_duration_width_budget_holds():
     """Every formatted duration in the realistic range fits in 7 chars.
 
-    The realistic upper bound is set by `activeDeadlineSeconds: 18000` (5h)
-    on the orchestrator Job, multiplied by retries — at most a handful of
-    hours, never near a day. The 7-char column budget holds comfortably for
-    anything operators will actually see; values past ~999 days would
-    overflow but cannot occur in practice."""
+    Orchestrator wall time is bounded by per-PipelineRun timeouts
+    (`timeout_hours` × `max_retries`) summed across pairs — at most a
+    handful of days for any practical sweep. The 7-char column budget
+    holds comfortably for anything operators will actually see; values
+    past ~999 days would overflow but cannot occur in practice."""
     from pipeline.deploy import _fmt_duration
     for s in (0, 59, 60, 3599, 3600, 86399, 86400, 86400 * 30):
         assert len(_fmt_duration(s)) <= 7, f"_fmt_duration({s})={_fmt_duration(s)!r} exceeds width"

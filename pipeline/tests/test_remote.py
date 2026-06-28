@@ -249,9 +249,10 @@ def test_job_backoff_limit_zero():
     assert job["spec"]["backoffLimit"] == 0
 
 
-def test_job_active_deadline():
+def test_job_has_no_active_deadline():
+    """No Job-level wall-clock deadline; the orchestrator bounds its own runtime."""
     job = _build_job()
-    assert job["spec"]["activeDeadlineSeconds"] == 18000
+    assert "activeDeadlineSeconds" not in job["spec"]
 
 
 # --- defaults.yaml bundling tests ---
