@@ -237,3 +237,29 @@ def _validate_v3_fields(data: dict) -> None:
         raise ManifestError(
             f"pipeline.yaml must be a relative path, got: {pipeline['yaml']}"
         )
+
+    # blis_observe (optional): per-transfer overrides for the blis-observe
+    # tuning params the sim2real Pipeline accepts (see pipeline/pipeline.yaml).
+    # Absent or partial → omitted keys fall through to Pipeline-level defaults.
+    observe_raw = data.get("blis_observe")
+    if observe_raw is None:
+        data["blis_observe"] = {}
+    elif not isinstance(observe_raw, dict):
+        raise ManifestError("blis_observe must be a mapping")
+    else:
+        _valid_observe_keys = {
+            "maxConcurrency", "timeout", "warmupRequests",
+            "prewarmDuration", "extraArgs",
+        }
+        unknown_observe = set(observe_raw.keys()) - _valid_observe_keys
+        if unknown_observe:
+            raise ManifestError(
+                f"blis_observe contains unknown keys: {sorted(unknown_observe)}. "
+                f"Valid keys: {sorted(_valid_observe_keys)}"
+            )
+        for k, v in observe_raw.items():
+            if not isinstance(v, (str, int, float)) or isinstance(v, bool):
+                raise ManifestError(
+                    f"blis_observe.{k} must be a scalar (string or number)"
+                )
+        data["blis_observe"] = dict(observe_raw)

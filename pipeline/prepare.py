@@ -696,6 +696,8 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     scenarios_list = first_baseline.resolved.get("scenario", [])
     model_name = scenarios_list[0].get("model", {}).get("name", "") if scenarios_list else ""
 
+    observe = manifest.get("blis_observe") or {}
+
     for pkg in packages:
         scenario_content = yaml.dump(pkg.resolved, default_flow_style=False, allow_unicode=True)
         for wl in workloads:
@@ -715,6 +717,7 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
                 blis_git_commit=blis_commit,
                 blis_git_repo_url=blis_repo_url,
                 model=model_name,
+                observe=observe,
             )
             pr_path = cluster_dir / f"pipelinerun-{safe_wl}-{pkg.name}.yaml"
             pr_path.write_text(yaml.dump(pr, default_flow_style=False, allow_unicode=True))
