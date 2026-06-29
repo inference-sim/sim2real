@@ -391,6 +391,25 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
 
 # ── PipelineRun helpers ──────────────────────────────────────────────────────
 
+# Tekton PipelineRun `.status.conditions[0].reason` values that mean the run is
+# fully done — no further state transitions, finally tasks (including
+# `llmdbenchmark-teardown`) have completed.  `CancelledRunningFinally`,
+# `PipelineRunStopping`, and `PipelineRunStoppingTimeout` are explicitly
+# NOT terminal: they're transient states where finally is still executing,
+# and deleting the PipelineRun while it's in one of those states force-kills
+# the in-flight teardown and orphans its helm releases (issue #412).
+_TERMINAL_PR_REASONS = frozenset({
+    "Cancelled",
+    "PipelineRunCancelled",        # older Tekton versions
+    "Succeeded",
+    "Completed",
+    "Failed",
+    "PipelineRunTimeout",
+    "CreateRunFailed",
+    "Unknown",                     # PR not found → also terminal for our wait
+})
+
+
 def _cancel_and_delete_pipelinerun(pr_name: str, namespace: str) -> bool:
     """If a PipelineRun with the given name exists, cancel it, wait for it to
     finish cancelling, then delete it so a fresh one can be submitted.
@@ -427,10 +446,15 @@ def _cancel_and_delete_pipelinerun(pr_name: str, namespace: str) -> bool:
             warn(f"Failed to patch PipelineRun {pr_name!r} for cancellation"
                  + (f": {detail}" if detail else ""))
         else:
+            # Wait for the PipelineRun to reach a TERMINAL reason — not just
+            # "anything other than Running".  `CancelledRunningFinally` is the
+            # transient state where the finally block (which runs helm uninstall
+            # via llmdbenchmark-teardown) is still executing; breaking on it and
+            # deleting the PR kills the teardown mid-flight.  See issue #412.
             for _ in range(40):  # wait up to 120 s
                 time.sleep(3)
                 current = _check_pipelinerun_status(pr_name, namespace)
-                if current not in ("Running", "Started"):
+                if current in _TERMINAL_PR_REASONS:
                     info(f"PipelineRun {pr_name!r} cancelled (now: {current})")
                     break
             else:
