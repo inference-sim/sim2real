@@ -593,6 +593,96 @@ def test_run_remote_passes_scoping_flags(monkeypatch, tmp_path):
     assert "wl-smoke" in container_args
 
 
+# ── Pre-flight filter validation merges discovered (#414) ──────────────────
+
+def _write_pr_yaml(cluster_dir, stem, workload, package="baseline"):
+    (cluster_dir / f"pipelinerun-{stem}.yaml").write_text(
+        f"metadata:\n  name: pipelinerun-{stem}\n"
+        f"spec:\n  params:\n"
+        f"  - name: workloadName\n    value: {workload}\n"
+        f"  - name: phase\n    value: {package}\n"
+    )
+
+
+def _existing_progress_entry(workload, package="baseline", status="done"):
+    return {
+        "workload": workload, "package": package, "status": status,
+        "namespace": None, "completed_namespace": None,
+        "retries": 0, "pending_stalls": 0,
+        "pending_since": None, "running_since": None, "last_duration": None,
+    }
+
+
+def test_run_remote_preflight_accepts_newly_discovered_workload(monkeypatch, tmp_path):
+    """Regression for #414. A workload YAML in cluster/ but absent from the
+    progress ConfigMap must pass pre-flight validation — mirrors the
+    init-loop merge _cmd_run does in-cluster."""
+    from pipeline.lib.progress import ConfigMapProgressStore
+    run_dir = _setup_run_dir(tmp_path)
+    cluster_dir = run_dir / "cluster"
+    # Two pair_keys in cluster/: one already known to progress, one newly added.
+    _write_pr_yaml(cluster_dir, "existing-baseline", workload="wl-existing")
+    _write_pr_yaml(cluster_dir, "newwl-baseline", workload="wl-newwl")
+    # Progress only knows about wl-existing — wl-newwl is the newly-added one.
+    monkeypatch.setattr(
+        ConfigMapProgressStore, "load",
+        lambda self: {"wl-existing-baseline": _existing_progress_entry("wl-existing")},
+    )
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
+    monkeypatch.setattr(mod, "_wait_for_job_pod", lambda *a, **kw: None)
+
+    apply_inputs = []
+
+    def fake_subprocess_run(cmd, *, input=None, text=True, check=False, capture_output=True, **kw):
+        if input:
+            apply_inputs.append(json.loads(input))
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    with patch("subprocess.run", side_effect=fake_subprocess_run):
+        args = _make_run_args(remote=True, skip_build=True, workload="wl-newwl")
+        setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
+        # Must NOT SystemExit at pre-flight.
+        mod._cmd_run_remote(args, run_dir, setup_config)
+
+    # ConfigMap + Job were submitted (we got past pre-flight + image build).
+    assert len(apply_inputs) == 2
+    assert apply_inputs[0]["kind"] == "ConfigMap"
+    assert apply_inputs[1]["kind"] == "Job"
+    # And --workload was forwarded to the in-cluster orchestrator unchanged.
+    container_args = apply_inputs[1]["spec"]["template"]["spec"]["containers"][0]["args"]
+    assert "--workload" in container_args
+    assert "wl-newwl" in container_args
+
+
+def test_run_remote_preflight_still_rejects_truly_unknown_workload(monkeypatch, tmp_path, capsys):
+    """A --workload value that exists neither in progress nor in cluster/ must
+    still be rejected. The #414 fix loosens validation only for keys present
+    in cluster/."""
+    from pipeline.lib.progress import ConfigMapProgressStore
+    run_dir = _setup_run_dir(tmp_path)
+    cluster_dir = run_dir / "cluster"
+    _write_pr_yaml(cluster_dir, "existing-baseline", workload="wl-existing")
+    monkeypatch.setattr(
+        ConfigMapProgressStore, "load",
+        lambda self: {"wl-existing-baseline": _existing_progress_entry("wl-existing")},
+    )
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
+
+    args = _make_run_args(remote=True, skip_build=True, workload="wl-bogus")
+    setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
+
+    with pytest.raises(SystemExit) as exc_info:
+        mod._cmd_run_remote(args, run_dir, setup_config)
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "wl-bogus" in err
+    assert "unrecognized" in err.lower()
+
+
 def test_run_remote_no_image_exits(monkeypatch, tmp_path):
     run_dir = _setup_run_dir(tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
