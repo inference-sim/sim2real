@@ -3170,7 +3170,20 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
             warn(f"ConfigMap unreachable — skipping pre-flight filter "
                  f"validation: {exc}")
             progress = None
-        if progress:
+        if progress is not None:
+            # Mirror _cmd_run's init loop locally so the pre-flight validator
+            # sees pair_keys that prepare.py added since the last run. The
+            # in-cluster orchestrator independently does its own init from
+            # the ConfigMap and persists; only `workload` and `package` need
+            # to be populated here — those are the fields _apply_run_filters
+            # reads when building valid_workloads / valid_packages (#414).
+            for key, meta in discovered.items():
+                if key not in progress:
+                    progress[key] = {
+                        "workload": meta["workload"],
+                        "package":  meta["package"],
+                        "status":   "pending",
+                    }
             _resolve_scope(progress, args)
 
     _cmd_build(run_dir, namespace=namespace, skip_build=args.skip_build)
