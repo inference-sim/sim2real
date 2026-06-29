@@ -607,3 +607,59 @@ class TestStepRbacApply:
         assert exc.value.code == 1
         # No kubectl apply should have been issued.
         assert len(self._apply_calls(mock_run)) == 0
+
+
+class TestSimRealRunnerNsRoleContent:
+    """Content assertions on pipeline/rbac/sim2real-runner-ns.yaml.
+
+    The orchestrator SA needs every rule in this Role to be present in every
+    slot namespace. step_rbac applies the file unmodified (just envsubst), so
+    the rules here ARE the orchestrator's namespaced permission set. If a rule
+    silently disappears, the orchestrator's pod-health polling 403s in slot
+    namespaces — see issue #410 for the failure shape.
+    """
+
+    def _load_role_rules(self):
+        import yaml
+        from pipeline.setup import REPO_ROOT
+        path = REPO_ROOT / "pipeline" / "rbac" / "sim2real-runner-ns.yaml"
+        docs = list(yaml.safe_load_all(path.read_text()))
+        role = next(d for d in docs if d.get("kind") == "Role")
+        return role["rules"]
+
+    def _rule_for(self, rules, api_group, resource):
+        """Return the first rule covering (api_group, resource), or None."""
+        for r in rules:
+            if api_group in r.get("apiGroups", []) and resource in r.get("resources", []):
+                return r
+        return None
+
+    def test_pipelineruns_rule_present(self):
+        """Tekton PipelineRun CRUD — the orchestrator's primary verb set."""
+        rule = self._rule_for(self._load_role_rules(), "tekton.dev", "pipelineruns")
+        assert rule is not None
+        assert set(rule["verbs"]) >= {"create", "get", "watch", "list", "delete", "patch"}
+
+    def test_pvc_secret_get_rule_present(self):
+        """Slot-readiness checks read PVC bind state and HF secret presence."""
+        rules = self._load_role_rules()
+        for resource in ("persistentvolumeclaims", "secrets"):
+            rule = self._rule_for(rules, "", resource)
+            assert rule is not None, f"missing rule for core/{resource}"
+            assert "get" in rule["verbs"]
+
+    def test_pods_rule_present(self):
+        """Issue #410: pods get/list/watch is what _check_pod_health and
+        _check_pending_pods exercise on every poll tick; without it, the
+        orchestrator's health triage silently degrades to no-ops."""
+        rule = self._rule_for(self._load_role_rules(), "", "pods")
+        assert rule is not None, "pods rule missing — orchestrator pod health checks will 403"
+        assert set(rule["verbs"]) >= {"get", "list", "watch"}
+
+    def test_events_rule_present(self):
+        """Issue #410: events get/list feeds get_events(), which provides the
+        warning-event context for pod_pending classification (FailedScheduling,
+        ImagePullBackOff, etc.)."""
+        rule = self._rule_for(self._load_role_rules(), "", "events")
+        assert rule is not None, "events rule missing — pending-pod triage loses event context"
+        assert set(rule["verbs"]) >= {"get", "list"}

@@ -1,5 +1,14 @@
-# Additional namespace-scoped permissions for the sim2real-runner SA:
-# - PVC and Secret read access for orchestrator slot health checks.
+# Namespace-scoped permissions the orchestrator SA needs in each slot ns:
+# - pipelineruns (tekton.dev): create/manage workload PipelineRuns.
+# - persistentvolumeclaims, secrets: slot-readiness checks.
+# - pods: per-PipelineRun pending-pod triage (deploy.py _check_pending_pods)
+#   and broader non-Tekton pod health sweeps (lib/health.py:get_all_pods).
+# - events: triage context for pending/failed pods
+#   (lib/health.py:get_events) — feeds the pod_pending classifier.
+# Granted here rather than via the cluster bundle so the orchestrator
+# works when the operator running setup.py lacks cluster-RBAC privileges
+# (sim2real-runner-cluster.yaml is best-effort and silently skipped in
+# that case — issue #410).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -12,6 +21,12 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims", "secrets"]
     verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
