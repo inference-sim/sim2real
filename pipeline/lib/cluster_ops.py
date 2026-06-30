@@ -409,7 +409,13 @@ def _step_rbac(
             if required:
                 return ("failed", f"{yaml_path} not found (submodule init?)")
             continue
-        subst = _envsubst(yaml_path.read_text(), env)
+        try:
+            text = yaml_path.read_text()
+        except OSError as e:
+            return ("failed", f"{yaml_path.name}: read failed: {e}")
+        except UnicodeDecodeError as e:
+            return ("failed", f"{yaml_path.name}: not UTF-8 ({e.reason})")
+        subst = _envsubst(text, env)
         proc = _run(
             ["kubectl", "apply", "-f", "-"],
             input=subst, check=False, capture=True,
@@ -587,7 +593,11 @@ def _step_tekton(
         tekton_dir = _TEKTONC_DIR / "tekton" / subdir
         if not tekton_dir.exists():
             continue
-        for yaml_file in sorted(tekton_dir.glob("*.yaml")):
+        try:
+            yaml_files = sorted(tekton_dir.glob("*.yaml"))
+        except OSError as e:
+            return ("failed", f"cannot list {tekton_dir}: {e}")
+        for yaml_file in yaml_files:
             proc = _run(
                 ["kubectl", "apply", "-f", str(yaml_file), f"-n={namespace}"],
                 check=False, capture=True,

@@ -873,6 +873,61 @@ class TestProvisionNamespace:
         failed_steps = [s for s, _ in result.steps_failed]
         assert "rbac" in failed_steps
 
+    def test_rbac_read_text_oserror_routed_to_failed(self, fake_run, monkeypatch):
+        # The "no exception escapes provision_namespace" invariant requires
+        # that an OSError on read_text() lands in steps_failed, not propagates.
+        _tekton_yamls_present(monkeypatch)
+        fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=0))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+
+        def boom_read(self, *_a, **_kw):
+            raise PermissionError(13, "Permission denied", str(self))
+        monkeypatch.setattr(cluster_ops.Path, "read_text", boom_read)
+
+        result = cluster_ops.provision_namespace(
+            "ns-a",
+            _baseline_cluster_config(),
+            secret_values={
+                "hf_token": "v", "github_token": "v",
+                "registry_creds": {"server": "s", "user": "u", "token": "t"},
+            },
+        )
+        failed = dict(result.steps_failed)
+        assert "rbac" in failed
+        assert "read failed" in failed["rbac"]
+        # The dispatch loop kept going — every sub-step is in exactly one list.
+        all_attempted = (
+            set(result.steps_ok)
+            | {s for s, _ in result.steps_skipped}
+            | {s for s, _ in result.steps_failed}
+        )
+        assert all_attempted == set(cluster_ops._PROVISION_STEPS)
+
+    def test_tekton_glob_oserror_routed_to_failed(self, fake_run, monkeypatch):
+        # PermissionError on Path.glob (e.g. submodule dir the operator can't
+        # descend into) must surface as steps_failed, not raise out.
+        fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=0))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+
+        monkeypatch.setattr(cluster_ops.Path, "exists", lambda self: True)
+        monkeypatch.setattr(cluster_ops.Path, "read_text", lambda self: "# fake\n")
+
+        def boom_glob(self, pattern):
+            raise PermissionError(13, "Permission denied", str(self))
+        monkeypatch.setattr(cluster_ops.Path, "glob", boom_glob)
+
+        result = cluster_ops.provision_namespace(
+            "ns-a",
+            _baseline_cluster_config(),
+            secret_values={
+                "hf_token": "v", "github_token": "v",
+                "registry_creds": {"server": "s", "user": "u", "token": "t"},
+            },
+        )
+        failed = dict(result.steps_failed)
+        assert "tekton" in failed
+        assert "cannot list" in failed["tekton"]
+
     def test_pvc_existing_skipped(self, fake_run, monkeypatch):
         _tekton_yamls_present(monkeypatch)
         fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=0))
