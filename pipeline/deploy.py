@@ -2387,7 +2387,7 @@ def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
 
     namespaces = cluster_config.get("namespaces") or []
     if not namespaces or not namespaces[0]:
-        err("No namespaces configured. Run setup.py with --namespaces."); sys.exit(1)
+        err("No namespaces configured. Run cluster.py provision with --namespaces."); sys.exit(1)
 
     _cmd_build(run_dir, namespace=namespaces[0], skip_build=args.skip_build)
 
@@ -3160,7 +3160,7 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict,
     namespaces = cluster_config.get("namespaces") or []
     namespace = namespaces[0] if namespaces else ""
     if not namespace:
-        err("No namespaces configured. Run setup.py with --namespaces.")
+        err("No namespaces configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
 
     orchestrator_image = setup_config.get("orchestrator_image")
@@ -3429,7 +3429,7 @@ def main():
     if cmd == "build":
         namespaces = cluster_config.get("namespaces") or []
         if not namespaces or not namespaces[0]:
-            err("No namespaces configured. Run setup.py with --namespaces."); sys.exit(1)
+            err("No namespaces configured. Run cluster.py provision with --namespaces."); sys.exit(1)
         _cmd_build(run_dir, namespace=namespaces[0],
                    skip_build=getattr(args, "skip_build", False))
         return
