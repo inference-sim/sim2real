@@ -28,13 +28,15 @@ The experiment repo must contain:
 - `algorithm/` and `workloads/` directories as referenced in `transfer.yaml`
 - `workspace/` in `.gitignore`
 
-`pipeline/pipeline.yaml` is the static Tekton Pipeline definition (applied by `setup.py`; Phase 4 generates PipelineRuns that reference it).
+`pipeline/pipeline.yaml` is the static Tekton Pipeline definition (applied by `cluster.py provision`; Phase 4 generates PipelineRuns that reference it).
 
 ---
 
 ## setup.py
 
-One-time, idempotent cluster bootstrap. Safe to re-run.
+Workspace config writer. Writes `workspace/setup_config.json` and `workspace/runs/<run>/run_metadata.json` with operator-side fields (registry, repo_name, current_run, orchestrator_image, pipeline_yaml, sim2real_root). Idempotent.
+
+Cluster-side provisioning (namespaces, RBAC, secrets, PVCs, Tekton tasks, Pipeline definition) lives in `cluster.py provision` and writes a separate `workspace/clusters/<cluster_id>/cluster_config.json`. Run `cluster.py provision` before `prepare.py` / `deploy.py`.
 
 ```bash
 python pipeline/setup.py [flags]
@@ -42,30 +44,22 @@ python pipeline/setup.py [flags]
 
 | Flag | Env var | Default |
 |------|---------|---------|
-| `--namespace NS` | `NAMESPACE` | interactive |
-| `--namespaces NS1,NS2,...` | — | — |
-| `--hf-token TOKEN` | `HF_TOKEN` | interactive |
-| `--github-token TOKEN` | `GITHUB_TOKEN` | — |
 | `--registry REG` | — | interactive |
-| `--registry-user USER` | `REGISTRY_USER` | interactive |
-| `--registry-token TOKEN` | `REGISTRY_TOKEN` | interactive |
+| `--repo-name NAME` | — | `llm-d-inference-scheduler` |
+| `--registry-user USER` | `REGISTRY_USER` | interactive (with `--test-push`) |
+| `--registry-token TOKEN` | `REGISTRY_TOKEN` | interactive (with `--test-push`) |
 | `--run NAME` | — | `sim2real-YYYY-MM-DD` |
-| `--storage-class SC` | — | cluster default |
-| `--no-cluster` | — | false |
-| `--pipeline-yaml PATH` | — | `pipeline/pipeline.yaml` |
-| `--redeploy-tasks` | — | false |
+| `--experiment-root PATH` | — | current working directory |
+| `--pipeline-yaml PATH` | — | `<repo-root>/pipeline/pipeline.yaml` |
+| `--orchestrator-image IMAGE` | `ORCHESTRATOR_IMAGE` | `ghcr.io/inference-sim/sim2real/orchestrator:latest` |
+| `--test-push` | — | false |
+| `--test-push-tag TAG` | — | `_test-image-push` |
 
-**`--namespaces NS1,NS2,...`** — provision multiple namespace slots for parallel pool execution. Each slot is bootstrapped identically to a single `--namespace`.
+**`--pipeline-yaml PATH`** — pointer to a Pipeline YAML definition; stored in `setup_config.json`. The manifest itself is applied by `cluster.py provision`.
 
-**`--no-cluster`** — generates `setup_config.json` without touching the cluster; useful when cluster access comes later.
+**`--test-push`** — optional workspace-scoped registry credential check (pull busybox, tag, push to `<registry>/<repo_name>:<test-push-tag>`, pull back). Skipped when no registry is configured or no container runtime (`podman`/`docker`) is found. `--registry-user` / `--registry-token` (or `REGISTRY_USER` / `REGISTRY_TOKEN`) gate the registry login. The cluster-side `registry-secret` is created independently by `cluster.py provision`; see #435 for the dedup plan.
 
-**`--pipeline-yaml PATH`** — override the default Pipeline YAML definition (`pipeline/pipeline.yaml`). Stored in `setup_config.json`.
-
-**`--redeploy-tasks`** — fast path to re-apply Tekton step/task YAMLs and Pipeline definition (requires `--namespace`).
-
-Writes `workspace/setup_config.json` and `workspace/runs/<run>/run_metadata.json`. Subsequent scripts read namespace, registry, and run name from `setup_config.json`.
-
-`setup_config.json` includes workspace bindings for two PVCs: `data-storage` (`data-pvc`) and `source` (`source-pvc`). `source-pvc` holds the BLIS binary built at pipeline runtime by the `install-blis` task. Both must be bound before `deploy.py run` accepts a namespace slot.
+Cluster-scoped fields (`namespaces`, `is_openshift`, `storage_class`, `hf_secret_name`, `workspaces`) live in `workspace/clusters/<cluster_id>/cluster_config.json`, written by `cluster.py provision`. PVC bind state (`data-pvc`, `source-pvc`) is gated by `deploy.py`'s slot-readiness check before `deploy.py run` accepts a namespace slot.
 
 ---
 
@@ -174,7 +168,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 **Polling and slot-aware probe skipping** — the orchestrator always sleeps at `--poll-interval` (default 30s); there is no backoff state machine. On each cycle it first checks the status of every busy slot's PipelineRun. The GPU capacity probe and dispatch computation run only when at least one slot is free; when all slots are busy the cycle logs `Dispatching 0/<pending> pending — all <total> slots busy` (deduped per state transition) and skips the probe, so slot recovery is detected within one poll interval. The base interval is itself the rate limit against hot-loop reclaim cycles. (Old progress files may still carry a legacy `_orchestrator` metadata key; it is ignored.)
 
-**Live slot-list updates (issue #372)** — each cycle re-reads `workspace/clusters/<cluster_id>/cluster_config.json` and updates the in-memory slot list. Adding a namespace makes it eligible for dispatch on the next cycle (subject to `_check_slot_ready` — PVCs bound, HF secret present); removing a namespace stops new dispatch to it but does **not** cancel a pair already running there — that pair drains and the slot is freed normally on completion. `namespaces[0]` (the primary, where the run-scoped progress ConfigMap lives) is pinned for the lifetime of the run; mid-run changes to it are logged and ignored. Parse / IO errors keep the prior list. The safe way to add a slot is `setup.py --namespaces NS1,NS2,NS3` (provisions before publishing the change).
+**Live slot-list updates (issue #372)** — each cycle re-reads `workspace/clusters/<cluster_id>/cluster_config.json` and updates the in-memory slot list. Adding a namespace makes it eligible for dispatch on the next cycle (subject to `_check_slot_ready` — PVCs bound, HF secret present); removing a namespace stops new dispatch to it but does **not** cancel a pair already running there — that pair drains and the slot is freed normally on completion. `namespaces[0]` (the primary, where the run-scoped progress ConfigMap lives) is pinned for the lifetime of the run; mid-run changes to it are logged and ignored. Parse / IO errors keep the prior list. The safe way to add a slot is `cluster.py provision <cluster_id> --namespaces NS1,NS2,NS3` (provisions before publishing the change).
 
 **Capacity probe filtering** — `pipeline/lib/capacity.py` filters cluster nodes the same way the K8s scheduler would before summing allocatable/requested GPUs. A node is excluded if cordoned (`spec.unschedulable: true`), if it carries a `NoSchedule`/`NoExecute` taint that no role's tolerations match, or if its `nvidia.com/gpu.product` label is not in the set required by the scenario. The required product set is read from `scenario[0].{decode,prefill}.acceleratorType.{labelKey, labelValue}`. When no per-role product constraint can be extracted, cordon and taint screening still apply on cluster facts. Tolerations are currently treated as empty per follow-up issue #263 — every blocking taint excludes the node until that's lifted.
 
@@ -334,7 +328,7 @@ All paths are relative to the repo root and validated at Phase 1.
 
 ## Parallel Pool Execution
 
-`setup.py --namespaces NS1,NS2,...` provisions N namespace slots, each bootstrapped identically. `prepare.py` generates one shared Tekton Pipeline plus one PipelineRun per `(workload, package)` pair. `deploy.py run` orchestrates execution by assigning pairs to free slots, polling for completion, and retrying on timeout. Use `deploy.py collect` to pull results off-cluster. `deploy.py status` reads progress from the ConfigMap.
+`cluster.py provision <cluster_id> --namespaces NS1,NS2,...` provisions N namespace slots, each bootstrapped identically. `prepare.py` generates one shared Tekton Pipeline plus one PipelineRun per `(workload, package)` pair. `deploy.py run` orchestrates execution by assigning pairs to free slots, polling for completion, and retrying on timeout. Use `deploy.py collect` to pull results off-cluster. `deploy.py status` reads progress from the ConfigMap.
 
 | Artifact | Written by | Read by |
 |----------|-----------|---------|
