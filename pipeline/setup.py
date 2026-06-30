@@ -72,8 +72,9 @@ Examples:
     p.add_argument("--experiment-root", metavar="PATH", dest="experiment_root",
                    help="Root of the experiment repo (default: current working directory)")
     p.add_argument("--pipeline-yaml",  metavar="PATH",
-                                       help="Path to Tekton Pipeline YAML to apply "
-                                            "(default: <repo-root>/pipeline/pipeline.yaml)")
+                                       help="Path to Tekton Pipeline YAML "
+                                            "(default: <repo-root>/pipeline/pipeline.yaml); "
+                                            "applied by `cluster.py provision`")
     p.add_argument("--test-push",      action="store_true",
                                        help="Auto-accept test push prompt")
     p.add_argument("--test-push-tag",  metavar="TAG",   default="_test-image-push",
