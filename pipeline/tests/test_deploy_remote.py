@@ -400,6 +400,11 @@ def _setup_run_dir(tmp_path):
     cluster_dir = run_dir / "cluster"
     cluster_dir.mkdir(parents=True)
     (workspace / "setup_config.json").write_text("{}")
+    cluster_config_dir = workspace / "clusters" / "test-cluster"
+    cluster_config_dir.mkdir(parents=True)
+    (cluster_config_dir / "cluster_config.json").write_text(
+        json.dumps({"namespaces": ["ns"]})
+    )
     (run_dir / "run_metadata.json").write_text(json.dumps({
         "component_image": "registry.example.com/epp:latest",
     }))
