@@ -1,8 +1,10 @@
-"""Tests for pipeline/lib/cluster_ops.py — file-system primitives."""
+"""Tests for pipeline/lib/cluster_ops.py — file-system + kubectl/oc primitives."""
 
 from __future__ import annotations
 
 import json
+import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -299,3 +301,596 @@ class TestUpdateClusterConfig:
             namespaces=["a"],
         )
         assert result == {"cluster_id": "ocp-east", "namespaces": ["a"]}
+
+
+# ── kubectl/oc invocation harness ─────────────────────────────────────
+
+
+def _completed(returncode: int = 0, stdout: str = "", stderr: str = ""):
+    """Build a stand-in for subprocess.CompletedProcess returned by _run."""
+    return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+class FakeRun:
+    """Records every _run() call; returns canned outputs keyed by command prefix.
+
+    Use ``.set(prefix, return_value)`` to register a response for any command
+    whose argv startswith the prefix list. Unmatched calls return success
+    (returncode=0, stdout=""), which is the right default for kubectl applies
+    where the live state already matches.
+    """
+
+    def __init__(self):
+        self.calls: list[list[str]] = []
+        self.inputs: list[str | None] = []
+        self._responses: list[tuple[list[str], SimpleNamespace]] = []
+
+    def set(self, prefix: list[str], result):
+        self._responses.append((prefix, result))
+
+    def __call__(self, cmd, *, check=True, capture=False, input=None):
+        self.calls.append(list(cmd))
+        self.inputs.append(input)
+        for prefix, response in self._responses:
+            if cmd[: len(prefix)] == prefix:
+                if check and response.returncode != 0:
+                    raise subprocess.CalledProcessError(
+                        response.returncode, cmd, response.stdout, response.stderr,
+                    )
+                return response
+        return _completed(returncode=0, stdout="", stderr="")
+
+
+@pytest.fixture
+def fake_run(monkeypatch):
+    fr = FakeRun()
+    monkeypatch.setattr(cluster_ops, "_run", fr)
+    return fr
+
+
+# ── detect_openshift / check_cluster_reachable / secret_exists ────────
+
+
+class TestDetectOpenshift:
+    def test_returns_false_when_oc_not_installed(self, monkeypatch, fake_run):
+        monkeypatch.setattr(cluster_ops, "_which", lambda cmd: False)
+        assert cluster_ops.detect_openshift() is False
+        # We must NOT invoke oc when it isn't on PATH.
+        assert fake_run.calls == []
+
+    def test_returns_true_when_oc_whoami_succeeds(self, monkeypatch, fake_run):
+        monkeypatch.setattr(cluster_ops, "_which", lambda cmd: True)
+        fake_run.set(["oc", "whoami"], _completed(returncode=0))
+        assert cluster_ops.detect_openshift() is True
+
+    def test_returns_false_when_oc_whoami_fails(self, monkeypatch, fake_run):
+        monkeypatch.setattr(cluster_ops, "_which", lambda cmd: True)
+        fake_run.set(["oc", "whoami"], _completed(returncode=1, stderr="not logged in"))
+        assert cluster_ops.detect_openshift() is False
+
+
+class TestCheckClusterReachable:
+    def test_returns_silently_on_success(self, fake_run):
+        fake_run.set(["kubectl", "cluster-info"], _completed(returncode=0))
+        cluster_ops.check_cluster_reachable()  # no raise
+
+    def test_forbidden_treated_as_reachable(self, fake_run):
+        fake_run.set(["kubectl", "cluster-info"],
+                     _completed(returncode=1, stderr="Error: forbidden"))
+        cluster_ops.check_cluster_reachable()
+
+    @pytest.mark.parametrize("stderr,reason_fragment", [
+        ("dial tcp: lookup foo: no such host", "DNS resolution failed"),
+        ("dial tcp 127.0.0.1:8443: connect: connection refused", "Connection refused"),
+        ("Unable to connect to the server: i/o timeout", "Connection timed out"),
+        ("error: You must be logged in to the server (Unauthorized)", "Authentication failed"),
+        ("error: no configuration has been provided", "No kubeconfig found"),
+        ("something else broke", "kubectl cluster-info failed"),
+    ])
+    def test_classifies_failure_and_raises(self, fake_run, stderr, reason_fragment):
+        fake_run.set(["kubectl", "cluster-info"],
+                     _completed(returncode=1, stderr=stderr))
+        with pytest.raises(cluster_ops.ClusterUnreachableError) as exc:
+            cluster_ops.check_cluster_reachable()
+        assert reason_fragment in exc.value.args[0]
+
+
+class TestSecretExists:
+    def test_returns_true_when_kubectl_get_succeeds(self, fake_run):
+        fake_run.set(["kubectl", "get", "secret", "hf-secret"],
+                     _completed(returncode=0, stdout="hf-secret"))
+        assert cluster_ops.secret_exists("hf-secret", "ns-a") is True
+        # Right namespace flag is on the call.
+        assert "-n=ns-a" in fake_run.calls[0]
+
+    def test_returns_false_when_kubectl_get_fails(self, fake_run):
+        fake_run.set(["kubectl", "get", "secret", "hf-secret"],
+                     _completed(returncode=1, stderr="not found"))
+        assert cluster_ops.secret_exists("hf-secret", "ns-a") is False
+
+
+# ── ProvisionResult dataclass ─────────────────────────────────────────
+
+
+class TestProvisionResult:
+    def test_default_fields(self):
+        r = cluster_ops.ProvisionResult(namespace="ns-a")
+        assert r.namespace == "ns-a"
+        assert r.steps_ok == []
+        assert r.steps_skipped == []
+        assert r.steps_failed == []
+
+    def test_diverged_false_when_all_ok(self):
+        r = cluster_ops.ProvisionResult(namespace="ns-a", steps_ok=["namespace"])
+        assert r.diverged is False
+
+    def test_diverged_true_on_skipped(self):
+        r = cluster_ops.ProvisionResult(
+            namespace="ns-a",
+            steps_ok=["namespace"],
+            steps_skipped=[("secrets", "no value")],
+        )
+        assert r.diverged is True
+
+    def test_diverged_true_on_failed(self):
+        r = cluster_ops.ProvisionResult(
+            namespace="ns-a",
+            steps_failed=[("rbac", "kubectl forbidden")],
+        )
+        assert r.diverged is True
+
+
+# ── provision_namespace ───────────────────────────────────────────────
+
+
+def _baseline_cluster_config(**overrides) -> dict:
+    cfg = {
+        "is_openshift": False,
+        "namespaces": ["ns-a", "ns-b"],
+        "storage_class": "",
+        "secret_names": {
+            "hf_token": "hf-secret",
+            "github_token": "github-token",
+            "registry_creds": "registry-secret",
+        },
+        "workspaces": {
+            "data-storage": {"persistentVolumeClaim": {"claimName": "data-pvc"}},
+            "source": {"persistentVolumeClaim": {"claimName": "source-pvc"}},
+        },
+    }
+    cfg.update(overrides)
+    return cfg
+
+
+def _rbac_yaml_paths_exist(monkeypatch, exists=True):
+    # Pretend the RBAC YAML files exist on disk (cluster_ops reads .text on them).
+    monkeypatch.setattr(cluster_ops.Path, "exists", lambda self: exists)
+    monkeypatch.setattr(cluster_ops.Path, "read_text", lambda self: f"# {self.name}\n")
+
+
+def _tekton_yamls_present(monkeypatch, files=None):
+    """Stub Path.exists/glob so _step_tekton sees a couple of YAMLs."""
+    files = files or ["step-a.yaml", "step-b.yaml"]
+
+    real_path = cluster_ops.Path
+
+    def fake_glob(self, pattern):
+        if pattern == "*.yaml":
+            return [real_path(f"/fake/{name}") for name in files]
+        return []
+
+    monkeypatch.setattr(cluster_ops.Path, "exists", lambda self: True)
+    monkeypatch.setattr(cluster_ops.Path, "read_text", lambda self: "# fake\n")
+    monkeypatch.setattr(cluster_ops.Path, "glob", fake_glob)
+
+
+class TestProvisionNamespace:
+    def test_happy_path_all_steps_ok_kubectl(self, fake_run, monkeypatch):
+        """Default cluster (not OpenShift): namespace + rbac + secrets + pvc + tekton all apply cleanly."""
+        _tekton_yamls_present(monkeypatch)
+        # Namespace doesn't exist yet → create succeeds.
+        fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=1))
+        fake_run.set(["kubectl", "create", "ns", "ns-a"], _completed(returncode=0))
+        # PVC pre-checks miss; apply succeeds (default).
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+
+        result = cluster_ops.provision_namespace(
+            "ns-a",
+            _baseline_cluster_config(),
+            secret_values={
+                "hf_token": "hf-XXX",
+                "github_token": "ghp-XXX",
+                "registry_creds": {"server": "quay.io", "user": "u", "token": "t"},
+            },
+        )
+        assert result.namespace == "ns-a"
+        assert result.steps_ok == ["namespace", "rbac", "secrets", "pvc", "tekton"]
+        assert result.steps_skipped == []
+        assert result.steps_failed == []
+        assert result.diverged is False
+
+    def test_openshift_uses_oc_for_namespace(self, fake_run, monkeypatch):
+        _tekton_yamls_present(monkeypatch)
+        fake_run.set(["oc", "get", "project", "ns-a"], _completed(returncode=1))
+        fake_run.set(["oc", "new-project", "ns-a"], _completed(returncode=0))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+
+        cluster_ops.provision_namespace(
+            "ns-a",
+            _baseline_cluster_config(is_openshift=True),
+            secret_values={
+                "hf_token": "v", "github_token": "v",
+                "registry_creds": {"server": "s", "user": "u", "token": "t"},
+            },
+        )
+        # An oc new-project call was issued (and no kubectl create ns).
+        cmds = [tuple(c[:3]) for c in fake_run.calls]
+        assert ("oc", "new-project", "ns-a") in cmds
+        assert ("kubectl", "create", "ns") not in [tuple(c[:3]) for c in fake_run.calls]
+
+    def test_existing_namespace_is_noop(self, fake_run, monkeypatch):
+        _tekton_yamls_present(monkeypatch)
+        # Namespace pre-check returns success → no create attempted.
+        fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=0))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+
+        cluster_ops.provision_namespace(
+            "ns-a",
+            _baseline_cluster_config(),
+            secret_values={
+                "hf_token": "v", "github_token": "v",
+                "registry_creds": {"server": "s", "user": "u", "token": "t"},
+            },
+        )
+        cmds = [tuple(c[:3]) for c in fake_run.calls]
+        assert ("kubectl", "create", "ns") not in cmds
+
+    def test_namespace_already_exists_race_is_ok(self, fake_run, monkeypatch):
+        _tekton_yamls_present(monkeypatch)
+        fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=1))
+        fake_run.set(["kubectl", "create", "ns", "ns-a"],
+                     _completed(returncode=1, stderr='Error from server (AlreadyExists)'))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+
+        result = cluster_ops.provision_namespace(
+            "ns-a",
+            _baseline_cluster_config(),
+            secret_values={
+                "hf_token": "v", "github_token": "v",
+                "registry_creds": {"server": "s", "user": "u", "token": "t"},
+            },
+        )
+        assert "namespace" in result.steps_ok
+
+    def test_namespace_create_failure_recorded(self, fake_run, monkeypatch):
+        _tekton_yamls_present(monkeypatch)
+        fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=1))
+        fake_run.set(["kubectl", "create", "ns", "ns-a"],
+                     _completed(returncode=1, stderr="quota exceeded"))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+
+        result = cluster_ops.provision_namespace(
+            "ns-a",
+            _baseline_cluster_config(),
+            secret_values={
+                "hf_token": "v", "github_token": "v",
+                "registry_creds": {"server": "s", "user": "u", "token": "t"},
+            },
+        )
+        assert ("namespace", "quota exceeded") in result.steps_failed
+        # Later steps still run — provision_namespace doesn't short-circuit
+        # on per-step failures; surfacing every divergence is the design.
+        assert result.diverged is True
+
+    def test_skip_arg_suppresses_named_steps(self, fake_run, monkeypatch):
+        _tekton_yamls_present(monkeypatch)
+        result = cluster_ops.provision_namespace(
+            "ns-a",
+            _baseline_cluster_config(),
+            secret_values={
+                "hf_token": "v", "github_token": "v",
+                "registry_creds": {"server": "s", "user": "u", "token": "t"},
+            },
+            skip=["namespace", "rbac", "secrets", "pvc", "tekton"],
+        )
+        assert result.steps_ok == []
+        assert [s for s, _ in result.steps_skipped] == list(cluster_ops._PROVISION_STEPS)
+        # No kubectl/oc calls were issued — skip suppresses execution.
+        assert fake_run.calls == []
+
+    def test_skip_unknown_step_is_ignored(self, fake_run, monkeypatch):
+        _tekton_yamls_present(monkeypatch)
+        fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=0))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+        # Unknown step in skip is a no-op — for forward compat with future steps.
+        result = cluster_ops.provision_namespace(
+            "ns-a",
+            _baseline_cluster_config(),
+            secret_values={
+                "hf_token": "v", "github_token": "v",
+                "registry_creds": {"server": "s", "user": "u", "token": "t"},
+            },
+            skip=["nonexistent-step"],
+        )
+        assert "namespace" in result.steps_ok  # known steps still ran
+
+    def test_secret_with_value_is_applied(self, fake_run, monkeypatch):
+        _tekton_yamls_present(monkeypatch)
+        fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=0))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+        # kubectl create secret --dry-run produces the manifest YAML.
+        fake_run.set(["kubectl", "create", "secret", "generic", "hf-secret"],
+                     _completed(returncode=0, stdout="apiVersion: v1\nkind: Secret\n"))
+
+        cluster_ops.provision_namespace(
+            "ns-a",
+            _baseline_cluster_config(),
+            secret_values={
+                "hf_token": "hf-XXX",
+                "github_token": "ghp-XXX",
+                "registry_creds": {"server": "quay.io", "user": "u", "token": "t"},
+            },
+        )
+        # The --from-literal carries the value through.
+        create_calls = [c for c in fake_run.calls
+                        if c[:4] == ["kubectl", "create", "secret", "generic"]]
+        assert any("--from-literal=HF_TOKEN=hf-XXX" in c for c in create_calls)
+
+    def test_secret_value_absent_but_secret_exists_is_reused(self, fake_run, monkeypatch):
+        _tekton_yamls_present(monkeypatch)
+        fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=0))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+        # Pre-installed secrets exist:
+        fake_run.set(["kubectl", "get", "secret", "hf-secret"], _completed(returncode=0))
+        fake_run.set(["kubectl", "get", "secret", "github-token"], _completed(returncode=0))
+        fake_run.set(["kubectl", "get", "secret", "registry-secret"], _completed(returncode=0))
+
+        result = cluster_ops.provision_namespace(
+            "ns-a",
+            _baseline_cluster_config(),
+            secret_values={},  # no values supplied
+        )
+        # secrets step is OK (reuse is the idempotent happy path).
+        assert "secrets" in result.steps_ok
+        # No create-secret calls were issued.
+        create_calls = [c for c in fake_run.calls if c[:3] == ["kubectl", "create", "secret"]]
+        assert create_calls == []
+
+    def test_secret_value_absent_and_secret_missing_is_skipped(self, fake_run, monkeypatch):
+        _tekton_yamls_present(monkeypatch)
+        fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=0))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+        # All secret pre-checks miss.
+        fake_run.set(["kubectl", "get", "secret"], _completed(returncode=1))
+
+        result = cluster_ops.provision_namespace(
+            "ns-a",
+            _baseline_cluster_config(),
+            secret_values={},
+        )
+        skipped_steps = [s for s, _ in result.steps_skipped]
+        assert "secrets" in skipped_steps
+        # The reason mentions every missing secret.
+        secrets_reason = next(reason for s, reason in result.steps_skipped if s == "secrets")
+        assert "hf_token" in secrets_reason
+        assert "github_token" in secrets_reason
+        assert "registry_creds" in secrets_reason
+
+    def test_secret_partial_value_skipped(self, fake_run, monkeypatch):
+        _tekton_yamls_present(monkeypatch)
+        fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=0))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+        # github-token Secret pre-exists; hf-secret and registry-secret missing.
+        fake_run.set(["kubectl", "get", "secret", "github-token"], _completed(returncode=0))
+        fake_run.set(["kubectl", "get", "secret"], _completed(returncode=1))
+        fake_run.set(["kubectl", "create", "secret", "generic", "hf-secret"],
+                     _completed(returncode=0, stdout="apiVersion: v1\nkind: Secret\n"))
+
+        result = cluster_ops.provision_namespace(
+            "ns-a",
+            _baseline_cluster_config(),
+            secret_values={"hf_token": "hf-XXX"},
+        )
+        # secrets step partially applied: hf applied, github reused, registry missing.
+        skipped_reasons = dict(result.steps_skipped)
+        assert "secrets" in skipped_reasons
+        assert "registry_creds" in skipped_reasons["secrets"]
+
+    def test_rbac_cluster_forbidden_skipped_not_failed(self, fake_run, monkeypatch):
+        _tekton_yamls_present(monkeypatch)
+        fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=0))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+        # Every kubectl apply -f - call gets a Forbidden mentioning ClusterRole;
+        # the matcher only suppresses on best-effort YAMLs, so the required ones
+        # would normally fail. Force them through by giving required path applies
+        # a 0 and only the optional ones the Forbidden response.
+        applies = []
+
+        def custom_run(cmd, *, check=True, capture=False, input=None):
+            applies.append((list(cmd), input))
+            if cmd[:2] == ["kubectl", "apply"] and input and "roles-cluster" in input:
+                return _completed(returncode=1,
+                                  stderr="Error: forbidden: User cannot create resource clusterrole")
+            if cmd[:2] == ["kubectl", "apply"] and input and "sim2real-runner-cluster" in input:
+                return _completed(returncode=1,
+                                  stderr="Error: forbidden: User cannot create resource clusterrolebinding")
+            return _completed(returncode=0)
+
+        monkeypatch.setattr(cluster_ops, "_run", custom_run)
+        # Also need filesystem stubs:
+        _rbac_yaml_paths_exist(monkeypatch)
+
+        result = cluster_ops.provision_namespace(
+            "ns-a",
+            _baseline_cluster_config(),
+            secret_values={
+                "hf_token": "v", "github_token": "v",
+                "registry_creds": {"server": "s", "user": "u", "token": "t"},
+            },
+        )
+        # rbac is skipped (not failed) because every Forbidden was on a
+        # best-effort cluster-scoped YAML.
+        skipped_reasons = dict(result.steps_skipped)
+        assert "rbac" in skipped_reasons
+        assert "cluster" in skipped_reasons["rbac"].lower()
+
+    def test_rbac_other_failure_is_failed(self, fake_run, monkeypatch):
+        _rbac_yaml_paths_exist(monkeypatch)
+        # Required YAML apply fails for a non-cluster-RBAC reason.
+        def custom_run(cmd, *, check=True, capture=False, input=None):
+            if cmd[:2] == ["kubectl", "apply"] and input:
+                return _completed(returncode=1, stderr="error: quota exceeded")
+            if cmd[:3] == ["kubectl", "get"] and "ns" in cmd[2:]:
+                return _completed(returncode=0)
+            return _completed(returncode=0)
+        monkeypatch.setattr(cluster_ops, "_run", custom_run)
+        # We need _step_tekton not to find any YAMLs to apply for this test.
+        monkeypatch.setattr(cluster_ops.Path, "glob", lambda self, pattern: [])
+
+        result = cluster_ops.provision_namespace(
+            "ns-a",
+            _baseline_cluster_config(),
+            secret_values={
+                "hf_token": "v", "github_token": "v",
+                "registry_creds": {"server": "s", "user": "u", "token": "t"},
+            },
+        )
+        failed_steps = [s for s, _ in result.steps_failed]
+        assert "rbac" in failed_steps
+
+    def test_pvc_existing_skipped(self, fake_run, monkeypatch):
+        _tekton_yamls_present(monkeypatch)
+        fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=0))
+        # All PVC pre-checks hit.
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=0))
+
+        cluster_ops.provision_namespace(
+            "ns-a",
+            _baseline_cluster_config(),
+            secret_values={
+                "hf_token": "v", "github_token": "v",
+                "registry_creds": {"server": "s", "user": "u", "token": "t"},
+            },
+        )
+        # No kubectl apply on a manifest containing the PVC kind happened.
+        pvc_applies = [
+            (cmd, inp) for cmd, inp in zip(fake_run.calls, fake_run.inputs)
+            if cmd[:2] == ["kubectl", "apply"] and inp and "PersistentVolumeClaim" in inp
+        ]
+        assert pvc_applies == []
+
+    def test_pvc_creates_with_storage_class(self, fake_run, monkeypatch):
+        _tekton_yamls_present(monkeypatch)
+        fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=0))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+
+        cluster_ops.provision_namespace(
+            "ns-a",
+            _baseline_cluster_config(storage_class="gp3"),
+            secret_values={
+                "hf_token": "v", "github_token": "v",
+                "registry_creds": {"server": "s", "user": "u", "token": "t"},
+            },
+        )
+        pvc_manifests = [
+            inp for cmd, inp in zip(fake_run.calls, fake_run.inputs)
+            if cmd[:2] == ["kubectl", "apply"] and inp and "PersistentVolumeClaim" in inp
+        ]
+        assert pvc_manifests, "expected at least one PVC apply"
+        for manifest in pvc_manifests:
+            assert "storageClassName: gp3" in manifest
+            assert "ReadWriteMany" in manifest
+            assert "50Gi" in manifest
+
+    def test_tekton_skipped_when_no_yamls_found(self, fake_run, monkeypatch):
+        fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=0))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+        # tekton dirs don't exist:
+        monkeypatch.setattr(cluster_ops.Path, "exists",
+                            lambda self: "tekton" not in self.parts)
+
+        result = cluster_ops.provision_namespace(
+            "ns-a",
+            _baseline_cluster_config(),
+            secret_values={
+                "hf_token": "v", "github_token": "v",
+                "registry_creds": {"server": "s", "user": "u", "token": "t"},
+            },
+        )
+        skipped = dict(result.steps_skipped)
+        assert "tekton" in skipped
+
+
+# ── apply_cluster_resources ───────────────────────────────────────────
+
+
+class TestApplyClusterResources:
+    def test_applies_pipeline_yaml_to_each_namespace(self, fake_run, monkeypatch, tmp_path):
+        # Stub pipeline.yaml existence.
+        monkeypatch.setattr(cluster_ops.Path, "exists", lambda self: True)
+        cluster_ops.write_cluster_config(
+            "ocp-east", {"namespaces": ["ns-a", "ns-b", "ns-c"]},
+        )
+        cluster_ops.apply_cluster_resources("ocp-east")
+        applies = [c for c in fake_run.calls if c[:3] == ["kubectl", "apply", "-f"]]
+        ns_flags = [c[-1] for c in applies]
+        assert ns_flags == ["-n=ns-a", "-n=ns-b", "-n=ns-c"]
+
+    def test_pipeline_yaml_missing_raises(self, fake_run, monkeypatch):
+        monkeypatch.setattr(cluster_ops.Path, "exists", lambda self: False)
+        with pytest.raises(FileNotFoundError):
+            cluster_ops.apply_cluster_resources("ocp-east")
+
+    def test_idempotent_repeat_invocations_succeed(self, fake_run, monkeypatch):
+        # kubectl apply is idempotent — same call sequence on the second run.
+        monkeypatch.setattr(cluster_ops.Path, "exists", lambda self: True)
+        cluster_ops.write_cluster_config("ocp-east", {"namespaces": ["ns-a"]})
+
+        cluster_ops.apply_cluster_resources("ocp-east")
+        first_run_calls = list(fake_run.calls)
+        cluster_ops.apply_cluster_resources("ocp-east")
+        # Same command issued again.
+        second_run_calls = fake_run.calls[len(first_run_calls):]
+        assert second_run_calls == first_run_calls
+
+    def test_no_namespaces_in_config_is_noop(self, fake_run, monkeypatch):
+        monkeypatch.setattr(cluster_ops.Path, "exists", lambda self: True)
+        cluster_ops.write_cluster_config("ocp-east", {"namespaces": []})
+        cluster_ops.apply_cluster_resources("ocp-east")
+        # No kubectl apply -f calls.
+        applies = [c for c in fake_run.calls if c[:3] == ["kubectl", "apply", "-f"]]
+        assert applies == []
+
+    def test_per_namespace_failure_raises(self, fake_run, monkeypatch):
+        monkeypatch.setattr(cluster_ops.Path, "exists", lambda self: True)
+        cluster_ops.write_cluster_config("ocp-east", {"namespaces": ["ns-a"]})
+
+        def boom(cmd, *, check=True, capture=False, input=None):
+            if cmd[:3] == ["kubectl", "apply", "-f"]:
+                raise subprocess.CalledProcessError(1, cmd, "", "stderr")
+            return _completed(returncode=0)
+        monkeypatch.setattr(cluster_ops, "_run", boom)
+
+        with pytest.raises(subprocess.CalledProcessError):
+            cluster_ops.apply_cluster_resources("ocp-east")
+
+
+# ── _envsubst helper (pure-Python envsubst replacement) ───────────────
+
+
+class TestEnvsubst:
+    def test_substitutes_dollar_var(self):
+        assert cluster_ops._envsubst("ns: $NAMESPACE\n", {"NAMESPACE": "ns-a"}) == "ns: ns-a\n"
+
+    def test_substitutes_braced_var(self):
+        assert cluster_ops._envsubst("ns: ${NAMESPACE}\n", {"NAMESPACE": "ns-a"}) == "ns: ns-a\n"
+
+    def test_missing_key_left_intact(self):
+        assert cluster_ops._envsubst("ns: $UNSET", {}) == "ns: $UNSET"
+
+    def test_multiple_vars(self):
+        out = cluster_ops._envsubst(
+            "primary: $PRIMARY_NAMESPACE\nthis: $NAMESPACE\n",
+            {"PRIMARY_NAMESPACE": "ns-a", "NAMESPACE": "ns-b"},
+        )
+        assert "primary: ns-a" in out and "this: ns-b" in out
