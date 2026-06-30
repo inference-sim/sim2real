@@ -111,6 +111,134 @@ class TestBuildClusterConfig:
         assert "created_at" not in cfg
 
 
+class _FakePrompts:
+    """Records every prompt call; returns canned responses by label match."""
+    def __init__(self, *, plain=None, secret=None):
+        self._plain = plain or {}
+        self._secret = secret or {}
+        self.plain_calls: list[str] = []
+        self.secret_calls: list[str] = []
+
+    def plain(self, label, default=""):
+        self.plain_calls.append(label)
+        return self._plain.get(label, default)
+
+    def secret(self, label):
+        self.secret_calls.append(label)
+        return self._secret.get(label, "")
+
+
+def _ns(**kwargs):
+    """argparse.Namespace stand-in for resolution tests."""
+    base = dict(
+        hf_token=None, github_token=None,
+        registry_user=None, registry_token=None,
+        dockerhub_user=None, dockerhub_token=None,
+    )
+    base.update(kwargs)
+    return SimpleNamespace(**base)
+
+
+class TestResolveSecretValues:
+    def test_all_flags_provided_no_prompts(self):
+        prompts = _FakePrompts()
+        args = _ns(hf_token="hf", github_token="gh",
+                   registry_user="ru", registry_token="rt",
+                   dockerhub_user="du", dockerhub_token="dt")
+        values, has_dh = cluster_cmd._resolve_secret_values(
+            args, env={}, prompter=prompts.plain, secret_prompter=prompts.secret,
+        )
+        assert has_dh is True
+        assert values["hf_token"] == "hf"
+        assert values["github_token"] == "gh"
+        assert values["registry_creds"] == {"server": "ghcr.io", "user": "ru", "token": "rt"}
+        assert values["dockerhub_creds"] == {"server": "docker.io", "user": "du", "token": "dt"}
+        assert prompts.plain_calls == []
+        assert prompts.secret_calls == []
+
+    def test_env_var_used_when_flag_absent(self):
+        prompts = _FakePrompts()
+        args = _ns()
+        env = {
+            "HF_TOKEN": "hf-from-env",
+            "GITHUB_TOKEN": "gh-from-env",
+            "REGISTRY_USER": "ru-env",
+            "REGISTRY_TOKEN": "rt-env",
+        }
+        values, has_dh = cluster_cmd._resolve_secret_values(
+            args, env=env, prompter=prompts.plain, secret_prompter=prompts.secret,
+        )
+        assert has_dh is False
+        assert values["hf_token"] == "hf-from-env"
+        assert values["github_token"] == "gh-from-env"
+        assert values["registry_creds"]["user"] == "ru-env"
+        assert values["registry_creds"]["token"] == "rt-env"
+        assert "dockerhub_creds" not in values
+        assert prompts.plain_calls == []
+        assert prompts.secret_calls == []
+
+    def test_prompt_fires_when_neither_flag_nor_env(self):
+        prompts = _FakePrompts(
+            plain={"Registry username": "ru-prompted"},
+            secret={"HuggingFace token": "hf-prompted",
+                    "Registry token": "rt-prompted"},
+        )
+        args = _ns()
+        values, has_dh = cluster_cmd._resolve_secret_values(
+            args, env={}, prompter=prompts.plain, secret_prompter=prompts.secret,
+        )
+        assert values["hf_token"] == "hf-prompted"
+        assert values["registry_creds"]["user"] == "ru-prompted"
+        assert values["registry_creds"]["token"] == "rt-prompted"
+        assert "HuggingFace token" in prompts.secret_calls
+        assert "Registry username" in prompts.plain_calls
+        assert has_dh is False
+
+    def test_github_token_does_not_prompt(self):
+        """GitHub token is optional; we never block on it. No flag and no env
+        means the value is absent (cluster_ops will reuse an existing Secret
+        or surface a structured skip)."""
+        prompts = _FakePrompts()
+        args = _ns(hf_token="hf", registry_user="ru", registry_token="rt")
+        values, _ = cluster_cmd._resolve_secret_values(
+            args, env={}, prompter=prompts.plain, secret_prompter=prompts.secret,
+        )
+        assert "github_token" not in values
+        assert prompts.plain_calls == []
+        assert prompts.secret_calls == []
+
+    def test_dockerhub_server_overridable_by_env(self):
+        prompts = _FakePrompts()
+        args = _ns(hf_token="hf", registry_user="ru", registry_token="rt",
+                   dockerhub_user="du", dockerhub_token="dt")
+        env = {"DOCKERHUB_SERVER": "docker.acme.io"}
+        values, _ = cluster_cmd._resolve_secret_values(
+            args, env=env, prompter=prompts.plain, secret_prompter=prompts.secret,
+        )
+        assert values["dockerhub_creds"]["server"] == "docker.acme.io"
+
+    def test_registry_server_overridable_by_env(self):
+        prompts = _FakePrompts()
+        args = _ns(hf_token="hf", registry_user="ru", registry_token="rt")
+        env = {"REGISTRY_SERVER": "quay.io"}
+        values, _ = cluster_cmd._resolve_secret_values(
+            args, env=env, prompter=prompts.plain, secret_prompter=prompts.secret,
+        )
+        assert values["registry_creds"]["server"] == "quay.io"
+
+    def test_partial_dockerhub_creds_skip(self):
+        """User without token (or vice versa) does NOT register dockerhub_creds —
+        we only emit a fully-formed dict when both are present."""
+        prompts = _FakePrompts()
+        args = _ns(hf_token="hf", registry_user="ru", registry_token="rt",
+                   dockerhub_user="du")  # token missing
+        values, has_dh = cluster_cmd._resolve_secret_values(
+            args, env={}, prompter=prompts.plain, secret_prompter=prompts.secret,
+        )
+        assert has_dh is False
+        assert "dockerhub_creds" not in values
+
+
 class TestParser:
     def test_provision_subcommand_accepts_required_positional_and_namespaces(self):
         parser = cluster_cmd.build_parser()

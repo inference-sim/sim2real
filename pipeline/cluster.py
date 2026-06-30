@@ -14,6 +14,7 @@ Idempotent — safe to re-run; pre-existing resources reconcile via
 from __future__ import annotations
 
 import argparse
+import getpass
 import sys
 
 
@@ -121,6 +122,81 @@ def _build_cluster_config_dict(
     if prior_created:
         cfg["created_at"] = prior_created
     return cfg
+
+
+def _default_plain_prompter(label: str, default: str = "") -> str:
+    suffix = f" [{default}]" if default else ""
+    raw = input(f"{label}{suffix}: ").strip()
+    return raw or default
+
+
+def _default_secret_prompter(label: str) -> str:
+    return getpass.getpass(f"{label}: ").strip()
+
+
+def _resolve_secret_values(
+    args,
+    *,
+    env: dict[str, str],
+    prompter,
+    secret_prompter,
+) -> tuple[dict, bool]:
+    """Resolve the four secret payloads using flag > env > prompt.
+
+    Returns ``(secret_values, has_dockerhub)``. The dict shape matches
+    ``pipeline.lib.cluster_ops._build_secret_manifest`` expectations:
+
+      * ``hf_token`` / ``github_token`` → ``str``
+      * ``registry_creds`` / ``dockerhub_creds`` → ``{"server", "user", "token"}``
+
+    Resolution rules:
+
+    * Required secrets (``hf_token``, ``registry_creds``) prompt the
+      operator when neither flag nor env var supplies a value.
+    * Optional secrets (``github_token``, ``dockerhub_creds``) never
+      prompt — when no flag/env is set, the key is omitted entirely so
+      :func:`cluster_ops.provision_namespace` records a structured skip
+      (or reuses a pre-installed Secret).
+    * Registry/dockerhub ``server`` fields default to ``ghcr.io`` and
+      ``docker.io`` respectively; overridable by ``REGISTRY_SERVER`` /
+      ``DOCKERHUB_SERVER`` env vars. No flag, per design.
+    """
+    values: dict[str, object] = {}
+
+    # hf_token — required; prompt if absent.
+    hf = args.hf_token or env.get("HF_TOKEN") or secret_prompter("HuggingFace token")
+    if hf:
+        values["hf_token"] = hf
+
+    # github_token — optional; never prompt.
+    gh = args.github_token or env.get("GITHUB_TOKEN")
+    if gh:
+        values["github_token"] = gh
+
+    # registry_creds — user + token required together; prompt if missing.
+    reg_user = args.registry_user or env.get("REGISTRY_USER") \
+        or prompter("Registry username")
+    reg_token = args.registry_token or env.get("REGISTRY_TOKEN") \
+        or (secret_prompter("Registry token") if reg_user else "")
+    if reg_user and reg_token:
+        values["registry_creds"] = {
+            "server": env.get("REGISTRY_SERVER") or "ghcr.io",
+            "user": reg_user,
+            "token": reg_token,
+        }
+
+    # dockerhub_creds — optional; never prompt; both fields required.
+    dh_user = args.dockerhub_user or env.get("DOCKERHUB_USER")
+    dh_token = args.dockerhub_token or env.get("DOCKERHUB_TOKEN")
+    has_dockerhub = bool(dh_user and dh_token)
+    if has_dockerhub:
+        values["dockerhub_creds"] = {
+            "server": env.get("DOCKERHUB_SERVER") or "docker.io",
+            "user": dh_user,
+            "token": dh_token,
+        }
+
+    return values, has_dockerhub
 
 
 def cmd_provision(args: argparse.Namespace) -> int:
