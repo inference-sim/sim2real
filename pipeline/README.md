@@ -5,7 +5,7 @@ Scripts that drive the sim2real transfer pipeline. Run from the repo root.
 The pipeline has two phases:
 
 ```
-cluster.py provision  (one-time per cluster — bootstrap namespaces, RBAC, PVCs, Tekton tasks)
+cluster.py provision  (one-time per cluster — bootstrap namespaces, RBAC, PVCs, Tekton tasks, Pipeline definition)
                    ↓
 setup.py → prepare.py → [/sim2real-translate] → deploy.py   (per-workspace + per-run)
 ```
@@ -68,12 +68,12 @@ python pipeline/cluster.py provision <cluster_id> --namespaces NS1,NS2,... [flag
 - `is_openshift` — detected cluster flavor
 - `storage_class` — PVC storage class
 - `secret_names` — dict of Secret names: `hf_token`, `registry_creds`, `github_token`, `dockerhub_creds` (consumers read e.g. `cluster_config["secret_names"]["hf_token"]`)
-- `workspaces` — PVC bindings (`data-pvc`, `source-pvc`)
+- `workspaces` — Tekton workspace bindings; keys `data-storage` and `source` map to PVC claim names `data-pvc` and `source-pvc` respectively (`cluster_config["workspaces"]["data-storage"]["persistentVolumeClaim"]["claimName"] == "data-pvc"`)
 - `created_at` — first-write timestamp (preserved across re-runs)
 
 **What it provisions per namespace:** namespace, RBAC bindings, Secrets (HF, registry, GitHub, Docker Hub), PVCs (data, source), Tekton tasks, and the cluster-wide Pipeline definition. Re-runs reconcile via `kubectl apply` — drift is overwritten.
 
-**Boundary with `setup.py`:** anything operator-side (registry choice, repo name, current run, orchestrator image, pipeline_yaml path, sim2real_root) belongs in `setup.py` and lands in `setup_config.json`. Anything cluster-side (namespaces, RBAC, secrets, PVCs, Tekton tasks) belongs in `cluster.py provision` and lands in `cluster_config.json`. The two never write the same file.
+**Boundary with `setup.py`:** anything operator-side (registry choice, repo name, current run, orchestrator image, pipeline_yaml path, sim2real_root) belongs in `setup.py` and lands in `setup_config.json`. Anything cluster-side (namespaces, RBAC, secrets, PVCs, Tekton tasks, Pipeline definition) belongs in `cluster.py provision` and lands in `cluster_config.json`. The two never write the same file.
 
 ---
 
@@ -104,7 +104,7 @@ python pipeline/setup.py [flags]
 
 **`--test-push`** — optional workspace-scoped registry credential check (pull busybox, tag, push to `<registry>/<repo_name>:<test-push-tag>`, pull back). Skipped when no registry is configured or no container runtime (`podman`/`docker`) is found. `--registry-user` / `--registry-token` (or `REGISTRY_USER` / `REGISTRY_TOKEN`) gate the registry login. The cluster-side `registry-secret` is created independently by `cluster.py provision`; see #435 for the dedup plan.
 
-Cluster-scoped fields (`namespaces`, `is_openshift`, `storage_class`, `hf_secret_name`, `workspaces`) live in `workspace/clusters/<cluster_id>/cluster_config.json`, written by `cluster.py provision`. PVC bind state (`data-pvc`, `source-pvc`) is gated by `deploy.py`'s slot-readiness check before `deploy.py run` accepts a namespace slot.
+Cluster-scoped fields (`namespaces`, `is_openshift`, `storage_class`, `secret_names`, `workspaces`) live in `workspace/clusters/<cluster_id>/cluster_config.json`, written by `cluster.py provision`. PVC bind state (`data-pvc`, `source-pvc`) is gated by `deploy.py`'s slot-readiness check before `deploy.py run` accepts a namespace slot.
 
 ---
 

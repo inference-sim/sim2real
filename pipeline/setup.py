@@ -325,7 +325,7 @@ def step_config_output(cfg: SetupConfig, run_dir: Path) -> None:
     ).stdout.strip() or "unknown"
 
     # setup_config.json — operator-side fields only. Cluster-side fields
-    # (namespace[s], is_openshift, storage_class, hf_secret_name, workspaces)
+    # (namespaces, is_openshift, storage_class, secret_names, workspaces)
     # live in workspace/clusters/<id>/cluster_config.json, written by
     # `cluster.py provision`.
     setup_config_path = workspace / "setup_config.json"

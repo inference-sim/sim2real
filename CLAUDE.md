@@ -79,6 +79,7 @@ python pipeline/run.py      --experiment-root ../admission-control switch <run-n
 | `pod_pending.py` | Classifies pod scheduling failures as recoverable or non-recoverable |
 | `run_manager.py` | `list_runs`, `inspect_run`, `switch_run` logic |
 | `remote.py` | ConfigMap and Job generation for `deploy.py run --remote` |
+| `capacity.py` | Cluster GPU capacity probe (taint / cordon / product filter) |
 | `cluster_ops.py` | Cluster-side primitives: read/write/update `cluster_config.json`, `provision_namespace`, `apply_cluster_resources`, `detect_openshift` |
 | `layout.py` | Workspace path helpers (`workspace_dir`, `cluster_dir`, `cluster_config_path`, `runs_dir`, `setup_config_path`) |
 | `slicer.py` | Splits `transfer.yaml` into translation-slice vs assembly-slice + computes `translation_hash` |

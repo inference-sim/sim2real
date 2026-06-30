@@ -2172,7 +2172,7 @@ def _check_slot_ready(namespace: str, hf_secret_name: str = "hf-secret") -> tupl
             check=False, capture=True,
         )
         if result.returncode != 0 or result.stdout.strip() != "Bound":
-            hint = " — re-run setup.py to provision it" if pvc == "source-pvc" else ""
+            hint = " — re-run cluster.py provision to provision it" if pvc == "source-pvc" else ""
             failures.append(f"PVC {pvc} not Bound in {namespace}{hint}")
 
     result = run(
