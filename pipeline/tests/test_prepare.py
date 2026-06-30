@@ -1134,6 +1134,53 @@ class TestBaselineOnlyAssembly:
         # Should NOT produce cluster/treatment.yaml
         assert not (cluster_dir / "treatment.yaml").exists()
 
+    def test_assembly_propagates_custom_hf_token_from_cluster_config(self, repo):
+        """A custom ``secret_names.hf_token`` in cluster_config must be injected
+        as ``huggingface.secretName`` on every scenario entry.
+
+        Guards the nested key path ``cluster_config["secret_names"]["hf_token"]``
+        against silent fallback to ``"hf-secret"`` — a typo at either layer of
+        the traversal would let the default win, and every other assembly test
+        uses a cluster_config that omits ``secret_names`` (so they all go
+        through the fallback branch).
+        """
+        mod = _import_prepare_with_root(repo)
+        run_dir = self._setup_baseline_only_repo(repo)
+
+        # Override the cluster_config with the nested secret_names shape.
+        cluster_config = {
+            "namespaces": ["sim2real-test"],
+            "workspaces": {},
+            "secret_names": {"hf_token": "my-custom-hf-secret"},
+        }
+        (repo / "workspace" / "clusters" / "test-cluster" / "cluster_config.json").write_text(
+            json.dumps(cluster_config)
+        )
+
+        manifest = dict(MINIMAL_MANIFEST)
+        resolved = mod._load_resolved_config(manifest)
+        state = StateMachine("test-run", "routing", run_dir)
+        state.mark_done("init")
+
+        class Args:
+            force = False
+
+        mod._phase_assembly(Args(), state, manifest, run_dir, resolved)
+
+        # The resolved baseline scenario must carry the custom secret name,
+        # not the "hf-secret" default.
+        baseline_yaml = (run_dir / "cluster" / "baseline.yaml").read_text()
+        baseline_resolved = yaml.safe_load(baseline_yaml)
+        secret_names = {
+            entry["huggingface"]["secretName"]
+            for entry in baseline_resolved["scenario"]
+        }
+        assert secret_names == {"my-custom-hf-secret"}, (
+            f"Expected huggingface.secretName == 'my-custom-hf-secret' on every "
+            f"scenario entry; got {secret_names}. The nested cluster_config key "
+            f"path secret_names.hf_token likely fell back to the default."
+        )
+
     def test_assembly_baseline_only_skips_epp_validation(self, repo):
         """When run_metadata.json has NO registry key but no translation_output.json
         exists, _phase_assembly should still succeed (EPP validation skipped).
