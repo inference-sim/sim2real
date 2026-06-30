@@ -258,6 +258,167 @@ class TestParser:
             parser.parse_args(["provision", "ocp-east", "--namespaces", "a", "--no-cluster"])
 
 
+class TestProvisionOrchestration:
+    """End-to-end orchestration over mocked kubectl/oc."""
+
+    @pytest.fixture(autouse=True)
+    def _freeze_experiment_root(self, monkeypatch):
+        """Prevent cmd_provision from overriding the tmp_path set by the
+        outer _isolated_experiment_root fixture.  The autouse fixture already
+        points layout._EXPERIMENT_ROOT at tmp_path; we just stop
+        set_experiment_root(None) from resetting it to cwd."""
+        monkeypatch.setattr(layout, "set_experiment_root", lambda _arg: None)
+
+    def _full_arg_setup(self, monkeypatch, fake_run, tmp_path):
+        """Common harness: returns the env dict + a 'no-prompt' getpass."""
+        monkeypatch.setattr(cluster_ops, "_which", lambda cmd: False)  # not OpenShift
+        # No RBAC YAMLs / tekton YAMLs on disk so those steps either fail (rbac)
+        # or skip (tekton). For green-path tests, monkeypatch Path methods.
+        return None
+
+    def test_happy_path_returns_zero(self, fake_run, monkeypatch, tmp_path, capsys):
+        monkeypatch.setattr(cluster_ops, "_which", lambda cmd: False)  # not OpenShift
+        # Pretend YAML files exist (but fall back to real exists for cluster_config.json
+        # so read_cluster_config works before the first write).
+        _real_exists = cluster_ops.Path.exists
+        monkeypatch.setattr(cluster_ops.Path, "exists",
+                            lambda self: _real_exists(self) if str(self).endswith("cluster_config.json") else True)
+        monkeypatch.setattr(cluster_ops.Path, "read_text", lambda self: "# yaml\n")
+
+        real_path = cluster_ops.Path
+        def fake_glob(self, pattern):
+            if pattern == "*.yaml":
+                return [real_path("/fake/a.yaml"), real_path("/fake/b.yaml")]
+            return []
+        monkeypatch.setattr(cluster_ops.Path, "glob", fake_glob)
+
+        # Namespace pre-checks: not present yet.
+        fake_run.set(["kubectl", "get", "ns"], _completed(returncode=1))
+        # PVC pre-checks: not present yet.
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+
+        rc = cluster_cmd.main([
+            "provision", "ocp-east",
+            "--namespaces", "ns-a,ns-b",
+            "--hf-token", "hf-x",
+            "--github-token", "gh-x",
+            "--registry-user", "ru",
+            "--registry-token", "rt",
+        ])
+        assert rc == 0
+
+        # cluster_config.json was written with the expected shape.
+        cfg = cluster_ops.read_cluster_config("ocp-east")
+        assert cfg["cluster_id"] == "ocp-east"
+        assert cfg["namespaces"] == ["ns-a", "ns-b"]
+        assert cfg["is_openshift"] is False
+        assert "created_at" in cfg
+        assert cfg["secret_names"]["dockerhub_creds"] == ""  # no dockerhub flags
+
+        # Per-namespace summary lines printed.
+        out = capsys.readouterr().out
+        assert "ns-a: ok" in out
+        assert "ns-b: ok" in out
+
+    def test_returns_one_when_any_namespace_failed(self, fake_run, monkeypatch, capsys):
+        _real_exists = cluster_ops.Path.exists
+        monkeypatch.setattr(cluster_ops.Path, "exists",
+                            lambda self: _real_exists(self) if str(self).endswith("cluster_config.json") else True)
+        monkeypatch.setattr(cluster_ops.Path, "read_text", lambda self: "# yaml\n")
+        monkeypatch.setattr(cluster_ops.Path, "glob",
+                            lambda self, p: ([cluster_ops.Path("/fake/a.yaml")] if p == "*.yaml" else []))
+
+        # Force RBAC apply to fail on ns-b only.
+        real_step_rbac = cluster_ops._step_rbac
+        def selective_rbac(ns, cfg, sv):
+            if ns == "ns-b":
+                return ("failed", "synthetic kubectl forbidden")
+            return real_step_rbac(ns, cfg, sv)
+        monkeypatch.setattr(cluster_ops, "_step_rbac", selective_rbac)
+
+        rc = cluster_cmd.main([
+            "provision", "ocp-east",
+            "--namespaces", "ns-a,ns-b",
+            "--hf-token", "hf",
+            "--registry-user", "ru", "--registry-token", "rt",
+        ])
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "ns-a: ok" in out
+        assert "ns-b: diverged" in out
+        assert "rbac" in out
+
+    def test_idempotent_rerun_preserves_created_at(self, fake_run, monkeypatch, tmp_path):
+        _real_exists = cluster_ops.Path.exists
+        monkeypatch.setattr(cluster_ops.Path, "exists",
+                            lambda self: _real_exists(self) if str(self).endswith("cluster_config.json") else True)
+        monkeypatch.setattr(cluster_ops.Path, "read_text", lambda self: "# yaml\n")
+        monkeypatch.setattr(cluster_ops.Path, "glob",
+                            lambda self, p: ([cluster_ops.Path("/fake/a.yaml")] if p == "*.yaml" else []))
+        fake_run.set(["kubectl", "get", "ns"], _completed(returncode=0))  # ns already present
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=0))  # pvcs already present
+
+        # First run.
+        rc1 = cluster_cmd.main([
+            "provision", "ocp-east", "--namespaces", "ns-a",
+            "--hf-token", "hf", "--registry-user", "ru", "--registry-token", "rt",
+        ])
+        assert rc1 == 0
+        first = cluster_ops.read_cluster_config("ocp-east")
+        first_created = first["created_at"]
+
+        # Second run — must preserve created_at byte-for-byte.
+        rc2 = cluster_cmd.main([
+            "provision", "ocp-east", "--namespaces", "ns-a",
+            "--hf-token", "hf", "--registry-user", "ru", "--registry-token", "rt",
+        ])
+        assert rc2 == 0
+        second = cluster_ops.read_cluster_config("ocp-east")
+        assert second["created_at"] == first_created
+
+    def test_empty_namespaces_exits_two(self, fake_run, capsys):
+        rc = cluster_cmd.main([
+            "provision", "ocp-east", "--namespaces", "  , ,",
+            "--hf-token", "hf", "--registry-user", "ru", "--registry-token", "rt",
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "--namespaces" in err
+
+    def test_pipeline_yaml_missing_exits_one(self, fake_run, monkeypatch, capsys):
+        # Force apply_cluster_resources to raise FileNotFoundError.
+        def boom(_):
+            raise FileNotFoundError("Pipeline YAML not found at /nowhere")
+        monkeypatch.setattr(cluster_ops, "apply_cluster_resources", boom)
+
+        rc = cluster_cmd.main([
+            "provision", "ocp-east", "--namespaces", "ns-a",
+            "--hf-token", "hf", "--registry-user", "ru", "--registry-token", "rt",
+        ])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "Pipeline YAML" in err
+
+    def test_dockerhub_creds_recorded_when_provided(self, fake_run, monkeypatch):
+        _real_exists = cluster_ops.Path.exists
+        monkeypatch.setattr(cluster_ops.Path, "exists",
+                            lambda self: _real_exists(self) if str(self).endswith("cluster_config.json") else True)
+        monkeypatch.setattr(cluster_ops.Path, "read_text", lambda self: "# yaml\n")
+        monkeypatch.setattr(cluster_ops.Path, "glob",
+                            lambda self, p: ([cluster_ops.Path("/fake/a.yaml")] if p == "*.yaml" else []))
+        fake_run.set(["kubectl", "get", "ns"], _completed(returncode=0))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=0))
+
+        rc = cluster_cmd.main([
+            "provision", "ocp-east", "--namespaces", "ns-a",
+            "--hf-token", "hf", "--registry-user", "ru", "--registry-token", "rt",
+            "--dockerhub-user", "du", "--dockerhub-token", "dt",
+        ])
+        assert rc == 0
+        cfg = cluster_ops.read_cluster_config("ocp-east")
+        assert cfg["secret_names"]["dockerhub_creds"] == "dockerhub-creds"
+
+
 class TestFormatSummary:
     def test_ok_when_no_divergence(self):
         r = cluster_ops.ProvisionResult(namespace="ns-a", steps_ok=["namespace", "rbac"])

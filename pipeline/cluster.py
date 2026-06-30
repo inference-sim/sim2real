@@ -15,7 +15,12 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import os
+import subprocess
 import sys
+from datetime import datetime, timezone
+
+from pipeline.lib import cluster_ops, layout
 
 
 # ── Argparse ──────────────────────────────────────────────────────────
@@ -218,7 +223,66 @@ def _format_summary_line(result) -> str:
 
 
 def cmd_provision(args: argparse.Namespace) -> int:
-    raise NotImplementedError("filled in by subsequent tasks")
+    layout.set_experiment_root(args.experiment_root)
+    cluster_id = args.cluster_id
+
+    # 1. Parse namespaces — fail fast on empty.
+    try:
+        namespaces = _parse_namespaces(args.namespaces)
+    except ValueError as exc:
+        print(f"error: --namespaces: {exc}", file=sys.stderr)
+        return 2
+
+    # 2. Existing config (for created_at preservation).
+    existing = cluster_ops.read_cluster_config(cluster_id)
+
+    # 3. Detect OpenShift once.
+    is_openshift = cluster_ops.detect_openshift()
+
+    # 4. Resolve secret values from flag > env > prompt.
+    secret_values, has_dockerhub = _resolve_secret_values(
+        args,
+        env=os.environ,
+        prompter=_default_plain_prompter,
+        secret_prompter=_default_secret_prompter,
+    )
+
+    # 5. Build cluster_config; stamp created_at if first-time write.
+    cluster_config = _build_cluster_config_dict(
+        cluster_id, namespaces,
+        is_openshift=is_openshift,
+        storage_class=args.storage_class or "",
+        has_dockerhub=has_dockerhub,
+        existing=existing,
+    )
+    if "created_at" not in cluster_config:
+        cluster_config["created_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # 6. Persist BEFORE apply_cluster_resources (it reads cluster_config from disk).
+    cluster_ops.write_cluster_config(cluster_id, cluster_config)
+
+    # 7. Cluster-wide resources.
+    try:
+        cluster_ops.apply_cluster_resources(cluster_id)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except subprocess.CalledProcessError as exc:
+        msg = (exc.stderr or exc.stdout or str(exc)).strip()
+        print(f"error: cluster-wide apply failed: {msg}", file=sys.stderr)
+        return 1
+
+    # 8. Provision each namespace; print one summary line each.
+    any_failed = False
+    for ns in namespaces:
+        result = cluster_ops.provision_namespace(
+            ns, cluster_config, secret_values=secret_values,
+        )
+        print(_format_summary_line(result))
+        if result.steps_failed:
+            any_failed = True
+
+    return 1 if any_failed else 0
 
 
 if __name__ == "__main__":
