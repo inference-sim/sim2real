@@ -696,6 +696,80 @@ class TestProvisionNamespace:
         assert "secrets" in skipped_reasons
         assert "registry_creds" in skipped_reasons["secrets"]
 
+    def test_unknown_secret_key_distinct_error(self, fake_run, monkeypatch):
+        # cluster_config declares a secret key the builder doesn't know about.
+        # Failure reason must name the key, not conflate with "incomplete dict".
+        _tekton_yamls_present(monkeypatch)
+        fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=0))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+        cfg = _baseline_cluster_config()
+        cfg["secret_names"] = {"futuristic_token": "future-secret"}
+
+        result = cluster_ops.provision_namespace(
+            "ns-a", cfg,
+            secret_values={"futuristic_token": "some-value"},
+        )
+        failed = dict(result.steps_failed)
+        assert "secrets" in failed
+        assert "unknown secret key 'futuristic_token'" in failed["secrets"]
+
+    def test_incomplete_docker_creds_distinct_error(self, fake_run, monkeypatch):
+        # registry_creds dict is missing 'token'. Operator-facing error must
+        # name the missing field, not say "unknown secret key".
+        _tekton_yamls_present(monkeypatch)
+        fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=0))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+        cfg = _baseline_cluster_config()
+        cfg["secret_names"] = {"registry_creds": "registry-secret"}
+
+        result = cluster_ops.provision_namespace(
+            "ns-a", cfg,
+            secret_values={"registry_creds": {"server": "quay.io", "user": "u"}},
+        )
+        failed = dict(result.steps_failed)
+        assert "secrets" in failed
+        assert "missing required fields: token" in failed["secrets"]
+        # And NOT the unknown-key message:
+        assert "unknown secret key" not in failed["secrets"]
+
+    def test_non_dict_docker_creds_distinct_error(self, fake_run, monkeypatch):
+        # Operator passes a string when a dict is expected.
+        _tekton_yamls_present(monkeypatch)
+        fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=0))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+        cfg = _baseline_cluster_config()
+        cfg["secret_names"] = {"registry_creds": "registry-secret"}
+
+        result = cluster_ops.provision_namespace(
+            "ns-a", cfg,
+            secret_values={"registry_creds": "not-a-dict"},
+        )
+        failed = dict(result.steps_failed)
+        assert "secrets" in failed
+        assert "not a dict" in failed["secrets"]
+
+    def test_dry_run_failure_routes_through_provision_result(self, fake_run, monkeypatch):
+        # If kubectl create --dry-run somehow returns non-zero, the failure
+        # must land on ProvisionResult.steps_failed, not raise out as
+        # CalledProcessError. The invariant is "every sub-step lands in
+        # steps_ok|skipped|failed" — no exception escapes.
+        _tekton_yamls_present(monkeypatch)
+        fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=0))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+        fake_run.set(
+            ["kubectl", "create", "secret", "generic", "hf-secret"],
+            _completed(returncode=1, stderr="dry-run failed for reasons"),
+        )
+        cfg = _baseline_cluster_config()
+        cfg["secret_names"] = {"hf_token": "hf-secret"}
+
+        result = cluster_ops.provision_namespace(
+            "ns-a", cfg, secret_values={"hf_token": "hf-XXX"},
+        )
+        failed = dict(result.steps_failed)
+        assert "secrets" in failed
+        assert "dry-run failed" in failed["secrets"]
+
     def test_rbac_cluster_forbidden_skipped_not_failed(self, fake_run, monkeypatch):
         _tekton_yamls_present(monkeypatch)
         fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=0))

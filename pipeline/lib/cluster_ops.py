@@ -434,9 +434,9 @@ def _step_secrets(
             else:
                 skipped.append(f"{key}({name})")
             continue
-        manifest = _build_secret_manifest(key, name, namespace, value)
+        manifest, reason = _build_secret_manifest(key, name, namespace, value)
         if manifest is None:
-            return ("failed", f"unknown secret key '{key}' — no manifest builder")
+            return ("failed", f"secret '{key}' ({name}): {reason}")
         proc = _run(
             ["kubectl", "apply", "-f", "-"],
             input=manifest, check=False, capture=True,
@@ -454,52 +454,68 @@ def _build_secret_manifest(
     name: str,
     namespace: str,
     value: object,
-) -> str | None:
+) -> tuple[str | None, str | None]:
     """Render a Kubernetes Secret manifest YAML via ``kubectl create
     secret ... --dry-run=client -o yaml``.
 
-    Returns ``None`` if the key is unrecognised — caller surfaces as a
-    structured failure. The four conventional keys are:
+    Returns ``(manifest, None)`` on success and ``(None, reason)`` on any
+    failure — unknown key, incomplete docker-creds dict, or a non-zero
+    ``kubectl create --dry-run`` exit. The caller surfaces ``reason`` on
+    ``ProvisionResult.steps_failed`` so distinct failure modes get
+    distinct operator-facing messages.
+
+    The four conventional keys are:
 
     * ``hf_token`` / ``github_token`` — generic Secret with a single
       string field (``HF_TOKEN`` / ``token``).
     * ``registry_creds`` / ``dockerhub_creds`` — docker-registry Secret;
       value is a dict with ``server``, ``user``, ``token``.
+
+    All ``_run`` calls pass ``check=False`` so a non-zero dry-run is
+    reported through the return value rather than raised — provision_namespace
+    must never let a sub-step bypass :class:`ProvisionResult`.
     """
     if key == "hf_token":
-        return _run(
+        proc = _run(
             ["kubectl", "create", "secret", "generic", name,
              f"--namespace={namespace}",
              f"--from-literal=HF_TOKEN={value}",
              "--dry-run=client", "-o", "yaml"],
-            capture=True,
-        ).stdout
+            check=False, capture=True,
+        )
+        if proc.returncode != 0:
+            return None, f"kubectl create --dry-run failed: {(proc.stderr or proc.stdout).strip()}"
+        return proc.stdout, None
     if key == "github_token":
-        return _run(
+        proc = _run(
             ["kubectl", "create", "secret", "generic", name,
              f"--namespace={namespace}",
              f"--from-literal=token={value}",
              "--dry-run=client", "-o", "yaml"],
-            capture=True,
-        ).stdout
+            check=False, capture=True,
+        )
+        if proc.returncode != 0:
+            return None, f"kubectl create --dry-run failed: {(proc.stderr or proc.stdout).strip()}"
+        return proc.stdout, None
     if key in ("registry_creds", "dockerhub_creds"):
         if not isinstance(value, dict):
-            return None
-        server = value.get("server", "")
-        user = value.get("user", "")
-        token = value.get("token", "")
-        if not (server and user and token):
-            return None
-        return _run(
+            return None, f"value is not a dict (expected {{server, user, token}}, got {type(value).__name__})"
+        missing = [field for field in ("server", "user", "token") if not value.get(field)]
+        if missing:
+            return None, f"value is missing required fields: {', '.join(missing)}"
+        proc = _run(
             ["kubectl", "create", "secret", "docker-registry", name,
              f"--namespace={namespace}",
-             f"--docker-server={server}",
-             f"--docker-username={user}",
-             f"--docker-password={token}",
+             f"--docker-server={value['server']}",
+             f"--docker-username={value['user']}",
+             f"--docker-password={value['token']}",
              "--dry-run=client", "-o", "yaml"],
-            capture=True,
-        ).stdout
-    return None
+            check=False, capture=True,
+        )
+        if proc.returncode != 0:
+            return None, f"kubectl create --dry-run failed: {(proc.stderr or proc.stdout).strip()}"
+        return proc.stdout, None
+    return None, f"unknown secret key '{key}' — no manifest builder"
 
 
 def _step_pvc(
