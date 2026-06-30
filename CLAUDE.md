@@ -64,7 +64,7 @@ python pipeline/run.py      --experiment-root ../admission-control switch <run-n
 
 **`pipeline/run.py`** — Lists, inspects, and switches between runs. `switch` syncs generated scorer plugin files into the experiment repo's `llm-d-inference-scheduler/` directory. Pass `--experiment-root` to point at the experiment repo (default: current directory).
 
-**`pipeline/cluster.py`** — Cluster-side bootstrap. `cluster.py provision <cluster_id> --namespaces NS1,NS2,...` provisions namespaces, RBAC, Secrets, PVCs, and Tekton tasks, and writes `workspace/clusters/<cluster_id>/cluster_config.json`. Idempotent — re-run when adding or changing namespace slots.
+**`pipeline/cluster.py`** — Cluster-side bootstrap. `cluster.py provision <cluster_id> --namespaces NS1,NS2,...` provisions namespaces, RBAC, Secrets, PVCs, Tekton tasks, and the cluster-wide Pipeline definition, and writes `workspace/clusters/<cluster_id>/cluster_config.json`. Idempotent — re-run when adding or changing namespace slots.
 
 ## Pipeline Library (`pipeline/lib/`)
 
@@ -90,7 +90,7 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). When no `-
 | File | Written by | Read by |
 |------|-----------|---------|
 | `setup_config.json` (workspace fields: registry, repo_name, current_run, orchestrator_image, pipeline_yaml, sim2real_root) | `setup.py` | `prepare.py`, `deploy.py`, `run.py` |
-| `clusters/<id>/cluster_config.json` (cluster fields: namespaces, is_openshift, storage_class, hf_secret_name, workspaces, secret_names) | `cluster.py provision` | `deploy.py`, `prepare.py`, `lib/remote.py`, `lib/run_manager.py` |
+| `clusters/<id>/cluster_config.json` (cluster fields: cluster_id, namespaces, is_openshift, storage_class, secret_names, workspaces, created_at) | `cluster.py provision` | `deploy.py`, `prepare.py`, `lib/remote.py` |
 | `runs/<run>/.state.json` | `prepare.py` | `prepare.py`, `deploy.py` |
 | `runs/<run>/run_metadata.json` | `setup.py`, `deploy.py` | `deploy.py`, `run.py` |
 | `runs/<run>/skill_input.json` | `prepare.py` Phase 3 | `/sim2real-translate` skill |
@@ -127,7 +127,15 @@ Two checks run in order:
 ruff check pipeline/ .claude/skills/ --select F
 
 # 2. Tests
-python -m pytest pipeline/ .claude/skills/sim2real-analyze/tests/ .claude/skills/sim2real-bootstrap/tests/ .claude/skills/sim2real-translate/tests/ -v
+python -m pytest pipeline/ \
+  pipeline/tests/test_layout.py \
+  pipeline/tests/test_cluster_ops.py \
+  pipeline/tests/test_cluster_py.py \
+  pipeline/tests/test_slicer.py \
+  .claude/skills/sim2real-analyze/tests/ \
+  .claude/skills/sim2real-bootstrap/tests/ \
+  .claude/skills/sim2real-translate/tests/ \
+  -v
 ```
 
 Run both locally before pushing. If your change adds a new module, test file location, or skill, update `.github/workflows/test.yml` to include it — CI only covers paths explicitly listed.

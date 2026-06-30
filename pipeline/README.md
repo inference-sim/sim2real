@@ -63,13 +63,13 @@ python pipeline/cluster.py provision <cluster_id> --namespaces NS1,NS2,... [flag
 
 **Output:** `workspace/clusters/<cluster_id>/cluster_config.json` records:
 
+- `cluster_id` — the slug passed on the command line
 - `namespaces` — the provisioned slot list
 - `is_openshift` — detected cluster flavor
 - `storage_class` — PVC storage class
-- `hf_secret_name` — name of the Secret holding the HF token
+- `secret_names` — dict of Secret names: `hf_token`, `registry_creds`, `github_token`, `dockerhub_creds` (consumers read e.g. `cluster_config["secret_names"]["hf_token"]`)
 - `workspaces` — PVC bindings (`data-pvc`, `source-pvc`)
-- `secret_names` — names of registry/github/dockerhub Secrets
-- `created_at` — first-write timestamp
+- `created_at` — first-write timestamp (preserved across re-runs)
 
 **What it provisions per namespace:** namespace, RBAC bindings, Secrets (HF, registry, GitHub, Docker Hub), PVCs (data, source), Tekton tasks, and the cluster-wide Pipeline definition. Re-runs reconcile via `kubectl apply` — drift is overwritten.
 
@@ -328,7 +328,7 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). Key files:
 | File | Written by | Read by |
 |------|-----------|---------|
 | `setup_config.json` (workspace fields: registry, repo_name, current_run, orchestrator_image, pipeline_yaml, sim2real_root) | `setup.py` | `prepare.py`, `deploy.py`, `run.py` |
-| `clusters/<id>/cluster_config.json` (cluster fields: namespaces, is_openshift, storage_class, hf_secret_name, workspaces, secret_names) | `cluster.py provision` | `deploy.py`, `prepare.py`, `lib/remote.py`, `lib/run_manager.py` |
+| `clusters/<id>/cluster_config.json` (cluster fields: cluster_id, namespaces, is_openshift, storage_class, secret_names, workspaces, created_at) | `cluster.py provision` | `deploy.py`, `prepare.py`, `lib/remote.py` |
 | `runs/<run>/.state.json` | `prepare.py` | `prepare.py`, `deploy.py` |
 | `runs/<run>/run_metadata.json` | `setup.py`, `deploy.py` | `deploy.py`, `run.py` |
 | `runs/<run>/skill_input.json` | `prepare.py` Phase 3 | `/sim2real-translate` skill |
