@@ -43,7 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--hf-token", metavar="TOKEN", default=None,
                     help="HuggingFace API token (env: HF_TOKEN; else prompt)")
     pv.add_argument("--github-token", metavar="TOKEN", default=None,
-                    help="GitHub token (env: GITHUB_TOKEN; else prompt)")
+                    help="GitHub token (env: GITHUB_TOKEN; optional)")
     pv.add_argument("--registry-user", metavar="USER", default=None,
                     help="Registry username (env: REGISTRY_USER; else prompt)")
     pv.add_argument("--registry-token", metavar="TOKEN", default=None,
