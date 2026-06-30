@@ -58,6 +58,8 @@ python pipeline/run.py     --experiment-root ../admission-control switch <run-na
 
 **`pipeline/run.py`** — Lists, inspects, and switches between runs. `switch` syncs generated scorer plugin files into the experiment repo's `llm-d-inference-scheduler/` directory. Pass `--experiment-root` to point at the experiment repo (default: current directory).
 
+**`pipeline/cluster.py`** — New Step-0 entry point (epic #416). Cluster-side bootstrap only: `cluster.py provision <cluster_id> --namespaces NS1,NS2,...` writes `workspace/clusters/<cluster_id>/cluster_config.json` and provisions namespaces, RBAC, Secrets, PVCs, and Tekton tasks. The cluster-side responsibilities of `setup.py` are being carved into `cluster.py`; `setup.py` remains the legacy 8-step flow until its trim PR lands (see epic #416).
+
 ## Pipeline Library (`pipeline/lib/`)
 
 | Module | Purpose |
