@@ -256,3 +256,30 @@ class TestParser:
         parser = cluster_cmd.build_parser()
         with pytest.raises(SystemExit):
             parser.parse_args(["provision", "ocp-east", "--namespaces", "a", "--no-cluster"])
+
+
+class TestFormatSummary:
+    def test_ok_when_no_divergence(self):
+        r = cluster_ops.ProvisionResult(namespace="ns-a", steps_ok=["namespace", "rbac"])
+        assert cluster_cmd._format_summary_line(r) == "ns-a: ok"
+
+    def test_skipped_only(self):
+        r = cluster_ops.ProvisionResult(
+            namespace="ns-a",
+            steps_ok=["namespace"],
+            steps_skipped=[("secrets", "no value provided for: hf_token(hf-secret)")],
+        )
+        line = cluster_cmd._format_summary_line(r)
+        assert line.startswith("ns-a: diverged: ")
+        assert "skipped=secrets" in line
+        assert "no value provided" in line
+
+    def test_failed_listed_before_skipped(self):
+        r = cluster_ops.ProvisionResult(
+            namespace="ns-a",
+            steps_failed=[("rbac", "kubectl forbidden")],
+            steps_skipped=[("secrets", "no value")],
+        )
+        line = cluster_cmd._format_summary_line(r)
+        # failed= appears before skipped=
+        assert line.index("failed=") < line.index("skipped=")

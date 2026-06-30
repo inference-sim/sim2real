@@ -199,6 +199,24 @@ def _resolve_secret_values(
     return values, has_dockerhub
 
 
+def _format_summary_line(result) -> str:
+    """One-line per-namespace summary for stdout printing.
+
+    Failed items come first because they block the exit code (steps_skipped
+    is soft divergence; steps_failed is the only thing that flips the exit
+    to non-zero — operators scanning a multi-namespace summary care about
+    the failures first).
+    """
+    if not result.diverged:
+        return f"{result.namespace}: ok"
+    parts: list[str] = []
+    for step, reason in result.steps_failed:
+        parts.append(f"failed={step}({reason})")
+    for step, reason in result.steps_skipped:
+        parts.append(f"skipped={step}({reason})")
+    return f"{result.namespace}: diverged: " + ", ".join(parts)
+
+
 def cmd_provision(args: argparse.Namespace) -> int:
     raise NotImplementedError("filled in by subsequent tasks")
 
