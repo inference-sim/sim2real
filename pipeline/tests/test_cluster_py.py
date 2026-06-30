@@ -51,6 +51,66 @@ def _isolated_experiment_root(tmp_path, monkeypatch):
     layout._EXPERIMENT_ROOT = None
 
 
+class TestParseNamespaces:
+    def test_splits_csv(self):
+        assert cluster_cmd._parse_namespaces("a,b,c") == ["a", "b", "c"]
+
+    def test_strips_whitespace(self):
+        assert cluster_cmd._parse_namespaces(" a , b ,c ") == ["a", "b", "c"]
+
+    def test_rejects_empty_string(self):
+        with pytest.raises(ValueError):
+            cluster_cmd._parse_namespaces("")
+
+    def test_rejects_only_whitespace_or_commas(self):
+        with pytest.raises(ValueError):
+            cluster_cmd._parse_namespaces(" , ,, ")
+
+
+class TestBuildClusterConfig:
+    def test_hardcoded_defaults(self):
+        cfg = cluster_cmd._build_cluster_config_dict(
+            "ocp-east",
+            ["a", "b"],
+            is_openshift=True,
+            storage_class="",
+            has_dockerhub=False,
+        )
+        assert cfg["cluster_id"] == "ocp-east"
+        assert cfg["namespaces"] == ["a", "b"]
+        assert cfg["is_openshift"] is True
+        assert cfg["storage_class"] == ""
+        assert cfg["secret_names"] == {
+            "hf_token": "hf-secret",
+            "registry_creds": "registry-creds",
+            "github_token": "github-token",
+            "dockerhub_creds": "",
+        }
+        assert cfg["workspaces"] == {
+            "data-storage": {"persistentVolumeClaim": {"claimName": "data-pvc"}},
+            "source":       {"persistentVolumeClaim": {"claimName": "source-pvc"}},
+        }
+
+    def test_dockerhub_secret_name_set_when_creds_present(self):
+        cfg = cluster_cmd._build_cluster_config_dict(
+            "ocp-east", ["a"], is_openshift=False, storage_class="", has_dockerhub=True,
+        )
+        assert cfg["secret_names"]["dockerhub_creds"] == "dockerhub-creds"
+
+    def test_existing_created_at_preserved(self):
+        cfg = cluster_cmd._build_cluster_config_dict(
+            "ocp-east", ["a"], is_openshift=False, storage_class="",
+            has_dockerhub=False, existing={"created_at": "2026-01-01T00:00:00Z"},
+        )
+        assert cfg["created_at"] == "2026-01-01T00:00:00Z"
+
+    def test_no_created_at_when_no_existing(self):
+        cfg = cluster_cmd._build_cluster_config_dict(
+            "ocp-east", ["a"], is_openshift=False, storage_class="", has_dockerhub=False,
+        )
+        assert "created_at" not in cfg
+
+
 class TestParser:
     def test_provision_subcommand_accepts_required_positional_and_namespaces(self):
         parser = cluster_cmd.build_parser()

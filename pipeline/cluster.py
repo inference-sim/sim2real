@@ -58,6 +58,71 @@ def main(argv: list[str] | None = None) -> int:
     return 2  # unreachable: subparser is required
 
 
+# ── Hardcoded defaults (match today's setup.py behavior) ──────────────
+
+
+_DEFAULT_SECRET_NAMES = {
+    "hf_token": "hf-secret",
+    "registry_creds": "registry-creds",
+    "github_token": "github-token",
+    "dockerhub_creds": "",  # filled in when --dockerhub-user/--dockerhub-token both provided
+}
+
+_DEFAULT_WORKSPACES = {
+    "data-storage": {"persistentVolumeClaim": {"claimName": "data-pvc"}},
+    "source":       {"persistentVolumeClaim": {"claimName": "source-pvc"}},
+}
+
+
+# ── Argument resolution helpers ──────────────────────────────────────
+
+
+def _parse_namespaces(raw: str) -> list[str]:
+    """Split ``--namespaces`` CSV into a non-empty list.
+
+    Whitespace around each entry is stripped; empty / whitespace-only
+    entries are dropped. Raises ``ValueError`` if the result is empty so the
+    caller exits with a clean message rather than letting ``provision_namespace``
+    iterate over an empty list.
+    """
+    items = [n.strip() for n in (raw or "").split(",") if n.strip()]
+    if not items:
+        raise ValueError("--namespaces resolved to an empty list")
+    return items
+
+
+def _build_cluster_config_dict(
+    cluster_id: str,
+    namespaces: list[str],
+    *,
+    is_openshift: bool,
+    storage_class: str,
+    has_dockerhub: bool,
+    existing: dict | None = None,
+) -> dict:
+    """Compose the cluster_config dict to be written to disk.
+
+    Pure — no I/O. ``existing`` is the prior on-disk config (or empty)
+    used only to preserve ``created_at``; everything else comes from the
+    current command-line invocation.
+    """
+    secret_names = dict(_DEFAULT_SECRET_NAMES)
+    if has_dockerhub:
+        secret_names["dockerhub_creds"] = "dockerhub-creds"
+    cfg = {
+        "cluster_id": cluster_id,
+        "namespaces": list(namespaces),
+        "is_openshift": bool(is_openshift),
+        "storage_class": storage_class or "",
+        "secret_names": secret_names,
+        "workspaces": dict(_DEFAULT_WORKSPACES),
+    }
+    prior_created = (existing or {}).get("created_at")
+    if prior_created:
+        cfg["created_at"] = prior_created
+    return cfg
+
+
 def cmd_provision(args: argparse.Namespace) -> int:
     raise NotImplementedError("filled in by subsequent tasks")
 
