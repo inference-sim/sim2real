@@ -609,7 +609,7 @@ def _cmd_status(args, run_dir: Path,
     from pipeline.lib.progress import ConfigMapProgressStore
     primary_ns = _configmap_namespace(cluster_config)
     if not primary_ns:
-        err("No namespace configured. Run setup.py first.")
+        err("No namespace configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
     try:
@@ -1428,7 +1428,7 @@ def _cmd_collect(args, run_dir: Path, cluster_config: dict):
     from pipeline.lib.progress import ConfigMapProgressStore
     primary_ns = _configmap_namespace(cluster_config)
     if not primary_ns:
-        err("No namespace configured. Run setup.py first.")
+        err("No namespace configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
     try:
@@ -2172,7 +2172,7 @@ def _check_slot_ready(namespace: str, hf_secret_name: str = "hf-secret") -> tupl
             check=False, capture=True,
         )
         if result.returncode != 0 or result.stdout.strip() != "Bound":
-            hint = " — re-run setup.py to provision it" if pvc == "source-pvc" else ""
+            hint = " — re-run cluster.py provision to provision it" if pvc == "source-pvc" else ""
             failures.append(f"PVC {pvc} not Bound in {namespace}{hint}")
 
     result = run(
@@ -2387,7 +2387,7 @@ def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
 
     namespaces = cluster_config.get("namespaces") or []
     if not namespaces or not namespaces[0]:
-        err("No namespaces configured. Run setup.py with --namespaces."); sys.exit(1)
+        err("No namespaces configured. Run cluster.py provision with --namespaces."); sys.exit(1)
 
     _cmd_build(run_dir, namespace=namespaces[0], skip_build=args.skip_build)
 
@@ -2399,7 +2399,7 @@ def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
     cluster_dir = run_dir / "cluster"
     primary_ns = _configmap_namespace(cluster_config, namespaces)
     if not primary_ns:
-        err("No namespace configured. Run setup.py first."); sys.exit(1)
+        err("No namespace configured. Run cluster.py provision with --namespaces."); sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
 
     # Derive GPU resource type from baseline scenario
@@ -2728,7 +2728,7 @@ def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
                 random.shuffle(dispatchable)
 
             for ns, pair_key in zip(free_slots, dispatchable):
-                hf_secret_name = cluster_config.get("hf_secret_name", "hf-secret")
+                hf_secret_name = (cluster_config.get("secret_names") or {}).get("hf_token", "hf-secret")
                 ready, reasons = _check_slot_ready(ns, hf_secret_name=hf_secret_name)
                 if not ready:
                     warn(f"Slot {ns} not ready: {'; '.join(reasons)}")
@@ -2826,7 +2826,7 @@ def _cmd_reset(args, run_dir: Path, discovered: dict,
     from pipeline.lib.progress import ConfigMapProgressStore
     primary_ns = _configmap_namespace(cluster_config, namespaces)
     if not primary_ns:
-        err("No namespace configured. Run setup.py first.")
+        err("No namespace configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
     progress = _load_progress(store)
@@ -2881,7 +2881,7 @@ def _cmd_wipe(args, run_dir: Path,
     from pipeline.lib.progress import ConfigMapProgressStore
     primary_ns = _configmap_namespace(cluster_config)
     if not primary_ns:
-        err("No namespace configured. Run setup.py first.")
+        err("No namespace configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
     progress = _load_progress(store)
@@ -3160,7 +3160,7 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict,
     namespaces = cluster_config.get("namespaces") or []
     namespace = namespaces[0] if namespaces else ""
     if not namespace:
-        err("No namespaces configured. Run setup.py with --namespaces.")
+        err("No namespaces configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
 
     orchestrator_image = setup_config.get("orchestrator_image")
@@ -3411,7 +3411,7 @@ def main():
     if cmd == "stop":
         namespaces = [ns for ns in (cluster_config.get("namespaces") or []) if ns]
         if not namespaces:
-            err("No namespaces configured. Run setup.py first.")
+            err("No namespaces configured. Run cluster.py provision with --namespaces.")
             sys.exit(1)
         _cmd_stop(namespace=namespaces[0])
         return
@@ -3429,7 +3429,7 @@ def main():
     if cmd == "build":
         namespaces = cluster_config.get("namespaces") or []
         if not namespaces or not namespaces[0]:
-            err("No namespaces configured. Run setup.py with --namespaces."); sys.exit(1)
+            err("No namespaces configured. Run cluster.py provision with --namespaces."); sys.exit(1)
         _cmd_build(run_dir, namespace=namespaces[0],
                    skip_build=getattr(args, "skip_build", False))
         return
