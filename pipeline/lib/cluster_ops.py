@@ -11,18 +11,36 @@ is split into two slices:
 * kubectl/oc primitives — :func:`provision_namespace` (per-namespace
   resources: namespace, RBAC, secrets, PVCs, Tekton tasks) and
   :func:`apply_cluster_resources` (Tekton Pipeline definition). Each
-  primitive is idempotent: a step that's already correct is a no-op, a
-  step that diverges is surfaced as a structured failure on
-  :class:`ProvisionResult` rather than silently overwriting.
+  primitive is idempotent in the ``kubectl apply``/``oc new-project``
+  sense: applying the same manifest twice converges on the same cluster
+  state, and an already-existing object is not an error. Note that
+  ``kubectl apply`` server-side merges — this module does NOT compare
+  the live object's contents to the supplied manifest, so drift between
+  a cluster-mutated resource and the source-of-truth manifest is
+  reconciled silently. Per-step outcomes are reported via
+  :class:`ProvisionResult` (see "outcome reporting" below).
 
-Error-handling convention (per design):
+Outcome reporting:
 
-* Idempotent applies that succeed: silent.
-* Idempotent applies that surface a name collision with different content:
-  structured failure entry on ``ProvisionResult.steps_failed``.
-* Hard failures (auth, network): exceptions propagate to the caller —
-  :class:`ClusterUnreachableError` for connectivity issues,
-  ``subprocess.CalledProcessError`` for unexpected non-zero exits.
+* Successful sub-step (apply returned zero, or pre-check said
+  already-exists): recorded on ``ProvisionResult.steps_ok``.
+* Intentional suppression (caller-supplied ``skip``) or operator
+  prerequisites not provided (e.g. absent secret value + no
+  pre-installed Secret) or best-effort YAMLs that hit a tolerated
+  permission error (cluster-scoped RBAC Forbidden): recorded on
+  ``ProvisionResult.steps_skipped``. Soft divergence — flips
+  :attr:`ProvisionResult.diverged` to True without anything in
+  ``steps_failed``.
+* Non-zero exit from kubectl/oc, missing required YAML, or malformed
+  config: recorded on ``ProvisionResult.steps_failed``. Hard divergence.
+
+Hard failures (auth, network) that prevent reasoning about per-step
+outcomes raise instead — :class:`ClusterUnreachableError` for
+connectivity issues (from :func:`check_cluster_reachable`), and
+``subprocess.CalledProcessError`` from :func:`apply_cluster_resources`'s
+per-namespace applies. No exception ever escapes
+:func:`provision_namespace`: every sub-step lands in exactly one of
+``steps_ok`` / ``steps_skipped`` / ``steps_failed``.
 """
 
 from __future__ import annotations

@@ -582,6 +582,47 @@ class TestProvisionNamespace:
         # on per-step failures; surfacing every divergence is the design.
         assert result.diverged is True
 
+    def test_no_short_circuit_on_early_failure(self, fake_run, monkeypatch):
+        """provision_namespace must attempt every sub-step even after an
+        earlier one fails. The invariant is 'every sub-step lands in
+        exactly one of steps_ok / steps_skipped / steps_failed' — a
+        regression that adds an early return on first failure would lose
+        coverage of the later steps in the ProvisionResult.
+        """
+        _tekton_yamls_present(monkeypatch)
+        # Namespace step fails on a non-AlreadyExists error.
+        fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=1))
+        fake_run.set(["kubectl", "create", "ns", "ns-a"],
+                     _completed(returncode=1, stderr="quota exceeded"))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+
+        result = cluster_ops.provision_namespace(
+            "ns-a",
+            _baseline_cluster_config(),
+            secret_values={
+                "hf_token": "v", "github_token": "v",
+                "registry_creds": {"server": "s", "user": "u", "token": "t"},
+            },
+        )
+        # Every one of the five sub-steps lands in exactly one of the three
+        # lists. No exception escapes provision_namespace.
+        all_attempted = (
+            set(result.steps_ok)
+            | {s for s, _ in result.steps_skipped}
+            | {s for s, _ in result.steps_failed}
+        )
+        assert all_attempted == set(cluster_ops._PROVISION_STEPS)
+        assert (
+            len(result.steps_ok)
+            + len(result.steps_skipped)
+            + len(result.steps_failed)
+            == len(cluster_ops._PROVISION_STEPS)
+        )
+        # The failed step is recorded; later steps did run (rbac apply
+        # default-returns 0, so it lands in steps_ok).
+        assert ("namespace", "quota exceeded") in result.steps_failed
+        assert "rbac" in result.steps_ok
+
     def test_skip_arg_suppresses_named_steps(self, fake_run, monkeypatch):
         _tekton_yamls_present(monkeypatch)
         result = cluster_ops.provision_namespace(
