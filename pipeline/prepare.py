@@ -26,6 +26,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from pipeline.lib import cluster_ops, layout
 from pipeline.lib.manifest import load_manifest, ManifestError
 from pipeline.lib.state_machine import StateMachine
 from pipeline.lib.context_builder import build_context
@@ -99,6 +100,30 @@ def _load_setup_config() -> dict:
     if path.exists():
         return json.loads(path.read_text())
     return {}
+
+
+def _load_cluster_config() -> dict:
+    """Load the single cluster_config.json from the workspace.
+
+    Step 0 assumes one cluster per workspace. Returns ``{}`` when no
+    ``clusters/`` entry exists yet (callers surface the same
+    "no cluster configured" error path they used for an empty
+    setup_config); hard-fails when more than one cluster is present.
+    Mirrors ``deploy.py:_load_cluster_config`` so cluster discovery
+    behaves identically across the two entry points.
+    """
+    layout.set_experiment_root(EXPERIMENT_ROOT)
+    cluster_ids = layout.list_cluster_ids()
+    if not cluster_ids:
+        layout.set_experiment_root(REPO_ROOT)
+        cluster_ids = layout.list_cluster_ids()
+        if not cluster_ids:
+            return {}
+    if len(cluster_ids) > 1:
+        err(f"Multiple clusters found in workspace ({len(cluster_ids)}); "
+            f"Step 0 assumes a single cluster.")
+        sys.exit(1)
+    return cluster_ops.read_cluster_config(cluster_ids[0])
 
 
 def _load_resolved_config(manifest: dict) -> dict:
@@ -606,11 +631,11 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
             info("Skipping baseline EPP injection: no component.path in manifest")
 
     # 4b.6: Inject huggingface.secretName into all packages
-    setup_config = _load_setup_config()
-    if not setup_config:
-        err("setup_config.json not found. Run setup.py first to bootstrap cluster resources.")
+    cluster_config = _load_cluster_config()
+    if not cluster_config:
+        err("No cluster_config.json found. Run pipeline/cluster.py provision first to bootstrap cluster resources.")
         sys.exit(1)
-    hf_secret_name = setup_config.get("hf_secret_name", "hf-secret")
+    hf_secret_name = (cluster_config.get("secret_names") or {}).get("hf_token", "hf-secret")
     for pkg in packages:
         if not inject_hf_secret_name(pkg.resolved, hf_secret_name):
             err(f"{pkg.name} has no 'scenario' entries — huggingface.secretName cannot be injected.")
@@ -656,8 +681,9 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     pipeline_name = manifest.get("pipeline", {}).get("name", "sim2real")
 
     # 4f: Generate PipelineRuns
-    namespace = setup_config.get("namespace", "default")
-    ws_bindings = setup_config.get("workspaces") or {}
+    namespaces = cluster_config.get("namespaces") or []
+    namespace = namespaces[0] if namespaces else "default"
+    ws_bindings = cluster_config.get("workspaces") or {}
     shas = _get_submodule_shas(manifest.get("component", {}).get("path", ""))
     benchmark_commit = shas.get("llm-d-benchmark", "")
     blis_commit = shas.get("inference-sim", "")

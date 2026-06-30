@@ -1084,9 +1084,11 @@ class TestBaselineOnlyAssembly:
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        # setup_config.json (written by setup.py)
-        setup_config = {"namespace": "sim2real-test", "workspaces": {}}
-        (repo / "workspace" / "setup_config.json").write_text(json.dumps(setup_config))
+        # cluster_config.json (written by cluster.py provision)
+        cluster_dir = repo / "workspace" / "clusters" / "test-cluster"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        cluster_config = {"namespaces": ["sim2real-test"], "workspaces": {}}
+        (cluster_dir / "cluster_config.json").write_text(json.dumps(cluster_config))
 
         # baseline.yaml bundle (experiment root)
         baseline_bundle = {
@@ -1328,16 +1330,16 @@ class TestBaselineOnlyNoAlgorithm:
         """Full _cmd_run succeeds with no algorithm — baseline-only flow."""
         mod = _import_prepare_with_root(repo)
         manifest = self._no_algo_manifest()
-        # Empty workloads to skip PipelineRun generation (avoids setup_config dep)
+        # Empty workloads to skip PipelineRun generation (avoids cluster_config dep)
         manifest["workloads"] = []
 
         # baseline.yaml must exist for assembly (needs scenario list for HF injection)
         (repo / "baseline.yaml").write_text(yaml.dump({"scenario": [{"name": "test", "model": {"name": "test"}}]}))
 
-        # setup_config.json required for HF secret injection
-        ws_dir = repo / "workspace"
-        ws_dir.mkdir(parents=True, exist_ok=True)
-        (ws_dir / "setup_config.json").write_text(json.dumps({"namespace": "default"}))
+        # cluster_config.json required for HF secret injection
+        cluster_dir = repo / "workspace" / "clusters" / "test-cluster"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        (cluster_dir / "cluster_config.json").write_text(json.dumps({"namespaces": ["default"]}))
 
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
