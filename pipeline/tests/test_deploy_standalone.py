@@ -27,9 +27,9 @@ def test_main_works_without_transfer_yaml(tmp_path, monkeypatch):
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     run_dir.mkdir(parents=True)
 
-    # setup_config.json with current_run
+    # setup_config.json with current_run; cluster_config holds the namespace
     ws = tmp_path / "workspace"
-    (ws / "setup_config.json").write_text(json.dumps({"current_run": "test-run", "namespace": "ns-0"}))
+    (ws / "setup_config.json").write_text(json.dumps({"current_run": "test-run"}))
 
     # Mock ConfigMapProgressStore to return progress data
     progress = {"wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "pending", "namespace": None, "retries": 0}}
@@ -39,16 +39,17 @@ def test_main_works_without_transfer_yaml(tmp_path, monkeypatch):
     # Patch sys.argv to simulate CLI invocation
     monkeypatch.setattr("sys.argv", ["deploy.py", "--experiment-root", str(tmp_path), "status"])
 
-    # Patch EXPERIMENT_ROOT and _load_setup_config to use our tmp_path
+    # Patch EXPERIMENT_ROOT and the config loaders to use our tmp_path
     monkeypatch.setattr(deploy, "EXPERIMENT_ROOT", tmp_path)
 
     status_called = []
 
-    def mock_status(args, run_dir, setup_config=None):
+    def mock_status(args, run_dir, setup_config=None, cluster_config=None):
         status_called.append(run_dir)
 
     with patch.object(deploy, "_cmd_status", mock_status):
-        with patch.object(deploy, "_load_setup_config", return_value={"current_run": "test-run", "namespace": "ns-0"}):
+        with patch.object(deploy, "_load_setup_config", return_value={"current_run": "test-run"}), \
+             patch.object(deploy, "_load_cluster_config", return_value={"namespaces": ["ns-0"]}):
             deploy.main()
 
     assert len(status_called) == 1
@@ -63,7 +64,7 @@ def test_main_status_silent_suppresses_banner(tmp_path, monkeypatch, capsys):
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     run_dir.mkdir(parents=True)
     ws = tmp_path / "workspace"
-    (ws / "setup_config.json").write_text(json.dumps({"current_run": "test-run", "namespace": "ns-0"}))
+    (ws / "setup_config.json").write_text(json.dumps({"current_run": "test-run"}))
 
     progress = {"wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "done", "namespace": "ns-0", "retries": 0}}
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: progress)
@@ -73,7 +74,9 @@ def test_main_status_silent_suppresses_banner(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(deploy, "EXPERIMENT_ROOT", tmp_path)
 
     with patch.object(deploy, "_load_setup_config",
-                      return_value={"current_run": "test-run", "namespace": "ns-0"}):
+                      return_value={"current_run": "test-run"}), \
+         patch.object(deploy, "_load_cluster_config",
+                      return_value={"namespaces": ["ns-0"]}):
         deploy.main()
 
     out = capsys.readouterr().out
@@ -89,7 +92,7 @@ def test_main_status_without_silent_keeps_banner(tmp_path, monkeypatch, capsys):
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     run_dir.mkdir(parents=True)
     ws = tmp_path / "workspace"
-    (ws / "setup_config.json").write_text(json.dumps({"current_run": "test-run", "namespace": "ns-0"}))
+    (ws / "setup_config.json").write_text(json.dumps({"current_run": "test-run"}))
 
     progress = {"wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "done", "namespace": "ns-0", "retries": 0}}
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: progress)
@@ -99,7 +102,9 @@ def test_main_status_without_silent_keeps_banner(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(deploy, "EXPERIMENT_ROOT", tmp_path)
 
     with patch.object(deploy, "_load_setup_config",
-                      return_value={"current_run": "test-run", "namespace": "ns-0"}):
+                      return_value={"current_run": "test-run"}), \
+         patch.object(deploy, "_load_cluster_config",
+                      return_value={"namespaces": ["ns-0"]}):
         deploy.main()
 
     out = capsys.readouterr().out
