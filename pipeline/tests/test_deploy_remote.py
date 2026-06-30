@@ -761,7 +761,7 @@ def test_main_routes_run_local(tmp_path, monkeypatch):
 
     local_calls = []
 
-    def mock_run(args, rd, sc, cc):
+    def mock_run(args, rd, cc):
         local_calls.append(True)
 
     with patch.object(mod, "_cmd_run", mock_run):

@@ -2471,6 +2471,63 @@ def test_configmap_namespace_empty():
     assert _configmap_namespace(None) == ""
 
 
+# ── _load_cluster_config helper ──────────────────────────────────────────────
+
+def _write_cluster_config(root, cluster_id, payload):
+    """Helper: write workspace/clusters/<cluster_id>/cluster_config.json under *root*."""
+    d = root / "workspace" / "clusters" / cluster_id
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "cluster_config.json").write_text(json.dumps(payload))
+
+
+def test_load_cluster_config_zero_clusters_returns_empty(tmp_path, monkeypatch):
+    """Zero clusters under EXPERIMENT_ROOT and REPO_ROOT → returns {}."""
+    import pipeline.deploy as mod
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "REPO_ROOT", other)
+    assert mod._load_cluster_config() == {}
+
+
+def test_load_cluster_config_single_cluster_returns_dict(tmp_path, monkeypatch):
+    """Exactly one cluster under EXPERIMENT_ROOT → returns its parsed config."""
+    import pipeline.deploy as mod
+    _write_cluster_config(tmp_path, "ocp-east",
+                          {"namespaces": ["sim2real-0", "sim2real-1"]})
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path / "_unused")
+    result = mod._load_cluster_config()
+    assert result == {"namespaces": ["sim2real-0", "sim2real-1"]}
+
+
+def test_load_cluster_config_multi_cluster_exits(tmp_path, monkeypatch, capsys):
+    """More than one cluster directory triggers the safety rail."""
+    import pipeline.deploy as mod
+    _write_cluster_config(tmp_path, "ocp-east", {"namespaces": ["a"]})
+    _write_cluster_config(tmp_path, "ocp-west", {"namespaces": ["b"]})
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path / "_unused")
+    with pytest.raises(SystemExit) as exc_info:
+        mod._load_cluster_config()
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "Multiple clusters" in err
+
+
+def test_load_cluster_config_falls_back_to_repo_root(tmp_path, monkeypatch):
+    """Zero under EXPERIMENT_ROOT but one under REPO_ROOT → returns the REPO_ROOT dict."""
+    import pipeline.deploy as mod
+    experiment = tmp_path / "experiment"
+    experiment.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_cluster_config(repo, "ocp-east", {"namespaces": ["from-repo"]})
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", experiment)
+    monkeypatch.setattr(mod, "REPO_ROOT", repo)
+    assert mod._load_cluster_config() == {"namespaces": ["from-repo"]}
+
+
 # ── ConfigMapProgressStore wiring in _cmd_run / _cmd_reset ─────────────────
 
 def test_cmd_run_uses_configmap_store(monkeypatch, tmp_path):
@@ -2492,11 +2549,10 @@ def test_cmd_run_uses_configmap_store(monkeypatch, tmp_path):
         gpu_resource_type=None, default_gpu_cost=1,
         pending_threshold=600, max_pending_stalls=10,
     )
-    setup = {}
     cluster = {"namespaces": ["sim2real-ns"]}
 
     with pytest.raises(SystemExit):
-        mod._cmd_run(args, run_dir, setup, cluster)
+        mod._cmd_run(args, run_dir, cluster)
 
 
 def test_cmd_reset_uses_configmap_store(monkeypatch, tmp_path):
@@ -2807,7 +2863,6 @@ def test_dispatch_sets_entry_running(tmp_path, monkeypatch):
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
 
     # Setup config with one namespace slot
-    setup_config = {}
     cluster_config = {"namespaces": ["sim2real-0"]}
 
     # Track progress store saves
@@ -2873,7 +2928,7 @@ def test_dispatch_sets_entry_running(tmp_path, monkeypatch):
         shadow_ttl=0,
     )
 
-    mod._cmd_run(args, run_dir, setup_config, cluster_config)
+    mod._cmd_run(args, run_dir, cluster_config)
 
     # The pair should have been marked running at some point during dispatch
     assert "wl-a-baseline" in saved_progress
@@ -2919,7 +2974,6 @@ def test_all_slots_busy_skips_gpu_probe(tmp_path, monkeypatch, capsys):
     _write_pr(cluster_dir, "a")
     _write_pr(cluster_dir, "b")
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
-    setup_config = {}
     cluster_config = {"namespaces": ["sim2real-0"]}
 
     # wl-a already running in the only slot (busy); wl-b pending.
@@ -2985,7 +3039,7 @@ def test_all_slots_busy_skips_gpu_probe(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
 
-    mod._cmd_run(_run_args(), run_dir, setup_config, cluster_config)
+    mod._cmd_run(_run_args(), run_dir, cluster_config)
 
     # The first (all-slots-busy) cycle must not have probed GPUs.
     assert probe_calls["at_first_sleep"] == 0
@@ -3006,7 +3060,6 @@ def test_free_slot_runs_gpu_probe_and_dispatches(tmp_path, monkeypatch):
     cluster_dir.mkdir(parents=True)
     _write_pr(cluster_dir, "a")
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
-    setup_config = {}
     cluster_config = {"namespaces": ["sim2real-0"]}
 
     saved_progress = {}
@@ -3044,7 +3097,7 @@ def test_free_slot_runs_gpu_probe_and_dispatches(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
 
-    mod._cmd_run(_run_args(), run_dir, setup_config, cluster_config)
+    mod._cmd_run(_run_args(), run_dir, cluster_config)
 
     # The free slot triggered at least one GPU probe and the pair dispatched.
     assert probe_calls["n"] >= 1
@@ -3066,7 +3119,6 @@ def _orphan_harness(tmp_path, monkeypatch, *, initial_progress):
     cluster_dir.mkdir(parents=True)
     _write_pr(cluster_dir, "a")
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
-    setup_config = {}
     cluster_config = {"namespaces": ["sim2real-0"]}
 
     saved_progress = {}
@@ -3097,7 +3149,7 @@ def _orphan_harness(tmp_path, monkeypatch, *, initial_progress):
     monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
 
-    mod._cmd_run(_run_args(), run_dir, setup_config, cluster_config)
+    mod._cmd_run(_run_args(), run_dir, cluster_config)
     return saved_progress
 
 
@@ -3193,7 +3245,6 @@ def _run_harness(tmp_path, monkeypatch, *, status_fn, extra_patches=None):
     (cluster_dir / "pipelinerun-a-baseline.yaml").write_text(_yaml.dump(pr))
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
 
-    setup_config = {}
     cluster_config = {"namespaces": ["sim2real-0"]}
 
     saved_progress = {}
@@ -3229,7 +3280,7 @@ def _run_harness(tmp_path, monkeypatch, *, status_fn, extra_patches=None):
         package=None, status=None, force=False, skip_teardown=False,
         remote=False, preserve_pipelineruns=False, shadow_ttl=0,
     )
-    mod._cmd_run(args, run_dir, setup_config, cluster_config)
+    mod._cmd_run(args, run_dir, cluster_config)
     return saved_progress
 
 
@@ -3289,7 +3340,6 @@ def test_derive_costs_only_for_scoped_pairs(tmp_path, monkeypatch):
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
 
     # Setup config
-    setup_config = {}
     cluster_config = {"namespaces": ["sim2real-0"]}
 
     # Mock ConfigMapProgressStore
@@ -3357,7 +3407,7 @@ def test_derive_costs_only_for_scoped_pairs(tmp_path, monkeypatch):
         shadow_ttl=0,
     )
 
-    mod._cmd_run(args, run_dir, setup_config, cluster_config)
+    mod._cmd_run(args, run_dir, cluster_config)
 
     # _derive_pair_gpu_costs should have been called with only the 2 in-scope pairs
     assert len(called_keys) == 1
@@ -3490,7 +3540,6 @@ def test_health_escalation_cancels_pipelinerun(tmp_path, monkeypatch):
     (cluster_dir / "pipelinerun-a-baseline.yaml").write_text(_yaml.dump(pr))
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
 
-    setup_config = {}
     cluster_config = {"namespaces": ["sim2real-0"]}
 
     saved = {}
@@ -3538,7 +3587,7 @@ def test_health_escalation_cancels_pipelinerun(tmp_path, monkeypatch):
         preserve_pipelineruns=False, shadow_ttl=0,
     )
 
-    mod._cmd_run(args, run_dir, setup_config, cluster_config)
+    mod._cmd_run(args, run_dir, cluster_config)
 
     assert "wl-a-baseline" in saved
     assert saved["wl-a-baseline"]["status"] == "failed"
@@ -3679,7 +3728,6 @@ def test_dispatch_shuffles_dispatchable(tmp_path, monkeypatch):
     (cluster_dir / "pipelinerun-a-baseline.yaml").write_text(_yaml.dump(pr))
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
 
-    setup_config = {}
     cluster_config = {"namespaces": ["sim2real-0"]}
 
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
@@ -3722,7 +3770,7 @@ def test_dispatch_shuffles_dispatchable(tmp_path, monkeypatch):
         preserve_pipelineruns=False, shadow_ttl=0,
     )
 
-    mod._cmd_run(args, run_dir, setup_config, cluster_config)
+    mod._cmd_run(args, run_dir, cluster_config)
 
     assert len(shuffle_calls) >= 1
     assert "wl-a-baseline" in shuffle_calls[0]
@@ -3759,7 +3807,6 @@ def test_shadow_ledger_prevents_over_subscription(tmp_path, monkeypatch):
 
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
 
-    setup_config = {}
     cluster_config = {"namespaces": ["sim2real-0", "sim2real-1", "sim2real-2"]}
 
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
@@ -3812,7 +3859,7 @@ def test_shadow_ledger_prevents_over_subscription(tmp_path, monkeypatch):
         preserve_pipelineruns=False, shadow_ttl=120,
     )
 
-    mod._cmd_run(args, run_dir, setup_config, cluster_config)
+    mod._cmd_run(args, run_dir, cluster_config)
 
     # All 3 pairs eventually dispatched
     assert len(dispatch_log) == 3
@@ -3845,7 +3892,6 @@ def test_shadow_ttl_zero_disables_gating(tmp_path, monkeypatch):
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
 
     # 3 slots, 12 probed free GPUs, cost 4 each — without shadow all 3 fit
-    setup_config = {}
     cluster_config = {"namespaces": ["sim2real-0", "sim2real-1", "sim2real-2"]}
 
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
@@ -3885,7 +3931,7 @@ def test_shadow_ttl_zero_disables_gating(tmp_path, monkeypatch):
         preserve_pipelineruns=False, shadow_ttl=0,
     )
 
-    mod._cmd_run(args, run_dir, setup_config, cluster_config)
+    mod._cmd_run(args, run_dir, cluster_config)
 
     # All 3 pairs dispatched — shadow tracking disabled, probe says 12 free
     # which fits 3 pairs of cost 4 each
@@ -3897,7 +3943,7 @@ def _setup_dispatch_run(tmp_path, monkeypatch, *, baseline_yaml: str):
 
     Builds a single-pair run dir with a PipelineRun YAML and the given
     `baseline.yaml` content, mocks the cluster and store, and returns
-    the args + setup_config + run_dir for the test to invoke _cmd_run.
+    the args + cluster_config + run_dir for the test to invoke _cmd_run.
 
     Captures probe_free_gpus kwargs into the returned dict; the loop is
     short-circuited by reporting "Succeeded" on the first poll.
@@ -3949,9 +3995,8 @@ def _setup_dispatch_run(tmp_path, monkeypatch, *, baseline_yaml: str):
         skip_teardown=False, remote=False, preserve_pipelineruns=False,
         shadow_ttl=0,
     )
-    setup_config = {}
     cluster_config = {"namespaces": ["sim2real-0"]}
-    return mod, args, setup_config, cluster_config, run_dir, captured
+    return mod, args, cluster_config, run_dir, captured
 
 
 class TestCmdRunForwardsNodeFilters:
@@ -3963,10 +4008,10 @@ class TestCmdRunForwardsNodeFilters:
         from pipeline.lib.capacity import NodeFilter
         # Scenario with no role keys → extract_node_filters returns {}.
         baseline = "scenario:\n- name: test\n"
-        mod, args, setup, cluster, run_dir, captured = _setup_dispatch_run(
+        mod, args, cluster, run_dir, captured = _setup_dispatch_run(
             tmp_path, monkeypatch, baseline_yaml=baseline,
         )
-        mod._cmd_run(args, run_dir, setup, cluster)
+        mod._cmd_run(args, run_dir, cluster)
         assert captured["probe_kwargs"], "probe_free_gpus was never called"
         first = captured["probe_kwargs"][0]
         assert first.get("node_filters") == [NodeFilter()]
@@ -3981,10 +4026,10 @@ class TestCmdRunForwardsNodeFilters:
             "      labelKey: nvidia.com/gpu.product\n"
             "      labelValue: NVIDIA-H100-80GB-HBM3\n"
         )
-        mod, args, setup, cluster, run_dir, captured = _setup_dispatch_run(
+        mod, args, cluster, run_dir, captured = _setup_dispatch_run(
             tmp_path, monkeypatch, baseline_yaml=baseline,
         )
-        mod._cmd_run(args, run_dir, setup, cluster)
+        mod._cmd_run(args, run_dir, cluster)
         assert captured["probe_kwargs"], "probe_free_gpus was never called"
         first = captured["probe_kwargs"][0]
         assert first.get("node_filters") == [
@@ -3998,10 +4043,10 @@ class TestCmdRunForwardsNodeFilters:
         """Issue #268 item 6: when no constraint can be extracted, the orchestrator
         must announce that cordon/taint-only screening is in effect."""
         baseline = "scenario:\n- name: test\n"
-        mod, args, setup, cluster, run_dir, _captured = _setup_dispatch_run(
+        mod, args, cluster, run_dir, _captured = _setup_dispatch_run(
             tmp_path, monkeypatch, baseline_yaml=baseline,
         )
-        mod._cmd_run(args, run_dir, setup, cluster)
+        mod._cmd_run(args, run_dir, cluster)
         out = capsys.readouterr().out
         assert "No per-role GPU product constraint extracted" in out
         assert "cordon/taint screening only" in out
@@ -4098,7 +4143,6 @@ def test_one_cycle_emits_unified_capacity_log_and_effective_free_warn(
     cluster_dir.mkdir(parents=True)
     _write_pr(cluster_dir, "a")
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
-    setup_config = {}
     cluster_config = {"namespaces": ["sim2real-0"]}
 
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
@@ -4156,7 +4200,7 @@ def test_one_cycle_emits_unified_capacity_log_and_effective_free_warn(
     )
 
     with pytest.raises(_LoopBreak):
-        mod._cmd_run(args, run_dir, setup_config, cluster_config)
+        mod._cmd_run(args, run_dir, cluster_config)
 
     out = capsys.readouterr().out
     cap_lines = [ln for ln in out.splitlines() if "Capacity:" in ln]

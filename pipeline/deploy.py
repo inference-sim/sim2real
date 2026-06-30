@@ -604,7 +604,6 @@ def _runtime_str(entry: dict) -> str:
 
 
 def _cmd_status(args, run_dir: Path,
-                setup_config: dict | None = None,
                 cluster_config: dict | None = None) -> None:
     """Print a snapshot table of all (workload, package) pair statuses."""
     from pipeline.lib.progress import ConfigMapProgressStore
@@ -1413,7 +1412,7 @@ def _extract_phase_plans(pod_name: str, run_name: str, phase: str,
             info(f"[{phase}/plans/{flow}] copied={copied} skipped={skipped}")
 
 
-def _cmd_collect(args, run_dir: Path, setup_config: dict, cluster_config: dict):
+def _cmd_collect(args, run_dir: Path, cluster_config: dict):
     """Pull results from cluster for completed phases."""
     cluster_namespaces = cluster_config.get("namespaces") or []
     namespace = os.environ.get(
@@ -2377,7 +2376,7 @@ def _refresh_namespaces(current: list[str]) -> list[str]:
     return fresh_ns
 
 
-def _cmd_run(args, run_dir: Path, setup_config: dict, cluster_config: dict) -> None:
+def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
     """Orchestrate parallel pool execution across namespace slots."""
     import tempfile as _tmp
     from pipeline.lib.progress import ConfigMapProgressStore
@@ -2822,7 +2821,6 @@ def _cmd_run(args, run_dir: Path, setup_config: dict, cluster_config: dict) -> N
 
 def _cmd_reset(args, run_dir: Path, discovered: dict,
                namespaces: list[str] | None = None,
-               setup_config: dict | None = None,
                cluster_config: dict | None = None) -> None:
     """Reset all non-pending pairs to pending (with cluster cleanup)."""
     from pipeline.lib.progress import ConfigMapProgressStore
@@ -2878,7 +2876,6 @@ def _cmd_reset(args, run_dir: Path, discovered: dict,
 
 
 def _cmd_wipe(args, run_dir: Path,
-              setup_config: dict | None = None,
               cluster_config: dict | None = None) -> None:
     """Delete local result files for pairs in scope."""
     from pipeline.lib.progress import ConfigMapProgressStore
@@ -3441,12 +3438,11 @@ def main():
         if getattr(args, "remote", False):
             _cmd_run_remote(args, run_dir, setup_config, cluster_config)
         else:
-            _cmd_run(args, run_dir, setup_config, cluster_config)
+            _cmd_run(args, run_dir, cluster_config)
     elif cmd == "status":
-        _cmd_status(args, run_dir, setup_config=setup_config,
-                    cluster_config=cluster_config)
+        _cmd_status(args, run_dir, cluster_config=cluster_config)
     elif cmd == "collect":
-        _cmd_collect(args, run_dir, setup_config, cluster_config)
+        _cmd_collect(args, run_dir, cluster_config)
     elif cmd == "reset":
         cluster_dir = run_dir / "cluster"
         discovered = _load_pairs(cluster_dir)
@@ -3455,11 +3451,9 @@ def main():
             warn("No namespaces in cluster_config — PipelineRun deletion for done pairs may be incomplete")
         _cmd_reset(args, run_dir, discovered,
                    namespaces=namespaces or None,
-                   setup_config=setup_config,
                    cluster_config=cluster_config)
     elif cmd == "wipe":
-        _cmd_wipe(args, run_dir, setup_config=setup_config,
-                  cluster_config=cluster_config)
+        _cmd_wipe(args, run_dir, cluster_config=cluster_config)
     elif cmd == "pairs":
         cluster_dir = run_dir / "cluster"
         _cmd_pairs(cluster_dir, keys_only=args.keys_only,
