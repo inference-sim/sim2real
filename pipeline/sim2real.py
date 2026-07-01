@@ -13,7 +13,10 @@ import hashlib
 import json
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+
+import yaml
 
 # Ensure repo root is on sys.path when run as a script (python pipeline/sim2real.py)
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -173,3 +176,134 @@ def _register_translation(
         )
 
     return thash, "created"
+
+
+# ── Argparse ──────────────────────────────────────────────────────────
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="pipeline/sim2real.py",
+        description="sim2real top-level CLI.",
+    )
+    parser.add_argument(
+        "--experiment-root",
+        metavar="PATH",
+        default=None,
+        help="Experiment root (default: current working directory)",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    translation = sub.add_parser("translation", help="Manage translations")
+    tsub = translation.add_subparsers(dest="subcommand", required=True)
+
+    reg = tsub.add_parser("register", help="Register a BYO (pre-built) translation")
+    reg.add_argument(
+        "--algorithm",
+        required=True,
+        type=_validate_algorithm_name,
+        help="Algorithm name (a-z, 0-9, hyphens)",
+    )
+    reg.add_argument(
+        "--image",
+        required=True,
+        metavar="REF",
+        help="EPP image reference (e.g. ghcr.io/foo/bar:v1 or ...@sha256:...)",
+    )
+    reg.add_argument(
+        "--config",
+        required=True,
+        metavar="PATH",
+        help="Path to the treatment overlay YAML",
+    )
+    reg.add_argument(
+        "--baseline-config",
+        metavar="PATH",
+        default=None,
+        help="Optional path to a baseline overlay YAML",
+    )
+    reg.add_argument(
+        "--registered-hash",
+        metavar="HASH",
+        default=None,
+        help="Assert the computed translation hash equals this value",
+    )
+
+    return parser
+
+
+def _cmd_translation_register(args) -> int:
+    config_path = Path(args.config)
+    baseline_config_path = Path(args.baseline_config) if args.baseline_config else None
+
+    if not config_path.exists():
+        print(f"error: --config file not found: {config_path}", file=sys.stderr)
+        return 2
+
+    # Fail-fast YAML validation. Malformed overlay → error before any writes.
+    try:
+        yaml.safe_load(config_path.read_text())
+    except yaml.YAMLError as e:
+        print(f"error: --config is not valid YAML: {e}", file=sys.stderr)
+        return 2
+
+    if baseline_config_path is not None:
+        if not baseline_config_path.exists():
+            print(
+                f"error: --baseline-config file not found: {baseline_config_path}",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            yaml.safe_load(baseline_config_path.read_text())
+        except yaml.YAMLError as e:
+            print(f"error: --baseline-config is not valid YAML: {e}", file=sys.stderr)
+            return 2
+
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        thash, status = _register_translation(
+            algorithm_name=args.algorithm,
+            image_ref=args.image,
+            config_path=config_path,
+            baseline_config_path=baseline_config_path,
+            registered_hash=args.registered_hash,
+            now_iso=now_iso,
+        )
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    if status == "idempotent":
+        print(
+            f"warning: translation {thash} already registered, no-op",
+            file=sys.stderr,
+        )
+    else:
+        digest = _extract_digest_from_ref(args.image)
+        if digest is None:
+            print(
+                "warning: image_digest recorded as null "
+                "(no @sha256: in --image); hash falls back to using image_ref",
+                file=sys.stderr,
+            )
+    print(f"registered translation {thash}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    layout.set_experiment_root(args.experiment_root)
+    if args.command == "translation" and args.subcommand == "register":
+        return _cmd_translation_register(args)
+    # argparse's required=True on subparsers means this is unreachable in
+    # practice; kept for defensive parity with cluster.py.
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

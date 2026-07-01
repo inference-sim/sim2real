@@ -294,3 +294,128 @@ class TestRegisterTranslation:
         )
         assert thash == expected
         assert status == "created"
+
+
+class TestBuildParser:
+    def test_parses_translation_register(self):
+        parser = sim2real.build_parser()
+        args = parser.parse_args([
+            "translation", "register",
+            "--algorithm", "softreflective",
+            "--image", "ghcr.io/foo:v1",
+            "--config", "/tmp/treatment.yaml",
+        ])
+        assert args.command == "translation"
+        assert args.subcommand == "register"
+        assert args.algorithm == "softreflective"
+        assert args.image == "ghcr.io/foo:v1"
+        assert args.config == "/tmp/treatment.yaml"
+        assert args.baseline_config is None
+        assert args.registered_hash is None
+
+    def test_accepts_baseline_and_registered_hash(self):
+        parser = sim2real.build_parser()
+        args = parser.parse_args([
+            "translation", "register",
+            "--algorithm", "softreflective",
+            "--image", "ghcr.io/foo:v1",
+            "--config", "/tmp/treatment.yaml",
+            "--baseline-config", "/tmp/baseline.yaml",
+            "--registered-hash", "abcd" * 16,
+        ])
+        assert args.baseline_config == "/tmp/baseline.yaml"
+        assert args.registered_hash == "abcd" * 16
+
+    def test_rejects_bad_algorithm_name(self):
+        parser = sim2real.build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args([
+                "translation", "register",
+                "--algorithm", "Bad_Name",
+                "--image", "ghcr.io/foo:v1",
+                "--config", "/tmp/treatment.yaml",
+            ])
+
+
+class TestMainEndToEnd:
+    def test_happy_path(self, tmp_path, capsys):
+        cfg = tmp_path / "treatment.yaml"
+        cfg.write_text("scorer: mine\n")
+        rc = sim2real.main([
+            "--experiment-root", str(tmp_path),
+            "translation", "register",
+            "--algorithm", "softreflective",
+            "--image", "ghcr.io/foo:v1",
+            "--config", str(cfg),
+        ])
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "registered translation" in captured.out
+        # Warn about null digest since image ref is tag-only.
+        assert "image_digest recorded as null" in captured.err
+
+    def test_idempotent_second_run(self, tmp_path):
+        cfg = tmp_path / "treatment.yaml"
+        cfg.write_text("scorer: mine\n")
+        argv = [
+            "--experiment-root", str(tmp_path),
+            "translation", "register",
+            "--algorithm", "softreflective",
+            "--image", "ghcr.io/foo:v1",
+            "--config", str(cfg),
+        ]
+        assert sim2real.main(argv) == 0
+        assert sim2real.main(argv) == 0  # idempotent, still exit 0
+
+    def test_malformed_config_errors_no_writes(self, tmp_path):
+        cfg = tmp_path / "bad.yaml"
+        cfg.write_text("scorer: [unclosed\n")  # invalid YAML
+        rc = sim2real.main([
+            "--experiment-root", str(tmp_path),
+            "translation", "register",
+            "--algorithm", "softreflective",
+            "--image", "ghcr.io/foo:v1",
+            "--config", str(cfg),
+        ])
+        assert rc == 2
+        # No translation dir should have been created.
+        assert not layout.translations_dir().exists() or not any(
+            layout.translations_dir().iterdir()
+        )
+
+    def test_missing_config_errors(self, tmp_path):
+        rc = sim2real.main([
+            "--experiment-root", str(tmp_path),
+            "translation", "register",
+            "--algorithm", "softreflective",
+            "--image", "ghcr.io/foo:v1",
+            "--config", str(tmp_path / "does-not-exist.yaml"),
+        ])
+        assert rc == 2
+
+    def test_registered_hash_mismatch_exits_2(self, tmp_path):
+        cfg = tmp_path / "treatment.yaml"
+        cfg.write_text("scorer: mine\n")
+        rc = sim2real.main([
+            "--experiment-root", str(tmp_path),
+            "translation", "register",
+            "--algorithm", "softreflective",
+            "--image", "ghcr.io/foo:v1",
+            "--config", str(cfg),
+            "--registered-hash", "deadbeef" * 8,
+        ])
+        assert rc == 2
+
+    def test_digest_ref_no_null_warning(self, tmp_path, capsys):
+        cfg = tmp_path / "treatment.yaml"
+        cfg.write_text("scorer: mine\n")
+        rc = sim2real.main([
+            "--experiment-root", str(tmp_path),
+            "translation", "register",
+            "--algorithm", "softreflective",
+            "--image", "ghcr.io/foo@sha256:" + "a" * 64,
+            "--config", str(cfg),
+        ])
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "image_digest recorded as null" not in captured.err
