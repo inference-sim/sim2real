@@ -444,3 +444,41 @@ class TestFormatSummary:
         line = cluster_cmd._format_summary_line(r)
         # failed= appears before skipped=
         assert line.index("failed=") < line.index("skipped=")
+
+
+class TestScriptImportFromNonRepoCwd:
+    """Regression for #439.
+
+    cluster.py must be runnable as a script from any cwd — the common
+    operator pattern is `python /path/to/sim2real/pipeline/cluster.py …`
+    invoked from the experiment repo. Before the sys.path guard was
+    added, this failed with `ModuleNotFoundError: No module named
+    'pipeline'` because Python's script-mode auto-path adds only the
+    script's own directory (pipeline/) to sys.path, not the repo root.
+
+    This test bypasses pytest's automatic sys.path setup by spawning a
+    fresh interpreter with cwd outside the repo tree.
+    """
+
+    def test_provision_help_runs_from_tmp_cwd(self, tmp_path):
+        import sys as _sys
+        from pathlib import Path
+
+        cluster_py = Path(__file__).resolve().parents[2] / "pipeline" / "cluster.py"
+        assert cluster_py.exists(), f"cluster.py not found at {cluster_py}"
+
+        # tmp_path is outside the repo tree, so any pipeline.* import from
+        # cluster.py can only succeed if the module's own sys.path guard
+        # runs first.
+        result = subprocess.run(
+            [_sys.executable, str(cluster_py), "provision", "--help"],
+            cwd=str(tmp_path),
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, (
+            f"cluster.py provision --help failed from {tmp_path}\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+        # Sanity: argparse actually rendered its help text.
+        assert "--namespaces" in result.stdout

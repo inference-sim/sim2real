@@ -19,8 +19,14 @@ import os
 import subprocess
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
-from pipeline.lib import cluster_ops, layout
+# Ensure repo root is on sys.path when run as a script (python pipeline/cluster.py)
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from pipeline.lib import cluster_ops, layout  # noqa: E402 — must follow sys.path guard
 
 
 # ── Argparse ──────────────────────────────────────────────────────────
