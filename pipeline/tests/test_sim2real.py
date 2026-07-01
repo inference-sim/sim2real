@@ -563,6 +563,138 @@ class TestUseCommand:
         assert "run doesn't exist; try 'sim2real list runs'" in err
 
 
+class TestListRunsCommand:
+    def _write_run(self, tmp_path, name, translation, cluster, assembled, mtime_offset=0):
+        run_dir = tmp_path / "workspace" / "runs" / name
+        run_dir.mkdir(parents=True)
+        meta = run_dir / "run_metadata.json"
+        meta.write_text(json.dumps({
+            "version": 1,
+            "run_name": name,
+            "translation_hash": translation,
+            "cluster_id": cluster,
+            "params_hash": "p",
+            "image_tag": "ghcr.io/foo:v1",
+            "assembled_at": assembled,
+        }))
+        if mtime_offset:
+            import os
+            st = meta.stat()
+            os.utime(meta, (st.st_atime, st.st_mtime + mtime_offset))
+        return meta
+
+    def _write_setup_config(self, tmp_path, current_run):
+        cfg = tmp_path / "workspace" / "setup_config.json"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(json.dumps({"current_run": current_run}))
+
+    def test_missing_runs_dir_prints_no_runs_yet(self, tmp_path, capsys):
+        rc = sim2real.main([
+            "--experiment-root", str(tmp_path),
+            "list", "runs",
+        ])
+        assert rc == 0
+        assert capsys.readouterr().out.strip() == "no runs yet"
+
+    def test_empty_runs_dir_prints_no_runs_yet(self, tmp_path, capsys):
+        (tmp_path / "workspace" / "runs").mkdir(parents=True)
+        rc = sim2real.main([
+            "--experiment-root", str(tmp_path),
+            "list", "runs",
+        ])
+        assert rc == 0
+        assert capsys.readouterr().out.strip() == "no runs yet"
+
+    def test_mtime_ordering_newest_first(self, tmp_path, capsys):
+        # Write trial-1 first (older mtime), then trial-2 with a +100s bump.
+        self._write_run(tmp_path, "trial-1", "abc12345", "ocp-east",
+                        "2026-07-01T12:10:00Z")
+        self._write_run(tmp_path, "trial-2", "abc12345", "ocp-east",
+                        "2026-07-01T14:32:00Z", mtime_offset=100)
+        rc = sim2real.main([
+            "--experiment-root", str(tmp_path),
+            "list", "runs",
+        ])
+        assert rc == 0
+        lines = capsys.readouterr().out.splitlines()
+        # First line is the header, then trial-2 (newest), then trial-1.
+        assert "RUN_NAME" in lines[0] and "TRANSLATION" in lines[0]
+        assert "CLUSTER" in lines[0] and "ASSEMBLED" in lines[0]
+        assert lines[1].split()[0] == "trial-2"
+        assert lines[2].split()[0] == "trial-1"
+
+    def test_current_run_marker(self, tmp_path, capsys):
+        self._write_run(tmp_path, "trial-1", "abc12345", "ocp-east",
+                        "2026-07-01T12:10:00Z")
+        self._write_run(tmp_path, "trial-2", "abc12345", "ocp-east",
+                        "2026-07-01T14:32:00Z", mtime_offset=100)
+        self._write_setup_config(tmp_path, "trial-1")
+        rc = sim2real.main([
+            "--experiment-root", str(tmp_path),
+            "list", "runs",
+        ])
+        assert rc == 0
+        lines = capsys.readouterr().out.splitlines()
+        # trial-2 (newest, no marker); trial-1 (current, has "*").
+        assert lines[1].lstrip().startswith("trial-2")
+        assert lines[2].lstrip().startswith("* trial-1")
+
+    def test_no_current_run_prints_no_marker(self, tmp_path, capsys):
+        self._write_run(tmp_path, "trial-1", "abc12345", "ocp-east",
+                        "2026-07-01T12:10:00Z")
+        rc = sim2real.main([
+            "--experiment-root", str(tmp_path),
+            "list", "runs",
+        ])
+        assert rc == 0
+        lines = capsys.readouterr().out.splitlines()
+        # No line starts with '*'.
+        for line in lines[1:]:
+            assert not line.lstrip().startswith("*")
+
+    def test_translation_hash_truncated_to_8_chars(self, tmp_path, capsys):
+        self._write_run(tmp_path, "trial-1", "a" * 64, "ocp-east",
+                        "2026-07-01T12:10:00Z")
+        rc = sim2real.main([
+            "--experiment-root", str(tmp_path),
+            "list", "runs",
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out
+        # First 8 chars of hash appear as a token.
+        assert "aaaaaaaa" in out
+        # The full 64-char hash should NOT appear on the run's data line.
+        data_line = [ln for ln in out.splitlines() if "trial-1" in ln][0]
+        assert "a" * 64 not in data_line
+
+    def test_malformed_metadata_shows_question_marks(self, tmp_path, capsys):
+        run_dir = tmp_path / "workspace" / "runs" / "trial-broken"
+        run_dir.mkdir(parents=True)
+        (run_dir / "run_metadata.json").write_text("{not valid json")
+        rc = sim2real.main([
+            "--experiment-root", str(tmp_path),
+            "list", "runs",
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "trial-broken" in out
+        assert "?" in out  # placeholder for unreadable metadata
+
+    def test_missing_metadata_skips_directory(self, tmp_path, capsys):
+        # Directory with no run_metadata.json is not a run.
+        (tmp_path / "workspace" / "runs" / "not-a-run").mkdir(parents=True)
+        self._write_run(tmp_path, "trial-1", "abc12345", "ocp-east",
+                        "2026-07-01T12:10:00Z")
+        rc = sim2real.main([
+            "--experiment-root", str(tmp_path),
+            "list", "runs",
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "trial-1" in out
+        assert "not-a-run" not in out
+
+
 class TestAssembleCommand:
     def _make_minimal_registration(self, tmp_path):
         cfg = tmp_path / "treatment.yaml"

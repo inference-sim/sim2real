@@ -420,6 +420,82 @@ def _cmd_use(args) -> int:
     return 0
 
 
+def _read_current_run() -> str:
+    """Return current_run from setup_config.json, or "" if absent/unreadable."""
+    cfg_path = layout.setup_config_path()
+    if not cfg_path.exists():
+        return ""
+    try:
+        return json.loads(cfg_path.read_text()).get("current_run", "") or ""
+    except (json.JSONDecodeError, OSError):
+        return ""
+
+
+def _format_assembled(iso: str) -> str:
+    """Turn an ISO-8601 UTC timestamp into "YYYY-MM-DD HH:MM" for display.
+
+    Returns "?" if the input isn't parseable — the CLI degrades gracefully
+    rather than erroring on one bad row.
+    """
+    try:
+        # datetime.fromisoformat accepts "...Z" only in 3.11+; strip it for parity.
+        s = iso[:-1] if iso.endswith("Z") else iso
+        dt = datetime.fromisoformat(s)
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except (ValueError, TypeError):
+        return "?"
+
+
+def _cmd_list_runs(_args) -> int:
+    runs_dir = layout.runs_dir()
+    if not runs_dir.is_dir():
+        print("no runs yet")
+        return 0
+
+    entries = []
+    for run_dir in runs_dir.iterdir():
+        if not run_dir.is_dir():
+            continue
+        meta_path = run_dir / "run_metadata.json"
+        if not meta_path.exists():
+            continue
+        mtime = meta_path.stat().st_mtime
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            meta = None
+        entries.append((mtime, run_dir.name, meta))
+
+    if not entries:
+        print("no runs yet")
+        return 0
+
+    entries.sort(key=lambda e: e[0], reverse=True)
+    current = _read_current_run()
+
+    fmt = "{marker} {name:<20} {translation:<14} {cluster:<11} {assembled}"
+    print(fmt.format(
+        marker=" ", name="RUN_NAME", translation="TRANSLATION",
+        cluster="CLUSTER", assembled="ASSEMBLED",
+    ))
+    for _mtime, name, meta in entries:
+        if meta is None:
+            translation = "?"
+            cluster = "?"
+            assembled = "?"
+        else:
+            thash = meta.get("translation_hash") or ""
+            translation = thash[:8] if thash else "?"
+            cluster = meta.get("cluster_id") or "?"
+            assembled = _format_assembled(meta.get("assembled_at") or "")
+        marker = "*" if name == current else " "
+        print(fmt.format(
+            marker=marker, name=name, translation=translation,
+            cluster=cluster, assembled=assembled,
+        ))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     layout.set_experiment_root(args.experiment_root)
@@ -429,6 +505,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_assemble(args)
     if args.command == "use":
         return _cmd_use(args)
+    if args.command == "list" and args.subcommand == "runs":
+        return _cmd_list_runs(args)
     # argparse's required=True on subparsers means this is unreachable in
     # practice; kept for defensive parity with cluster.py.
     return 1
