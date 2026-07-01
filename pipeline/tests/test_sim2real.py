@@ -295,6 +295,50 @@ class TestRegisterTranslation:
         assert thash == expected
         assert status == "created"
 
+    def test_partial_write_missing_registered_json_raises(self, tmp_path):
+        # Simulate: an earlier register wrote translation_output.json but
+        # died before writing registered.json (disk full, killed, etc.).
+        cfg = self._write_overlay(tmp_path)
+        thash, _ = sim2real._register_translation(
+            algorithm_name="softreflective",
+            image_ref="ghcr.io/foo:v1",
+            config_path=cfg,
+            baseline_config_path=None,
+            registered_hash=None,
+            now_iso="2026-07-01T14:00:00Z",
+        )
+        layout.registered_path(thash).unlink()
+        with pytest.raises(RuntimeError, match="incomplete"):
+            sim2real._register_translation(
+                algorithm_name="softreflective",
+                image_ref="ghcr.io/foo:v1",
+                config_path=cfg,
+                baseline_config_path=None,
+                registered_hash=None,
+                now_iso="2026-07-01T14:00:00Z",
+            )
+
+    def test_partial_write_missing_generated_config_raises(self, tmp_path):
+        cfg = self._write_overlay(tmp_path)
+        thash, _ = sim2real._register_translation(
+            algorithm_name="softreflective",
+            image_ref="ghcr.io/foo:v1",
+            config_path=cfg,
+            baseline_config_path=None,
+            registered_hash=None,
+            now_iso="2026-07-01T14:00:00Z",
+        )
+        layout.generated_config_path(thash, "softreflective").unlink()
+        with pytest.raises(RuntimeError, match="incomplete"):
+            sim2real._register_translation(
+                algorithm_name="softreflective",
+                image_ref="ghcr.io/foo:v1",
+                config_path=cfg,
+                baseline_config_path=None,
+                registered_hash=None,
+                now_iso="2026-07-01T14:00:00Z",
+            )
+
 
 class TestBuildParser:
     def test_parses_translation_register(self):
@@ -419,3 +463,30 @@ class TestMainEndToEnd:
         assert rc == 0
         captured = capsys.readouterr()
         assert "image_digest recorded as null" not in captured.err
+
+    def test_oserror_from_register_returns_2_not_traceback(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        cfg = tmp_path / "treatment.yaml"
+        cfg.write_text("scorer: mine\n")
+
+        original_write_text = type(cfg).write_text
+
+        def flaky_write_text(self, *args, **kwargs):
+            if self.name == "translation_output.json":
+                raise OSError("simulated: disk full")
+            return original_write_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(type(cfg), "write_text", flaky_write_text)
+
+        rc = sim2real.main([
+            "--experiment-root", str(tmp_path),
+            "translation", "register",
+            "--algorithm", "softreflective",
+            "--image", "ghcr.io/foo:v1",
+            "--config", str(cfg),
+        ])
+        assert rc == 2
+        captured = capsys.readouterr()
+        assert "error:" in captured.err
+        assert "disk full" in captured.err

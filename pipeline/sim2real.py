@@ -157,6 +157,22 @@ def _register_translation(
                 f"algorithm name mismatch: translation {thash} records "
                 f"{existing_algos}, refusing to register {algorithm_name!r}"
             )
+        # Detect a partial-write left behind by an earlier failed register: the
+        # translation_output.json landed but a later write (registered.json or
+        # the config overlay) raised. Without this check we would silently
+        # short-circuit to "idempotent" and downstream consumers would fail
+        # with confusing missing-file errors. Refuse and require manual cleanup.
+        missing = []
+        if not layout.registered_path(thash).exists():
+            missing.append("registered.json")
+        if not layout.generated_config_path(thash, algorithm_name).exists():
+            missing.append(f"generated/{algorithm_name}/{algorithm_name}_config.yaml")
+        if missing:
+            raise RuntimeError(
+                f"translation {thash} directory is incomplete (missing: "
+                f"{', '.join(missing)}); remove {layout.translation_dir(thash)} "
+                f"and re-run to recover"
+            )
         return thash, "idempotent"
 
     tdir = layout.translation_dir(thash)
@@ -271,10 +287,12 @@ def _cmd_translation_register(args) -> int:
             registered_hash=args.registered_hash,
             now_iso=now_iso,
         )
-    except RuntimeError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 2
-    except ValueError as e:
+    except (RuntimeError, ValueError, OSError) as e:
+        # OSError covers filesystem faults from mkdir/write_text/write_bytes/
+        # read_bytes inside _register_translation (disk full, permission
+        # denied, missing parent unwritable). Surfacing as the same
+        # `error: ...; return 2` shape used elsewhere keeps failures
+        # consistent with the rest of the command.
         print(f"error: {e}", file=sys.stderr)
         return 2
 
