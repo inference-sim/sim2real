@@ -25,7 +25,6 @@ class SetupConfig:
     run_name: str
     registry_user: str
     registry_token: str
-    pipeline_yaml: str | None = None
     orchestrator_image: str = ""
 
 # ── Repo layout ──────────────────────────────────────────────────────
@@ -71,10 +70,6 @@ Examples:
     p.add_argument("--run",            metavar="NAME",  help="Run name [sim2real-YYYY-MM-DD]")
     p.add_argument("--experiment-root", metavar="PATH", dest="experiment_root",
                    help="Root of the experiment repo (default: current working directory)")
-    p.add_argument("--pipeline-yaml",  metavar="PATH",
-                                       help="Path to Tekton Pipeline YAML "
-                                            "(default: <repo-root>/pipeline/pipeline.yaml); "
-                                            "applied by `cluster.py provision`")
     p.add_argument("--test-push",      action="store_true",
                                        help="Auto-accept test push prompt")
     p.add_argument("--test-push-tag",  metavar="TAG",   default="_test-image-push",
@@ -211,7 +206,6 @@ def collect_config(args: argparse.Namespace) -> tuple[SetupConfig, Path, str]:
         registry=registry, repo_name=repo_name,
         run_name=run_name,
         registry_user=reg_user, registry_token=reg_token,
-        pipeline_yaml=args.pipeline_yaml,
         orchestrator_image=orchestrator_image,
     )
     ok(f"Configuration complete (registry={registry or '(none)'})")
@@ -339,7 +333,6 @@ def step_config_output(cfg: SetupConfig, run_dir: Path) -> None:
         "registry": cfg.registry,
         "repo_name": cfg.repo_name,
         "sim2real_root": str(REPO_ROOT),
-        "pipeline_yaml": cfg.pipeline_yaml,
         "orchestrator_image": cfg.orchestrator_image,
         "current_run": cfg.run_name,
     })

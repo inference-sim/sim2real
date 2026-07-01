@@ -53,6 +53,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from pipeline.lib import layout
+from pipeline.lib.log import err, info, ok, warn
 from pipeline.lib.values import deep_merge
 
 
@@ -339,16 +340,23 @@ def provision_namespace(
         "tekton": _step_tekton,
     }
 
-    for step in _PROVISION_STEPS:
+    info(f"provisioning namespace: {namespace}")
+    total = len(_PROVISION_STEPS)
+    for i, step in enumerate(_PROVISION_STEPS, start=1):
         if step in skip_set:
+            warn(f"  [{i}/{total}] {step}: suppressed by skip arg")
             result.steps_skipped.append((step, "suppressed by skip arg"))
             continue
+        info(f"  [{i}/{total}] {step}...")
         status, reason = handlers[step](namespace, cluster_config, secret_values)
         if status == "ok":
+            ok(f"  [{i}/{total}] {step}: {reason}")
             result.steps_ok.append(step)
         elif status == "skipped":
+            warn(f"  [{i}/{total}] {step} skipped: {reason}")
             result.steps_skipped.append((step, reason))
         else:
+            err(f"  [{i}/{total}] {step} failed: {reason}")
             result.steps_failed.append((step, reason))
     return result
 
@@ -416,6 +424,7 @@ def _step_rbac(
         except UnicodeDecodeError as e:
             return ("failed", f"{yaml_path.name}: not UTF-8 ({e.reason})")
         subst = _envsubst(text, env)
+        info(f"    applying {yaml_path.name}")
         proc = _run(
             ["kubectl", "apply", "-f", "-"],
             input=subst, check=False, capture=True,
@@ -461,6 +470,7 @@ def _step_secrets(
         manifest, reason = _build_secret_manifest(key, name, namespace, value)
         if manifest is None:
             return ("failed", f"secret '{key}' ({name}): {reason}")
+        info(f"    applying secret {name} ({key})")
         proc = _run(
             ["kubectl", "apply", "-f", "-"],
             input=manifest, check=False, capture=True,
@@ -564,6 +574,7 @@ def _step_pvc(
             check=False, capture=True,
         ).returncode == 0
         if exists:
+            info(f"    PVC {claim} already exists")
             continue
         manifest = (
             f"apiVersion: v1\nkind: PersistentVolumeClaim\n"
@@ -572,6 +583,7 @@ def _step_pvc(
             f"  accessModes:\n    - {_DEFAULT_PVC_ACCESS_MODE}\n"
             f"  resources:\n    requests:\n      storage: {_DEFAULT_PVC_SIZE}\n"
         )
+        info(f"    creating PVC {claim} ({_DEFAULT_PVC_SIZE}, {_DEFAULT_PVC_ACCESS_MODE})")
         proc = _run(
             ["kubectl", "apply", "-f", "-"],
             input=manifest, check=False, capture=True,
@@ -597,6 +609,8 @@ def _step_tekton(
             yaml_files = sorted(tekton_dir.glob("*.yaml"))
         except OSError as e:
             return ("failed", f"cannot list {tekton_dir}: {e}")
+        if yaml_files:
+            info(f"    applying {len(yaml_files)} {subdir}/*.yaml")
         for yaml_file in yaml_files:
             proc = _run(
                 ["kubectl", "apply", "-f", str(yaml_file), f"-n={namespace}"],
@@ -632,28 +646,41 @@ def _envsubst(text: str, env: dict[str, str]) -> str:
 def apply_cluster_resources(cluster_id: str) -> None:
     """Apply cluster-wide Tekton resources (the Pipeline definition).
 
-    Reads ``cluster_config['namespaces']`` and applies
-    ``pipeline/pipeline.yaml`` to each. Tekton ``Pipeline`` is a namespaced
-    resource in upstream Tekton, so "cluster-wide" here means "the same
-    definition across every namespace registered for this cluster" — it is
-    NOT part of the per-namespace flow because the source YAML is one
-    cluster-level artifact, not a per-namespace one.
+    Reads ``cluster_config['namespaces']`` and applies the Tekton Pipeline
+    manifest to each. Tekton ``Pipeline`` is a namespaced resource in
+    upstream Tekton, so "cluster-wide" here means "the same definition
+    across every namespace registered for this cluster" — it is NOT part
+    of the per-namespace flow because the source YAML is one cluster-level
+    artifact, not a per-namespace one.
+
+    The manifest path is ``cluster_config['pipeline_yaml']`` when set,
+    otherwise the default ``pipeline/pipeline.yaml`` bundled with the
+    framework. Operators pick the override at provision time via
+    ``cluster.py provision --pipeline-yaml PATH``.
 
     Idempotent: ``kubectl apply`` is a no-op when the live object matches
     the supplied manifest; subsequent invocations succeed silently.
 
-    Raises ``FileNotFoundError`` if ``pipeline/pipeline.yaml`` is missing.
+    Raises ``FileNotFoundError`` if the resolved Pipeline YAML is missing.
     Per-namespace apply failures raise ``subprocess.CalledProcessError`` so
     the caller can surface the first failure rather than silently
     continuing.
     """
-    if not _PIPELINE_YAML.exists():
-        raise FileNotFoundError(f"Pipeline YAML not found at {_PIPELINE_YAML}")
-
     cfg = read_cluster_config(cluster_id)
+    override = cfg.get("pipeline_yaml")
+    pipeline_yaml = Path(override) if override else _PIPELINE_YAML
+    if not pipeline_yaml.exists():
+        raise FileNotFoundError(f"Pipeline YAML not found at {pipeline_yaml}")
+
     namespaces = cfg.get("namespaces") or []
+    if namespaces:
+        info(f"applying cluster-wide Pipeline ({pipeline_yaml.name}) "
+             f"to {len(namespaces)} namespace(s)")
     for ns in namespaces:
+        info(f"    applying {pipeline_yaml.name} to {ns}")
         _run(
-            ["kubectl", "apply", "-f", str(_PIPELINE_YAML), f"-n={ns}"],
+            ["kubectl", "apply", "-f", str(pipeline_yaml), f"-n={ns}"],
             check=True, capture=True,
         )
+    if namespaces:
+        ok(f"{pipeline_yaml.name} applied to {len(namespaces)} namespace(s)")

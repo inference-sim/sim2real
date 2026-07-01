@@ -110,6 +110,23 @@ class TestBuildClusterConfig:
         )
         assert "created_at" not in cfg
 
+    def test_pipeline_yaml_omitted_when_none(self):
+        """No key written when --pipeline-yaml is not set — apply_cluster_resources
+        falls back to the built-in default."""
+        cfg = cluster_cmd._build_cluster_config_dict(
+            "ocp-east", ["a"], is_openshift=False, storage_class="", has_dockerhub=False,
+            pipeline_yaml=None,
+        )
+        assert "pipeline_yaml" not in cfg
+
+    def test_pipeline_yaml_recorded_when_provided(self):
+        """--pipeline-yaml PATH lands in cluster_config for apply_cluster_resources."""
+        cfg = cluster_cmd._build_cluster_config_dict(
+            "ocp-east", ["a"], is_openshift=False, storage_class="", has_dockerhub=False,
+            pipeline_yaml="/custom/pipeline.yaml",
+        )
+        assert cfg["pipeline_yaml"] == "/custom/pipeline.yaml"
+
 
 class _FakePrompts:
     """Records every prompt call; returns canned responses by label match."""
@@ -256,6 +273,20 @@ class TestParser:
         parser = cluster_cmd.build_parser()
         with pytest.raises(SystemExit):
             parser.parse_args(["provision", "ocp-east", "--namespaces", "a", "--no-cluster"])
+
+    def test_pipeline_yaml_flag_accepted(self):
+        """#442: --pipeline-yaml moved here from setup.py."""
+        parser = cluster_cmd.build_parser()
+        args = parser.parse_args([
+            "provision", "ocp-east", "--namespaces", "a",
+            "--pipeline-yaml", "/custom/pipeline.yaml",
+        ])
+        assert args.pipeline_yaml == "/custom/pipeline.yaml"
+
+    def test_pipeline_yaml_defaults_to_none(self):
+        parser = cluster_cmd.build_parser()
+        args = parser.parse_args(["provision", "ocp-east", "--namespaces", "a"])
+        assert args.pipeline_yaml is None
 
 
 class TestProvisionOrchestration:
@@ -444,3 +475,41 @@ class TestFormatSummary:
         line = cluster_cmd._format_summary_line(r)
         # failed= appears before skipped=
         assert line.index("failed=") < line.index("skipped=")
+
+
+class TestScriptImportFromNonRepoCwd:
+    """Regression for #439.
+
+    cluster.py must be runnable as a script from any cwd — the common
+    operator pattern is `python /path/to/sim2real/pipeline/cluster.py …`
+    invoked from the experiment repo. Before the sys.path guard was
+    added, this failed with `ModuleNotFoundError: No module named
+    'pipeline'` because Python's script-mode auto-path adds only the
+    script's own directory (pipeline/) to sys.path, not the repo root.
+
+    This test bypasses pytest's automatic sys.path setup by spawning a
+    fresh interpreter with cwd outside the repo tree.
+    """
+
+    def test_provision_help_runs_from_tmp_cwd(self, tmp_path):
+        import sys as _sys
+        from pathlib import Path
+
+        cluster_py = Path(__file__).resolve().parents[2] / "pipeline" / "cluster.py"
+        assert cluster_py.exists(), f"cluster.py not found at {cluster_py}"
+
+        # tmp_path is outside the repo tree, so any pipeline.* import from
+        # cluster.py can only succeed if the module's own sys.path guard
+        # runs first.
+        result = subprocess.run(
+            [_sys.executable, str(cluster_py), "provision", "--help"],
+            cwd=str(tmp_path),
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, (
+            f"cluster.py provision --help failed from {tmp_path}\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+        # Sanity: argparse actually rendered its help text.
+        assert "--namespaces" in result.stdout

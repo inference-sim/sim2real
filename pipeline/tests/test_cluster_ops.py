@@ -1044,6 +1044,36 @@ class TestApplyClusterResources:
         with pytest.raises(subprocess.CalledProcessError):
             cluster_ops.apply_cluster_resources("ocp-east")
 
+    def test_pipeline_yaml_override_from_cluster_config(self, fake_run, monkeypatch):
+        """#442: cluster_config['pipeline_yaml'] overrides the built-in default."""
+        monkeypatch.setattr(cluster_ops.Path, "exists", lambda self: True)
+        cluster_ops.write_cluster_config(
+            "ocp-east",
+            {"namespaces": ["ns-a"], "pipeline_yaml": "/custom/mine.yaml"},
+        )
+        cluster_ops.apply_cluster_resources("ocp-east")
+        # The kubectl apply -f argument must be the override path.
+        applies = [c for c in fake_run.calls if c[:3] == ["kubectl", "apply", "-f"]]
+        assert applies, "no kubectl apply issued"
+        assert applies[0][3] == "/custom/mine.yaml", (
+            f"expected override path, got {applies[0][3]}"
+        )
+
+    def test_pipeline_yaml_override_missing_raises(self, fake_run, monkeypatch):
+        """#442: FileNotFoundError names the override path, not the default."""
+        # Default pipeline.yaml exists; the override does not.
+        monkeypatch.setattr(
+            cluster_ops.Path, "exists",
+            lambda self: str(self) != "/nope/custom.yaml",
+        )
+        cluster_ops.write_cluster_config(
+            "ocp-east",
+            {"namespaces": ["ns-a"], "pipeline_yaml": "/nope/custom.yaml"},
+        )
+        with pytest.raises(FileNotFoundError) as exc:
+            cluster_ops.apply_cluster_resources("ocp-east")
+        assert "/nope/custom.yaml" in str(exc.value)
+
 
 # ── _envsubst helper (pure-Python envsubst replacement) ───────────────
 
@@ -1064,3 +1094,39 @@ class TestEnvsubst:
             {"PRIMARY_NAMESPACE": "ns-a", "NAMESPACE": "ns-b"},
         )
         assert "primary: ns-a" in out and "this: ns-b" in out
+
+
+class TestProvisionNamespaceProgressOutput:
+    """Regression for #441.
+
+    provision_namespace used to run every sub-step (namespace, RBAC,
+    secrets, PVC, tekton) silently. Operators saw a single summary
+    line at the end and could not tell whether the command was making
+    progress or hanging. The fix emits an info() log per sub-step
+    (start + result) and per major kubectl apply.
+    """
+
+    def test_happy_path_emits_progress_per_step(self, fake_run, monkeypatch, capsys):
+        _tekton_yamls_present(monkeypatch)
+        fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=1))
+        fake_run.set(["kubectl", "create", "ns", "ns-a"], _completed(returncode=0))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+
+        result = cluster_ops.provision_namespace(
+            "ns-a",
+            _baseline_cluster_config(),
+            secret_values={
+                "hf_token": "v", "github_token": "v",
+                "registry_creds": {"server": "s", "user": "u", "token": "t"},
+            },
+        )
+        assert result.diverged is False
+
+        out = capsys.readouterr().out
+        # Namespace banner appears.
+        assert "provisioning namespace: ns-a" in out
+        # Every sub-step names itself in a start line ("step..." then
+        # "step: reason" on success). Assert both present per step.
+        for step in cluster_ops._PROVISION_STEPS:
+            assert f"{step}..." in out, f"missing start log for {step}"
+            assert f"{step}:" in out, f"missing result log for {step}"

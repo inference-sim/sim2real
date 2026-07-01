@@ -45,7 +45,7 @@ python pipeline/run.py      --experiment-root ../admission-control switch <run-n
 
 **Backward compat:** Omitting `--experiment-root` defaults to the current working directory. Run all pipeline commands from the experiment repo root and the default will resolve correctly without the flag.
 
-**`pipeline/setup.py`** — One-time workspace config writer. Writes `setup_config.json` and `run_metadata.json` with operator-side fields (registry, repo name, current run, orchestrator image, pipeline_yaml path, sim2real_root). Idempotent — safe to re-run. Cluster-side bootstrap (namespaces, RBAC, secrets, PVCs, Tekton tasks, Pipeline definition) lives in `cluster.py provision`.
+**`pipeline/setup.py`** — One-time workspace config writer. Writes `setup_config.json` and `run_metadata.json` with operator-side fields (registry, repo name, current run, orchestrator image, sim2real_root). Idempotent — safe to re-run. Cluster-side bootstrap (namespaces, RBAC, secrets, PVCs, Tekton tasks, Pipeline definition, and the optional `--pipeline-yaml` manifest override) lives in `cluster.py provision`.
 
 **`pipeline/prepare.py`** — 6-phase state machine. Re-running skips completed phases (tracked in `.state.json`):
 
@@ -90,8 +90,8 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). When no `-
 
 | File | Written by | Read by |
 |------|-----------|---------|
-| `setup_config.json` (workspace fields: registry, repo_name, current_run, orchestrator_image, pipeline_yaml, sim2real_root) | `setup.py` | `prepare.py`, `deploy.py`, `run.py` |
-| `clusters/<id>/cluster_config.json` (cluster fields: cluster_id, namespaces, is_openshift, storage_class, secret_names, workspaces, created_at) | `cluster.py provision` | `deploy.py`, `prepare.py`, `lib/remote.py` |
+| `setup_config.json` (workspace fields: registry, repo_name, current_run, orchestrator_image, sim2real_root) | `setup.py` | `prepare.py`, `deploy.py`, `run.py` |
+| `clusters/<id>/cluster_config.json` (cluster fields: cluster_id, namespaces, is_openshift, storage_class, secret_names, workspaces, pipeline_yaml (optional), created_at) | `cluster.py provision` | `deploy.py`, `prepare.py`, `lib/remote.py` |
 | `runs/<run>/.state.json` | `prepare.py` | `prepare.py`, `deploy.py` |
 | `runs/<run>/run_metadata.json` | `setup.py`, `deploy.py` | `deploy.py`, `run.py` |
 | `runs/<run>/skill_input.json` | `prepare.py` Phase 3 | `/sim2real-translate` skill |
