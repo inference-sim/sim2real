@@ -62,7 +62,7 @@ python pipeline/cluster.py provision <cluster_id> --namespaces NS1,NS2,... [flag
 | `--pipeline-yaml PATH` | — | `<repo-root>/pipeline/pipeline.yaml` |
 | `--experiment-root PATH` | — | cwd |
 
-**`--pipeline-yaml PATH`** — override the Tekton Pipeline manifest applied to every namespace. When set, the path is recorded in `cluster_config.json["pipeline_yaml"]` and picked up by `apply_cluster_resources` on this run and every subsequent re-run of `cluster.py provision <same-id>`. When unset, the built-in default is used and the key is not written.
+**`--pipeline-yaml PATH`** — override the Tekton Pipeline manifest applied to every namespace. When set, the path is recorded in `cluster_config.json["pipeline_yaml"]` and picked up by `apply_cluster_resources` on this run. **The flag is not sticky**: a re-run of `cluster.py provision <same-id>` without `--pipeline-yaml` drops the key and reverts to the built-in default — pass `--pipeline-yaml` on every re-run where you want the override.
 
 **Output:** `workspace/clusters/<cluster_id>/cluster_config.json` records:
 
