@@ -23,6 +23,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from pipeline.lib import assemble_run as _assemble_run_lib  # noqa: E402
 from pipeline.lib import layout  # noqa: E402 — must follow sys.path guard
 
 
@@ -245,6 +246,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Assert the computed translation hash equals this value",
     )
 
+    asm = sub.add_parser(
+        "assemble", help="Assemble a run from a registered translation"
+    )
+    asm.add_argument(
+        "--translation",
+        required=True,
+        metavar="HASH",
+        help="translation hash (from `sim2real translation register`)",
+    )
+    asm.add_argument(
+        "--cluster",
+        required=True,
+        metavar="CLUSTER_ID",
+        help="cluster id (matches workspace/clusters/<id>/)",
+    )
+    asm.add_argument(
+        "--run",
+        required=True,
+        metavar="RUN_NAME",
+        help="run name — directory created at workspace/runs/<run>/",
+    )
+    asm.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite an existing runs/<run>/ directory",
+    )
+
     return parser
 
 
@@ -313,11 +341,54 @@ def _cmd_translation_register(args) -> int:
     return 0
 
 
+def _cmd_assemble(args) -> int:
+    exp_root = (
+        Path(args.experiment_root).resolve()
+        if args.experiment_root
+        else Path.cwd()
+    )
+    manifest_path = exp_root / "transfer.yaml"
+    if not manifest_path.exists():
+        manifest_path = exp_root / "config" / "transfer.yaml"
+    if not manifest_path.exists():
+        print(
+            f"error: transfer.yaml not found under {exp_root}",
+            file=sys.stderr,
+        )
+        return 2
+
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        _assemble_run_lib.assemble_run(
+            translation_hash=args.translation,
+            cluster_id=args.cluster,
+            run_name=args.run,
+            experiment_root=exp_root,
+            manifest_path=manifest_path,
+            force=args.force,
+            now_iso=now_iso,
+        )
+    except _assemble_run_lib.AssembleError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    for name in getattr(_assemble_run_lib.assemble_run, "skipped_algorithms", []):
+        print(
+            f"warning: algorithm '{name}' declared in transfer.yaml but not "
+            "in translation_output.json — skipped",
+            file=sys.stderr,
+        )
+    print(f"assembled run {args.run}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     layout.set_experiment_root(args.experiment_root)
     if args.command == "translation" and args.subcommand == "register":
         return _cmd_translation_register(args)
+    if args.command == "assemble":
+        return _cmd_assemble(args)
     # argparse's required=True on subparsers means this is unreachable in
     # practice; kept for defensive parity with cluster.py.
     return 1

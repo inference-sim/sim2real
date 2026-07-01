@@ -31,7 +31,7 @@ def set_experiment_root(arg: str | Path | None) -> Path:
     """Set the module-level experiment root from a CLI-arg-style value.
 
     Mirrors the resolution rule that today lives inline in
-    ``pipeline/setup.py``, ``pipeline/prepare.py``, and
+    ``pipeline/setup.py``, ``pipeline/sim2real.py``, and
     ``pipeline/deploy.py``: a non-empty ``arg`` is resolved to an absolute
     Path; an empty / None ``arg`` falls back to ``Path.cwd()``.
 

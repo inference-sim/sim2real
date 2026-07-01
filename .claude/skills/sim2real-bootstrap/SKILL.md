@@ -253,7 +253,7 @@ ls "$EXPERIMENT_ROOT"/workloads/*.yaml
 
 Framework workarounds documented in `docs/troubleshooting.md` (EPP llm-d.ai
 RBAC, request-id preservation, EPP/vLLM verbosity, routing-proxy resource
-requests) are applied automatically by `prepare.py` Phase 4 from
+requests) are applied automatically by `sim2real assemble` from
 `<experiment-root>/baselines/defaults/`. Copy the framework templates into
 the experiment so each experiment is self-contained and reproducible.
 
@@ -398,8 +398,12 @@ Tell the user:
 ```
 Bootstrap complete. Next steps:
   1. Run: python pipeline/setup.py --experiment-root $EXPERIMENT_ROOT
-  2. Run: python pipeline/prepare.py --experiment-root $EXPERIMENT_ROOT
-  3. The translate skill will be invoked at Phase 3
+  2. Register a translation:
+       python pipeline/sim2real.py translation register \
+         --algorithm NAME --image REF --config PATH_TO_TREATMENT_OVERLAY
+  3. Assemble a run:
+       python pipeline/sim2real.py assemble \
+         --translation HASH --cluster CLUSTER_ID --run RUN_NAME
 ```
 
 ## Reference: Bundled Files
