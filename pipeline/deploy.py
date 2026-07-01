@@ -195,11 +195,17 @@ class ProgressUnavailable(RuntimeError):
     """
 
 
-def _load_progress(store, *, allow_unreachable: bool = False) -> dict:
+def _load_progress(store, *, allow_unreachable: bool = False,
+                   run_name: str = "") -> dict:
     """Load progress data with consistent corrupt/unreachable handling.
 
     Single entry point for ``store.load()`` across deploy.py subcommands so
     every command surfaces corrupt-data errors with the same UX (issue #140).
+
+    ``run_name`` is folded into the corrupt-data recovery hint when supplied
+    so the user sees the concrete ``sim2real assemble --run <name>`` command
+    to re-run; callers that do not have it in scope get a ``<run-name>``
+    placeholder styled to match the other placeholders in the message.
 
     On ``ValueError`` (corrupt-data signal from ``ConfigMapProgressStore.load``):
     print a clear error pointing at the affected ConfigMap with recovery
@@ -215,8 +221,9 @@ def _load_progress(store, *, allow_unreachable: bool = False) -> dict:
         return store.load()
     except ValueError as exc:
         err(f"Corrupt progress data: {exc}")
-        err("Re-assemble the run (sim2real assemble --run <R>), or fix the "
-            "ConfigMap manually with `kubectl edit configmap <name> -n <namespace>`.")
+        run_token = run_name if run_name else "<run-name>"
+        err(f"Re-assemble the run (sim2real assemble --run {run_token}), or fix "
+            f"the ConfigMap manually with `kubectl edit configmap <name> -n <namespace>`.")
         sys.exit(1)
     except RuntimeError as exc:
         if allow_unreachable:
@@ -645,7 +652,8 @@ def _cmd_status(args, run_dir: Path,
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
     try:
-        progress = _load_progress(store, allow_unreachable=True)
+        progress = _load_progress(store, allow_unreachable=True,
+                                  run_name=run_dir.name)
     except ProgressUnavailable as exc:
         err(f"Cluster unreachable — cannot read progress ConfigMap: {exc}")
         err("Retry once kubectl can reach the cluster.")
@@ -1464,7 +1472,8 @@ def _cmd_collect(args, run_dir: Path, cluster_config: dict):
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
     try:
-        progress = _load_progress(store, allow_unreachable=True) or None
+        progress = _load_progress(store, allow_unreachable=True,
+                                  run_name=run_dir.name) or None
     except ProgressUnavailable as exc:
         err(f"Cluster unreachable — cannot read progress ConfigMap: {exc}")
         err("Refusing to collect from filesystem-discovered phases without "
@@ -2488,7 +2497,7 @@ def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
     _zero_dispatch_count = 0
 
     # Load or initialize progress
-    progress = _load_progress(store)
+    progress = _load_progress(store, run_name=run_dir.name)
 
     discovered = _load_pairs(cluster_dir)
     if not discovered:
@@ -2861,7 +2870,7 @@ def _cmd_reset(args, run_dir: Path, discovered: dict,
         err("No namespace configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
-    progress = _load_progress(store)
+    progress = _load_progress(store, run_name=run_dir.name)
 
     if not progress:
         info("No progress data found — nothing to reset")
@@ -2916,7 +2925,7 @@ def _cmd_wipe(args, run_dir: Path,
         err("No namespace configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
-    progress = _load_progress(store)
+    progress = _load_progress(store, run_name=run_dir.name)
 
     if not progress:
         info("No progress data found — nothing to wipe")
@@ -3220,7 +3229,8 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict,
         from pipeline.lib.progress import ConfigMapProgressStore
         store = ConfigMapProgressStore(namespace, run_name=run_dir.name)
         try:
-            progress = _load_progress(store, allow_unreachable=True) or None
+            progress = _load_progress(store, allow_unreachable=True,
+                                      run_name=run_dir.name) or None
         except ProgressUnavailable as exc:
             warn(f"ConfigMap unreachable — skipping pre-flight filter "
                  f"validation: {exc}")

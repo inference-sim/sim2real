@@ -4082,7 +4082,34 @@ class TestLoadProgressHelper:
         combined = captured.out + captured.err
         assert "Corrupt" in combined
         assert "sim2real-progress-fake" in combined
-        assert "prepare" in combined.lower() or "manually" in combined.lower()
+        assert "re-assemble" in combined.lower() or "manually" in combined.lower()
+
+    def test_corrupt_data_error_substitutes_run_name_when_provided(self, capsys):
+        """`run_name=trial-1` → error shows `--run trial-1`, not the `<run-name>`
+        placeholder — issue #446 (post-review fix for PR #455)."""
+        from pipeline.deploy import _load_progress
+
+        def boom():
+            raise ValueError("Corrupt ConfigMap sim2real-progress-trial-1 in ns-x")
+        store = self._fake_store(boom)
+        with pytest.raises(SystemExit):
+            _load_progress(store, run_name="trial-1")
+        combined = capsys.readouterr().err
+        assert "sim2real assemble --run trial-1" in combined
+        assert "<run-name>" not in combined
+
+    def test_corrupt_data_error_uses_placeholder_when_run_name_absent(self, capsys):
+        """No `run_name` → literal `<run-name>` placeholder, styled to match the
+        other `<name>` / `<namespace>` placeholders in the same message."""
+        from pipeline.deploy import _load_progress
+
+        def boom():
+            raise ValueError("Corrupt ConfigMap in ns-x")
+        store = self._fake_store(boom)
+        with pytest.raises(SystemExit):
+            _load_progress(store)
+        combined = capsys.readouterr().err
+        assert "sim2real assemble --run <run-name>" in combined
 
     def test_propagates_runtime_error_by_default(self):
         from pipeline.deploy import _load_progress

@@ -252,7 +252,7 @@ python pipeline/deploy.py wipe  [flags]     # delete local result files for pair
 python pipeline/deploy.py pairs   [flags]   # list available pair keys, workloads, and packages
 ```
 
-**`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, and retries pairs that time out. Reads progress from the run-scoped `sim2real-progress-{run}` ConfigMap to resume interrupted runs. Requires a configured namespace. Use `deploy.py collect` to pull results off-cluster after runs complete. The run's cluster is resolved from `workspace/runs/<R>/run_metadata.json:cluster_id`; if the run has not been assembled, `deploy.py run --run <R>` exits with `run 'sim2real assemble --run <R>' first`, and if `run_metadata.json` is missing or lacks `cluster_id`, it exits with `run metadata corrupted; re-assemble`.
+**`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, and retries pairs that time out. Reads progress from the run-scoped `sim2real-progress-{run}` ConfigMap to resume interrupted runs. Requires a configured namespace. Use `deploy.py collect` to pull results off-cluster after runs complete. The run's cluster is resolved from `workspace/runs/<R>/run_metadata.json:cluster_id`; if the run directory or its `cluster/` subdirectory does not exist, `deploy.py run --run <R>` exits with `run 'sim2real assemble --run <R>' first`, and if `run_metadata.json` is missing, unparseable, or lacks a non-empty `cluster_id`, it exits with `run metadata corrupted; re-assemble`.
 
 | Flag | Default | Description |
 |------|---------|-------------|
