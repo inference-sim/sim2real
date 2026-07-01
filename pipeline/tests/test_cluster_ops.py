@@ -1064,3 +1064,39 @@ class TestEnvsubst:
             {"PRIMARY_NAMESPACE": "ns-a", "NAMESPACE": "ns-b"},
         )
         assert "primary: ns-a" in out and "this: ns-b" in out
+
+
+class TestProvisionNamespaceProgressOutput:
+    """Regression for #441.
+
+    provision_namespace used to run every sub-step (namespace, RBAC,
+    secrets, PVC, tekton) silently. Operators saw a single summary
+    line at the end and could not tell whether the command was making
+    progress or hanging. The fix emits an info() log per sub-step
+    (start + result) and per major kubectl apply.
+    """
+
+    def test_happy_path_emits_progress_per_step(self, fake_run, monkeypatch, capsys):
+        _tekton_yamls_present(monkeypatch)
+        fake_run.set(["kubectl", "get", "ns", "ns-a"], _completed(returncode=1))
+        fake_run.set(["kubectl", "create", "ns", "ns-a"], _completed(returncode=0))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+
+        result = cluster_ops.provision_namespace(
+            "ns-a",
+            _baseline_cluster_config(),
+            secret_values={
+                "hf_token": "v", "github_token": "v",
+                "registry_creds": {"server": "s", "user": "u", "token": "t"},
+            },
+        )
+        assert result.diverged is False
+
+        out = capsys.readouterr().out
+        # Namespace banner appears.
+        assert "provisioning namespace: ns-a" in out
+        # Every sub-step names itself in a start line ("step..." then
+        # "step: reason" on success). Assert both present per step.
+        for step in cluster_ops._PROVISION_STEPS:
+            assert f"{step}..." in out, f"missing start log for {step}"
+            assert f"{step}:" in out, f"missing result log for {step}"
