@@ -6,6 +6,7 @@ import argparse
 import json
 
 import pytest
+import yaml
 
 from pipeline import sim2real
 from pipeline.lib import layout
@@ -490,3 +491,166 @@ class TestMainEndToEnd:
         captured = capsys.readouterr()
         assert "error:" in captured.err
         assert "disk full" in captured.err
+
+
+class TestAssembleCommand:
+    def _make_minimal_registration(self, tmp_path):
+        cfg = tmp_path / "treatment.yaml"
+        cfg.write_bytes(
+            b"scenario:\n  - name: test-scenario\n"
+            b"    inferenceExtension:\n      pluginsConfigFile: sr.yaml\n"
+        )
+        thash, _ = sim2real._register_translation(
+            algorithm_name="sr",
+            image_ref="ghcr.io/foo/bar:v1",
+            config_path=cfg,
+            baseline_config_path=None,
+            registered_hash=None,
+            now_iso="2026-07-01T14:00:00Z",
+        )
+        return thash
+
+    def _write_yaml(self, path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.dump(data, sort_keys=False))
+
+    def _write_json(self, path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2) + "\n")
+
+    def _bootstrap_experiment(self, tmp_path):
+        cluster_id = "ocp-east"
+        cluster_dir = tmp_path / "workspace" / "clusters" / cluster_id
+        cluster_dir.mkdir(parents=True)
+        self._write_json(
+            cluster_dir / "cluster_config.json",
+            {
+                "cluster_id": cluster_id,
+                "namespaces": ["ns0"],
+                "secret_names": {"hf_token": "hf"},
+                "workspaces": {},
+            },
+        )
+        manifest = {
+            "kind": "sim2real-transfer",
+            "version": 3,
+            "scenario": "test-scenario",
+            "component": {"repo": "acme/foo", "kind": "gaie"},
+            "context": {"text": "", "files": []},
+            "baselines": [
+                {"name": "baseline", "scenario": "baselines/base.yaml"}
+            ],
+            "algorithms": [
+                {"name": "sr", "source": "algo/sr.py", "defaults": "baseline"}
+            ],
+            "workloads": ["workloads/w1.yaml"],
+            "defaults": {"disable": []},
+        }
+        self._write_yaml(tmp_path / "transfer.yaml", manifest)
+        self._write_yaml(
+            tmp_path / "baselines" / "base.yaml",
+            {"scenario": [{"name": "test-scenario", "model": {"name": "M"}}]},
+        )
+        self._write_yaml(
+            tmp_path / "workloads" / "w1.yaml",
+            {"name": "w1", "num_requests": 1},
+        )
+        (tmp_path / "algo").mkdir()
+        (tmp_path / "algo" / "sr.py").write_text("# stub\n")
+        return cluster_id
+
+    def test_success_produces_run_dir(self, tmp_path, capsys):
+        thash = self._make_minimal_registration(tmp_path)
+        cluster_id = self._bootstrap_experiment(tmp_path)
+        rc = sim2real.main(
+            [
+                "--experiment-root", str(tmp_path),
+                "assemble",
+                "--translation", thash,
+                "--cluster", cluster_id,
+                "--run", "trial-1",
+            ]
+        )
+        assert rc == 0
+        run_dir = tmp_path / "workspace" / "runs" / "trial-1"
+        assert (run_dir / "manifest.assembly.yaml").exists()
+        assert (run_dir / "run_metadata.json").exists()
+        assert (run_dir / "cluster" / "baseline.yaml").exists()
+        assert (run_dir / "cluster" / "sr.yaml").exists()
+        assert (run_dir / "cluster" / "pipelinerun-w1-baseline.yaml").exists()
+        assert (run_dir / "cluster" / "pipelinerun-w1-sr.yaml").exists()
+
+    def test_refuses_existing_run_without_force(self, tmp_path, capsys):
+        thash = self._make_minimal_registration(tmp_path)
+        cluster_id = self._bootstrap_experiment(tmp_path)
+        (tmp_path / "workspace" / "runs" / "trial-1").mkdir(parents=True)
+        rc = sim2real.main(
+            [
+                "--experiment-root", str(tmp_path),
+                "assemble",
+                "--translation", thash,
+                "--cluster", cluster_id,
+                "--run", "trial-1",
+            ]
+        )
+        assert rc == 2
+        assert "--force" in capsys.readouterr().err
+
+    def test_force_overwrites(self, tmp_path, capsys):
+        thash = self._make_minimal_registration(tmp_path)
+        cluster_id = self._bootstrap_experiment(tmp_path)
+        existing = tmp_path / "workspace" / "runs" / "trial-1"
+        existing.mkdir(parents=True)
+        (existing / "sentinel").write_text("leftover")
+        rc = sim2real.main(
+            [
+                "--experiment-root", str(tmp_path),
+                "assemble",
+                "--translation", thash,
+                "--cluster", cluster_id,
+                "--run", "trial-1",
+                "--force",
+            ]
+        )
+        assert rc == 0
+        assert not (existing / "sentinel").exists()
+
+    def test_missing_translation_hash_errors(self, tmp_path, capsys):
+        self._make_minimal_registration(tmp_path)
+        cluster_id = self._bootstrap_experiment(tmp_path)
+        rc = sim2real.main(
+            [
+                "--experiment-root", str(tmp_path),
+                "assemble",
+                "--translation", "0" * 64,
+                "--cluster", cluster_id,
+                "--run", "trial-1",
+            ]
+        )
+        assert rc == 2
+        assert "translation" in capsys.readouterr().err.lower()
+
+    def test_warns_on_skipped_algorithms(self, tmp_path, capsys):
+        thash = self._make_minimal_registration(tmp_path)
+        cluster_id = self._bootstrap_experiment(tmp_path)
+        # Add an unregistered algorithm to the manifest.
+        manifest_path = tmp_path / "transfer.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        manifest["algorithms"].append(
+            {"name": "cc", "source": "algo/cc.py", "defaults": "baseline"}
+        )
+        manifest_path.write_text(yaml.dump(manifest, sort_keys=False))
+        (tmp_path / "algo" / "cc.py").write_text("# stub\n")
+        rc = sim2real.main(
+            [
+                "--experiment-root", str(tmp_path),
+                "assemble",
+                "--translation", thash,
+                "--cluster", cluster_id,
+                "--run", "trial-1",
+            ]
+        )
+        assert rc == 0
+        out = capsys.readouterr()
+        assert "cc" in out.err
+        assert "skipped" in out.err
