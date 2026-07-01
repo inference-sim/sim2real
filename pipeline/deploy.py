@@ -197,10 +197,11 @@ def _load_progress(store, *, allow_unreachable: bool = False) -> dict:
 def _write_build_metadata(run_dir: Path, epp_image: str) -> None:
     """Record a successful EPP build in run_metadata.json.
 
-    Sets ``epp_image`` and ``stages.deploy.last_completed_step = "build"`` so
-    ``run.py inspect`` (via ``run_manager.inspect_run``) shows the deploy
-    progress. No-op if run_metadata.json is missing or unparseable — the
-    caller's earlier load/validate path already surfaces those errors.
+    Sets ``epp_image`` and ``stages.deploy.last_completed_step = "build"``.
+    No current reader consumes these fields — they remain for future
+    inspect tooling (see epic #443). No-op if run_metadata.json is missing
+    or unparseable — the caller's earlier load/validate path already
+    surfaces those errors.
     """
     meta_path = run_dir / "run_metadata.json"
     if not meta_path.exists():
