@@ -1,4 +1,4 @@
-"""Tests for pipeline manifest override in prepare.py and deploy.py."""
+"""Tests for pipeline manifest override in sim2real assemble and deploy.py."""
 import pytest
 import yaml
 
