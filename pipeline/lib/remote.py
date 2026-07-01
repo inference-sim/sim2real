@@ -73,7 +73,7 @@ def build_run_inputs_configmap(
     yaml_files = sorted(cluster_dir.glob("*.yaml")) if cluster_dir.is_dir() else []
     if not yaml_files:
         raise FileNotFoundError(
-            f"No cluster YAML files in {cluster_dir} — run prepare.py first"
+            f"No cluster YAML files in {cluster_dir} — re-assemble the run"
         )
     for yaml_file in yaml_files:
         data[f"cluster--{yaml_file.name}"] = yaml_file.read_text()

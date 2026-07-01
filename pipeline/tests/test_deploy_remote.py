@@ -748,7 +748,7 @@ def test_main_routes_run_remote(tmp_path, monkeypatch):
     with patch.object(mod, "_cmd_run_remote", mock_run_remote):
         with patch.object(mod, "_load_setup_config", return_value={
             "current_run": "test-run",
-        }), patch.object(mod, "_load_cluster_config", return_value={
+        }), patch.object(mod, "_load_run_cluster_config", return_value={
             "namespaces": ["ns"],
         }):
             mod.main()
@@ -772,7 +772,7 @@ def test_main_routes_run_local(tmp_path, monkeypatch):
     with patch.object(mod, "_cmd_run", mock_run):
         with patch.object(mod, "_load_setup_config", return_value={
             "current_run": "test-run",
-        }), patch.object(mod, "_load_cluster_config", return_value={
+        }), patch.object(mod, "_load_run_cluster_config", return_value={
             "namespaces": ["ns"],
         }):
             mod.main()
