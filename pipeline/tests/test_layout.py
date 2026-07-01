@@ -180,6 +180,36 @@ class TestListClusterIds:
         assert layout.list_cluster_ids() == []
 
 
+# ── Translation path helpers ──────────────────────────────────────────
+
+
+class TestTranslationPaths:
+    def test_translation_dir(self, tmp_path):
+        layout.set_experiment_root(tmp_path)
+        assert layout.translation_dir("abc123") == (
+            tmp_path / "workspace" / "translations" / "abc123"
+        )
+
+    def test_translation_output_path(self, tmp_path):
+        layout.set_experiment_root(tmp_path)
+        assert layout.translation_output_path("abc123") == (
+            tmp_path / "workspace" / "translations" / "abc123" / "translation_output.json"
+        )
+
+    def test_registered_path(self, tmp_path):
+        layout.set_experiment_root(tmp_path)
+        assert layout.registered_path("abc123") == (
+            tmp_path / "workspace" / "translations" / "abc123" / "registered.json"
+        )
+
+    def test_generated_config_path(self, tmp_path):
+        layout.set_experiment_root(tmp_path)
+        assert layout.generated_config_path("abc123", "softreflective") == (
+            tmp_path / "workspace" / "translations" / "abc123"
+            / "generated" / "softreflective" / "softreflective_config.yaml"
+        )
+
+
 # ── No content I/O ────────────────────────────────────────────────────
 
 
