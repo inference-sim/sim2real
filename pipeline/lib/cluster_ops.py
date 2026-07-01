@@ -646,33 +646,41 @@ def _envsubst(text: str, env: dict[str, str]) -> str:
 def apply_cluster_resources(cluster_id: str) -> None:
     """Apply cluster-wide Tekton resources (the Pipeline definition).
 
-    Reads ``cluster_config['namespaces']`` and applies
-    ``pipeline/pipeline.yaml`` to each. Tekton ``Pipeline`` is a namespaced
-    resource in upstream Tekton, so "cluster-wide" here means "the same
-    definition across every namespace registered for this cluster" — it is
-    NOT part of the per-namespace flow because the source YAML is one
-    cluster-level artifact, not a per-namespace one.
+    Reads ``cluster_config['namespaces']`` and applies the Tekton Pipeline
+    manifest to each. Tekton ``Pipeline`` is a namespaced resource in
+    upstream Tekton, so "cluster-wide" here means "the same definition
+    across every namespace registered for this cluster" — it is NOT part
+    of the per-namespace flow because the source YAML is one cluster-level
+    artifact, not a per-namespace one.
+
+    The manifest path is ``cluster_config['pipeline_yaml']`` when set,
+    otherwise the default ``pipeline/pipeline.yaml`` bundled with the
+    framework. Operators pick the override at provision time via
+    ``cluster.py provision --pipeline-yaml PATH``.
 
     Idempotent: ``kubectl apply`` is a no-op when the live object matches
     the supplied manifest; subsequent invocations succeed silently.
 
-    Raises ``FileNotFoundError`` if ``pipeline/pipeline.yaml`` is missing.
+    Raises ``FileNotFoundError`` if the resolved Pipeline YAML is missing.
     Per-namespace apply failures raise ``subprocess.CalledProcessError`` so
     the caller can surface the first failure rather than silently
     continuing.
     """
-    if not _PIPELINE_YAML.exists():
-        raise FileNotFoundError(f"Pipeline YAML not found at {_PIPELINE_YAML}")
-
     cfg = read_cluster_config(cluster_id)
+    override = cfg.get("pipeline_yaml")
+    pipeline_yaml = Path(override) if override else _PIPELINE_YAML
+    if not pipeline_yaml.exists():
+        raise FileNotFoundError(f"Pipeline YAML not found at {pipeline_yaml}")
+
     namespaces = cfg.get("namespaces") or []
     if namespaces:
-        info(f"applying cluster-wide Pipeline to {len(namespaces)} namespace(s)")
+        info(f"applying cluster-wide Pipeline ({pipeline_yaml.name}) "
+             f"to {len(namespaces)} namespace(s)")
     for ns in namespaces:
-        info(f"    applying pipeline.yaml to {ns}")
+        info(f"    applying {pipeline_yaml.name} to {ns}")
         _run(
-            ["kubectl", "apply", "-f", str(_PIPELINE_YAML), f"-n={ns}"],
+            ["kubectl", "apply", "-f", str(pipeline_yaml), f"-n={ns}"],
             check=True, capture=True,
         )
     if namespaces:
-        ok(f"pipeline.yaml applied to {len(namespaces)} namespace(s)")
+        ok(f"{pipeline_yaml.name} applied to {len(namespaces)} namespace(s)")

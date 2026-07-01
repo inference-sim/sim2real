@@ -59,7 +59,10 @@ python pipeline/cluster.py provision <cluster_id> --namespaces NS1,NS2,... [flag
 | `--registry-token TOKEN` | `REGISTRY_TOKEN` | prompt |
 | `--dockerhub-user USER` | `DOCKERHUB_USER` | optional |
 | `--dockerhub-token TOKEN` | `DOCKERHUB_TOKEN` | optional |
+| `--pipeline-yaml PATH` | — | `<repo-root>/pipeline/pipeline.yaml` |
 | `--experiment-root PATH` | — | cwd |
+
+**`--pipeline-yaml PATH`** — override the Tekton Pipeline manifest applied to every namespace. When set, the path is recorded in `cluster_config.json["pipeline_yaml"]` and picked up by `apply_cluster_resources` on this run and every subsequent re-run of `cluster.py provision <same-id>`. When unset, the built-in default is used and the key is not written.
 
 **Output:** `workspace/clusters/<cluster_id>/cluster_config.json` records:
 
@@ -69,19 +72,20 @@ python pipeline/cluster.py provision <cluster_id> --namespaces NS1,NS2,... [flag
 - `storage_class` — PVC storage class
 - `secret_names` — dict of Secret names: `hf_token`, `registry_creds`, `github_token`, `dockerhub_creds` (consumers read e.g. `cluster_config["secret_names"]["hf_token"]`)
 - `workspaces` — Tekton workspace bindings; keys `data-storage` and `source` map to PVC claim names `data-pvc` and `source-pvc` respectively (`cluster_config["workspaces"]["data-storage"]["persistentVolumeClaim"]["claimName"] == "data-pvc"`)
+- `pipeline_yaml` — optional Pipeline manifest override (only present when `--pipeline-yaml` was passed)
 - `created_at` — first-write timestamp (preserved across re-runs)
 
 **What it provisions per namespace:** namespace, RBAC bindings, Secrets (HF, registry, GitHub, Docker Hub), PVCs (data, source), Tekton tasks, and the cluster-wide Pipeline definition. Re-runs reconcile via `kubectl apply` — drift is overwritten.
 
-**Boundary with `setup.py`:** anything operator-side (registry choice, repo name, current run, orchestrator image, pipeline_yaml path, sim2real_root) belongs in `setup.py` and lands in `setup_config.json`. Anything cluster-side (namespaces, RBAC, secrets, PVCs, Tekton tasks, Pipeline definition) belongs in `cluster.py provision` and lands in `cluster_config.json`. The two never write the same file.
+**Boundary with `setup.py`:** anything operator-side (registry choice, repo name, current run, orchestrator image, sim2real_root) belongs in `setup.py` and lands in `setup_config.json`. Anything cluster-side (namespaces, RBAC, secrets, PVCs, Tekton tasks, Pipeline definition, Pipeline manifest override) belongs in `cluster.py provision` and lands in `cluster_config.json`. The two never write the same file.
 
 ---
 
 ## setup.py
 
-Workspace config writer. Writes `workspace/setup_config.json` and `workspace/runs/<run>/run_metadata.json` with operator-side fields (registry, repo_name, current_run, orchestrator_image, pipeline_yaml, sim2real_root). Idempotent.
+Workspace config writer. Writes `workspace/setup_config.json` and `workspace/runs/<run>/run_metadata.json` with operator-side fields (registry, repo_name, current_run, orchestrator_image, sim2real_root). Idempotent.
 
-Cluster-side provisioning (namespaces, RBAC, secrets, PVCs, Tekton tasks, Pipeline definition) lives in `cluster.py provision` and writes a separate `workspace/clusters/<cluster_id>/cluster_config.json`. Run `cluster.py provision` before `prepare.py` / `deploy.py`.
+Cluster-side provisioning (namespaces, RBAC, secrets, PVCs, Tekton tasks, Pipeline definition) lives in `cluster.py provision` and writes a separate `workspace/clusters/<cluster_id>/cluster_config.json`. Run `cluster.py provision` before `prepare.py` / `deploy.py`. The Pipeline manifest override (`--pipeline-yaml`) lives on `cluster.py provision`, not here.
 
 ```bash
 python pipeline/setup.py [flags]
@@ -95,16 +99,13 @@ python pipeline/setup.py [flags]
 | `--registry-token TOKEN` | `REGISTRY_TOKEN` | interactive (with `--test-push`) |
 | `--run NAME` | — | `sim2real-YYYY-MM-DD` |
 | `--experiment-root PATH` | — | current working directory |
-| `--pipeline-yaml PATH` | — | `<repo-root>/pipeline/pipeline.yaml` |
 | `--orchestrator-image IMAGE` | `ORCHESTRATOR_IMAGE` | `ghcr.io/inference-sim/sim2real/orchestrator:latest` |
 | `--test-push` | — | false |
 | `--test-push-tag TAG` | — | `_test-image-push` |
 
-**`--pipeline-yaml PATH`** — pointer to a Pipeline YAML definition; stored in `setup_config.json`. The manifest itself is applied by `cluster.py provision`.
-
 **`--test-push`** — optional workspace-scoped registry credential check (pull busybox, tag, push to `<registry>/<repo_name>:<test-push-tag>`, pull back). Skipped when no registry is configured or no container runtime (`podman`/`docker`) is found. `--registry-user` / `--registry-token` (or `REGISTRY_USER` / `REGISTRY_TOKEN`) gate the registry login. The cluster-side `registry-secret` is created independently by `cluster.py provision`; see #435 for the dedup plan.
 
-Cluster-scoped fields (`namespaces`, `is_openshift`, `storage_class`, `secret_names`, `workspaces`) live in `workspace/clusters/<cluster_id>/cluster_config.json`, written by `cluster.py provision`. PVC bind state (`data-pvc`, `source-pvc`) is gated by `deploy.py`'s slot-readiness check before `deploy.py run` accepts a namespace slot.
+Cluster-scoped fields (`namespaces`, `is_openshift`, `storage_class`, `secret_names`, `workspaces`, `pipeline_yaml`) live in `workspace/clusters/<cluster_id>/cluster_config.json`, written by `cluster.py provision`. PVC bind state (`data-pvc`, `source-pvc`) is gated by `deploy.py`'s slot-readiness check before `deploy.py run` accepts a namespace slot.
 
 ---
 
@@ -327,7 +328,7 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). Key files:
 
 | File | Written by | Read by |
 |------|-----------|---------|
-| `setup_config.json` (workspace fields: registry, repo_name, current_run, orchestrator_image, pipeline_yaml, sim2real_root) | `setup.py` | `prepare.py`, `deploy.py`, `run.py` |
+| `setup_config.json` (workspace fields: registry, repo_name, current_run, orchestrator_image, sim2real_root) | `setup.py` | `prepare.py`, `deploy.py`, `run.py` |
 | `clusters/<id>/cluster_config.json` (cluster fields: cluster_id, namespaces, is_openshift, storage_class, secret_names, workspaces, created_at) | `cluster.py provision` | `deploy.py`, `prepare.py`, `lib/remote.py` |
 | `runs/<run>/.state.json` | `prepare.py` | `prepare.py`, `deploy.py` |
 | `runs/<run>/run_metadata.json` | `setup.py`, `deploy.py` | `deploy.py`, `run.py` |

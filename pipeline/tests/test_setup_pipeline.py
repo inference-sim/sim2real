@@ -18,7 +18,6 @@ def _make_config(**overrides):
         run_name="test-run",
         registry_user="user",
         registry_token="token",
-        pipeline_yaml=None,
     )
     defaults.update(overrides)
     return SetupConfig(**defaults)
@@ -37,36 +36,15 @@ class TestSetupConfigJson:
             run_dir = tmp_path / "workspace" / "runs" / "test-run"
             run_dir.mkdir(parents=True)
 
-            cfg = _make_config(pipeline_yaml="/path/to/pipeline.yaml",
-                               orchestrator_image="ghcr.io/x/orch:abc")
+            cfg = _make_config(orchestrator_image="ghcr.io/x/orch:abc")
             step_config_output(cfg, run_dir)
 
             data = json.loads((tmp_path / "workspace" / "setup_config.json").read_text())
             assert data["registry"] == "quay.io/test"
             assert data["repo_name"] == "llm-d-inference-scheduler"
-            assert data["pipeline_yaml"] == "/path/to/pipeline.yaml"
             assert data["orchestrator_image"] == "ghcr.io/x/orch:abc"
             assert data["current_run"] == "test-run"
             assert "sim2real_root" in data
-        finally:
-            setup_module.EXPERIMENT_ROOT = original
-
-    def test_pipeline_yaml_none_persisted(self, tmp_path):
-        """When pipeline_yaml is None, key still present with null value."""
-        from pipeline.setup import step_config_output
-        import pipeline.setup as setup_module
-
-        original = setup_module.EXPERIMENT_ROOT
-        setup_module.EXPERIMENT_ROOT = tmp_path
-        try:
-            run_dir = tmp_path / "workspace" / "runs" / "test-run"
-            run_dir.mkdir(parents=True)
-
-            step_config_output(_make_config(pipeline_yaml=None), run_dir)
-
-            data = json.loads((tmp_path / "workspace" / "setup_config.json").read_text())
-            assert "pipeline_yaml" in data
-            assert data["pipeline_yaml"] is None
         finally:
             setup_module.EXPERIMENT_ROOT = original
 
@@ -91,6 +69,8 @@ class TestSetupConfigJson:
         "namespace", "namespaces", "is_openshift", "storage_class",
         "hf_secret_name", "workspaces", "tektonc_dir", "setup_timestamp",
         "container_runtime",
+        # #442: pipeline_yaml moved to cluster.py provision + cluster_config.json.
+        "pipeline_yaml",
     ])
     def test_removed_keys_absent(self, tmp_path, removed_key):
         """Cluster-scoped and cruft keys are not written to setup_config.json."""
@@ -142,7 +122,6 @@ class TestBuildParser:
     KEPT_FLAGS = [
         ("--registry", "REG"),
         ("--repo-name", "NAME"),
-        ("--pipeline-yaml", "/p"),
         ("--orchestrator-image", "img"),
         ("--run", "n"),
         ("--experiment-root", "/x"),
@@ -156,6 +135,8 @@ class TestBuildParser:
         "--namespace", "--namespaces", "--storage-class",
         "--hf-token", "--github-token",
         "--no-cluster", "--redeploy-tasks",
+        # #442: --pipeline-yaml moved to cluster.py provision.
+        "--pipeline-yaml",
     ]
 
     @pytest.mark.parametrize("flag,value", KEPT_FLAGS)

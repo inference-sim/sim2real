@@ -1044,6 +1044,36 @@ class TestApplyClusterResources:
         with pytest.raises(subprocess.CalledProcessError):
             cluster_ops.apply_cluster_resources("ocp-east")
 
+    def test_pipeline_yaml_override_from_cluster_config(self, fake_run, monkeypatch):
+        """#442: cluster_config['pipeline_yaml'] overrides the built-in default."""
+        monkeypatch.setattr(cluster_ops.Path, "exists", lambda self: True)
+        cluster_ops.write_cluster_config(
+            "ocp-east",
+            {"namespaces": ["ns-a"], "pipeline_yaml": "/custom/mine.yaml"},
+        )
+        cluster_ops.apply_cluster_resources("ocp-east")
+        # The kubectl apply -f argument must be the override path.
+        applies = [c for c in fake_run.calls if c[:3] == ["kubectl", "apply", "-f"]]
+        assert applies, "no kubectl apply issued"
+        assert applies[0][3] == "/custom/mine.yaml", (
+            f"expected override path, got {applies[0][3]}"
+        )
+
+    def test_pipeline_yaml_override_missing_raises(self, fake_run, monkeypatch):
+        """#442: FileNotFoundError names the override path, not the default."""
+        # Default pipeline.yaml exists; the override does not.
+        monkeypatch.setattr(
+            cluster_ops.Path, "exists",
+            lambda self: str(self) != "/nope/custom.yaml",
+        )
+        cluster_ops.write_cluster_config(
+            "ocp-east",
+            {"namespaces": ["ns-a"], "pipeline_yaml": "/nope/custom.yaml"},
+        )
+        with pytest.raises(FileNotFoundError) as exc:
+            cluster_ops.apply_cluster_resources("ocp-east")
+        assert "/nope/custom.yaml" in str(exc.value)
+
 
 # ── _envsubst helper (pure-Python envsubst replacement) ───────────────
 

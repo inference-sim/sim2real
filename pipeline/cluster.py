@@ -58,6 +58,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Docker Hub username (env: DOCKERHUB_USER; optional)")
     pv.add_argument("--dockerhub-token", metavar="TOKEN", default=None,
                     help="Docker Hub token (env: DOCKERHUB_TOKEN; optional)")
+    pv.add_argument("--pipeline-yaml", metavar="PATH", default=None,
+                    help="Path to Tekton Pipeline YAML to apply "
+                         "(default: <repo-root>/pipeline/pipeline.yaml)")
     pv.add_argument("--experiment-root", metavar="PATH", default=None,
                     help="Root of the experiment repo (default: cwd)")
     return parser
@@ -110,6 +113,7 @@ def _build_cluster_config_dict(
     is_openshift: bool,
     storage_class: str,
     has_dockerhub: bool,
+    pipeline_yaml: str | None = None,
     existing: dict | None = None,
 ) -> dict:
     """Compose the cluster_config dict to be written to disk.
@@ -117,6 +121,11 @@ def _build_cluster_config_dict(
     Pure — no I/O. ``existing`` is the prior on-disk config (or empty)
     used only to preserve ``created_at``; everything else comes from the
     current command-line invocation.
+
+    ``pipeline_yaml`` — optional override path for the Tekton Pipeline
+    definition applied by :func:`cluster_ops.apply_cluster_resources`.
+    ``None`` means "use the built-in default". The key is only written
+    when set, so cluster_config.json stays minimal for the common case.
     """
     secret_names = dict(_DEFAULT_SECRET_NAMES)
     if has_dockerhub:
@@ -129,6 +138,8 @@ def _build_cluster_config_dict(
         "secret_names": secret_names,
         "workspaces": dict(_DEFAULT_WORKSPACES),
     }
+    if pipeline_yaml:
+        cfg["pipeline_yaml"] = pipeline_yaml
     prior_created = (existing or {}).get("created_at")
     if prior_created:
         cfg["created_at"] = prior_created
@@ -259,6 +270,7 @@ def cmd_provision(args: argparse.Namespace) -> int:
         is_openshift=is_openshift,
         storage_class=args.storage_class or "",
         has_dockerhub=has_dockerhub,
+        pipeline_yaml=args.pipeline_yaml,
         existing=existing,
     )
     if "created_at" not in cluster_config:

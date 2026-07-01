@@ -110,6 +110,23 @@ class TestBuildClusterConfig:
         )
         assert "created_at" not in cfg
 
+    def test_pipeline_yaml_omitted_when_none(self):
+        """No key written when --pipeline-yaml is not set — apply_cluster_resources
+        falls back to the built-in default."""
+        cfg = cluster_cmd._build_cluster_config_dict(
+            "ocp-east", ["a"], is_openshift=False, storage_class="", has_dockerhub=False,
+            pipeline_yaml=None,
+        )
+        assert "pipeline_yaml" not in cfg
+
+    def test_pipeline_yaml_recorded_when_provided(self):
+        """--pipeline-yaml PATH lands in cluster_config for apply_cluster_resources."""
+        cfg = cluster_cmd._build_cluster_config_dict(
+            "ocp-east", ["a"], is_openshift=False, storage_class="", has_dockerhub=False,
+            pipeline_yaml="/custom/pipeline.yaml",
+        )
+        assert cfg["pipeline_yaml"] == "/custom/pipeline.yaml"
+
 
 class _FakePrompts:
     """Records every prompt call; returns canned responses by label match."""
@@ -256,6 +273,20 @@ class TestParser:
         parser = cluster_cmd.build_parser()
         with pytest.raises(SystemExit):
             parser.parse_args(["provision", "ocp-east", "--namespaces", "a", "--no-cluster"])
+
+    def test_pipeline_yaml_flag_accepted(self):
+        """#442: --pipeline-yaml moved here from setup.py."""
+        parser = cluster_cmd.build_parser()
+        args = parser.parse_args([
+            "provision", "ocp-east", "--namespaces", "a",
+            "--pipeline-yaml", "/custom/pipeline.yaml",
+        ])
+        assert args.pipeline_yaml == "/custom/pipeline.yaml"
+
+    def test_pipeline_yaml_defaults_to_none(self):
+        parser = cluster_cmd.build_parser()
+        args = parser.parse_args(["provision", "ocp-east", "--namespaces", "a"])
+        assert args.pipeline_yaml is None
 
 
 class TestProvisionOrchestration:
