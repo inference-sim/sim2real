@@ -10,7 +10,7 @@ cluster.py provision  (one-time per cluster — bootstrap namespaces, RBAC, PVCs
 setup.py → sim2real translation register → sim2real assemble → deploy.py   (per-workspace + per-run)
 ```
 
-`run.py` manages runs independently of the main flow.
+`sim2real.py`'s `use` and `list runs` subcommands manage runs independently of the main flow.
 
 ---
 
@@ -350,19 +350,22 @@ Flags are mutually exclusive. Default (no flag) prints a human-readable table wi
 
 ---
 
-## run.py
+## Manage runs
 
-Manage and switch between runs.
+`pipeline/sim2real.py` exposes two run-management subcommands.
 
 ```bash
-python pipeline/run.py --experiment-root ../admission-control list
-python pipeline/run.py --experiment-root ../admission-control inspect <name>
-python pipeline/run.py --experiment-root ../admission-control switch <name>
+python pipeline/sim2real.py --experiment-root ../admission-control list runs
+python pipeline/sim2real.py --experiment-root ../admission-control use --run <name>
 ```
 
 `--experiment-root` defaults to the current working directory; omit it when running from the experiment repo root.
 
-**`switch`** copies files listed in `translation_output.json` (`files_created` + `files_modified`) into the experiment repo's `llm-d-inference-scheduler/` directory and updates `setup_config.json`. For per-algorithm index format, copies from `generated/{algo_name}/` using full relative paths. Prompts before overwriting uncommitted changes.
+**`sim2real list runs`** — Walks `workspace/runs/*/run_metadata.json` and prints one row per run, newest first (mtime desc). Columns: `RUN_NAME`, `TRANSLATION` (first 8 chars of the translation hash), `CLUSTER`, `ASSEMBLED`. The active run (`current_run` in `setup_config.json`) is marked with `*`. Prints `no runs yet` and exits 0 if `workspace/runs/` is empty or missing. A subdirectory without `run_metadata.json` is skipped; a corrupt `run_metadata.json` renders `?` cells instead of aborting the listing.
+
+**`sim2real use --run <name>`** — Sets `current_run` in `setup_config.json` to the given run. Errors with `"run doesn't exist; try 'sim2real list runs'"` (exit 2) if `workspace/runs/<name>/run_metadata.json` does not exist. Read-modify-write preserves unrelated keys in `setup_config.json`.
+
+The previous `run.py inspect` debug view is dropped without replacement — `cat workspace/runs/<name>/run_metadata.json` is the shortest path. If a structured inspect surfaces demand, a follow-up `sim2real inspect run <name>` can be filed against the epic.
 
 ---
 
@@ -376,7 +379,6 @@ python pipeline/run.py --experiment-root ../admission-control switch <name>
 | `values.py` | Deep-merge utility used by `assemble_run.py` |
 | `tekton.py` | Generates PipelineRun YAMLs |
 | `pod_pending.py` | Classifies pod scheduling failures (recoverable vs not) |
-| `run_manager.py` | `list_runs`, `inspect_run`, `switch_run` logic |
 | `remote.py` | ConfigMap + Job generation for `deploy.py run --remote` |
 | `capacity.py` | Cluster GPU capacity probe (taint / cordon / product filter) |
 | `cluster_ops.py` | Cluster-side primitives: read/write/update `cluster_config.json`, `provision_namespace`, `apply_cluster_resources`, `detect_openshift` |
@@ -391,12 +393,12 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). Key files:
 
 | File | Written by | Read by |
 |------|-----------|---------|
-| `setup_config.json` (workspace fields: registry, repo_name, current_run, orchestrator_image, sim2real_root) | `setup.py` | `deploy.py`, `run.py` |
+| `setup_config.json` (workspace fields: registry, repo_name, current_run, orchestrator_image, sim2real_root) | `setup.py`, `sim2real.py use` | `deploy.py`, `sim2real.py list runs` |
 | `clusters/<id>/cluster_config.json` (cluster fields: cluster_id, namespaces, is_openshift, storage_class, secret_names, workspaces, created_at) | `cluster.py provision` | `sim2real assemble`, `deploy.py`, `lib/remote.py` |
-| `translations/<hash>/translation_output.json` | `sim2real translation register` | `sim2real assemble`, `deploy.py`, `run.py` |
+| `translations/<hash>/translation_output.json` | `sim2real translation register` | `sim2real assemble`, `deploy.py` |
 | `translations/<hash>/registered.json` | `sim2real translation register` | audit trail |
 | `translations/<hash>/generated/…` | `sim2real translation register` | `sim2real assemble` |
-| `runs/<run>/run_metadata.json` | `sim2real assemble` | `deploy.py`, `run.py` |
+| `runs/<run>/run_metadata.json` | `sim2real assemble` | `deploy.py`, `sim2real.py list runs` |
 | `runs/<run>/manifest.assembly.yaml` | `sim2real assemble` | reproducibility / drift detection (step-4) |
 | `runs/<run>/cluster/…` | `sim2real assemble` | `deploy.py` |
 | `runs/<run>/results/{phase}/` | `deploy.py collect` | `/sim2real-analyze` skill, `deploy.py wipe` |

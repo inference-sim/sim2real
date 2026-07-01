@@ -42,8 +42,8 @@ python pipeline/sim2real.py translation register \
 python pipeline/sim2real.py assemble \
     --translation <hash> --cluster <cluster_id> --run <run-name>
 python pipeline/deploy.py run --experiment-root ../admission-control
-python pipeline/run.py       --experiment-root ../admission-control list
-python pipeline/run.py       --experiment-root ../admission-control switch <run-name>
+python pipeline/sim2real.py --experiment-root ../admission-control list runs
+python pipeline/sim2real.py --experiment-root ../admission-control use --run <run-name>
 ```
 
 **Backward compat:** Omitting `--experiment-root` defaults to the current working directory. Run all pipeline commands from the experiment repo root and the default will resolve correctly without the flag.
@@ -58,7 +58,7 @@ python pipeline/run.py       --experiment-root ../admission-control switch <run-
 
 **`pipeline/deploy.py`** — Builds EPP image and orchestrates PipelineRun execution across namespace slots (`deploy.py run`). Use `deploy.py collect` to pull results from the cluster PVC after runs complete. Operates independently of `transfer.yaml` — driven by workspace files, `setup_config.json`, and `clusters/<id>/cluster_config.json`.
 
-**`pipeline/run.py`** — Lists, inspects, and switches between runs. `switch` syncs generated scorer plugin files into the experiment repo's `llm-d-inference-scheduler/` directory. Pass `--experiment-root` to point at the experiment repo (default: current directory).
+**`pipeline/sim2real.py` (`use`, `list runs`)** — Manage runs. `use --run <name>` flips `current_run` in `setup_config.json`. `list runs` prints all runs newest-first (mtime desc) with the active run marked `*`.
 
 **`pipeline/cluster.py`** — Cluster-side bootstrap. `cluster.py provision <cluster_id> --namespaces NS1,NS2,...` provisions namespaces, RBAC, Secrets, PVCs, Tekton tasks, and the cluster-wide Pipeline definition, and writes `workspace/clusters/<cluster_id>/cluster_config.json`. Idempotent — re-run when adding or changing namespace slots.
 
@@ -72,7 +72,6 @@ python pipeline/run.py       --experiment-root ../admission-control switch <run-
 | `values.py` | Deep-merge utility (`deep_merge`) used by `assemble_run.py` |
 | `tekton.py` | Generates PipelineRun YAMLs for scenario-based benchmarks |
 | `pod_pending.py` | Classifies pod scheduling failures as recoverable or non-recoverable |
-| `run_manager.py` | `list_runs`, `inspect_run`, `switch_run` logic |
 | `remote.py` | ConfigMap and Job generation for `deploy.py run --remote` |
 | `capacity.py` | Cluster GPU capacity probe (taint / cordon / product filter) |
 | `cluster_ops.py` | Cluster-side primitives: read/write/update `cluster_config.json`, `provision_namespace`, `apply_cluster_resources`, `detect_openshift` |
@@ -85,13 +84,13 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). When no `-
 
 | File | Written by | Read by |
 |------|-----------|---------|
-| `setup_config.json` (workspace fields: registry, repo_name, current_run, orchestrator_image, sim2real_root) | `setup.py` | `deploy.py`, `run.py` |
+| `setup_config.json` (workspace fields: registry, repo_name, current_run, orchestrator_image, sim2real_root) | `setup.py`, `sim2real.py use` | `deploy.py`, `sim2real.py list runs` |
 | `clusters/<id>/cluster_config.json` (cluster fields: cluster_id, namespaces, is_openshift, storage_class, secret_names, workspaces, pipeline_yaml (optional), created_at) | `cluster.py provision` | `sim2real assemble`, `deploy.py`, `lib/remote.py` |
-| `translations/<hash>/translation_output.json` | `sim2real translation register` | `sim2real assemble`, `deploy.py`, `run.py` |
+| `translations/<hash>/translation_output.json` | `sim2real translation register` | `sim2real assemble`, `deploy.py` |
 | `translations/<hash>/registered.json` | `sim2real translation register` | audit trail |
 | `translations/<hash>/generated/baseline_config.yaml` | `sim2real translation register` (via `--baseline-config`) | `sim2real assemble` (baseline overlay) |
 | `translations/<hash>/generated/{algo}/{algo}_config.yaml` | `sim2real translation register` | `sim2real assemble` (per-algo treatment overlay) |
-| `runs/<run>/run_metadata.json` | `sim2real assemble` | `deploy.py`, `run.py` |
+| `runs/<run>/run_metadata.json` | `sim2real assemble` | `deploy.py`, `sim2real.py list runs` |
 | `runs/<run>/manifest.assembly.yaml` | `sim2real assemble` | reproducibility / drift detection (step-4 of the epic) |
 | `runs/<run>/cluster/baseline.yaml` | `sim2real assemble` | `deploy.py` |
 | `runs/<run>/cluster/<algo>.yaml` | `sim2real assemble` | `deploy.py` |
