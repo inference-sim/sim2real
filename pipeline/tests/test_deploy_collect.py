@@ -2217,3 +2217,22 @@ def test_main_collect_missing_cluster_id_emits_corrupt_hint(tmp_path, capsys, mo
     with pytest.raises(SystemExit):
         _run_deploy_main_collect(["--run", "trial-1", "collect"], monkeypatch, tmp_path)
     assert "run metadata corrupted; re-assemble" in capsys.readouterr().err
+
+
+def test_cmd_collect_empty_namespaces_exits(tmp_path, capsys, monkeypatch):
+    """_cmd_collect with cluster_config missing 'namespaces' → 'No namespace configured.' exit."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "trial-1"
+    (run_dir / "cluster").mkdir(parents=True)
+
+    # NAMESPACE env var must be unset for the guard to fire.
+    monkeypatch.delenv("NAMESPACE", raising=False)
+
+    class Args:
+        package = None
+        skip_logs = False
+
+    with pytest.raises(SystemExit):
+        deploy._cmd_collect(Args(), run_dir, {})
+    assert "No namespace configured." in capsys.readouterr().err
