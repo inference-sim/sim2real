@@ -49,6 +49,7 @@ def _c(code: str, text: str) -> str:
     return f"\033[{code}m{text}\033[0m" if _tty else text
 
 
+from pipeline.lib import cluster_ops, layout
 from pipeline.lib.log import info, ok, warn, err
 from pipeline.lib.redact import redact_yaml_file, redact_yaml_tree
 
@@ -90,22 +91,16 @@ def run(cmd: list[str], *, check: bool = True, capture: bool = False,
 
 # ── ConfigMap namespace resolution ──────────────────────────────────────────
 
-def _configmap_namespace(setup_config: dict | None,
+def _configmap_namespace(cluster_config: dict | None,
                          namespaces: list[str] | None = None) -> str:
     """Return the namespace for the run-scoped progress ConfigMap.
 
-    Checks setup_config["namespace"] first, then falls back to
-    namespaces[0] (or setup_config["namespaces"][0] if namespaces
-    is not passed).
+    Uses ``namespaces[0]`` when the caller passes that list, else
+    ``cluster_config["namespaces"][0]``. Returns "" when neither source
+    yields a value.
     """
-    cfg = setup_config or {}
-    ns = cfg.get("namespace", "")
-    if ns:
-        return ns
-    ns_list = namespaces or cfg.get("namespaces") or []
-    if ns_list:
-        return ns_list[0]
-    return ""
+    ns_list = namespaces or (cluster_config or {}).get("namespaces") or []
+    return ns_list[0] if ns_list else ""
 
 
 # ── Phase discovery ─────────────────────────────────────────────────────────
@@ -130,6 +125,30 @@ def _load_setup_config() -> dict:
     if path.exists():
         return json.loads(path.read_text())
     return {}
+
+
+def _load_cluster_config() -> dict:
+    """Load the single cluster_config.json from the workspace.
+
+    Step 0 assumes one cluster per workspace. Returns ``{}`` when no
+    ``clusters/`` entry exists yet (callers surface the same
+    "no namespace configured" error path they used for an empty
+    setup_config); hard-fails when more than one cluster is present.
+    """
+    layout.set_experiment_root(EXPERIMENT_ROOT)
+    cluster_ids = layout.list_cluster_ids()
+    if not cluster_ids:
+        # Fall back to legacy workspace/ next to REPO_ROOT (matches
+        # _load_setup_config's two-path resolution for in-repo workspaces).
+        layout.set_experiment_root(REPO_ROOT)
+        cluster_ids = layout.list_cluster_ids()
+        if not cluster_ids:
+            return {}
+    if len(cluster_ids) > 1:
+        err(f"Multiple clusters found in workspace ({len(cluster_ids)}); "
+            f"Step 0 assumes a single cluster.")
+        sys.exit(1)
+    return cluster_ops.read_cluster_config(cluster_ids[0])
 
 
 # ── Progress store loading ───────────────────────────────────────────────────
@@ -585,12 +604,12 @@ def _runtime_str(entry: dict) -> str:
 
 
 def _cmd_status(args, run_dir: Path,
-                setup_config: dict | None = None) -> None:
+                cluster_config: dict | None = None) -> None:
     """Print a snapshot table of all (workload, package) pair statuses."""
     from pipeline.lib.progress import ConfigMapProgressStore
-    primary_ns = _configmap_namespace(setup_config)
+    primary_ns = _configmap_namespace(cluster_config)
     if not primary_ns:
-        err("No namespace configured. Run setup.py first.")
+        err("No namespace configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
     try:
@@ -1393,9 +1412,12 @@ def _extract_phase_plans(pod_name: str, run_name: str, phase: str,
             info(f"[{phase}/plans/{flow}] copied={copied} skipped={skipped}")
 
 
-def _cmd_collect(args, run_dir: Path, setup_config: dict):
+def _cmd_collect(args, run_dir: Path, cluster_config: dict):
     """Pull results from cluster for completed phases."""
-    namespace = os.environ.get("NAMESPACE", setup_config.get("namespace", ""))
+    cluster_namespaces = cluster_config.get("namespaces") or []
+    namespace = os.environ.get(
+        "NAMESPACE", cluster_namespaces[0] if cluster_namespaces else ""
+    )
     if not namespace:
         err("No namespace configured.")
         sys.exit(1)
@@ -1404,9 +1426,9 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
 
     # Derive known phases from ConfigMap
     from pipeline.lib.progress import ConfigMapProgressStore
-    primary_ns = _configmap_namespace(setup_config)
+    primary_ns = _configmap_namespace(cluster_config)
     if not primary_ns:
-        err("No namespace configured. Run setup.py first.")
+        err("No namespace configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
     try:
@@ -2150,7 +2172,7 @@ def _check_slot_ready(namespace: str, hf_secret_name: str = "hf-secret") -> tupl
             check=False, capture=True,
         )
         if result.returncode != 0 or result.stdout.strip() != "Bound":
-            hint = " — re-run setup.py to provision it" if pvc == "source-pvc" else ""
+            hint = " — re-run cluster.py provision to provision it" if pvc == "source-pvc" else ""
             failures.append(f"PVC {pvc} not Bound in {namespace}{hint}")
 
     result = run(
@@ -2320,7 +2342,7 @@ def _select_dispatchable(
 
 
 def _refresh_namespaces(current: list[str]) -> list[str]:
-    """Re-read the slot list from setup_config.json for live mid-run updates.
+    """Re-read the slot list from cluster_config.json for live mid-run updates.
 
     Returns the refreshed list, or ``current`` unchanged when:
       - the file is unreadable / unparseable (best-effort: keep prior list),
@@ -2332,15 +2354,15 @@ def _refresh_namespaces(current: list[str]) -> list[str]:
     Logs once per actual change so quiet cycles stay silent.
     """
     try:
-        fresh = _load_setup_config()
+        fresh = _load_cluster_config()
     except Exception as exc:
-        warn(f"setup_config.json re-read failed: {exc} — keeping current slot list")
+        warn(f"cluster_config.json re-read failed: {exc} — keeping current slot list")
         return current
-    fresh_ns = [n for n in (fresh.get("namespaces") or [fresh.get("namespace", "")]) if n]
+    fresh_ns = [n for n in (fresh.get("namespaces") or []) if n]
     if not fresh_ns:
         return current
     if fresh_ns[0] != current[0]:
-        warn(f"setup_config.json primary namespace changed "
+        warn(f"cluster_config.json primary namespace changed "
              f"({current[0]} → {fresh_ns[0]}); ignoring (primary is pinned for the run)")
         return current
     if fresh_ns == current:
@@ -2354,7 +2376,7 @@ def _refresh_namespaces(current: list[str]) -> list[str]:
     return fresh_ns
 
 
-def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
+def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
     """Orchestrate parallel pool execution across namespace slots."""
     import tempfile as _tmp
     from pipeline.lib.progress import ConfigMapProgressStore
@@ -2363,9 +2385,9 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
         extract_node_filters, NodeFilter,
     )
 
-    namespaces = setup_config.get("namespaces") or [setup_config.get("namespace", "")]
+    namespaces = cluster_config.get("namespaces") or []
     if not namespaces or not namespaces[0]:
-        err("No namespaces configured. Run setup.py with --namespaces."); sys.exit(1)
+        err("No namespaces configured. Run cluster.py provision with --namespaces."); sys.exit(1)
 
     _cmd_build(run_dir, namespace=namespaces[0], skip_build=args.skip_build)
 
@@ -2375,9 +2397,9 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     max_pending_stalls = getattr(args, "max_pending_stalls", 10)
 
     cluster_dir = run_dir / "cluster"
-    primary_ns = _configmap_namespace(setup_config, namespaces)
+    primary_ns = _configmap_namespace(cluster_config, namespaces)
     if not primary_ns:
-        err("No namespace configured. Run setup.py first."); sys.exit(1)
+        err("No namespace configured. Run cluster.py provision with --namespaces."); sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
 
     # Derive GPU resource type from baseline scenario
@@ -2706,7 +2728,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 random.shuffle(dispatchable)
 
             for ns, pair_key in zip(free_slots, dispatchable):
-                hf_secret_name = setup_config.get("hf_secret_name", "hf-secret")
+                hf_secret_name = (cluster_config.get("secret_names") or {}).get("hf_token", "hf-secret")
                 ready, reasons = _check_slot_ready(ns, hf_secret_name=hf_secret_name)
                 if not ready:
                     warn(f"Slot {ns} not ready: {'; '.join(reasons)}")
@@ -2799,12 +2821,12 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
 
 def _cmd_reset(args, run_dir: Path, discovered: dict,
                namespaces: list[str] | None = None,
-               setup_config: dict | None = None) -> None:
+               cluster_config: dict | None = None) -> None:
     """Reset all non-pending pairs to pending (with cluster cleanup)."""
     from pipeline.lib.progress import ConfigMapProgressStore
-    primary_ns = _configmap_namespace(setup_config, namespaces)
+    primary_ns = _configmap_namespace(cluster_config, namespaces)
     if not primary_ns:
-        err("No namespace configured. Run setup.py first.")
+        err("No namespace configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
     progress = _load_progress(store)
@@ -2854,12 +2876,12 @@ def _cmd_reset(args, run_dir: Path, discovered: dict,
 
 
 def _cmd_wipe(args, run_dir: Path,
-              setup_config: dict | None = None) -> None:
+              cluster_config: dict | None = None) -> None:
     """Delete local result files for pairs in scope."""
     from pipeline.lib.progress import ConfigMapProgressStore
-    primary_ns = _configmap_namespace(setup_config)
+    primary_ns = _configmap_namespace(cluster_config)
     if not primary_ns:
-        err("No namespace configured. Run setup.py first.")
+        err("No namespace configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
     progress = _load_progress(store)
@@ -3128,16 +3150,17 @@ def _wait_for_job_pod(namespace: str, *, timeout: int = 120, poll: int = 5) -> N
         time.sleep(poll)
 
 
-def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
+def _cmd_run_remote(args, run_dir: "Path", setup_config: dict,
+                    cluster_config: dict) -> None:
     """Submit the orchestrator as an in-cluster Job."""
     from pipeline.lib.remote import (
         build_run_inputs_configmap, build_orchestrator_job,
     )
 
-    namespaces = setup_config.get("namespaces") or [setup_config.get("namespace", "")]
+    namespaces = cluster_config.get("namespaces") or []
     namespace = namespaces[0] if namespaces else ""
     if not namespace:
-        err("No namespaces configured. Run setup.py with --namespaces.")
+        err("No namespaces configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
 
     orchestrator_image = setup_config.get("orchestrator_image")
@@ -3381,14 +3404,14 @@ def main():
     EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if args.experiment_root else Path.cwd()
 
     setup_config = _load_setup_config()
+    cluster_config = _load_cluster_config()
 
     cmd = args.command
 
     if cmd == "stop":
-        namespaces = [ns for ns in (setup_config.get("namespaces") or
-                      [setup_config.get("namespace", "")]) if ns]
+        namespaces = [ns for ns in (cluster_config.get("namespaces") or []) if ns]
         if not namespaces:
-            err("No namespaces configured. Run setup.py first.")
+            err("No namespaces configured. Run cluster.py provision with --namespaces.")
             sys.exit(1)
         _cmd_stop(namespace=namespaces[0])
         return
@@ -3404,34 +3427,33 @@ def main():
         sys.exit(1)
 
     if cmd == "build":
-        namespaces = setup_config.get("namespaces") or [setup_config.get("namespace", "")]
+        namespaces = cluster_config.get("namespaces") or []
         if not namespaces or not namespaces[0]:
-            err("No namespaces configured. Run setup.py with --namespaces."); sys.exit(1)
+            err("No namespaces configured. Run cluster.py provision with --namespaces."); sys.exit(1)
         _cmd_build(run_dir, namespace=namespaces[0],
                    skip_build=getattr(args, "skip_build", False))
         return
 
     if cmd == "run":
         if getattr(args, "remote", False):
-            _cmd_run_remote(args, run_dir, setup_config)
+            _cmd_run_remote(args, run_dir, setup_config, cluster_config)
         else:
-            _cmd_run(args, run_dir, setup_config)
+            _cmd_run(args, run_dir, cluster_config)
     elif cmd == "status":
-        _cmd_status(args, run_dir, setup_config=setup_config)
+        _cmd_status(args, run_dir, cluster_config=cluster_config)
     elif cmd == "collect":
-        _cmd_collect(args, run_dir, setup_config)
+        _cmd_collect(args, run_dir, cluster_config)
     elif cmd == "reset":
         cluster_dir = run_dir / "cluster"
         discovered = _load_pairs(cluster_dir)
-        namespaces = [ns for ns in (setup_config.get("namespaces") or
-                      [setup_config.get("namespace", "")]) if ns]
+        namespaces = [ns for ns in (cluster_config.get("namespaces") or []) if ns]
         if not namespaces:
-            warn("No namespaces in setup_config — PipelineRun deletion for done pairs may be incomplete")
+            warn("No namespaces in cluster_config — PipelineRun deletion for done pairs may be incomplete")
         _cmd_reset(args, run_dir, discovered,
                    namespaces=namespaces or None,
-                   setup_config=setup_config)
+                   cluster_config=cluster_config)
     elif cmd == "wipe":
-        _cmd_wipe(args, run_dir, setup_config=setup_config)
+        _cmd_wipe(args, run_dir, cluster_config=cluster_config)
     elif cmd == "pairs":
         cluster_dir = run_dir / "cluster"
         _cmd_pairs(cluster_dir, keys_only=args.keys_only,

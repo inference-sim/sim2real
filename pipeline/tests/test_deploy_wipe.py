@@ -43,7 +43,7 @@ def test_wipe_all_deletes_results(tmp_path, monkeypatch):
     class _Args:
         only = None; workload = None; package = None; dry_run = False; yes = True
 
-    mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
 
     # All pairs wiped regardless of status (including pending)
     assert not (run_dir / "results" / "baseline" / "wl-smoke").exists()
@@ -65,7 +65,7 @@ def test_wipe_scoped_by_workload(tmp_path, monkeypatch):
     class _Args:
         only = None; workload = "wl-smoke"; package = None; dry_run = False; yes = True
 
-    mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
 
     # Only wl-smoke directories deleted
     assert not (run_dir / "results" / "baseline" / "wl-smoke").exists()
@@ -86,7 +86,7 @@ def test_wipe_scoped_by_only(tmp_path, monkeypatch):
     class _Args:
         only = "wl-heavy-baseline"; workload = None; package = None; dry_run = False; yes = True
 
-    mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
 
     # Only wl-heavy/baseline deleted
     assert not (run_dir / "results" / "baseline" / "wl-heavy").exists()
@@ -105,7 +105,7 @@ def test_wipe_scoped_by_package(tmp_path, monkeypatch):
     class _Args:
         only = None; workload = None; package = "treatment"; dry_run = False; yes = True
 
-    mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
 
     # Only treatment directories deleted
     assert not (run_dir / "results" / "treatment" / "wl-smoke").exists()
@@ -124,7 +124,7 @@ def test_wipe_dry_run_does_not_delete(tmp_path, monkeypatch, capsys):
     class _Args:
         only = None; workload = None; package = None; dry_run = True; yes = False
 
-    mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
 
     # Nothing deleted
     assert (run_dir / "results" / "baseline" / "wl-smoke").exists()
@@ -151,7 +151,7 @@ def test_wipe_includes_pending_pairs(tmp_path, monkeypatch):
     class _Args:
         only = None; workload = None; package = None; dry_run = False; yes = True
 
-    mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
 
     assert not (run_dir / "results" / "baseline" / "wl-a").exists()
 
@@ -167,7 +167,7 @@ def test_wipe_no_progress_reports_nothing(tmp_path, monkeypatch, capsys):
     class _Args:
         only = None; workload = None; package = None; dry_run = False; yes = True
 
-    mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
 
     captured = capsys.readouterr()
     assert "nothing" in (captured.out + captured.err).lower()
@@ -187,7 +187,7 @@ def test_wipe_confirmation_abort(tmp_path, monkeypatch, capsys):
     class _Args:
         only = None; workload = None; package = None; dry_run = False; yes = False
 
-    mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
 
     # Nothing deleted
     assert (run_dir / "results" / "baseline" / "wl-smoke").exists()
@@ -207,7 +207,7 @@ def test_wipe_confirmation_accept(tmp_path, monkeypatch):
     class _Args:
         only = None; workload = None; package = None; dry_run = False; yes = False
 
-    mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
 
     assert not (run_dir / "results" / "baseline" / "wl-smoke").exists()
 
@@ -229,7 +229,7 @@ def test_wipe_eof_on_input_aborts(tmp_path, monkeypatch, capsys):
     class _Args:
         only = None; workload = None; package = None; dry_run = False; yes = False
 
-    mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
 
     assert (run_dir / "results" / "baseline" / "wl-smoke").exists()
     captured = capsys.readouterr()
@@ -248,7 +248,7 @@ def test_wipe_filter_mismatch_aborts(tmp_path, monkeypatch, capsys):
         only = "nonexistent"; workload = None; package = None; dry_run = False; yes = True
 
     with __import__("pytest").raises(SystemExit) as exc_info:
-        mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
+        mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
     assert exc_info.value.code == 1
 
 
@@ -270,7 +270,7 @@ def test_wipe_cleans_empty_parent_dirs(tmp_path, monkeypatch):
     class _Args:
         only = None; workload = None; package = None; dry_run = False; yes = True
 
-    mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
 
     assert not (run_dir / "results" / "baseline").exists()
 
@@ -290,7 +290,7 @@ def test_wipe_no_results_on_disk(tmp_path, monkeypatch, capsys):
     class _Args:
         only = None; workload = None; package = None; dry_run = False; yes = True
 
-    mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
 
     captured = capsys.readouterr()
     assert "no results on disk" in (captured.out + captured.err).lower()
@@ -317,7 +317,7 @@ def test_wipe_parent_not_removed_when_siblings_remain(tmp_path, monkeypatch):
     class _Args:
         only = "wl-a-baseline"; workload = None; package = None; dry_run = False; yes = True
 
-    mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
 
     # wl-a deleted, wl-b untouched, parent kept
     assert not (run_dir / "results" / "baseline" / "wl-a").exists()
@@ -357,7 +357,7 @@ def test_wipe_rmtree_failure_skips_pair(tmp_path, monkeypatch, capsys):
         only = None; workload = None; package = None; dry_run = False; yes = True
 
     with __import__("pytest").raises(SystemExit) as exc_info:
-        mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
+        mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
     assert exc_info.value.code == 1
 
     # wl-a still on disk (failed), wl-b deleted
@@ -385,7 +385,7 @@ def test_wipe_warns_on_missing_package_workload(tmp_path, monkeypatch, capsys):
     class _Args:
         only = None; workload = None; package = None; dry_run = False; yes = True
 
-    mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
 
     captured = capsys.readouterr()
     assert "missing package/workload" in (captured.out + captured.err).lower()
@@ -407,6 +407,6 @@ def test_wipe_does_not_save_progress(tmp_path, monkeypatch):
     class _Args:
         only = None; workload = None; package = None; dry_run = False; yes = True
 
-    mod._cmd_wipe(_Args(), run_dir, setup_config={"namespace": "ns-0"})
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
 
     assert save_called == [], "wipe must not call store.save()"

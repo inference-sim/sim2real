@@ -408,7 +408,7 @@ def test_cmd_reset_continues_on_exception(tmp_path, monkeypatch, capsys):
         preserve_done_status = False
 
     mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
-                   setup_config={"namespace": "sim2real-ns"})
+                   cluster_config={"namespaces": ["sim2real-ns"]})
 
     # Both pairs should have been attempted
     assert "wl-a-baseline" in call_count
@@ -493,7 +493,7 @@ def test_cmd_reset_skips_pending_only(tmp_path, monkeypatch, capsys):
         preserve_done_status = False
 
     mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
-                   setup_config={"namespace": "sim2real-ns"})
+                   cluster_config={"namespaces": ["sim2real-ns"]})
 
     # pending (wl-load-baseline) should be skipped
     assert "wl-load-baseline" not in cleaned
@@ -522,7 +522,7 @@ def test_cmd_reset_respects_only_filter(tmp_path, monkeypatch, capsys):
         preserve_done_status = False
 
     mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
-                   setup_config={"namespace": "sim2real-ns"})
+                   cluster_config={"namespaces": ["sim2real-ns"]})
 
     assert cleaned == ["wl-heavy-baseline"]
 
@@ -545,7 +545,7 @@ def test_cmd_reset_dry_run_does_not_save(tmp_path, monkeypatch, capsys):
         preserve_done_status = False
 
     mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
-                   setup_config={"namespace": "sim2real-ns"})
+                   cluster_config={"namespaces": ["sim2real-ns"]})
 
     # Progress should not be saved (capture_saves stays empty)
     assert saved_data == {}
@@ -579,7 +579,7 @@ def test_cmd_reset_saves_progress_on_success(tmp_path, monkeypatch, capsys):
 
     mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
                    namespaces=["sim2real-0", "sim2real-1", "sim2real-2"],
-                   setup_config={"namespace": "sim2real-ns"})
+                   cluster_config={"namespaces": ["sim2real-ns"]})
 
     # All non-pending pairs reset to pending (including done)
     assert saved_data["wl-smoke-baseline"]["status"] == "pending"
@@ -703,7 +703,7 @@ def test_cmd_reset_aborts_on_filter_mismatch(tmp_path, monkeypatch, capsys):
 
     with __import__("pytest").raises(SystemExit) as exc_info:
         mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
-                       setup_config={"namespace": "sim2real-ns"})
+                       cluster_config={"namespaces": ["sim2real-ns"]})
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
     assert "no match" in captured.out + captured.err
