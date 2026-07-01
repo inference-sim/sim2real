@@ -83,3 +83,93 @@ def _compute_translation_hash(
         ensure_ascii=False,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _build_translation_output(
+    algorithm_name: str,
+    image_ref: str,
+    translation_hash: str,
+    created_at: str,
+) -> dict:
+    return {
+        "version": 1,
+        "translation_hash": translation_hash,
+        "source": "byo",
+        "algorithms": [{"name": algorithm_name}],
+        "image_ref": image_ref,
+        "created_at": created_at,
+    }
+
+
+def _build_registered(
+    image_ref: str,
+    image_digest: str | None,
+    registered_at: str,
+) -> dict:
+    return {
+        "version": 1,
+        "image_ref": image_ref,
+        "image_digest": image_digest,
+        "source": "byo",
+        "registered_at": registered_at,
+    }
+
+
+def _register_translation(
+    *,
+    algorithm_name: str,
+    image_ref: str,
+    config_path: Path,
+    baseline_config_path: Path | None,
+    registered_hash: str | None,
+    now_iso: str,
+) -> tuple[str, str]:
+    """Register a BYO translation on disk.
+
+    Returns ``(translation_hash, status)`` where status is either
+    ``"created"`` (fresh registration) or ``"idempotent"`` (matching
+    translation already existed; no writes performed).
+
+    Raises:
+        RuntimeError: ``--registered-hash`` given and does not match computed.
+        ValueError: existing translation dir has the same hash but records
+            a different algorithm name (corrupted state or collision).
+    """
+    config_bytes = config_path.read_bytes()
+    image_digest = _extract_digest_from_ref(image_ref)
+    digest_or_ref = image_digest if image_digest is not None else image_ref
+    thash = _compute_translation_hash(digest_or_ref, config_bytes, algorithm_name)
+
+    if registered_hash is not None and registered_hash != thash:
+        raise RuntimeError(
+            f"--registered-hash mismatch: expected {registered_hash}, got {thash}"
+        )
+
+    out_path = layout.translation_output_path(thash)
+    if out_path.exists():
+        existing = json.loads(out_path.read_text())
+        existing_algos = [a.get("name") for a in existing.get("algorithms", [])]
+        if algorithm_name not in existing_algos:
+            raise ValueError(
+                f"algorithm name mismatch: translation {thash} records "
+                f"{existing_algos}, refusing to register {algorithm_name!r}"
+            )
+        return thash, "idempotent"
+
+    tdir = layout.translation_dir(thash)
+    (tdir / "generated" / algorithm_name).mkdir(parents=True, exist_ok=True)
+
+    out = _build_translation_output(algorithm_name, image_ref, thash, now_iso)
+    out_path.write_text(json.dumps(out, indent=2) + "\n")
+
+    reg = _build_registered(image_ref, image_digest, now_iso)
+    layout.registered_path(thash).write_text(json.dumps(reg, indent=2) + "\n")
+
+    layout.generated_config_path(thash, algorithm_name).write_bytes(config_bytes)
+
+    if baseline_config_path is not None:
+        (tdir / "generated" / "baseline_config.yaml").write_bytes(
+            baseline_config_path.read_bytes()
+        )
+
+    return thash, "created"
