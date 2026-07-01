@@ -49,7 +49,7 @@ def test_main_works_without_transfer_yaml(tmp_path, monkeypatch):
 
     with patch.object(deploy, "_cmd_status", mock_status):
         with patch.object(deploy, "_load_setup_config", return_value={"current_run": "test-run"}), \
-             patch.object(deploy, "_load_cluster_config", return_value={"namespaces": ["ns-0"]}):
+             patch.object(deploy, "_load_run_cluster_config", return_value={"namespaces": ["ns-0"]}):
             deploy.main()
 
     assert len(status_called) == 1
@@ -75,7 +75,7 @@ def test_main_status_silent_suppresses_banner(tmp_path, monkeypatch, capsys):
 
     with patch.object(deploy, "_load_setup_config",
                       return_value={"current_run": "test-run"}), \
-         patch.object(deploy, "_load_cluster_config",
+         patch.object(deploy, "_load_run_cluster_config",
                       return_value={"namespaces": ["ns-0"]}):
         deploy.main()
 
@@ -103,7 +103,7 @@ def test_main_status_without_silent_keeps_banner(tmp_path, monkeypatch, capsys):
 
     with patch.object(deploy, "_load_setup_config",
                       return_value={"current_run": "test-run"}), \
-         patch.object(deploy, "_load_cluster_config",
+         patch.object(deploy, "_load_run_cluster_config",
                       return_value={"namespaces": ["ns-0"]}):
         deploy.main()
 

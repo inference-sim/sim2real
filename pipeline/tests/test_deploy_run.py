@@ -4082,7 +4082,34 @@ class TestLoadProgressHelper:
         combined = captured.out + captured.err
         assert "Corrupt" in combined
         assert "sim2real-progress-fake" in combined
-        assert "prepare" in combined.lower() or "manually" in combined.lower()
+        assert "re-assemble" in combined.lower() or "manually" in combined.lower()
+
+    def test_corrupt_data_error_substitutes_run_name_when_provided(self, capsys):
+        """`run_name=trial-1` → error shows `--run trial-1`, not the `<run-name>`
+        placeholder — issue #446 (post-review fix for PR #455)."""
+        from pipeline.deploy import _load_progress
+
+        def boom():
+            raise ValueError("Corrupt ConfigMap sim2real-progress-trial-1 in ns-x")
+        store = self._fake_store(boom)
+        with pytest.raises(SystemExit):
+            _load_progress(store, run_name="trial-1")
+        combined = capsys.readouterr().err
+        assert "sim2real assemble --run trial-1" in combined
+        assert "<run-name>" not in combined
+
+    def test_corrupt_data_error_uses_placeholder_when_run_name_absent(self, capsys):
+        """No `run_name` → literal `<run-name>` placeholder, styled to match the
+        other `<name>` / `<namespace>` placeholders in the same message."""
+        from pipeline.deploy import _load_progress
+
+        def boom():
+            raise ValueError("Corrupt ConfigMap in ns-x")
+        store = self._fake_store(boom)
+        with pytest.raises(SystemExit):
+            _load_progress(store)
+        combined = capsys.readouterr().err
+        assert "sim2real assemble --run <run-name>" in combined
 
     def test_propagates_runtime_error_by_default(self):
         from pipeline.deploy import _load_progress
@@ -4346,3 +4373,206 @@ def test_refresh_namespaces_parse_error_keeps_current(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "cluster_config.json re-read failed" in out
     assert "bad json" in out
+
+
+# ── _load_run_cluster_config: per-run cluster resolution (#446) ─────────────
+
+def _make_run_dir(tmp_path, run_name="trial-1", *, with_cluster=True,
+                  with_metadata=True, metadata_content=None):
+    """Fixture helper: build a workspace/runs/<run>/ tree for dispatcher tests."""
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / "runs" / run_name
+    run_dir.mkdir(parents=True)
+    if with_cluster:
+        (run_dir / "cluster").mkdir()
+    if with_metadata:
+        content = metadata_content if metadata_content is not None else \
+            {"version": 1, "run_name": run_name, "cluster_id": "ocp-east"}
+        (run_dir / "run_metadata.json").write_text(json.dumps(content))
+    return workspace, run_dir
+
+
+def test_load_run_cluster_config_missing_run_dir(tmp_path, capsys, monkeypatch):
+    """Missing runs/<R>/ → 'run 'sim2real assemble --run <R>' first'."""
+    from pipeline import deploy
+    monkeypatch.setattr(deploy, "EXPERIMENT_ROOT", tmp_path)
+    run_dir = tmp_path / "workspace" / "runs" / "trial-1"
+    with pytest.raises(SystemExit) as exc:
+        deploy._load_run_cluster_config(run_dir)
+    assert exc.value.code == 1
+    assert "run 'sim2real assemble --run trial-1' first" in capsys.readouterr().err
+
+
+def test_load_run_cluster_config_missing_cluster_dir(tmp_path, capsys, monkeypatch):
+    """Missing runs/<R>/cluster/ → same acceptance-criterion message."""
+    from pipeline import deploy
+    monkeypatch.setattr(deploy, "EXPERIMENT_ROOT", tmp_path)
+    _make_run_dir(tmp_path, with_cluster=False)
+    run_dir = tmp_path / "workspace" / "runs" / "trial-1"
+    with pytest.raises(SystemExit) as exc:
+        deploy._load_run_cluster_config(run_dir)
+    assert exc.value.code == 1
+    assert "run 'sim2real assemble --run trial-1' first" in capsys.readouterr().err
+
+
+def test_load_run_cluster_config_missing_metadata(tmp_path, capsys, monkeypatch):
+    """Missing run_metadata.json → 'run metadata corrupted; re-assemble'."""
+    from pipeline import deploy
+    monkeypatch.setattr(deploy, "EXPERIMENT_ROOT", tmp_path)
+    _make_run_dir(tmp_path, with_metadata=False)
+    run_dir = tmp_path / "workspace" / "runs" / "trial-1"
+    with pytest.raises(SystemExit) as exc:
+        deploy._load_run_cluster_config(run_dir)
+    assert exc.value.code == 1
+    assert "run metadata corrupted; re-assemble" in capsys.readouterr().err
+
+
+def test_load_run_cluster_config_malformed_metadata(tmp_path, capsys, monkeypatch):
+    """Non-JSON run_metadata.json → 'run metadata corrupted; re-assemble'."""
+    from pipeline import deploy
+    monkeypatch.setattr(deploy, "EXPERIMENT_ROOT", tmp_path)
+    _make_run_dir(tmp_path)
+    run_dir = tmp_path / "workspace" / "runs" / "trial-1"
+    (run_dir / "run_metadata.json").write_text("this is { not json")
+    with pytest.raises(SystemExit) as exc:
+        deploy._load_run_cluster_config(run_dir)
+    assert exc.value.code == 1
+    assert "run metadata corrupted; re-assemble" in capsys.readouterr().err
+
+
+def test_load_run_cluster_config_no_cluster_id(tmp_path, capsys, monkeypatch):
+    """run_metadata.json without cluster_id → 'run metadata corrupted; re-assemble'."""
+    from pipeline import deploy
+    monkeypatch.setattr(deploy, "EXPERIMENT_ROOT", tmp_path)
+    _make_run_dir(tmp_path,
+                  metadata_content={"version": 1, "run_name": "trial-1"})
+    run_dir = tmp_path / "workspace" / "runs" / "trial-1"
+    with pytest.raises(SystemExit) as exc:
+        deploy._load_run_cluster_config(run_dir)
+    assert exc.value.code == 1
+    assert "run metadata corrupted; re-assemble" in capsys.readouterr().err
+
+
+def test_load_run_cluster_config_empty_cluster_id(tmp_path, capsys, monkeypatch):
+    """run_metadata.json with empty cluster_id → 'run metadata corrupted; re-assemble'."""
+    from pipeline import deploy
+    monkeypatch.setattr(deploy, "EXPERIMENT_ROOT", tmp_path)
+    _make_run_dir(tmp_path,
+                  metadata_content={"version": 1, "run_name": "trial-1", "cluster_id": ""})
+    run_dir = tmp_path / "workspace" / "runs" / "trial-1"
+    with pytest.raises(SystemExit) as exc:
+        deploy._load_run_cluster_config(run_dir)
+    assert exc.value.code == 1
+    assert "run metadata corrupted; re-assemble" in capsys.readouterr().err
+
+
+def test_load_run_cluster_config_reads_via_cluster_ops(tmp_path, monkeypatch):
+    """Success path: cluster_id extracted from metadata, cluster_ops.read_cluster_config called with it."""
+    from pipeline import deploy
+    monkeypatch.setattr(deploy, "EXPERIMENT_ROOT", tmp_path)
+    _make_run_dir(tmp_path)
+    run_dir = tmp_path / "workspace" / "runs" / "trial-1"
+
+    calls = []
+    def fake_read(cid):
+        calls.append(cid)
+        return {"namespaces": ["ns-a", "ns-b"]}
+    monkeypatch.setattr(deploy.cluster_ops, "read_cluster_config", fake_read)
+
+    cfg = deploy._load_run_cluster_config(run_dir)
+    assert calls == ["ocp-east"]
+    assert cfg == {"namespaces": ["ns-a", "ns-b"]}
+
+
+# ── main() dispatcher: per-run cluster resolution (#446) ───────────────────
+
+def _run_deploy_main(argv, monkeypatch, tmp_path):
+    """Call deploy.main() with a mocked argv and --experiment-root=tmp_path.
+
+    main() re-resolves EXPERIMENT_ROOT from --experiment-root (or cwd), so
+    monkeypatching the module-level global is not enough — we pass the flag
+    through argv so the test's tmp_path is the actual experiment root.
+    """
+    import sys as _sys
+    from pipeline import deploy
+    monkeypatch.setattr(_sys, "argv",
+                        ["deploy.py", "--experiment-root", str(tmp_path), *argv])
+    monkeypatch.setattr(deploy, "_tty", False, raising=False)
+    return deploy.main()
+
+
+def test_main_missing_run_dir_emits_assemble_hint(tmp_path, capsys, monkeypatch):
+    """`deploy.py run --run trial-1` with no run dir → assemble hint."""
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "setup_config.json").write_text("{}")
+    with pytest.raises(SystemExit):
+        _run_deploy_main(["--run", "trial-1", "run"], monkeypatch, tmp_path)
+    assert "run 'sim2real assemble --run trial-1' first" in capsys.readouterr().err
+
+
+def test_main_missing_cluster_dir_emits_assemble_hint(tmp_path, capsys, monkeypatch):
+    """`deploy.py run --run trial-1` with runs/trial-1/ but no cluster/ → assemble hint."""
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "setup_config.json").write_text("{}")
+    _make_run_dir(tmp_path, with_cluster=False)
+    with pytest.raises(SystemExit):
+        _run_deploy_main(["--run", "trial-1", "run"], monkeypatch, tmp_path)
+    assert "run 'sim2real assemble --run trial-1' first" in capsys.readouterr().err
+
+
+def test_main_missing_run_metadata_emits_corrupt_hint(tmp_path, capsys, monkeypatch):
+    """`deploy.py run --run trial-1` with no run_metadata.json → 're-assemble' hint."""
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "setup_config.json").write_text("{}")
+    _make_run_dir(tmp_path, with_metadata=False)
+    with pytest.raises(SystemExit):
+        _run_deploy_main(["--run", "trial-1", "run"], monkeypatch, tmp_path)
+    assert "run metadata corrupted; re-assemble" in capsys.readouterr().err
+
+
+def test_main_missing_cluster_id_emits_corrupt_hint(tmp_path, capsys, monkeypatch):
+    """`deploy.py run --run trial-1` with metadata missing cluster_id → 're-assemble' hint."""
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "setup_config.json").write_text("{}")
+    _make_run_dir(tmp_path,
+                  metadata_content={"version": 1, "run_name": "trial-1"})
+    with pytest.raises(SystemExit):
+        _run_deploy_main(["--run", "trial-1", "run"], monkeypatch, tmp_path)
+    assert "run metadata corrupted; re-assemble" in capsys.readouterr().err
+
+
+# ── _cmd_run: no-pairs error message (issue #446) ──────────────────────────
+
+def test_cmd_run_empty_cluster_dir_emits_assemble_hint(tmp_path, capsys, monkeypatch):
+    """_cmd_run reached with an empty runs/<R>/cluster/ → assemble-hint string."""
+    from pipeline import deploy
+
+    _make_run_dir(tmp_path)  # workspace/runs/trial-1/{cluster/,run_metadata.json}
+    run_dir = tmp_path / "workspace" / "runs" / "trial-1"
+
+    # _cmd_run's first substantive action is _cmd_build; stub it so we
+    # exercise only the pair-discovery guard. Also stub out the ConfigMap
+    # load so the guard is reached without a real kubectl call.
+    monkeypatch.setattr(deploy, "_cmd_build", lambda *a, **kw: None)
+    _mock_cm(monkeypatch, {})
+
+    class _Args:
+        skip_build = True
+        gpu_resource_type = None
+        default_gpu_cost = 1
+        defaults_path = None
+        max_retries = 2
+        poll_interval = 30
+        pending_threshold = 600
+        max_pending_stalls = 10
+        force = False
+        preserve_pipelineruns = False
+        skip_teardown = False
+        only = None
+        workload = None
+        package = None
+        status = None
+
+    with pytest.raises(SystemExit):
+        deploy._cmd_run(_Args(), run_dir, {"namespaces": ["ns-a"]})
+    assert "run 'sim2real assemble --run trial-1' first" in capsys.readouterr().err
