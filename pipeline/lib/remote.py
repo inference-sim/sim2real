@@ -7,6 +7,37 @@ JOB_NAME = "sim2real-orchestrator"
 SERVICE_ACCOUNT = "sim2real-runner"
 MOUNT_BASE = "/data"
 
+# ConfigMap key prefix for the per-cluster cluster_config.json. The suffix is
+# the cluster id, so the pod can reconstruct the layout-correct path
+# ``clusters/<cluster_id>/cluster_config.json``. Distinct from ``cluster--``,
+# which is reserved for per-run cluster/*.yaml files.
+_CLUSTER_CONFIG_KEY_PREFIX = "cluster_config--"
+
+
+def _discover_cluster_id(workspace_dir: Path) -> str:
+    """Return the single cluster id under ``workspace_dir/clusters/``.
+
+    Step 0 assumes one cluster per workspace. Raises FileNotFoundError if no
+    cluster is registered (the in-pod orchestrator needs ``namespaces`` from
+    cluster_config) or RuntimeError if more than one is present.
+    """
+    clusters_root = workspace_dir / "clusters"
+    cluster_ids = (
+        sorted(p.name for p in clusters_root.iterdir() if p.is_dir())
+        if clusters_root.is_dir() else []
+    )
+    if not cluster_ids:
+        raise FileNotFoundError(
+            f"No cluster registered under {clusters_root}. "
+            f"Run pipeline/cluster.py provision first."
+        )
+    if len(cluster_ids) > 1:
+        raise RuntimeError(
+            f"Multiple clusters found in workspace ({len(cluster_ids)}); "
+            f"Step 0 assumes a single cluster."
+        )
+    return cluster_ids[0]
+
 
 def build_run_inputs_configmap(
     *, run_dir: Path, workspace_dir: Path, namespace: str, run_name: str,
@@ -20,8 +51,18 @@ def build_run_inputs_configmap(
     if not metadata_path.exists():
         raise FileNotFoundError(f"run_metadata.json not found: {metadata_path}")
 
+    cluster_id = _discover_cluster_id(workspace_dir)
+    cluster_config_path = (
+        workspace_dir / "clusters" / cluster_id / "cluster_config.json"
+    )
+    if not cluster_config_path.exists():
+        raise FileNotFoundError(
+            f"cluster_config.json not found: {cluster_config_path}"
+        )
+
     data = {
         "setup_config.json": setup_path.read_text(),
+        f"{_CLUSTER_CONFIG_KEY_PREFIX}{cluster_id}": cluster_config_path.read_text(),
         "run_metadata.json": metadata_path.read_text(),
     }
 
@@ -55,6 +96,12 @@ def _configmap_items(data: dict, run_name: str) -> list[dict]:
             items.append({"key": key, "path": "defaults.yaml"})
         elif key == "run_metadata.json":
             items.append({"key": key, "path": f"runs/{run_name}/{key}"})
+        elif key.startswith(_CLUSTER_CONFIG_KEY_PREFIX):
+            cluster_id = key[len(_CLUSTER_CONFIG_KEY_PREFIX):]
+            items.append({
+                "key": key,
+                "path": f"clusters/{cluster_id}/cluster_config.json",
+            })
         elif key.startswith("cluster--"):
             filename = key[len("cluster--"):]
             items.append({"key": key, "path": f"runs/{run_name}/cluster/{filename}"})

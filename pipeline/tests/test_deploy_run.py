@@ -38,7 +38,7 @@ def test_status_output_contains_all_pairs(tmp_path, capsys, monkeypatch):
         status = None
         live = False
 
-    _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+    _cmd_status(_Args(), tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
     out = capsys.readouterr().out
     for key in _PROGRESS:
         if not key.startswith("_"):
@@ -63,7 +63,7 @@ def test_status_done_pair_shows_completed_namespace(tmp_path, capsys, monkeypatc
         status = None
         live = False
 
-    _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+    _cmd_status(_Args(), tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
     out = capsys.readouterr().out
     done_line = next(line for line in out.splitlines() if "wl-smoke-baseline" in line)
     assert "sim2real-0" in done_line
@@ -90,7 +90,7 @@ def test_status_pending_pair_with_stale_completed_namespace_shows_dash(tmp_path,
         status = None
         live = False
 
-    _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+    _cmd_status(_Args(), tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
     out = capsys.readouterr().out
     pending_line = next(line for line in out.splitlines() if "wl-stale-baseline" in line)
     assert "—" in pending_line
@@ -108,7 +108,7 @@ def test_status_filter_by_workload(tmp_path, capsys, monkeypatch):
         status = None
         live = False
 
-    _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+    _cmd_status(_Args(), tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
     out = capsys.readouterr().out
     assert "wl-smoke-baseline" in out
     assert "wl-smoke-treatment" in out
@@ -126,7 +126,7 @@ def test_status_filter_by_package(tmp_path, capsys, monkeypatch):
         status = None
         live = False
 
-    _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+    _cmd_status(_Args(), tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
     out = capsys.readouterr().out
     assert "wl-smoke-treatment" in out
     assert "wl-load-treatment" in out
@@ -144,7 +144,7 @@ def test_status_summary_line(tmp_path, capsys, monkeypatch):
         status = None
         live = False
 
-    _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+    _cmd_status(_Args(), tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
     out = capsys.readouterr().out
     assert "6 pairs" in out
     assert "1 done" in out
@@ -164,7 +164,7 @@ def test_status_missing_progress_file(tmp_path, capsys, monkeypatch):
         live = False
 
     _cmd_status(_Args(), tmp_path / "missing-run-dir",
-                setup_config={"namespace": "sim2real-ns"})
+                cluster_config={"namespaces": ["sim2real-ns"]})
     out = capsys.readouterr().out
     assert "0 pairs" in out
 
@@ -189,7 +189,7 @@ def test_status_unreachable_configmap_exits(tmp_path, capsys, monkeypatch):
 
     with pytest.raises(SystemExit) as exc_info:
         _cmd_status(_Args(), tmp_path / "run-x",
-                    setup_config={"namespace": "sim2real-ns"})
+                    cluster_config={"namespaces": ["sim2real-ns"]})
 
     assert exc_info.value.code != 0
     captured = capsys.readouterr()
@@ -211,7 +211,7 @@ def test_status_silent_prints_summary_only(tmp_path, capsys, monkeypatch):
         live = False
         silent = True
 
-    _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+    _cmd_status(_Args(), tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
     out = capsys.readouterr().out
 
     assert "6 pairs" in out
@@ -235,7 +235,7 @@ def test_status_silent_composes_with_filter(tmp_path, capsys, monkeypatch):
         live = False
         silent = True
 
-    _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+    _cmd_status(_Args(), tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
     out = capsys.readouterr().out
 
     assert "2 pairs" in out
@@ -257,7 +257,7 @@ def test_status_silent_empty_progress(tmp_path, capsys, monkeypatch):
         silent = True
 
     _cmd_status(_Args(), tmp_path / "missing-run-dir",
-                setup_config={"namespace": "sim2real-ns"})
+                cluster_config={"namespaces": ["sim2real-ns"]})
     out = capsys.readouterr().out
     assert "0 pairs" in out
     assert "PAIR" not in out
@@ -430,7 +430,7 @@ def test_status_table_header_says_runtime_not_retries(tmp_path, capsys, monkeypa
         status = None
         live = False
 
-    _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+    _cmd_status(_Args(), tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
     out = capsys.readouterr().out
     assert "RUNTIME" in out
     assert "RETRIES" not in out
@@ -451,7 +451,7 @@ def test_status_table_done_row_shows_formatted_duration(tmp_path, capsys, monkey
         status = None
         live = False
 
-    _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+    _cmd_status(_Args(), tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
     out = capsys.readouterr().out
     done_line = next(line for line in out.splitlines() if "wl-smoke-baseline" in line)
     assert "42s" in done_line
@@ -478,7 +478,7 @@ def test_status_table_pre_feature_done_row_shows_dash(tmp_path, capsys, monkeypa
         status = None
         live = False
 
-    _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+    _cmd_status(_Args(), tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
     out = capsys.readouterr().out
     line = next(li for li in out.splitlines() if "wl-old-baseline" in li)
     # SLOT shows the completed namespace; RUNTIME shows '—'. The line should
@@ -507,7 +507,7 @@ def test_status_silent_unreachable_still_exits(tmp_path, capsys, monkeypatch):
 
     with pytest.raises(SystemExit) as exc_info:
         _cmd_status(_Args(), tmp_path / "run-x",
-                    setup_config={"namespace": "sim2real-ns"})
+                    cluster_config={"namespaces": ["sim2real-ns"]})
 
     assert exc_info.value.code != 0
     captured = capsys.readouterr()
@@ -537,7 +537,7 @@ def test_status_filter_by_only(tmp_path, capsys, monkeypatch):
     class _Args:
         only = "wl-smoke-baseline"; workload = None; package = None; status = None; live = False
 
-    _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+    _cmd_status(_Args(), tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
     out = capsys.readouterr().out
     assert "wl-smoke-baseline" in out
     assert "wl-load-baseline" not in out
@@ -551,7 +551,7 @@ def test_status_filter_by_status(tmp_path, capsys, monkeypatch):
     class _Args:
         only = None; workload = None; package = None; status = "running"; live = False
 
-    _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+    _cmd_status(_Args(), tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
     out = capsys.readouterr().out
     assert "wl-smoke-treatment" in out
     assert "wl-load-baseline" not in out
@@ -566,7 +566,7 @@ def test_status_mismatch_shows_valid_values(tmp_path, capsys, monkeypatch):
         only = None; workload = "nonexistent"; package = None; status = None; live = False
 
     with pytest.raises(SystemExit) as exc_info:
-        _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+        _cmd_status(_Args(), tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
     assert exc_info.value.code == 1
     captured = capsys.readouterr().err
     assert "unrecognized" in captured
@@ -581,7 +581,7 @@ def test_status_empty_progress_with_filters(tmp_path, capsys, monkeypatch):
     class _Args:
         only = None; workload = "foo"; package = None; status = None; live = False
 
-    _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+    _cmd_status(_Args(), tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
     out = capsys.readouterr().out
     assert "0 pairs" in out
     assert "filters ignored" in out
@@ -2079,7 +2079,7 @@ def test_status_ignores_orchestrator_metadata_as_pair(tmp_path, capsys, monkeypa
 
     from pipeline.deploy import _cmd_status
     args = argparse.Namespace(only=None, workload=None, package=None, status=None)
-    _cmd_status(args, tmp_path, setup_config={"namespace": "sim2real-ns"})
+    _cmd_status(args, tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
     out = capsys.readouterr().out
     assert "wl-foo-baseline" in out
     lines = out.strip().split("\n")
@@ -2100,7 +2100,7 @@ def test_status_backward_compat_ignores_legacy_orchestrator(tmp_path, capsys, mo
 
     from pipeline.deploy import _cmd_status
     args = argparse.Namespace(only=None, workload=None, package=None, status=None)
-    _cmd_status(args, tmp_path, setup_config={"namespace": "sim2real-ns"})
+    _cmd_status(args, tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
     out = capsys.readouterr().out
     assert "wl-foo-baseline" in out
     assert "backing_off" not in out
@@ -2141,7 +2141,7 @@ def test_status_empty_pairs_only_orchestrator(tmp_path, capsys, monkeypatch):
 
     from pipeline.deploy import _cmd_status
     args = argparse.Namespace(only=None, workload=None, package=None, status=None)
-    _cmd_status(args, tmp_path, setup_config={"namespace": "sim2real-ns"})
+    _cmd_status(args, tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
     out = capsys.readouterr().out
     assert "0 pairs" in out
 
@@ -2399,7 +2399,7 @@ def test_status_reads_configmap_when_namespace_configured(tmp_path, capsys, monk
         only = None; workload = None; package = None; status = None
 
     _cmd_status(_Args(), tmp_path,
-                setup_config={"namespace": "sim2real-ns"})
+                cluster_config={"namespaces": ["sim2real-ns"]})
 
     out = capsys.readouterr().out
     assert "wl-smoke-baseline" in out
@@ -2422,7 +2422,7 @@ def test_status_reads_from_configmap(tmp_path, capsys, monkeypatch):
     run_dir = tmp_path / "nonexistent-run"
     run_dir.mkdir()
     _cmd_status(_Args(), run_dir,
-                setup_config={"namespace": "sim2real-ns"})
+                cluster_config={"namespaces": ["sim2real-ns"]})
 
     out = capsys.readouterr().out
     assert "wl-smoke-baseline" in out
@@ -2436,7 +2436,7 @@ def test_status_empty_configmap_reports_no_run(tmp_path, capsys, monkeypatch):
         only = None; workload = None; package = None; status = None
 
     _cmd_status(_Args(), tmp_path,
-                setup_config={"namespace": "sim2real-ns"})
+                cluster_config={"namespaces": ["sim2real-ns"]})
 
     out = capsys.readouterr().out
     assert "0 pairs" in out
@@ -2449,31 +2449,83 @@ def test_status_no_namespace_exits_with_error(tmp_path, capsys):
         only = None; workload = None; package = None; status = None
 
     with pytest.raises(SystemExit):
-        _cmd_status(_Args(), tmp_path, setup_config={})
+        _cmd_status(_Args(), tmp_path, cluster_config={})
 
 
 # ── _configmap_namespace helper ──────────────────────────────────────────────
 
-def test_configmap_namespace_from_setup_config():
-    """Primary namespace comes from setup_config['namespace']."""
-    from pipeline.deploy import _configmap_namespace
-    assert _configmap_namespace({"namespace": "sim2real-ns"}) == "sim2real-ns"
-
-def test_configmap_namespace_fallback_to_namespaces_arg():
-    """Falls back to explicit namespaces[0] when setup_config has no namespace."""
-    from pipeline.deploy import _configmap_namespace
-    assert _configmap_namespace({}, ["sim2real-0", "sim2real-1"]) == "sim2real-0"
-
-def test_configmap_namespace_fallback_to_setup_config_namespaces():
-    """Falls back to setup_config['namespaces'][0] when namespace key is empty."""
+def test_configmap_namespace_from_cluster_config():
+    """Primary namespace comes from cluster_config['namespaces'][0]."""
     from pipeline.deploy import _configmap_namespace
     assert _configmap_namespace({"namespaces": ["sim2real-0"]}) == "sim2real-0"
+
+def test_configmap_namespace_explicit_namespaces_arg_wins():
+    """Explicit namespaces[0] arg overrides cluster_config['namespaces']."""
+    from pipeline.deploy import _configmap_namespace
+    assert _configmap_namespace({"namespaces": ["other"]}, ["sim2real-0", "sim2real-1"]) == "sim2real-0"
 
 def test_configmap_namespace_empty():
     """Returns '' when no namespace source is available."""
     from pipeline.deploy import _configmap_namespace
     assert _configmap_namespace({}) == ""
     assert _configmap_namespace(None) == ""
+
+
+# ── _load_cluster_config helper ──────────────────────────────────────────────
+
+def _write_cluster_config(root, cluster_id, payload):
+    """Helper: write workspace/clusters/<cluster_id>/cluster_config.json under *root*."""
+    d = root / "workspace" / "clusters" / cluster_id
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "cluster_config.json").write_text(json.dumps(payload))
+
+
+def test_load_cluster_config_zero_clusters_returns_empty(tmp_path, monkeypatch):
+    """Zero clusters under EXPERIMENT_ROOT and REPO_ROOT → returns {}."""
+    import pipeline.deploy as mod
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "REPO_ROOT", other)
+    assert mod._load_cluster_config() == {}
+
+
+def test_load_cluster_config_single_cluster_returns_dict(tmp_path, monkeypatch):
+    """Exactly one cluster under EXPERIMENT_ROOT → returns its parsed config."""
+    import pipeline.deploy as mod
+    _write_cluster_config(tmp_path, "ocp-east",
+                          {"namespaces": ["sim2real-0", "sim2real-1"]})
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path / "_unused")
+    result = mod._load_cluster_config()
+    assert result == {"namespaces": ["sim2real-0", "sim2real-1"]}
+
+
+def test_load_cluster_config_multi_cluster_exits(tmp_path, monkeypatch, capsys):
+    """More than one cluster directory triggers the safety rail."""
+    import pipeline.deploy as mod
+    _write_cluster_config(tmp_path, "ocp-east", {"namespaces": ["a"]})
+    _write_cluster_config(tmp_path, "ocp-west", {"namespaces": ["b"]})
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path / "_unused")
+    with pytest.raises(SystemExit) as exc_info:
+        mod._load_cluster_config()
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "Multiple clusters" in err
+
+
+def test_load_cluster_config_falls_back_to_repo_root(tmp_path, monkeypatch):
+    """Zero under EXPERIMENT_ROOT but one under REPO_ROOT → returns the REPO_ROOT dict."""
+    import pipeline.deploy as mod
+    experiment = tmp_path / "experiment"
+    experiment.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_cluster_config(repo, "ocp-east", {"namespaces": ["from-repo"]})
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", experiment)
+    monkeypatch.setattr(mod, "REPO_ROOT", repo)
+    assert mod._load_cluster_config() == {"namespaces": ["from-repo"]}
 
 
 # ── ConfigMapProgressStore wiring in _cmd_run / _cmd_reset ─────────────────
@@ -2497,10 +2549,10 @@ def test_cmd_run_uses_configmap_store(monkeypatch, tmp_path):
         gpu_resource_type=None, default_gpu_cost=1,
         pending_threshold=600, max_pending_stalls=10,
     )
-    setup = {"namespace": "sim2real-ns", "namespaces": ["sim2real-ns"]}
+    cluster = {"namespaces": ["sim2real-ns"]}
 
     with pytest.raises(SystemExit):
-        mod._cmd_run(args, run_dir, setup)
+        mod._cmd_run(args, run_dir, cluster)
 
 
 def test_cmd_reset_uses_configmap_store(monkeypatch, tmp_path):
@@ -2521,7 +2573,7 @@ def test_cmd_reset_uses_configmap_store(monkeypatch, tmp_path):
     # Note: _cmd_reset now takes run_dir, not progress_path
     mod._cmd_reset(args, run_dir, {},
                    namespaces=["sim2real-ns"],
-                   setup_config={"namespace": "sim2real-ns"})
+                   cluster_config={"namespaces": ["sim2real-ns"]})
 
 
 def test_status_uses_configmap_directly(tmp_path, capsys, monkeypatch):
@@ -2535,7 +2587,7 @@ def test_status_uses_configmap_directly(tmp_path, capsys, monkeypatch):
     class _Args:
         only = None; workload = None; package = None; status = None
 
-    _cmd_status(_Args(), tmp_path, setup_config={"namespace": "sim2real-ns"})
+    _cmd_status(_Args(), tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
 
     out = capsys.readouterr().out
     assert "wl-remote-baseline" in out
@@ -2811,7 +2863,7 @@ def test_dispatch_sets_entry_running(tmp_path, monkeypatch):
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
 
     # Setup config with one namespace slot
-    setup_config = {"namespaces": ["sim2real-0"], "namespace": "sim2real-0"}
+    cluster_config = {"namespaces": ["sim2real-0"]}
 
     # Track progress store saves
     saved_progress = {}
@@ -2876,7 +2928,7 @@ def test_dispatch_sets_entry_running(tmp_path, monkeypatch):
         shadow_ttl=0,
     )
 
-    mod._cmd_run(args, run_dir, setup_config)
+    mod._cmd_run(args, run_dir, cluster_config)
 
     # The pair should have been marked running at some point during dispatch
     assert "wl-a-baseline" in saved_progress
@@ -2922,7 +2974,7 @@ def test_all_slots_busy_skips_gpu_probe(tmp_path, monkeypatch, capsys):
     _write_pr(cluster_dir, "a")
     _write_pr(cluster_dir, "b")
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
-    setup_config = {"namespaces": ["sim2real-0"], "namespace": "sim2real-0"}
+    cluster_config = {"namespaces": ["sim2real-0"]}
 
     # wl-a already running in the only slot (busy); wl-b pending.
     preloaded = {
@@ -2987,7 +3039,7 @@ def test_all_slots_busy_skips_gpu_probe(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
 
-    mod._cmd_run(_run_args(), run_dir, setup_config)
+    mod._cmd_run(_run_args(), run_dir, cluster_config)
 
     # The first (all-slots-busy) cycle must not have probed GPUs.
     assert probe_calls["at_first_sleep"] == 0
@@ -3008,7 +3060,7 @@ def test_free_slot_runs_gpu_probe_and_dispatches(tmp_path, monkeypatch):
     cluster_dir.mkdir(parents=True)
     _write_pr(cluster_dir, "a")
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
-    setup_config = {"namespaces": ["sim2real-0"], "namespace": "sim2real-0"}
+    cluster_config = {"namespaces": ["sim2real-0"]}
 
     saved_progress = {}
 
@@ -3045,7 +3097,7 @@ def test_free_slot_runs_gpu_probe_and_dispatches(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
 
-    mod._cmd_run(_run_args(), run_dir, setup_config)
+    mod._cmd_run(_run_args(), run_dir, cluster_config)
 
     # The free slot triggered at least one GPU probe and the pair dispatched.
     assert probe_calls["n"] >= 1
@@ -3067,7 +3119,7 @@ def _orphan_harness(tmp_path, monkeypatch, *, initial_progress):
     cluster_dir.mkdir(parents=True)
     _write_pr(cluster_dir, "a")
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
-    setup_config = {"namespaces": ["sim2real-0"], "namespace": "sim2real-0"}
+    cluster_config = {"namespaces": ["sim2real-0"]}
 
     saved_progress = {}
 
@@ -3097,7 +3149,7 @@ def _orphan_harness(tmp_path, monkeypatch, *, initial_progress):
     monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
 
-    mod._cmd_run(_run_args(), run_dir, setup_config)
+    mod._cmd_run(_run_args(), run_dir, cluster_config)
     return saved_progress
 
 
@@ -3193,7 +3245,7 @@ def _run_harness(tmp_path, monkeypatch, *, status_fn, extra_patches=None):
     (cluster_dir / "pipelinerun-a-baseline.yaml").write_text(_yaml.dump(pr))
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
 
-    setup_config = {"namespaces": ["sim2real-0"], "namespace": "sim2real-0"}
+    cluster_config = {"namespaces": ["sim2real-0"]}
 
     saved_progress = {}
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
@@ -3228,7 +3280,7 @@ def _run_harness(tmp_path, monkeypatch, *, status_fn, extra_patches=None):
         package=None, status=None, force=False, skip_teardown=False,
         remote=False, preserve_pipelineruns=False, shadow_ttl=0,
     )
-    mod._cmd_run(args, run_dir, setup_config)
+    mod._cmd_run(args, run_dir, cluster_config)
     return saved_progress
 
 
@@ -3288,7 +3340,7 @@ def test_derive_costs_only_for_scoped_pairs(tmp_path, monkeypatch):
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
 
     # Setup config
-    setup_config = {"namespaces": ["sim2real-0"], "namespace": "sim2real-0"}
+    cluster_config = {"namespaces": ["sim2real-0"]}
 
     # Mock ConfigMapProgressStore
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
@@ -3355,7 +3407,7 @@ def test_derive_costs_only_for_scoped_pairs(tmp_path, monkeypatch):
         shadow_ttl=0,
     )
 
-    mod._cmd_run(args, run_dir, setup_config)
+    mod._cmd_run(args, run_dir, cluster_config)
 
     # _derive_pair_gpu_costs should have been called with only the 2 in-scope pairs
     assert len(called_keys) == 1
@@ -3488,7 +3540,7 @@ def test_health_escalation_cancels_pipelinerun(tmp_path, monkeypatch):
     (cluster_dir / "pipelinerun-a-baseline.yaml").write_text(_yaml.dump(pr))
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
 
-    setup_config = {"namespaces": ["sim2real-0"], "namespace": "sim2real-0"}
+    cluster_config = {"namespaces": ["sim2real-0"]}
 
     saved = {}
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
@@ -3535,7 +3587,7 @@ def test_health_escalation_cancels_pipelinerun(tmp_path, monkeypatch):
         preserve_pipelineruns=False, shadow_ttl=0,
     )
 
-    mod._cmd_run(args, run_dir, setup_config)
+    mod._cmd_run(args, run_dir, cluster_config)
 
     assert "wl-a-baseline" in saved
     assert saved["wl-a-baseline"]["status"] == "failed"
@@ -3676,7 +3728,7 @@ def test_dispatch_shuffles_dispatchable(tmp_path, monkeypatch):
     (cluster_dir / "pipelinerun-a-baseline.yaml").write_text(_yaml.dump(pr))
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
 
-    setup_config = {"namespaces": ["sim2real-0"], "namespace": "sim2real-0"}
+    cluster_config = {"namespaces": ["sim2real-0"]}
 
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
     monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
@@ -3718,7 +3770,7 @@ def test_dispatch_shuffles_dispatchable(tmp_path, monkeypatch):
         preserve_pipelineruns=False, shadow_ttl=0,
     )
 
-    mod._cmd_run(args, run_dir, setup_config)
+    mod._cmd_run(args, run_dir, cluster_config)
 
     assert len(shuffle_calls) >= 1
     assert "wl-a-baseline" in shuffle_calls[0]
@@ -3755,8 +3807,7 @@ def test_shadow_ledger_prevents_over_subscription(tmp_path, monkeypatch):
 
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
 
-    setup_config = {"namespaces": ["sim2real-0", "sim2real-1", "sim2real-2"],
-                    "namespace": "sim2real-ns"}
+    cluster_config = {"namespaces": ["sim2real-0", "sim2real-1", "sim2real-2"]}
 
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
     monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
@@ -3808,7 +3859,7 @@ def test_shadow_ledger_prevents_over_subscription(tmp_path, monkeypatch):
         preserve_pipelineruns=False, shadow_ttl=120,
     )
 
-    mod._cmd_run(args, run_dir, setup_config)
+    mod._cmd_run(args, run_dir, cluster_config)
 
     # All 3 pairs eventually dispatched
     assert len(dispatch_log) == 3
@@ -3841,8 +3892,7 @@ def test_shadow_ttl_zero_disables_gating(tmp_path, monkeypatch):
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
 
     # 3 slots, 12 probed free GPUs, cost 4 each — without shadow all 3 fit
-    setup_config = {"namespaces": ["sim2real-0", "sim2real-1", "sim2real-2"],
-                    "namespace": "sim2real-ns"}
+    cluster_config = {"namespaces": ["sim2real-0", "sim2real-1", "sim2real-2"]}
 
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
     monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
@@ -3881,7 +3931,7 @@ def test_shadow_ttl_zero_disables_gating(tmp_path, monkeypatch):
         preserve_pipelineruns=False, shadow_ttl=0,
     )
 
-    mod._cmd_run(args, run_dir, setup_config)
+    mod._cmd_run(args, run_dir, cluster_config)
 
     # All 3 pairs dispatched — shadow tracking disabled, probe says 12 free
     # which fits 3 pairs of cost 4 each
@@ -3893,7 +3943,7 @@ def _setup_dispatch_run(tmp_path, monkeypatch, *, baseline_yaml: str):
 
     Builds a single-pair run dir with a PipelineRun YAML and the given
     `baseline.yaml` content, mocks the cluster and store, and returns
-    the args + setup_config + run_dir for the test to invoke _cmd_run.
+    the args + cluster_config + run_dir for the test to invoke _cmd_run.
 
     Captures probe_free_gpus kwargs into the returned dict; the loop is
     short-circuited by reporting "Succeeded" on the first poll.
@@ -3945,8 +3995,8 @@ def _setup_dispatch_run(tmp_path, monkeypatch, *, baseline_yaml: str):
         skip_teardown=False, remote=False, preserve_pipelineruns=False,
         shadow_ttl=0,
     )
-    setup_config = {"namespace": "sim2real-0", "namespaces": ["sim2real-0"]}
-    return mod, args, setup_config, run_dir, captured
+    cluster_config = {"namespaces": ["sim2real-0"]}
+    return mod, args, cluster_config, run_dir, captured
 
 
 class TestCmdRunForwardsNodeFilters:
@@ -3958,10 +4008,10 @@ class TestCmdRunForwardsNodeFilters:
         from pipeline.lib.capacity import NodeFilter
         # Scenario with no role keys → extract_node_filters returns {}.
         baseline = "scenario:\n- name: test\n"
-        mod, args, setup, run_dir, captured = _setup_dispatch_run(
+        mod, args, cluster, run_dir, captured = _setup_dispatch_run(
             tmp_path, monkeypatch, baseline_yaml=baseline,
         )
-        mod._cmd_run(args, run_dir, setup)
+        mod._cmd_run(args, run_dir, cluster)
         assert captured["probe_kwargs"], "probe_free_gpus was never called"
         first = captured["probe_kwargs"][0]
         assert first.get("node_filters") == [NodeFilter()]
@@ -3976,10 +4026,10 @@ class TestCmdRunForwardsNodeFilters:
             "      labelKey: nvidia.com/gpu.product\n"
             "      labelValue: NVIDIA-H100-80GB-HBM3\n"
         )
-        mod, args, setup, run_dir, captured = _setup_dispatch_run(
+        mod, args, cluster, run_dir, captured = _setup_dispatch_run(
             tmp_path, monkeypatch, baseline_yaml=baseline,
         )
-        mod._cmd_run(args, run_dir, setup)
+        mod._cmd_run(args, run_dir, cluster)
         assert captured["probe_kwargs"], "probe_free_gpus was never called"
         first = captured["probe_kwargs"][0]
         assert first.get("node_filters") == [
@@ -3993,10 +4043,10 @@ class TestCmdRunForwardsNodeFilters:
         """Issue #268 item 6: when no constraint can be extracted, the orchestrator
         must announce that cordon/taint-only screening is in effect."""
         baseline = "scenario:\n- name: test\n"
-        mod, args, setup, run_dir, _captured = _setup_dispatch_run(
+        mod, args, cluster, run_dir, _captured = _setup_dispatch_run(
             tmp_path, monkeypatch, baseline_yaml=baseline,
         )
-        mod._cmd_run(args, run_dir, setup)
+        mod._cmd_run(args, run_dir, cluster)
         out = capsys.readouterr().out
         assert "No per-role GPU product constraint extracted" in out
         assert "cordon/taint screening only" in out
@@ -4093,7 +4143,7 @@ def test_one_cycle_emits_unified_capacity_log_and_effective_free_warn(
     cluster_dir.mkdir(parents=True)
     _write_pr(cluster_dir, "a")
     (run_dir / "run_metadata.json").write_text(json.dumps({}))
-    setup_config = {"namespaces": ["sim2real-0"], "namespace": "sim2real-0"}
+    cluster_config = {"namespaces": ["sim2real-0"]}
 
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
     monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
@@ -4150,7 +4200,7 @@ def test_one_cycle_emits_unified_capacity_log_and_effective_free_warn(
     )
 
     with pytest.raises(_LoopBreak):
-        mod._cmd_run(args, run_dir, setup_config)
+        mod._cmd_run(args, run_dir, cluster_config)
 
     out = capsys.readouterr().out
     cap_lines = [ln for ln in out.splitlines() if "Capacity:" in ln]
@@ -4201,11 +4251,11 @@ def test_one_cycle_emits_unified_capacity_log_and_effective_free_warn(
 
 # ── _refresh_namespaces (issue #372) ─────────────────────────────────────────
 # The dispatch loop calls _refresh_namespaces() once per cycle so live edits
-# of setup_config.json (mid-run namespace add/remove) take effect without an
+# of cluster_config.json (mid-run namespace add/remove) take effect without an
 # orchestrator restart. The tests below pin each branch of the helper.
 
-def _patch_setup_config(monkeypatch, value):
-    """Patch _load_setup_config to return *value* (or raise if it's an Exception)."""
+def _patch_cluster_config(monkeypatch, value):
+    """Patch _load_cluster_config to return *value* (or raise if it's an Exception)."""
     from pipeline import deploy as _deploy
 
     def _fake():
@@ -4213,14 +4263,14 @@ def _patch_setup_config(monkeypatch, value):
             raise value
         return value
 
-    monkeypatch.setattr(_deploy, "_load_setup_config", _fake)
+    monkeypatch.setattr(_deploy, "_load_cluster_config", _fake)
 
 
 def test_refresh_namespaces_no_change(monkeypatch, capsys):
     """Equal lists return the same list and emit no log lines."""
     from pipeline.deploy import _refresh_namespaces
 
-    _patch_setup_config(monkeypatch, {"namespaces": ["ns0", "ns1"]})
+    _patch_cluster_config(monkeypatch, {"namespaces": ["ns0", "ns1"]})
     result = _refresh_namespaces(["ns0", "ns1"])
     assert result == ["ns0", "ns1"]
     assert capsys.readouterr().out == ""
@@ -4230,7 +4280,7 @@ def test_refresh_namespaces_add(monkeypatch, capsys):
     """Adding a namespace returns the new list and logs '+' for additions."""
     from pipeline.deploy import _refresh_namespaces
 
-    _patch_setup_config(monkeypatch, {"namespaces": ["ns0", "ns1", "ns2"]})
+    _patch_cluster_config(monkeypatch, {"namespaces": ["ns0", "ns1", "ns2"]})
     result = _refresh_namespaces(["ns0", "ns1"])
     assert result == ["ns0", "ns1", "ns2"]
     out = capsys.readouterr().out
@@ -4242,7 +4292,7 @@ def test_refresh_namespaces_remove_drains_naturally(monkeypatch, capsys):
     """Removing a namespace returns the new list and logs '-' (no cancellation)."""
     from pipeline.deploy import _refresh_namespaces
 
-    _patch_setup_config(monkeypatch, {"namespaces": ["ns0", "ns1"]})
+    _patch_cluster_config(monkeypatch, {"namespaces": ["ns0", "ns1"]})
     result = _refresh_namespaces(["ns0", "ns1", "ns2"])
     assert result == ["ns0", "ns1"]
     out = capsys.readouterr().out
@@ -4255,7 +4305,7 @@ def test_refresh_namespaces_add_and_remove(monkeypatch, capsys):
     """Mixed add+remove emits both info lines in a single cycle."""
     from pipeline.deploy import _refresh_namespaces
 
-    _patch_setup_config(monkeypatch, {"namespaces": ["ns0", "ns2", "ns3"]})
+    _patch_cluster_config(monkeypatch, {"namespaces": ["ns0", "ns2", "ns3"]})
     result = _refresh_namespaces(["ns0", "ns1", "ns2"])
     assert result == ["ns0", "ns2", "ns3"]
     out = capsys.readouterr().out
@@ -4267,7 +4317,7 @@ def test_refresh_namespaces_primary_change_ignored(monkeypatch, capsys):
     """Primary (namespaces[0]) mismatch warns and returns current; pinning protects ConfigMap binding."""
     from pipeline.deploy import _refresh_namespaces
 
-    _patch_setup_config(monkeypatch, {"namespaces": ["ns-other", "ns1"]})
+    _patch_cluster_config(monkeypatch, {"namespaces": ["ns-other", "ns1"]})
     result = _refresh_namespaces(["ns0", "ns1"])
     assert result == ["ns0", "ns1"]
     out = capsys.readouterr().out
@@ -4276,10 +4326,10 @@ def test_refresh_namespaces_primary_change_ignored(monkeypatch, capsys):
 
 
 def test_refresh_namespaces_empty_keeps_current(monkeypatch, capsys):
-    """An empty / wiped setup_config returns the current list silently."""
+    """An empty / wiped cluster_config returns the current list silently."""
     from pipeline.deploy import _refresh_namespaces
 
-    _patch_setup_config(monkeypatch, {})
+    _patch_cluster_config(monkeypatch, {})
     result = _refresh_namespaces(["ns0", "ns1"])
     assert result == ["ns0", "ns1"]
     captured = capsys.readouterr()
@@ -4287,22 +4337,12 @@ def test_refresh_namespaces_empty_keeps_current(monkeypatch, capsys):
 
 
 def test_refresh_namespaces_parse_error_keeps_current(monkeypatch, capsys):
-    """Best-effort: any exception from _load_setup_config keeps the prior list and warns."""
+    """Best-effort: any exception from _load_cluster_config keeps the prior list and warns."""
     from pipeline.deploy import _refresh_namespaces
 
-    _patch_setup_config(monkeypatch, ValueError("bad json"))
+    _patch_cluster_config(monkeypatch, ValueError("bad json"))
     result = _refresh_namespaces(["ns0", "ns1"])
     assert result == ["ns0", "ns1"]
     out = capsys.readouterr().out
-    assert "setup_config.json re-read failed" in out
+    assert "cluster_config.json re-read failed" in out
     assert "bad json" in out
-
-
-def test_refresh_namespaces_singular_namespace_field(monkeypatch, capsys):
-    """Falls back to the legacy singular `namespace` field when `namespaces` is absent."""
-    from pipeline.deploy import _refresh_namespaces
-
-    _patch_setup_config(monkeypatch, {"namespace": "ns0"})
-    result = _refresh_namespaces(["ns0"])
-    assert result == ["ns0"]
-    assert capsys.readouterr().out == ""

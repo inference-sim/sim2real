@@ -23,9 +23,20 @@ def workspace(tmp_path):
     return workspace_dir, run_dir
 
 
+CLUSTER_ID = "test-cluster"
+
+
+def _write_cluster_config(workspace_dir, cluster_id=CLUSTER_ID, payload=None):
+    cluster_dir = workspace_dir / "clusters" / cluster_id
+    cluster_dir.mkdir(parents=True, exist_ok=True)
+    body = payload if payload is not None else {"namespaces": ["ns"]}
+    (cluster_dir / "cluster_config.json").write_text(json.dumps(body))
+
+
 def _write_defaults(workspace_dir, run_dir):
     setup = {"namespace": "ns", "pipeline_name": "p"}
     (workspace_dir / "setup_config.json").write_text(json.dumps(setup))
+    _write_cluster_config(workspace_dir)
     meta = {"run_name": "test-run"}
     (run_dir / "run_metadata.json").write_text(json.dumps(meta))
     (run_dir / "cluster" / "pipelinerun-smoke-baseline.yaml").write_text("kind: PipelineRun")
@@ -90,11 +101,38 @@ def test_missing_run_metadata(workspace):
         )
 
 
+def test_missing_cluster_config_raises(workspace):
+    """No clusters/ directory raises FileNotFoundError with provision hint."""
+    workspace_dir, run_dir = workspace
+    (workspace_dir / "setup_config.json").write_text("{}")
+    (run_dir / "run_metadata.json").write_text("{}")
+    with pytest.raises(FileNotFoundError, match="No cluster registered"):
+        build_run_inputs_configmap(
+            run_dir=run_dir, workspace_dir=workspace_dir,
+            namespace="ns", run_name="test-run",
+        )
+
+
+def test_multiple_clusters_raises(workspace):
+    """More than one cluster directory raises RuntimeError (Step 0 single-cluster)."""
+    workspace_dir, run_dir = workspace
+    (workspace_dir / "setup_config.json").write_text("{}")
+    (run_dir / "run_metadata.json").write_text("{}")
+    _write_cluster_config(workspace_dir, cluster_id="cluster-a")
+    _write_cluster_config(workspace_dir, cluster_id="cluster-b")
+    with pytest.raises(RuntimeError, match="Multiple clusters"):
+        build_run_inputs_configmap(
+            run_dir=run_dir, workspace_dir=workspace_dir,
+            namespace="ns", run_name="test-run",
+        )
+
+
 def test_empty_cluster_dir_raises(workspace):
     """Empty cluster/ directory raises FileNotFoundError."""
     workspace_dir, run_dir = workspace
     (workspace_dir / "setup_config.json").write_text("{}")
     (run_dir / "run_metadata.json").write_text("{}")
+    _write_cluster_config(workspace_dir)
     with pytest.raises(FileNotFoundError, match="No cluster YAML"):
         build_run_inputs_configmap(
             run_dir=run_dir, workspace_dir=workspace_dir,
@@ -110,11 +148,25 @@ def test_missing_cluster_dir_raises(tmp_path):
     run_dir.mkdir(parents=True)
     (workspace_dir / "setup_config.json").write_text("{}")
     (run_dir / "run_metadata.json").write_text("{}")
+    _write_cluster_config(workspace_dir)
     with pytest.raises(FileNotFoundError, match="No cluster YAML"):
         build_run_inputs_configmap(
             run_dir=run_dir, workspace_dir=workspace_dir,
             namespace="ns", run_name="test-run",
         )
+
+
+def test_cluster_config_packed(workspace):
+    """cluster_config.json content is keyed under the cluster id."""
+    workspace_dir, run_dir = workspace
+    _write_defaults(workspace_dir, run_dir)
+    cm = build_run_inputs_configmap(
+        run_dir=run_dir, workspace_dir=workspace_dir,
+        namespace="ns", run_name="test-run",
+    )
+    key = f"cluster_config--{CLUSTER_ID}"
+    assert key in cm["data"]
+    assert json.loads(cm["data"][key]) == {"namespaces": ["ns"]}
 
 
 # --- _configmap_items tests ---
@@ -143,6 +195,16 @@ def test_configmap_items_cluster_yaml_nested():
     assert "runs/exp-1/cluster/pipelinerun-a.yaml" in paths
 
 
+def test_configmap_items_cluster_config_under_clusters():
+    """cluster_config--<id> maps to clusters/<id>/cluster_config.json."""
+    data = {"cluster_config--ocp-east": "{}"}
+    items = _configmap_items(data, "run1")
+    assert {
+        "key": "cluster_config--ocp-east",
+        "path": "clusters/ocp-east/cluster_config.json",
+    } in items
+
+
 def test_configmap_items_raises_on_unrecognized_key():
     """Unrecognized keys raise ValueError (producer/consumer mismatch)."""
     data = {"setup_config.json": "{}", "unknown_file.txt": "data"}
@@ -157,6 +219,7 @@ NAMESPACE = "sim2real"
 IMAGE = "ghcr.io/inference-sim/sim2real-orchestrator:latest"
 SAMPLE_DATA = {
     "setup_config.json": "{}",
+    "cluster_config--test-cluster": "{}",
     "run_metadata.json": "{}",
     "cluster--baseline.yaml": "x",
 }
@@ -221,6 +284,7 @@ def test_job_configmap_volume_is_read_only():
     items = cfg_vol["configMap"]["items"]
     paths = {i["path"] for i in items}
     assert "setup_config.json" in paths
+    assert "clusters/test-cluster/cluster_config.json" in paths
     assert f"runs/{RUN_NAME}/run_metadata.json" in paths
     assert f"runs/{RUN_NAME}/cluster/baseline.yaml" in paths
 

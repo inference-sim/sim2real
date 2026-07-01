@@ -116,34 +116,12 @@ def test_main_dispatches_stop(tmp_path, monkeypatch):
     with patch.object(mod, "_cmd_stop", mock_stop):
         with patch.object(mod, "_load_setup_config", return_value={
             "current_run": "test-run",
-            "namespace": "sim2real-0",
+        }), patch.object(mod, "_load_cluster_config", return_value={
             "namespaces": ["sim2real-0", "sim2real-1"],
         }):
             mod.main()
 
     assert stop_calls == ["sim2real-0"]
-
-
-def test_main_dispatches_stop_singular_namespace(tmp_path, monkeypatch):
-    """main() falls back to singular 'namespace' key when 'namespaces' is absent."""
-    monkeypatch.setattr("sys.argv", [
-        "deploy.py", "--experiment-root", str(tmp_path), "stop",
-    ])
-    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
-
-    stop_calls = []
-
-    def mock_stop(namespace):
-        stop_calls.append(namespace)
-
-    with patch.object(mod, "_cmd_stop", mock_stop):
-        with patch.object(mod, "_load_setup_config", return_value={
-            "current_run": "test-run",
-            "namespace": "sim2real-legacy",
-        }):
-            mod.main()
-
-    assert stop_calls == ["sim2real-legacy"]
 
 
 def test_main_stop_no_namespace_exits(tmp_path, monkeypatch):
@@ -155,7 +133,7 @@ def test_main_stop_no_namespace_exits(tmp_path, monkeypatch):
 
     with patch.object(mod, "_load_setup_config", return_value={
         "current_run": "test-run",
-    }):
+    }), patch.object(mod, "_load_cluster_config", return_value={}):
         with pytest.raises(SystemExit) as exc_info:
             mod.main()
         assert exc_info.value.code == 1
@@ -174,9 +152,10 @@ def test_main_stop_does_not_require_run_dir(tmp_path, monkeypatch):
         stop_calls.append(namespace)
 
     with patch.object(mod, "_cmd_stop", mock_stop):
-        with patch.object(mod, "_load_setup_config", return_value={
-            "namespace": "sim2real-0",
-        }):
+        with patch.object(mod, "_load_setup_config", return_value={}), \
+             patch.object(mod, "_load_cluster_config", return_value={
+                 "namespaces": ["sim2real-0"],
+             }):
             mod.main()
 
     assert stop_calls == ["sim2real-0"]
