@@ -151,6 +151,38 @@ def _load_cluster_config() -> dict:
     return cluster_ops.read_cluster_config(cluster_ids[0])
 
 
+def _load_run_cluster_config(run_dir: Path) -> dict:
+    """Resolve a run's cluster_config via ``run_metadata.json:cluster_id``.
+
+    Per-run dispatch (issue #446): the run's cluster is recorded in
+    ``runs/<R>/run_metadata.json`` by ``sim2real assemble``, and this helper
+    reads that field then delegates to ``cluster_ops.read_cluster_config``.
+    All error paths emit the exact acceptance-criterion strings from #446
+    and exit — no auto-fix (that is step-5's job).
+    """
+    run_name = run_dir.name
+    if not run_dir.exists() or not (run_dir / "cluster").exists():
+        err(f"run 'sim2real assemble --run {run_name}' first")
+        sys.exit(1)
+
+    meta_path = run_dir / "run_metadata.json"
+    if not meta_path.exists():
+        err("run metadata corrupted; re-assemble")
+        sys.exit(1)
+    try:
+        meta = json.loads(meta_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        err("run metadata corrupted; re-assemble")
+        sys.exit(1)
+
+    cluster_id = meta.get("cluster_id") if isinstance(meta, dict) else None
+    if not cluster_id:
+        err("run metadata corrupted; re-assemble")
+        sys.exit(1)
+
+    return cluster_ops.read_cluster_config(cluster_id)
+
+
 # ── Progress store loading ───────────────────────────────────────────────────
 
 class ProgressUnavailable(RuntimeError):
