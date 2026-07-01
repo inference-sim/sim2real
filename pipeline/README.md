@@ -109,6 +109,52 @@ Cluster-scoped fields (`namespaces`, `is_openshift`, `storage_class`, `secret_na
 
 ---
 
+## sim2real.py
+
+Top-level CLI introduced in step-1 of the v2 refactor. Subcommands land incrementally across the step-1 epic; this section describes only what ships in step-1 PR 1.
+
+### Register a translation (BYO)
+
+`sim2real.py translation register` imports a pre-built EPP image and its treatment overlay YAML as a registered translation. Downstream commands (`assemble`, `deploy.py run`) treat a BYO-registered translation identically to a skill-produced one.
+
+```bash
+python pipeline/sim2real.py translation register \
+    --algorithm softreflective \
+    --image ghcr.io/kalantar-msb/sr-router:some-tag \
+    --config path/to/treatment-overlay.yaml \
+    [--baseline-config path/to/baseline-overlay.yaml] \
+    [--registered-hash <expected-sha256-hex>] \
+    [--experiment-root PATH]
+```
+
+| Flag | Required | Notes |
+|------|----------|-------|
+| `--algorithm NAME` | yes | `[a-z0-9-]+`. Single algorithm per call in step-1. |
+| `--image REF` | yes | Registry ref. If it contains `@sha256:HEX`, that digest is recorded; otherwise `image_digest` is `null` with a warning. |
+| `--config PATH` | yes | Treatment overlay YAML. Validated as YAML before any writes. |
+| `--baseline-config PATH` | no | Baseline overlay YAML, if the translation needs one. |
+| `--registered-hash HASH` | no | Assert the computed `translation_hash` equals this value; error if not. |
+| `--experiment-root PATH` | no | Defaults to cwd. |
+
+**Outputs** — under `workspace/translations/<translation_hash>/`:
+
+- `translation_output.json` — algorithm index + provenance (v1 schema).
+- `registered.json` — image ref + digest (BYO-only audit trail; v1 schema).
+- `generated/<algorithm>/<algorithm>_config.yaml` — the treatment overlay content.
+- `generated/baseline_config.yaml` — present only when `--baseline-config` is given.
+
+**`translation_hash` derivation (BYO):** SHA-256 hex over canonical JSON of `{algorithm_name, config_sha256, image_digest_or_ref}`. Deterministic — same inputs produce the same hash. When the image ref lacks a digest, the raw ref string is substituted for `image_digest_or_ref`, so the hash is stable within the offline session but changes if the same image is later re-registered with a digest ref.
+
+**Idempotency:** re-registering the same triple (algorithm, image, config content) is a no-op — the existing translation directory is detected, a warning is printed, and exit is 0.
+
+**Failure modes:**
+
+- `--config` file missing or malformed YAML → exit 2, no writes.
+- Existing translation directory records a different algorithm name (hash collision) → exit 2, no writes.
+- `--registered-hash` given and does not match computed → exit 2, no writes.
+
+---
+
 ## prepare.py
 
 6-phase state machine. Re-running skips completed phases.
