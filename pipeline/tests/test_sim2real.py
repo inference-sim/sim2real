@@ -493,6 +493,76 @@ class TestMainEndToEnd:
         assert "disk full" in captured.err
 
 
+class TestUseCommand:
+    def _setup_run_dir(self, tmp_path, run_name):
+        run_dir = tmp_path / "workspace" / "runs" / run_name
+        run_dir.mkdir(parents=True)
+        (run_dir / "run_metadata.json").write_text(
+            json.dumps({
+                "version": 1,
+                "run_name": run_name,
+                "translation_hash": "abc123",
+                "cluster_id": "ocp-east",
+                "params_hash": "def456",
+                "image_tag": "ghcr.io/foo:v1",
+                "assembled_at": "2026-07-01T14:00:00Z",
+            })
+        )
+        return run_dir
+
+    def test_use_updates_current_run(self, tmp_path):
+        self._setup_run_dir(tmp_path, "trial-1")
+        rc = sim2real.main([
+            "--experiment-root", str(tmp_path),
+            "use", "--run", "trial-1",
+        ])
+        assert rc == 0
+        cfg = json.loads((tmp_path / "workspace" / "setup_config.json").read_text())
+        assert cfg["current_run"] == "trial-1"
+
+    def test_use_preserves_other_setup_config_keys(self, tmp_path):
+        self._setup_run_dir(tmp_path, "trial-1")
+        cfg_path = tmp_path / "workspace" / "setup_config.json"
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(json.dumps({
+            "registry": "ghcr.io/me",
+            "repo_name": "sim2real",
+            "current_run": "trial-0",
+            "orchestrator_image": "ghcr.io/me/orch:v1",
+        }))
+        rc = sim2real.main([
+            "--experiment-root", str(tmp_path),
+            "use", "--run", "trial-1",
+        ])
+        assert rc == 0
+        cfg = json.loads(cfg_path.read_text())
+        assert cfg["current_run"] == "trial-1"
+        assert cfg["registry"] == "ghcr.io/me"
+        assert cfg["repo_name"] == "sim2real"
+        assert cfg["orchestrator_image"] == "ghcr.io/me/orch:v1"
+
+    def test_use_nonexistent_run_errors_with_hint(self, tmp_path, capsys):
+        rc = sim2real.main([
+            "--experiment-root", str(tmp_path),
+            "use", "--run", "ghost",
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "run doesn't exist; try 'sim2real list runs'" in err
+
+    def test_use_run_without_metadata_errors(self, tmp_path, capsys):
+        run_dir = tmp_path / "workspace" / "runs" / "half-baked"
+        run_dir.mkdir(parents=True)
+        # No run_metadata.json inside.
+        rc = sim2real.main([
+            "--experiment-root", str(tmp_path),
+            "use", "--run", "half-baked",
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "run doesn't exist; try 'sim2real list runs'" in err
+
+
 class TestAssembleCommand:
     def _make_minimal_registration(self, tmp_path):
         cfg = tmp_path / "treatment.yaml"

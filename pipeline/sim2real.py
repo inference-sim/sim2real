@@ -273,6 +273,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="overwrite an existing runs/<run>/ directory",
     )
 
+    use = sub.add_parser("use", help="Set the active run in setup_config.json")
+    use.add_argument(
+        "--run",
+        required=True,
+        metavar="RUN_NAME",
+        help="run name — must correspond to workspace/runs/<RUN_NAME>/",
+    )
+
+    lst = sub.add_parser("list", help="List workspace-scoped resources")
+    lsub = lst.add_subparsers(dest="subcommand", required=True)
+    lsub.add_parser("runs", help="List runs, newest first")
+
     return parser
 
 
@@ -382,6 +394,32 @@ def _cmd_assemble(args) -> int:
     return 0
 
 
+def _cmd_use(args) -> int:
+    run_dir = layout.runs_dir() / args.run
+    if not run_dir.is_dir() or not (run_dir / "run_metadata.json").exists():
+        print(
+            "error: run doesn't exist; try 'sim2real list runs'",
+            file=sys.stderr,
+        )
+        return 2
+
+    cfg_path = layout.setup_config_path()
+    existing = {}
+    if cfg_path.exists():
+        try:
+            existing = json.loads(cfg_path.read_text())
+        except json.JSONDecodeError:
+            # Corrupted setup_config.json — treat as empty and rewrite. The
+            # `use` command's contract is "flip current_run"; preserving
+            # unreadable garbage isn't a goal.
+            existing = {}
+    existing["current_run"] = args.run
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(json.dumps(existing, indent=2) + "\n")
+    print(f"current_run → {args.run}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     layout.set_experiment_root(args.experiment_root)
@@ -389,6 +427,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_translation_register(args)
     if args.command == "assemble":
         return _cmd_assemble(args)
+    if args.command == "use":
+        return _cmd_use(args)
     # argparse's required=True on subparsers means this is unreachable in
     # practice; kept for defensive parity with cluster.py.
     return 1
