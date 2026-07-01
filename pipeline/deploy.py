@@ -215,8 +215,8 @@ def _load_progress(store, *, allow_unreachable: bool = False) -> dict:
         return store.load()
     except ValueError as exc:
         err(f"Corrupt progress data: {exc}")
-        err("Re-run prepare.py, or fix the ConfigMap manually with "
-            "`kubectl edit configmap <name> -n <namespace>`.")
+        err("Re-assemble the run (sim2real assemble --run <R>), or fix the "
+            "ConfigMap manually with `kubectl edit configmap <name> -n <namespace>`.")
         sys.exit(1)
     except RuntimeError as exc:
         if allow_unreachable:
@@ -2492,7 +2492,7 @@ def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
 
     discovered = _load_pairs(cluster_dir)
     if not discovered:
-        err("No pairs found in cluster/. Run prepare.py first."); sys.exit(1)
+        err(f"run 'sim2real assemble --run {run_dir.name}' first"); sys.exit(1)
 
     # Initialize new entries (first run or new pairs added)
     for key, meta in discovered.items():
@@ -2536,10 +2536,10 @@ def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
     store.save(progress)
 
     # Orphans: pair_keys in progress (in scope, still active) but absent from
-    # cluster/. Happens when prepare.py is re-run with a different workload set
-    # between stop and the next run. Without this guard, _pending_pairs would
-    # surface them and the dispatch loop's pair_costs[pair_key] would KeyError
-    # at startup (#408).
+    # cluster/. Happens when sim2real assemble is re-run with a different
+    # workload set between stop and the next run. Without this guard,
+    # _pending_pairs would surface them and the dispatch loop's
+    # pair_costs[pair_key] would KeyError at startup (#408).
     orphans = sorted(
         k for k, v in progress.items()
         if _is_pair_key(k) and k in _scope and k not in discovered
@@ -2547,7 +2547,7 @@ def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
     )
     if orphans:
         warn(f"{len(orphans)} progress entries have no PipelineRun in cluster/ "
-             f"(likely from a prior prepare.py): {orphans}. Skipping. "
+             f"(likely from a prior sim2real assemble): {orphans}. Skipping. "
              f"Remove the entries manually or via `deploy.py reset --only <key>` "
              f"if they should not return.")
 
@@ -3227,8 +3227,8 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict,
             progress = None
         if progress is not None:
             # Mirror _cmd_run's init loop locally so the pre-flight validator
-            # sees pair_keys that prepare.py added since the last run. The
-            # in-cluster orchestrator independently does its own init from
+            # sees pair_keys that sim2real assemble added since the last run.
+            # The in-cluster orchestrator independently does its own init from
             # the ConfigMap and persists; only `workload` and `package` need
             # to be populated here — those are the fields _apply_run_filters
             # reads when building valid_workloads / valid_packages (#414).
@@ -3262,7 +3262,7 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict,
             defaults_content=defaults_content,
         )
     except OSError as exc:
-        err(f"{exc} — run setup.py and prepare.py first")
+        err(f"{exc} — run setup.py and 'sim2real assemble --run {run_dir.name}' first")
         sys.exit(1)
     # subprocess.run used directly because the module's run() helper doesn't
     # support stdin input, which kubectl apply -f - requires.

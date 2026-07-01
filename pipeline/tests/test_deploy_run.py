@@ -4512,3 +4512,40 @@ def test_main_missing_cluster_id_emits_corrupt_hint(tmp_path, capsys, monkeypatc
     with pytest.raises(SystemExit):
         _run_deploy_main(["--run", "trial-1", "run"], monkeypatch, tmp_path)
     assert "run metadata corrupted; re-assemble" in capsys.readouterr().err
+
+
+# ── _cmd_run: no-pairs error message (issue #446) ──────────────────────────
+
+def test_cmd_run_empty_cluster_dir_emits_assemble_hint(tmp_path, capsys, monkeypatch):
+    """_cmd_run reached with an empty runs/<R>/cluster/ → assemble-hint string."""
+    from pipeline import deploy
+
+    _make_run_dir(tmp_path)  # workspace/runs/trial-1/{cluster/,run_metadata.json}
+    run_dir = tmp_path / "workspace" / "runs" / "trial-1"
+
+    # _cmd_run's first substantive action is _cmd_build; stub it so we
+    # exercise only the pair-discovery guard. Also stub out the ConfigMap
+    # load so the guard is reached without a real kubectl call.
+    monkeypatch.setattr(deploy, "_cmd_build", lambda *a, **kw: None)
+    _mock_cm(monkeypatch, {})
+
+    class _Args:
+        skip_build = True
+        gpu_resource_type = None
+        default_gpu_cost = 1
+        defaults_path = None
+        max_retries = 2
+        poll_interval = 30
+        pending_threshold = 600
+        max_pending_stalls = 10
+        force = False
+        preserve_pipelineruns = False
+        skip_teardown = False
+        only = None
+        workload = None
+        package = None
+        status = None
+
+    with pytest.raises(SystemExit):
+        deploy._cmd_run(_Args(), run_dir, {"namespaces": ["ns-a"]})
+    assert "run 'sim2real assemble --run trial-1' first" in capsys.readouterr().err
