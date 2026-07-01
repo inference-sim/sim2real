@@ -3436,11 +3436,11 @@ def main():
     EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if args.experiment_root else Path.cwd()
 
     setup_config = _load_setup_config()
-    cluster_config = _load_cluster_config()
 
     cmd = args.command
 
     if cmd == "stop":
+        cluster_config = _load_cluster_config()
         namespaces = [ns for ns in (cluster_config.get("namespaces") or []) if ns]
         if not namespaces:
             err("No namespaces configured. Run cluster.py provision with --namespaces.")
@@ -3454,9 +3454,7 @@ def main():
         sys.exit(1)
     run_dir = EXPERIMENT_ROOT / "workspace" / "runs" / run_name
 
-    if not run_dir.exists():
-        err(f"Run directory not found: {run_dir}")
-        sys.exit(1)
+    cluster_config = _load_run_cluster_config(run_dir)
 
     if cmd == "build":
         namespaces = cluster_config.get("namespaces") or []

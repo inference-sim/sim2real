@@ -4455,3 +4455,60 @@ def test_load_run_cluster_config_reads_via_cluster_ops(tmp_path, monkeypatch):
     cfg = deploy._load_run_cluster_config(run_dir)
     assert calls == ["ocp-east"]
     assert cfg == {"namespaces": ["ns-a", "ns-b"]}
+
+
+# ── main() dispatcher: per-run cluster resolution (#446) ───────────────────
+
+def _run_deploy_main(argv, monkeypatch, tmp_path):
+    """Call deploy.main() with a mocked argv and --experiment-root=tmp_path.
+
+    main() re-resolves EXPERIMENT_ROOT from --experiment-root (or cwd), so
+    monkeypatching the module-level global is not enough — we pass the flag
+    through argv so the test's tmp_path is the actual experiment root.
+    """
+    import sys as _sys
+    from pipeline import deploy
+    monkeypatch.setattr(_sys, "argv",
+                        ["deploy.py", "--experiment-root", str(tmp_path), *argv])
+    monkeypatch.setattr(deploy, "_tty", False, raising=False)
+    return deploy.main()
+
+
+def test_main_missing_run_dir_emits_assemble_hint(tmp_path, capsys, monkeypatch):
+    """`deploy.py run --run trial-1` with no run dir → assemble hint."""
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "setup_config.json").write_text("{}")
+    with pytest.raises(SystemExit):
+        _run_deploy_main(["--run", "trial-1", "run"], monkeypatch, tmp_path)
+    assert "run 'sim2real assemble --run trial-1' first" in capsys.readouterr().err
+
+
+def test_main_missing_cluster_dir_emits_assemble_hint(tmp_path, capsys, monkeypatch):
+    """`deploy.py run --run trial-1` with runs/trial-1/ but no cluster/ → assemble hint."""
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "setup_config.json").write_text("{}")
+    _make_run_dir(tmp_path, with_cluster=False)
+    with pytest.raises(SystemExit):
+        _run_deploy_main(["--run", "trial-1", "run"], monkeypatch, tmp_path)
+    assert "run 'sim2real assemble --run trial-1' first" in capsys.readouterr().err
+
+
+def test_main_missing_run_metadata_emits_corrupt_hint(tmp_path, capsys, monkeypatch):
+    """`deploy.py run --run trial-1` with no run_metadata.json → 're-assemble' hint."""
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "setup_config.json").write_text("{}")
+    _make_run_dir(tmp_path, with_metadata=False)
+    with pytest.raises(SystemExit):
+        _run_deploy_main(["--run", "trial-1", "run"], monkeypatch, tmp_path)
+    assert "run metadata corrupted; re-assemble" in capsys.readouterr().err
+
+
+def test_main_missing_cluster_id_emits_corrupt_hint(tmp_path, capsys, monkeypatch):
+    """`deploy.py run --run trial-1` with metadata missing cluster_id → 're-assemble' hint."""
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "setup_config.json").write_text("{}")
+    _make_run_dir(tmp_path,
+                  metadata_content={"version": 1, "run_name": "trial-1"})
+    with pytest.raises(SystemExit):
+        _run_deploy_main(["--run", "trial-1", "run"], monkeypatch, tmp_path)
+    assert "run metadata corrupted; re-assemble" in capsys.readouterr().err
