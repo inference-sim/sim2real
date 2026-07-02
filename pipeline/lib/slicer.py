@@ -20,7 +20,11 @@ Two hashes are exported:
 
 - ``translation_hash`` — SHA-256 over canonical (sorted-key,
   no-whitespace) JSON of the translation slice. Stable across YAML
-  formatter / writer differences. Used by BYO ``translation register``.
+  formatter / writer differences. No production consumer today; kept
+  exported for tests and future slice-keyed callers. The BYO
+  ``translation register`` path uses a separate
+  ``_compute_translation_hash`` in ``pipeline/sim2real.py`` that folds
+  image digest + config bytes + algorithm name.
 - ``translation_hash_with_sources`` — folds each
   ``algorithms[i].source`` file's bytes (SHA-256) into the digest,
   so edits to algorithm source under a stable ``transfer.yaml`` still
