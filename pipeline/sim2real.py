@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """sim2real top-level CLI.
 
-Subcommands land incrementally across the step-1 epic. This file is
-created by PR 1 with only ``translation register``. Subsequent PRs add
-``assemble``, ``use``, ``list runs``.
+Subcommands: ``translation register`` (BYO), ``translate`` (skill-driven
+checkpoint + ``--resume``), ``build`` (per-algorithm image build against
+a checkpointed translation), ``assemble`` (materialize a run from a
+translation), ``use`` (flip active run), ``list runs`` /
+``list translations``.
 """
 
 from __future__ import annotations
@@ -959,7 +961,15 @@ def _cmd_build(args) -> int:
             if digest is not None:
                 algo["image_ref"] = image_ref
                 algo["image_digest"] = digest
-                build.atomic_write_json(tout_path, tout)
+                try:
+                    build.atomic_write_json(tout_path, tout)
+                except OSError as exc:
+                    print(
+                        f"error: failed to write translation_output.json "
+                        f"for {algo_name}: {exc}",
+                        file=sys.stderr,
+                    )
+                    return 2
                 print(f"probe hit: {image_ref} ({digest})")
                 continue
 
@@ -985,11 +995,22 @@ def _cmd_build(args) -> int:
             any_failure = True
             break
 
-        # Post-build probe.
+        # Post-build probe. The image has been pushed successfully at this
+        # point; a filesystem fault here means we can't record the digest,
+        # not that the build failed. The image_ref is still worth surfacing.
         digest = build.probe_image_digest(image_ref)
         algo["image_ref"] = image_ref
         algo["image_digest"] = digest
-        build.atomic_write_json(tout_path, tout)
+        try:
+            build.atomic_write_json(tout_path, tout)
+        except OSError as exc:
+            print(
+                f"error: built {image_ref} but failed to record digest in "
+                f"translation_output.json: {exc} — re-run 'sim2real build' "
+                f"to record it",
+                file=sys.stderr,
+            )
+            return 2
         if digest is None:
             print(f"built {image_ref}; digest not recorded (probe failed)")
         else:

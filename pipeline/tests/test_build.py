@@ -557,6 +557,60 @@ class TestSim2realBuildLoop:
         assert rc == 2
         assert "build failed" in capsys.readouterr().err.lower()
 
+    def test_probe_hit_write_failure_returns_2_cleanly(self, tmp_path, capsys):
+        """OSError on the probe-hit writeback → 'error: failed to write
+        translation_output.json for <algo>: ...' and rc=2, NOT a traceback."""
+        _make_workspace(tmp_path)
+        self._make_cluster_config(tmp_path)
+        _make_translation(tmp_path, alias="softref")
+
+        with patch("pipeline.lib.build.shutil.which",
+                   return_value="/usr/bin/skopeo"), \
+             patch("pipeline.lib.build.probe_image_digest",
+                   return_value="sha256:" + "d" * 64), \
+             patch("pipeline.lib.build.dispatch_buildkit_build") as mock_build, \
+             patch("pipeline.lib.build.atomic_write_json",
+                   side_effect=OSError("disk full")):
+            rc = sim2real.main([
+                "--experiment-root", str(tmp_path),
+                "build", "--translation", "softref",
+            ])
+        assert rc == 2
+        mock_build.assert_not_called()
+        err_out = capsys.readouterr().err
+        assert "failed to write translation_output.json" in err_out
+        assert "softref" in err_out
+        assert "disk full" in err_out
+
+    def test_post_build_write_failure_returns_2_cleanly(self, tmp_path, capsys):
+        """OSError on the post-build writeback → the image was pushed but the
+        digest couldn't be recorded. Distinct error message points that out."""
+        _make_workspace(tmp_path)
+        self._make_cluster_config(tmp_path)
+        _make_translation(tmp_path, alias="softref")
+
+        # Miss on pre-build probe → build runs → post-build probe returns a
+        # digest → atomic_write_json raises.
+        probe_returns = [None, "sha256:" + "e" * 64]
+        with patch("pipeline.lib.build.shutil.which",
+                   return_value="/usr/bin/skopeo"), \
+             patch("pipeline.lib.build.probe_image_digest",
+                   side_effect=probe_returns), \
+             patch("pipeline.lib.build.dispatch_buildkit_build",
+                   return_value=0), \
+             patch("pipeline.lib.build.atomic_write_json",
+                   side_effect=OSError("permission denied")):
+            rc = sim2real.main([
+                "--experiment-root", str(tmp_path),
+                "build", "--translation", "softref",
+            ])
+        assert rc == 2
+        err_out = capsys.readouterr().err
+        assert "built" in err_out  # message acknowledges the push succeeded
+        assert "failed to record digest" in err_out
+        assert "permission denied" in err_out
+        assert "re-run 'sim2real build'" in err_out
+
     def test_per_algo_writes_are_atomic_and_incremental(self, tmp_path):
         """Two-algo translation: first algo succeeds, second fails.
 
