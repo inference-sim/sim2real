@@ -30,7 +30,7 @@ Run Go commands via: `(cd {TARGET_REPO} && <cmd>)`
 | `{ALGO_CONFIG}` | Algorithm policy config (weights, thresholds) — empty for the current schema (parameters, if any, live inline in `{ALGO_SOURCE}`) |
 | `{REPO_ROOT}/pipeline/README.md` | "Scenario Overlay Format" section — defines output structure |
 
-Also inspect the operator-supplied context files (space-separated absolute paths):
+Also inspect the operator-supplied context files (newline-separated absolute paths, one per line):
 
 {CONTEXT_FILE_PATHS}
 
@@ -41,6 +41,10 @@ guidance for the translation.
 Context from the operator (held in mind, not written to disk):
 
 {CONTEXT_TEXT}
+
+Per-algorithm notes from the operator ({ALGO_NAME}, may be empty):
+
+{ALGO_NOTES}
 
 Expert agent name (for queries): {EXPERT_AGENT_NAME}
 
@@ -123,7 +127,7 @@ SendMessage({MAIN_SESSION_NAME}, "baseline-ready: {BASELINE_OVERLAY_PATH}")
 ```
 
 Wait for the reply. The main session will either forward user feedback ("feedback: ...") or
-send "continue". If feedback: revise `baseline_config.yaml` and re-send `baseline-ready:`.
+send "continue". If feedback: revise `{BASELINE_OVERLAY_PATH}` and re-send `baseline-ready:`.
 Repeat until you receive "continue".
 
 TaskUpdate Phase 2 → completed

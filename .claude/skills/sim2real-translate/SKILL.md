@@ -307,7 +307,7 @@ variable:
 - `{BUILD_COMMANDS}` → `$BUILD_COMMANDS` (JSON list of shell commands)
 - `{REVIEW_ROUNDS}` → `$REVIEW_ROUNDS`
 - `{CONTEXT_TEXT}` → `$CONTEXT_TEXT`
-- `{CONTEXT_FILE_PATHS}` → `$CONTEXT_FILE_PATHS` (space-separated absolute paths)
+- `{CONTEXT_FILE_PATHS}` → `$CONTEXT_FILE_PATHS` (newline-separated absolute paths — one path per line)
 - `{EXPERT_AGENT_NAME}` → `"expert"`
 - `{MAIN_SESSION_NAME}` → `"main-session"`
 
@@ -335,9 +335,10 @@ background while Writer begins Phase 2. By the time Writer reaches Phase 4
 (translation), Expert will have completed its repo exploration and be ready
 to answer queries.
 
-### Step 3: Handle writer messages
+### Step 3: Handle team messages
 
-Wait for the Writer to send a message to the main session. Handle each case:
+Wait for messages from the team (Expert and Writer both send to
+`{MAIN_SESSION_NAME}`). Handle each case:
 
 **On `expert-ready: ...`:**
 

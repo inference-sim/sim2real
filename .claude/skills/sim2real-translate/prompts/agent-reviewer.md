@@ -25,8 +25,8 @@ Config kind: {CONFIG_KIND}
 
 Read and hold in context:
 
-1. **Context files** `{CONTEXT_FILE_PATHS}` — space-separated absolute paths from
-   `transfer.yaml:context.files`. These provide the architecture overview, signal mapping,
+1. **Context files** `{CONTEXT_FILE_PATHS}` — newline-separated absolute paths
+   (one path per line) from `transfer.yaml:context.files`. These provide the architecture overview, signal mapping,
    available plugin types and their type strings.
 2. **Algorithm source** `{ALGO_SOURCE}` — the simulation source file being translated
 3. If `{ALGO_CONFIG}` is non-empty: read it — weights and thresholds (ground truth). Under
