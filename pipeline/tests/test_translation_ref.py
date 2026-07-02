@@ -316,3 +316,34 @@ class TestResolveTranslationRef:
         # base does not exist at all.
         with pytest.raises(ResolveError):
             resolve_translation_ref("anything", base)
+
+
+class TestPathSafetyMatrix:
+    @pytest.mark.parametrize("bad", [
+        "../foo",
+        "..",
+        ".",
+        "foo/bar",
+        "",
+        "a" * 129,
+        "-leading-hyphen",
+        "@#$%",           # all non-alphanumeric
+        ".hidden",
+        "foo\x00bar",     # embedded null
+        "foo\nbar",       # embedded newline
+    ])
+    def test_rejects_dangerous_name(self, bad):
+        with pytest.raises(ValidationError):
+            validate_name(bad)
+
+    @pytest.mark.parametrize("good", [
+        "softreflective",
+        "algo-v2",
+        "Algo_v2",
+        "1st",
+        "a.b.c",
+        "algo_v2.final-1",
+        "a" * 128,
+    ])
+    def test_accepts_safe_name(self, good):
+        assert validate_name(good) == good
