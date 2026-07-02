@@ -2581,7 +2581,23 @@ def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
     timeout_hours = 4
     info(f"Orchestrator: {len(_scope)} pairs in scope, {len(namespaces)} slot(s)")
     if not _work_remaining() and not slots_busy:
-        info(f"All {len(_scope)} pairs in scope already done — nothing to dispatch (use --force to reset)")
+        # Every pair in scope is in a terminal state. Count by status so
+        # the operator can distinguish a legitimately finished scope from
+        # one containing failed / timed-out / stalled pairs (issue #460).
+        # Uses the canonical status tokens ("timed-out" with a hyphen) so
+        # this line and `deploy.py status` speak the same language.
+        _terminal_states = ("done", "failed", "timed-out", "stalled")
+        _counts = {s: 0 for s in _terminal_states}
+        for k, v in progress.items():
+            if _is_pair_key(k) and k in _scope and k in discovered:
+                _status = v.get("status", "")
+                if _status in _counts:
+                    _counts[_status] += 1
+        _breakdown = ", ".join(f"{_counts[s]} {s}" for s in _terminal_states)
+        info(f"All {len(_scope)} pairs in scope are in terminal states "
+             f"({_breakdown}). Nothing to dispatch. Use "
+             f"`deploy.py reset --only <key>` to retry a specific pair, or "
+             f"`deploy.py run --force` to reset all pairs in scope.")
         return
 
     from pipeline.lib.health import RemediationTracker as _HealthTracker
