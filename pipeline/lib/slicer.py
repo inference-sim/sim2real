@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 from typing import Any
 
 TRANSLATION_FIELDS: list[str] = [
@@ -99,6 +100,65 @@ def translation_hash(manifest: dict) -> str:
     """
     canonical = json.dumps(
         translation_slice(manifest),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def translation_hash_with_sources(manifest: dict, experiment_root: Path) -> str:
+    """SHA-256 over the translation slice folded with each algorithm's source bytes.
+
+    Reads every ``algorithms[i].source`` file from ``experiment_root``,
+    computes its SHA-256, and folds the per-algorithm digests (sorted by
+    algorithm name) into a canonical envelope alongside
+    ``translation_slice(manifest)``. Callers use this when the translation
+    result depends on algorithm source contents — the skill-driven step-2
+    ``translate`` path.
+
+    Envelope shape (canonical JSON, sorted keys, no whitespace):
+
+        {"slice": <translation_slice>,
+         "sources": [{"name": <str>, "sha256": <hex>}, ...  # sorted by name
+                    ]}
+
+    Algorithm-order normalization: ``sources`` is sorted by ``name`` so
+    ``[a, b]`` and ``[b, a]`` produce the same hash. Algorithms without a
+    ``source`` field are skipped (they contribute nothing to the sources
+    list — matches the projection semantics of ``translation_slice``).
+
+    Raises:
+        AssembleError: if any ``algorithms[i].source`` file does not exist
+        under ``experiment_root``. Message format: ``source file not
+        found: <path>``.
+    """
+    # Deferred import to avoid the ``assemble_run -> slicer`` import cycle.
+    from pipeline.lib.assemble_run import AssembleError
+
+    sources: list[dict[str, str]] = []
+    algos = manifest.get("algorithms") or []
+    for algo in _sorted_by_name(algos):
+        if not isinstance(algo, dict):
+            continue
+        source_rel = algo.get("source")
+        if source_rel is None:
+            continue
+        source_path = experiment_root / source_rel
+        try:
+            data = source_path.read_bytes()
+        except FileNotFoundError as exc:
+            raise AssembleError(f"source file not found: {source_path}") from exc
+        sources.append(
+            {
+                "name": algo.get("name", ""),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+        )
+
+    envelope = {"slice": translation_slice(manifest), "sources": sources}
+    canonical = json.dumps(
+        envelope,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
