@@ -4,6 +4,11 @@ Replaces blind trust of translation_output.json lists with git-based
 discovery. Uses uncommitted working-tree state (git diff HEAD + untracked)
 as the source of truth.
 
+The output directory is a sim2real translation directory
+(workspace/translations/<hash>/). When ``algo_name`` is set the script writes
+into ``translation_dir/generated/<algo_name>/`` and updates
+``<algo_name>_output.json``.
+
 Precondition: the target repo working tree must contain only changes from
 this translation run (no pre-existing uncommitted edits from other sources).
 """
@@ -14,13 +19,14 @@ from pathlib import Path
 
 
 def copy_generated(
-    target_repo: str, run_dir: str, algo_name: str | None = None
+    target_repo: str, translation_dir: str, algo_name: str | None = None
 ) -> tuple[list[str], list[str]]:
     """Discover changed/new files via git, update translation_output.json, copy to generated/.
 
     Args:
         target_repo: Path to the target repo (e.g., llm-d-inference-scheduler directory).
-        run_dir: Path to the run directory containing translation_output.json.
+        translation_dir: Path to the translation directory (workspace/translations/<hash>/)
+            containing translation_output.json.
         algo_name: When set, files are written to generated/{algo_name}/ preserving
             full relative paths; an {algo_name}_output.json is also written there.
             When None, existing flat-copy behavior with basename collision check.
@@ -29,7 +35,7 @@ def copy_generated(
         Tuple of (files_created, files_modified) as written to translation_output.json.
     """
     target = Path(target_repo)
-    rd = Path(run_dir)
+    rd = Path(translation_dir)
 
     if algo_name is not None:
         gen = rd / "generated" / algo_name

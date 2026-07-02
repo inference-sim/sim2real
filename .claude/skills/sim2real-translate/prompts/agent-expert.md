@@ -30,8 +30,8 @@ Read the following to build your foundation:
 
 1. Read `{EXPERIMENT_ROOT}/transfer.yaml` — understand scenario, algorithm, baseline, context
 2. Read `{ALGO_SOURCE}` — the simulation algorithm being translated
-3. If `{ALGO_CONFIG}` is non-empty: read it — algorithm weights and thresholds (ground truth)
-4. Read all files in context.files (listed in transfer.yaml)
+3. If `{ALGO_CONFIG}` is non-empty: read it — algorithm weights and thresholds (ground truth). Under the current schema this is always empty; inspect `{ALGO_SOURCE}` directly for any inline parameters.
+4. Read every path in `{CONTEXT_FILE_PATHS}` (space-separated absolute paths) — these are the operator-declared context files (mirror of `transfer.yaml:context.files`) that the writer and reviewer also load
 
 Then do targeted exploration of the target repo:
 

@@ -54,7 +54,7 @@ python pipeline/sim2real.py --experiment-root ../admission-control use --run <ru
 
 **`pipeline/sim2real.py assemble`** — Materializes `workspace/runs/<run>/` from a registered translation and the experiment repo's `transfer.yaml`. Slices the manifest via `pipeline/lib/slicer.py`, snapshots the assembly slice into `manifest.assembly.yaml`, deep-merges framework defaults + baseline bundle + per-algorithm overlays into resolved scenarios, injects the BYO image ref into treatment scenarios, generates one PipelineRun per (workload, package), and writes `run_metadata.json` (with `params_hash` = SHA-256 of `manifest.assembly.yaml`). Algorithms in `transfer.yaml` but not in the registered translation are warned and skipped.
 
-**`/sim2real-translate`** — DISABLED for step-1. The skill-driven flow is scheduled to be restored in step-2 of the epic (issue [#443](https://github.com/inference-sim/sim2real/issues/443)). See `.claude/skills/sim2real-translate/SKILL.md` for the current stub.
+**`/sim2real-translate`** — Skill-driven translation. Reads `workspace/translations/<hash>/skill_input.json` (written by `sim2real translate`) and spawns a three-agent team (expert + writer + reviewer) per algorithm to produce the Go plugin source + treatment overlay under `workspace/translations/<hash>/generated/<algo>/`. Follow up with `sim2real translate --resume` to validate outputs. See `.claude/skills/sim2real-translate/SKILL.md`.
 
 **`pipeline/deploy.py`** — Builds EPP image and orchestrates PipelineRun execution across namespace slots (`deploy.py run`). Use `deploy.py collect` to pull results from the cluster PVC after runs complete. Operates independently of `transfer.yaml` — driven by workspace files, `setup_config.json`, and `clusters/<id>/cluster_config.json`.
 
