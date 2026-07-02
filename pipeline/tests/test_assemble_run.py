@@ -398,8 +398,18 @@ def _make_experiment(
             "version": 1,
             "translation_hash": thash,
             "source": "byo",
-            "algorithms": [{"name": n} for n in algo_names_registered],
-            "image_ref": image_ref,
+            "alias": algo_names_registered[0] if algo_names_registered else None,
+            "algorithms": [
+                {
+                    "name": n,
+                    "source_path": None,
+                    "source_sha256": None,
+                    "config_path": f"generated/{n}/{n}_config.yaml",
+                    "image_ref": image_ref,
+                    "image_digest": "sha256:aa",
+                }
+                for n in algo_names_registered
+            ],
             "created_at": "2026-07-01T14:00:00Z",
         },
     )
@@ -445,6 +455,7 @@ class TestAssembleRun:
         )
         assemble_run.assemble_run(
             translation_hash=fx["translation_hash"],
+            translation_ref=fx["translation_hash"],
             cluster_id=fx["cluster_id"],
             run_name="trial-1",
             experiment_root=fx["exp_root"],
@@ -498,6 +509,7 @@ class TestAssembleRun:
 
         assemble_run.assemble_run(
             translation_hash=fx["translation_hash"],
+            translation_ref=fx["translation_hash"],
             cluster_id=fx["cluster_id"],
             run_name="trial-1",
             experiment_root=fx["exp_root"],
@@ -545,6 +557,7 @@ class TestAssembleRun:
 
         assemble_run.assemble_run(
             translation_hash=fx["translation_hash"],
+            translation_ref=fx["translation_hash"],
             cluster_id=fx["cluster_id"],
             run_name="trial-1",
             experiment_root=fx["exp_root"],
@@ -572,6 +585,7 @@ class TestAssembleRun:
         )
         assemble_run.assemble_run(
             translation_hash=fx["translation_hash"],
+            translation_ref=fx["translation_hash"],
             cluster_id=fx["cluster_id"],
             run_name="trial-1",
             experiment_root=fx["exp_root"],
@@ -595,6 +609,7 @@ class TestAssembleRun:
         )
         assemble_run.assemble_run(
             translation_hash=fx["translation_hash"],
+            translation_ref=fx["translation_hash"],
             cluster_id=fx["cluster_id"],
             run_name="trial-1",
             experiment_root=fx["exp_root"],
@@ -637,6 +652,7 @@ class TestAssembleRun:
         )
         assemble_run.assemble_run(
             translation_hash=fx["translation_hash"],
+            translation_ref=fx["translation_hash"],
             cluster_id=fx["cluster_id"],
             run_name="trial-1",
             experiment_root=fx["exp_root"],
@@ -663,6 +679,7 @@ class TestAssembleRun:
         with pytest.raises(assemble_run.AssembleError, match="--force"):
             assemble_run.assemble_run(
                 translation_hash=fx["translation_hash"],
+                translation_ref=fx["translation_hash"],
                 cluster_id=fx["cluster_id"],
                 run_name="trial-1",
                 experiment_root=fx["exp_root"],
@@ -683,6 +700,7 @@ class TestAssembleRun:
         (run_dir / "sentinel").write_text("leftover")
         assemble_run.assemble_run(
             translation_hash=fx["translation_hash"],
+            translation_ref=fx["translation_hash"],
             cluster_id=fx["cluster_id"],
             run_name="trial-1",
             experiment_root=fx["exp_root"],
@@ -702,6 +720,7 @@ class TestAssembleRun:
         with pytest.raises(assemble_run.AssembleError, match="translation"):
             assemble_run.assemble_run(
                 translation_hash="0" * 64,
+                translation_ref="0" * 64,
                 cluster_id=fx["cluster_id"],
                 run_name="trial-1",
                 experiment_root=fx["exp_root"],
@@ -719,6 +738,7 @@ class TestAssembleRun:
         with pytest.raises(assemble_run.AssembleError, match="cluster"):
             assemble_run.assemble_run(
                 translation_hash=fx["translation_hash"],
+                translation_ref=fx["translation_hash"],
                 cluster_id="nonexistent-cluster",
                 run_name="trial-1",
                 experiment_root=fx["exp_root"],
@@ -737,6 +757,7 @@ class TestAssembleRun:
         with pytest.raises(assemble_run.AssembleError, match="workload"):
             assemble_run.assemble_run(
                 translation_hash=fx["translation_hash"],
+                translation_ref=fx["translation_hash"],
                 cluster_id=fx["cluster_id"],
                 run_name="trial-1",
                 experiment_root=fx["exp_root"],
@@ -835,3 +856,86 @@ class TestDiscoverFrameworkSubmodules:
         assert set(urls) == {"inference-sim", "llm-d-benchmark"}
         assert "tektonc-data-collection" not in shas
         assert "tektonc-data-collection" not in urls
+
+
+class TestLegacyShapeShim:
+    def test_legacy_top_level_image_ref_still_resolvable(
+        self, tmp_path, monkeypatch
+    ):
+        # Simulate a step-1 BYO translation_output.json on disk.
+        from pipeline.lib import layout, translation_ref
+        layout.set_experiment_root(tmp_path)
+        thash = "a" * 64
+        tdir = layout.translation_dir(thash)
+        tdir.mkdir(parents=True)
+        (tdir / "translation_output.json").write_text(json.dumps({
+            "version": 1,
+            "translation_hash": thash,
+            "source": "byo",
+            "algorithms": [{"name": "ac1"}],
+            "image_ref": "quay.io/legacy:v1",
+            "created_at": "2026-06-01T10:00:00Z",
+        }))
+        # Shim normalizes it: algorithms[0].image_ref is filled in.
+        data = translation_ref.read_translation_output(
+            tdir / "translation_output.json"
+        )
+        assert data["algorithms"][0]["image_ref"] == "quay.io/legacy:v1"
+        assert data["alias"] is None
+
+
+class TestIncompleteTranslation:
+    def test_missing_image_ref_raises_build_first(self, tmp_path):
+        from pipeline.lib import assemble_run, layout
+        layout.set_experiment_root(tmp_path)
+        thash = "a" * 64
+        tdir = layout.translation_dir(thash)
+        tdir.mkdir(parents=True)
+        (tdir / "translation_output.json").write_text(json.dumps({
+            "version": 1,
+            "translation_hash": thash,
+            "source": "skill",
+            "alias": "not-built",
+            "algorithms": [{
+                "name": "ac1", "source_path": "a.py",
+                "source_sha256": "…", "config_path": None,
+                "image_ref": None, "image_digest": None,
+            }],
+            "created_at": "2026-07-02T14:00:00Z",
+        }))
+        manifest_path = tmp_path / "transfer.yaml"
+        manifest_path.write_text(
+            "kind: sim2real-transfer\n"
+            "version: 3\n"
+            "scenario: test\n"
+            "component: {repo: acme/foo, kind: gaie}\n"
+            "algorithms: [{name: ac1, source: algo/ac1.py, defaults: b1}]\n"
+            "baselines: [{name: b1, scenario: baseline.yaml}]\n"
+            "workloads: []\n"
+        )
+        (tmp_path / "baseline.yaml").write_text("scenario: [{a: 1}]\n")
+        # Cluster config seed.
+        cluster_cfg_path = layout.cluster_config_path("cX")
+        cluster_cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cluster_cfg_path.write_text(json.dumps({
+            "id": "cX", "namespaces": ["ns1"], "workspaces": {},
+        }))
+        # Regression-protect the design-verbatim message shape: the user's
+        # typed ref appears BOTH in the failure line and in the suggested
+        # `sim2real build --translation <ref>` command, joined by an em-dash
+        # (U+2014, not "--").
+        with pytest.raises(
+            assemble_run.AssembleError,
+            match=r"translation not-built not built for algorithms: ac1 — "
+                  r"run 'sim2real build --translation not-built' first",
+        ):
+            assemble_run.assemble_run(
+                translation_hash=thash,
+                translation_ref="not-built",
+                cluster_id="cX",
+                run_name="r1",
+                experiment_root=tmp_path,
+                manifest_path=manifest_path,
+                force=False,
+                now_iso="2026-07-02T14:00:00Z",
+            )

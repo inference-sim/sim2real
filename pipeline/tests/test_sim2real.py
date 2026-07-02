@@ -26,13 +26,11 @@ class TestValidateAlgorithmName:
     def test_accepts_hyphens_and_digits(self):
         assert sim2real._validate_algorithm_name("algo-v2-final") == "algo-v2-final"
 
-    def test_rejects_uppercase(self):
-        with pytest.raises(argparse.ArgumentTypeError):
-            sim2real._validate_algorithm_name("SoftReflective")
+    def test_accepts_uppercase(self):
+        assert sim2real._validate_algorithm_name("SoftReflective") == "SoftReflective"
 
-    def test_rejects_underscore(self):
-        with pytest.raises(argparse.ArgumentTypeError):
-            sim2real._validate_algorithm_name("soft_reflective")
+    def test_accepts_underscore(self):
+        assert sim2real._validate_algorithm_name("soft_reflective") == "soft_reflective"
 
     def test_rejects_empty(self):
         with pytest.raises(argparse.ArgumentTypeError):
@@ -41,6 +39,22 @@ class TestValidateAlgorithmName:
     def test_rejects_whitespace(self):
         with pytest.raises(argparse.ArgumentTypeError):
             sim2real._validate_algorithm_name("soft reflective")
+
+    def test_rejects_leading_hyphen(self):
+        with pytest.raises(argparse.ArgumentTypeError):
+            sim2real._validate_algorithm_name("-algo")
+
+    def test_rejects_dot(self):
+        with pytest.raises(argparse.ArgumentTypeError):
+            sim2real._validate_algorithm_name(".")
+
+    def test_rejects_double_dot(self):
+        with pytest.raises(argparse.ArgumentTypeError):
+            sim2real._validate_algorithm_name("..")
+
+    def test_rejects_oversized(self):
+        with pytest.raises(argparse.ArgumentTypeError):
+            sim2real._validate_algorithm_name("a" * 129)
 
 
 class TestExtractDigest:
@@ -92,18 +106,30 @@ class TestComputeTranslationHash:
 
 class TestBuildSchemas:
     def test_translation_output_schema(self):
+        # Updated to step-2 shape: image_ref/image_digest live per-algo.
         out = sim2real._build_translation_output(
             algorithm_name="softreflective",
             image_ref="ghcr.io/foo:v1",
+            image_digest=None,
+            config_path="generated/softreflective/softreflective_config.yaml",
             translation_hash="a" * 64,
+            source="byo",
+            alias="softreflective",
             created_at="2026-07-01T14:00:00Z",
         )
         assert out == {
             "version": 1,
             "translation_hash": "a" * 64,
             "source": "byo",
-            "algorithms": [{"name": "softreflective"}],
-            "image_ref": "ghcr.io/foo:v1",
+            "alias": "softreflective",
+            "algorithms": [{
+                "name": "softreflective",
+                "source_path": None,
+                "source_sha256": None,
+                "config_path": "generated/softreflective/softreflective_config.yaml",
+                "image_ref": "ghcr.io/foo:v1",
+                "image_digest": None,
+            }],
             "created_at": "2026-07-01T14:00:00Z",
         }
 
@@ -131,6 +157,37 @@ class TestBuildSchemas:
         assert reg["image_ref"] == "ghcr.io/foo:v1"
 
 
+class TestBuildTranslationOutputV2:
+    def test_new_schema_shape(self):
+        out = sim2real._build_translation_output(
+            algorithm_name="softreflective",
+            image_ref="ghcr.io/x/sr:v1",
+            image_digest="sha256:aa",
+            config_path="generated/softreflective/softreflective_config.yaml",
+            translation_hash="a" * 64,
+            source="byo",
+            alias="softreflective",
+            created_at="2026-07-02T14:00:00Z",
+        )
+        # Top-level image_ref removed; now per-algo.
+        assert "image_ref" not in out
+        assert "image_digest" not in out
+        assert out["alias"] == "softreflective"
+        assert out["source"] == "byo"
+        assert out["version"] == 1
+        assert out["translation_hash"] == "a" * 64
+        assert out["created_at"] == "2026-07-02T14:00:00Z"
+        assert len(out["algorithms"]) == 1
+        algo = out["algorithms"][0]
+        assert algo["name"] == "softreflective"
+        assert algo["image_ref"] == "ghcr.io/x/sr:v1"
+        assert algo["image_digest"] == "sha256:aa"
+        assert algo["config_path"] == \
+            "generated/softreflective/softreflective_config.yaml"
+        assert algo["source_path"] is None
+        assert algo["source_sha256"] is None
+
+
 class TestRegisterTranslation:
     def _write_overlay(self, tmp_path, content=b"scorer: mine\n"):
         p = tmp_path / "treatment.yaml"
@@ -154,6 +211,7 @@ class TestRegisterTranslation:
         assert layout.generated_config_path(thash, "softreflective").exists()
 
     def test_translation_output_contents(self, tmp_path):
+        # Step-2 schema: image_ref lives per-algo; alias at top level.
         cfg = self._write_overlay(tmp_path)
         thash, _ = sim2real._register_translation(
             algorithm_name="softreflective",
@@ -165,10 +223,13 @@ class TestRegisterTranslation:
         )
         out = json.loads(layout.translation_output_path(thash).read_text())
         assert out["source"] == "byo"
-        assert out["algorithms"] == [{"name": "softreflective"}]
+        assert out["alias"] == "softreflective"
         assert out["translation_hash"] == thash
-        assert out["image_ref"] == "ghcr.io/foo:v1"
         assert out["version"] == 1
+        assert len(out["algorithms"]) == 1
+        algo = out["algorithms"][0]
+        assert algo["name"] == "softreflective"
+        assert algo["image_ref"] == "ghcr.io/foo:v1"
 
     def test_registered_records_digest_when_present(self, tmp_path):
         cfg = self._write_overlay(tmp_path)
@@ -372,11 +433,13 @@ class TestBuildParser:
         assert args.registered_hash == "abcd" * 16
 
     def test_rejects_bad_algorithm_name(self):
+        # Leading hyphen fails the shared regex; use it instead of Bad_Name
+        # (uppercase+underscore are now accepted per step-2 widening).
         parser = sim2real.build_parser()
         with pytest.raises(SystemExit):
             parser.parse_args([
                 "translation", "register",
-                "--algorithm", "Bad_Name",
+                "--algorithm", "-bad-name",
                 "--image", "ghcr.io/foo:v1",
                 "--config", "/tmp/treatment.yaml",
             ])
@@ -468,17 +531,20 @@ class TestMainEndToEnd:
     def test_oserror_from_register_returns_2_not_traceback(
         self, tmp_path, capsys, monkeypatch
     ):
+        # translation_output.json is now written via _atomic_write_json
+        # (tempfile + os.replace), not write_text. Patch the helper directly.
         cfg = tmp_path / "treatment.yaml"
         cfg.write_text("scorer: mine\n")
 
-        original_write_text = type(cfg).write_text
+        # Wrap: call the real impl for non-output.json paths.
+        original = sim2real._atomic_write_json
 
-        def flaky_write_text(self, *args, **kwargs):
-            if self.name == "translation_output.json":
+        def patched(path, data):
+            if path.name == "translation_output.json":
                 raise OSError("simulated: disk full")
-            return original_write_text(self, *args, **kwargs)
+            return original(path, data)
 
-        monkeypatch.setattr(type(cfg), "write_text", flaky_write_text)
+        monkeypatch.setattr(sim2real, "_atomic_write_json", patched)
 
         rc = sim2real.main([
             "--experiment-root", str(tmp_path),
@@ -856,3 +922,180 @@ class TestAssembleCommand:
         out = capsys.readouterr()
         assert "cc" in out.err
         assert "skipped" in out.err
+
+
+class TestAliasCollision:
+    def _seed_register(self, tmp_path, algo, image, config_yaml):
+        cfg = tmp_path / f"{algo}.yaml"
+        cfg.write_text(config_yaml)
+        thash, status = sim2real._register_translation(
+            algorithm_name=algo,
+            image_ref=image,
+            config_path=cfg,
+            baseline_config_path=None,
+            registered_hash=None,
+            now_iso="2026-07-02T14:00:00Z",
+        )
+        return thash
+
+    def test_same_alias_same_content_is_idempotent(self, tmp_path):
+        h1 = self._seed_register(tmp_path, "algo", "ghcr.io/x:v1", "a: 1\n")
+        h2 = self._seed_register(tmp_path, "algo", "ghcr.io/x:v1", "a: 1\n")
+        assert h1 == h2
+
+    def test_alias_collision_without_force_raises(self, tmp_path):
+        self._seed_register(tmp_path, "algo", "ghcr.io/x:v1", "a: 1\n")
+        cfg = tmp_path / "different.yaml"
+        cfg.write_text("a: 2\n")
+        with pytest.raises(RuntimeError, match="already assigned"):
+            sim2real._register_translation(
+                algorithm_name="algo",
+                image_ref="ghcr.io/x:v1",
+                config_path=cfg,
+                baseline_config_path=None,
+                registered_hash=None,
+                now_iso="2026-07-02T14:00:00Z",
+            )
+
+    def test_force_reassigns_alias_and_clears_previous(self, tmp_path):
+        from pipeline.lib import translation_ref
+        h_old = self._seed_register(tmp_path, "algo", "ghcr.io/x:v1", "a: 1\n")
+        cfg = tmp_path / "different.yaml"
+        cfg.write_text("a: 2\n")
+        h_new, _status = sim2real._register_translation(
+            algorithm_name="algo",
+            image_ref="ghcr.io/x:v1",
+            config_path=cfg,
+            baseline_config_path=None,
+            registered_hash=None,
+            now_iso="2026-07-02T14:00:00Z",
+            force=True,
+        )
+        assert h_new != h_old
+        # New translation carries the alias.
+        assert translation_ref.find_by_alias("algo") == h_new
+        # Old translation's alias is null; it's still reachable by hash.
+        old_data = translation_ref.read_translation_output(
+            layout.translation_output_path(h_old)
+        )
+        assert old_data["alias"] is None
+        assert layout.translation_dir(h_old).exists()
+
+
+class TestAssembleResolvesAlias:
+    def test_assemble_accepts_alias(self, tmp_path, monkeypatch):
+        # This is a smoke test — we mock assemble_run to just capture
+        # the resolved hash. Full assemble behavior is exercised in
+        # test_assemble_run.py.
+        cfg = tmp_path / "algo.yaml"
+        cfg.write_text("scenario: []\n")
+        thash, _ = sim2real._register_translation(
+            algorithm_name="my-algo",
+            image_ref="ghcr.io/x:v1",
+            config_path=cfg,
+            baseline_config_path=None,
+            registered_hash=None,
+            now_iso="2026-07-02T14:00:00Z",
+        )
+
+        captured = {}
+        def fake_assemble(*, translation_hash, translation_ref, cluster_id,
+                          run_name, experiment_root, manifest_path,
+                          force, now_iso):
+            captured["hash"] = translation_hash
+            captured["ref"] = translation_ref
+
+        monkeypatch.setattr(
+            sim2real._assemble_run_lib, "assemble_run", fake_assemble
+        )
+        # Also stub the manifest file so the pre-check passes.
+        (tmp_path / "transfer.yaml").write_text("kind: sim2real-transfer\n")
+        parser = sim2real.build_parser()
+        args = parser.parse_args([
+            "--experiment-root", str(tmp_path),
+            "assemble",
+            "--translation", "my-algo",
+            "--cluster", "cX",
+            "--run", "r1",
+        ])
+        sim2real.layout.set_experiment_root(str(tmp_path))
+        # Mocking cluster_config lookup is out of scope here; the fake
+        # replaces assemble_run entirely so cluster_config is never read.
+        rc = sim2real._cmd_assemble(args)
+        assert rc == 0
+        assert captured["hash"] == thash
+        assert captured["ref"] == "my-algo"
+
+
+class TestListTranslations:
+    def test_empty_prints_no_translations(self, capsys, tmp_path):
+        # translations_dir absent.
+        rc = sim2real._cmd_list_translations(
+            sim2real.build_parser().parse_args(["list", "translations"])
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "no translations yet" in out
+
+    def test_shows_alias_hash_source_images_created(self, capsys, tmp_path):
+        from pipeline.lib import layout
+        layout.set_experiment_root(tmp_path)
+        base = layout.translations_dir()
+        base.mkdir(parents=True)
+
+        h1 = "a" * 64
+        (base / h1).mkdir()
+        (base / h1 / "translation_output.json").write_text(json.dumps({
+            "version": 1,
+            "translation_hash": h1,
+            "source": "skill",
+            "alias": "softreflective-v1",
+            "algorithms": [{"name": "sr", "image_ref": "quay.io/x:v1"}],
+            "created_at": "2026-07-02T14:00:00Z",
+        }))
+
+        h2 = "b" * 64
+        (base / h2).mkdir()
+        (base / h2 / "translation_output.json").write_text(json.dumps({
+            "version": 1,
+            "translation_hash": h2,
+            "source": "skill",
+            "alias": "compare-a-b",
+            "algorithms": [
+                {"name": "a", "image_ref": None},
+                {"name": "b", "image_ref": None},
+            ],
+            "created_at": "2026-07-02T14:30:00Z",
+        }))
+
+        h3 = "c" * 64
+        (base / h3).mkdir()
+        (base / h3 / "translation_output.json").write_text(json.dumps({
+            "version": 1,
+            "translation_hash": h3,
+            "source": "byo",
+            "alias": None,
+            "algorithms": [{"name": "legacy", "image_ref": "ghcr.io/y:v1"}],
+            "created_at": "2026-07-01T10:00:00Z",
+        }))
+
+        rc = sim2real._cmd_list_translations(
+            sim2real.build_parser().parse_args(["list", "translations"])
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        lines = out.strip().splitlines()
+        # Header + 3 rows, newest first.
+        assert "ALIAS" in lines[0]
+        assert "HASH" in lines[0]
+        assert "SOURCE" in lines[0]
+        assert "IMAGES" in lines[0]
+        assert "CREATED" in lines[0]
+        # h2 is newest by created_at; h1 middle; h3 oldest.
+        assert "compare-a-b" in lines[1]
+        assert "softreflective-v1" in lines[2]
+        assert "-" in lines[3].split()[0:2]  # ALIAS column shows "-"
+
+        assert "2 pending" in out
+        assert "1 built" in out
+        assert "1 registered" in out

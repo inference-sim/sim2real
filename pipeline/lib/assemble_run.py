@@ -23,7 +23,7 @@ from pathlib import Path
 
 import yaml
 
-from pipeline.lib import cluster_ops, layout, slicer
+from pipeline.lib import cluster_ops, layout, slicer, translation_ref as _translation_ref
 from pipeline.lib.manifest import ManifestError, load_manifest
 from pipeline.lib.tekton import make_pipelinerun_scenario
 from pipeline.lib.values import deep_merge
@@ -419,6 +419,7 @@ def _resolve_scenario_path(
 def assemble_run(
     *,
     translation_hash: str,
+    translation_ref: str,
     cluster_id: str,
     run_name: str,
     experiment_root: Path,
@@ -443,6 +444,10 @@ def assemble_run(
 
     Raises AssembleError on any validation failure. Validation happens
     before ``run_dir`` is (re)created — no partial writes on failure.
+
+    ``translation_ref`` is the user-facing ref (alias/prefix/hash) as typed at
+    the CLI. Used only in error messages — internal logic uses
+    ``translation_hash``.
 
     The list of algorithms present in the manifest but absent from the
     registered translation is stored on ``assemble_run.skipped_algorithms``
@@ -491,23 +496,34 @@ def assemble_run(
         raise AssembleError(f"cannot load manifest {manifest_path}: {exc}") from exc
 
     try:
-        tout = json.loads(tout_path.read_text())
-    except json.JSONDecodeError as exc:
+        tout = _translation_ref.read_translation_output(tout_path)
+    except (json.JSONDecodeError, ValueError) as exc:
         raise AssembleError(
             f"translation_output.json is not valid JSON: {tout_path}: {exc}"
         ) from exc
 
-    translated_names = {a.get("name") for a in tout.get("algorithms", [])}
-    image_ref = tout.get("image_ref")
-    if not image_ref:
-        raise AssembleError(
-            f"translation_output.json missing image_ref: {tout_path}"
-        )
+    translated_algos = {
+        a.get("name"): a for a in tout.get("algorithms", []) or []
+    }
+    translated_names = set(translated_algos.keys())
 
     kept_algos, skipped_algo_names = filter_algorithms(
         manifest.get("algorithms", []) or [],
         translated_names=translated_names,
     )
+
+    # Incomplete-translation check: any kept algo with null image_ref means
+    # the build step has not run yet.
+    unbuilt = [
+        a["name"] for a in kept_algos
+        if not translated_algos[a["name"]].get("image_ref")
+    ]
+    if unbuilt:
+        raise AssembleError(
+            f"translation {translation_ref} not built for algorithms: "
+            f"{', '.join(unbuilt)} — run 'sim2real build --translation "
+            f"{translation_ref}' first"
+        )
 
     # 3. Snapshot assembly slice + params_hash ----------------------------
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -560,7 +576,8 @@ def assemble_run(
             diffs_path=diffs_path,
             overlay_path=overlay_path,
         )
-        inject_image_tag(resolved, image_ref)
+        algo_image_ref = translated_algos[algo_name]["image_ref"]
+        inject_image_tag(resolved, algo_image_ref)
         packages.append((algo_name, resolved))
 
     # 5. Inject hf secret on every package --------------------------------
@@ -609,6 +626,15 @@ def assemble_run(
     )
 
     # 8. Write run_metadata.json ------------------------------------------
+    # image_tag is a single-image summary field for backward-compat; use the
+    # first *kept* algorithm's image_ref. Reading from kept_algos rather
+    # than tout["algorithms"][0] guards against the multi-algo case where
+    # translated_algos contains an algo that was filtered out of the run,
+    # which would otherwise leak a null image_tag past the built-algo check.
+    run_meta_image_tag = (
+        translated_algos[kept_algos[0]["name"]]["image_ref"]
+        if kept_algos else ""
+    )
     write_run_metadata(
         run_dir,
         {
@@ -617,7 +643,7 @@ def assemble_run(
             "translation_hash": translation_hash,
             "cluster_id": cluster_id,
             "params_hash": params_hash,
-            "image_tag": image_ref,
+            "image_tag": run_meta_image_tag,
             "assembled_at": now_iso,
         },
     )
