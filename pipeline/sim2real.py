@@ -163,6 +163,117 @@ def _build_translation_output(
     }
 
 
+def _build_translate_output(
+    *,
+    translation_hash: str,
+    scenario: str,
+    algorithms: list[dict],
+    now_iso: str,
+) -> dict:
+    """Build ``translation_output.json`` body for skill-driven translate.
+
+    Multi-algorithm shape (design §Schemas). Each ``algorithms[i]`` carries
+    ``source_path``/``source_sha256`` (populated by ``translate``) and
+    ``image_ref``/``image_digest`` == ``None`` — ``sim2real build`` (PR 5)
+    fills the image fields in later. ``config_path`` is ``None`` for the
+    skill-driven producer; BYO ``translation register`` writes it instead.
+    """
+    return {
+        "version": 1,
+        "translation_hash": translation_hash,
+        "source": "skill",
+        "alias": scenario,
+        "algorithms": [
+            {
+                "name": a["name"],
+                "source_path": a["source_path"],
+                "source_sha256": a["source_sha256"],
+                "config_path": None,
+                "image_ref": None,
+                "image_digest": None,
+            }
+            for a in algorithms
+        ],
+        "created_at": now_iso,
+    }
+
+
+def _build_skill_input(
+    *,
+    translation_hash: str,
+    experiment_root: Path,
+    translations_dir: Path,
+    scenario: str,
+    baseline: dict | None,
+    algorithms: list[dict],
+    context: dict,
+) -> dict:
+    """Build ``skill_input.json`` body per design §Schemas.
+
+    Absolute paths at the top level so the skill doesn't have to compose
+    them; per-algorithm ``output_dir`` and ``config_output_path`` are
+    relative to ``translations_dir``. ``source_path`` is relative to
+    ``experiment_root``. ``baseline`` is ``None`` when the manifest has no
+    baseline overlay.
+    """
+    return {
+        "version": 1,
+        "translation_hash": translation_hash,
+        "experiment_root": str(experiment_root),
+        "translations_dir": str(translations_dir),
+        "scenario": scenario,
+        "baseline": baseline,
+        "algorithms": [
+            {
+                "name": a["name"],
+                "source_path": a["source_path"],
+                "source_sha256": a["source_sha256"],
+                "output_dir": f"generated/{a['name']}",
+                "config_output_path": f"generated/{a['name']}/{a['name']}_config.yaml",
+                "notes": a.get("notes", ""),
+            }
+            for a in algorithms
+        ],
+        "context": context,
+    }
+
+
+def _translate_state(
+    translation_hash: str, expected_algorithm_names: list[str]
+) -> tuple[str, list[str]]:
+    """Classify on-disk state of ``translations/<hash>/`` for the state machine.
+
+    Returns ``(state, missing_names)`` where ``state`` is one of
+    ``"nothing"``, ``"partial"``, ``"complete"`` per design's PR-3 state
+    table. ``missing_names`` is populated only for ``"partial"`` — the list
+    of algorithm names whose ``generated/<algo>/<algo>_output.json`` is not
+    on disk. A ``translation_output.json`` recording a divergent algorithm
+    set surfaces as ``"partial"`` (the currently-expected algorithms are
+    the missing ones).
+    """
+    tdir = layout.translation_dir(translation_hash)
+    if not tdir.exists():
+        return "nothing", []
+    tout = layout.translation_output_path(translation_hash)
+    if not tout.exists():
+        return "partial", list(expected_algorithm_names)
+    missing = [
+        name for name in expected_algorithm_names
+        if not (tdir / "generated" / name / f"{name}_output.json").exists()
+    ]
+    if missing:
+        return "partial", missing
+    return "complete", []
+
+
+def _translate_delete_dir(translation_hash: str) -> None:
+    """Recursively remove ``translations/<hash>/``. No-op if absent."""
+    import shutil
+    tdir = layout.translation_dir(translation_hash)
+    if tdir.exists():
+        shutil.rmtree(tdir)
+
+
 def _build_registered(
     image_ref: str,
     image_digest: str | None,
@@ -375,6 +486,28 @@ def build_parser() -> argparse.ArgumentParser:
     lsub.add_parser("runs", help="List runs, newest first")
     lsub.add_parser("translations", help="List translations, newest first")
 
+    trans = sub.add_parser(
+        "translate",
+        help="Skill-driven translation: write checkpoint files or validate resume",
+    )
+    mode = trans.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Delete and recreate the translation dir; the operator must "
+            "re-run '/sim2real-translate' after."
+        ),
+    )
+    mode.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Validate that '/sim2real-translate' produced all declared "
+            "algorithm outputs; never mutates the translation dir."
+        ),
+    )
+
     return parser
 
 
@@ -441,6 +574,203 @@ def _cmd_translation_register(args) -> int:
                 file=sys.stderr,
             )
     print(f"registered translation {thash}")
+    return 0
+
+
+def _cmd_translate(args) -> int:
+    """Skill-driven translation state machine.
+
+    Nine-cell state × command table per
+    ``docs/epics/step-2/design.md#pr-3--sim2real-translate-command``:
+      • nothing / plain → write checkpoint, exit 0
+      • nothing / resume → error "no translation to resume", exit 2
+      • nothing / force → same as plain
+      • partial / plain → error "incomplete", exit 2 (never mutates)
+      • partial / resume → error "missing outputs for: ...", exit 2
+      • partial / force → delete + recreate as if nothing
+      • complete / plain → "already complete", exit 0 (idempotent)
+      • complete / resume → same as complete / plain
+      • complete / force → delete + recreate; user re-runs the skill
+    """
+    from pipeline.lib import manifest as _manifest, slicer, translation_ref
+
+    exp_root = (
+        Path(args.experiment_root).resolve()
+        if args.experiment_root
+        else Path.cwd()
+    )
+    manifest_path = exp_root / "transfer.yaml"
+    if not manifest_path.exists():
+        manifest_path = exp_root / "config" / "transfer.yaml"
+    if not manifest_path.exists():
+        print(f"error: transfer.yaml not found under {exp_root}", file=sys.stderr)
+        return 2
+
+    try:
+        manifest = _manifest.load_manifest(manifest_path)
+    except _manifest.ManifestError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    scenario = manifest.get("scenario")
+    if not scenario:
+        print("error: transfer.yaml missing required 'scenario' field", file=sys.stderr)
+        return 2
+
+    # Scenario doubles as the translation's alias (design §Alias/algorithm-name
+    # validation). Reject invalid names before touching disk.
+    try:
+        translation_ref.validate_name(scenario)
+    except translation_ref.ValidationError as exc:
+        print(f"error: invalid scenario name (used as alias): {exc}", file=sys.stderr)
+        return 2
+
+    declared_algos = manifest.get("algorithms") or []
+    if not declared_algos:
+        print("error: transfer.yaml has no algorithms declared", file=sys.stderr)
+        return 2
+    for algo in declared_algos:
+        try:
+            translation_ref.validate_name(algo.get("name", ""))
+        except translation_ref.ValidationError as exc:
+            print(f"error: invalid algorithm name: {exc}", file=sys.stderr)
+            return 2
+
+    try:
+        thash = slicer.translation_hash_with_sources(manifest, exp_root)
+    except (_assemble_run_lib.AssembleError, OSError) as exc:
+        # slicer.translation_hash_with_sources raises AssembleError when an
+        # algorithm's ``source`` file is missing; OSError covers unreadable
+        # source files (permissions, etc). Both surface as actionable
+        # per-file errors rather than crashing the CLI.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    expected_names = [a["name"] for a in declared_algos]
+    state, missing = _translate_state(thash, expected_names)
+
+    if args.resume:
+        if state == "nothing":
+            print(
+                f"error: no translation to resume for hash {thash} — "
+                f"run 'sim2real translate' first",
+                file=sys.stderr,
+            )
+            return 2
+        if state == "partial":
+            print(
+                f"error: missing outputs for: {', '.join(missing)} — "
+                f"run '/sim2real-translate' first",
+                file=sys.stderr,
+            )
+            return 2
+        print(f"translation {thash} already complete — run 'sim2real build' next")
+        return 0
+
+    if args.force:
+        _translate_delete_dir(thash)
+        return _translate_write_checkpoint(
+            thash=thash,
+            scenario=scenario,
+            manifest=manifest,
+            exp_root=exp_root,
+            declared_algos=declared_algos,
+        )
+
+    if state == "partial":
+        print(
+            f"error: translation {thash} incomplete — "
+            f"run '/sim2real-translate' then 'sim2real translate --resume'",
+            file=sys.stderr,
+        )
+        return 2
+    if state == "complete":
+        print(f"translation {thash} already complete — run 'sim2real build' next")
+        return 0
+    return _translate_write_checkpoint(
+        thash=thash,
+        scenario=scenario,
+        manifest=manifest,
+        exp_root=exp_root,
+        declared_algos=declared_algos,
+    )
+
+
+def _translate_write_checkpoint(
+    *,
+    thash: str,
+    scenario: str,
+    manifest: dict,
+    exp_root: Path,
+    declared_algos: list[dict],
+) -> int:
+    """Write both checkpoint files and print the operator hint.
+
+    Caller has ensured on-disk state is ``"nothing"`` (either originally
+    or after ``_translate_delete_dir``). Writes go through
+    ``_atomic_write_json`` so an interruption never leaves a
+    half-written file visible.
+    """
+    tdir = layout.translation_dir(thash)
+    tdir.mkdir(parents=True, exist_ok=True)
+
+    algo_records = []
+    for algo in declared_algos:
+        name = algo["name"]
+        source_rel = algo.get("source")
+        source_sha = None
+        if source_rel:
+            source_sha = hashlib.sha256(
+                (exp_root / source_rel).read_bytes()
+            ).hexdigest()
+        algo_records.append({
+            "name": name,
+            "source_path": source_rel,
+            "source_sha256": source_sha,
+            "notes": algo.get("notes", ""),
+        })
+
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    tout = _build_translate_output(
+        translation_hash=thash,
+        scenario=scenario,
+        algorithms=algo_records,
+        now_iso=now_iso,
+    )
+    _atomic_write_json(layout.translation_output_path(thash), tout)
+
+    baseline_manifest = manifest.get("baseline") or None
+    if baseline_manifest:
+        skin_baseline: dict | None = {
+            "config_path": baseline_manifest.get("config"),
+            "generated_overlay_path": "generated/baseline_config.yaml",
+        }
+    else:
+        skin_baseline = None
+
+    # Bridge manifest ``context.files`` → skill_input ``context.file_paths``
+    # (design §Schemas §skill_input.json). Manifest keys are pinned by
+    # ``manifest.py``; the skill_input schema is pinned by the design.
+    manifest_context = manifest.get("context") or {}
+    context = {
+        "text": manifest_context.get("text", "") or "",
+        "file_paths": list(manifest_context.get("files") or []),
+    }
+    skin = _build_skill_input(
+        translation_hash=thash,
+        experiment_root=exp_root,
+        translations_dir=layout.translations_dir(),
+        scenario=scenario,
+        baseline=skin_baseline,
+        algorithms=algo_records,
+        context=context,
+    )
+    _atomic_write_json(tdir / "skill_input.json", skin)
+
+    print(
+        f"translation {thash} checkpoint written — "
+        f"run '/sim2real-translate' then 'sim2real translate --resume'"
+    )
     return 0
 
 
@@ -670,6 +1000,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_list_runs(args)
     if args.command == "list" and args.subcommand == "translations":
         return _cmd_list_translations(args)
+    if args.command == "translate":
+        return _cmd_translate(args)
     # argparse's required=True on subparsers means this is unreachable in
     # practice; kept for defensive parity with cluster.py.
     return 1
