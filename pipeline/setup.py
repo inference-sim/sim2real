@@ -399,7 +399,10 @@ def main() -> int:
     print("Next steps:")
     print("  1. Provision cluster: python pipeline/cluster.py provision <cluster_id> --namespaces NS1[,NS2,...]")
     print("  2. Edit <experiment-root>/transfer.yaml (algorithm source, workloads, context)")
-    print("  3. Run: python pipeline/prepare.py")
+    print("  3. Register a translation: python pipeline/sim2real.py translation register \\")
+    print("                                 --algorithm NAME --image REF --config PATH")
+    print("  4. Assemble a run:         python pipeline/sim2real.py assemble \\")
+    print("                                 --translation HASH --cluster CLUSTER_ID --run RUN_NAME")
     return 0
 
 if __name__ == "__main__":

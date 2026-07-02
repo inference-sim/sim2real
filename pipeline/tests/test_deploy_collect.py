@@ -2144,3 +2144,95 @@ def test_collect_multi_package_with_workload(tmp_path, monkeypatch):
     assert not any("wl-reason-treatment" in m for m in warn_msgs), (
         f"Spurious warn about out-of-scope pair: {warn_msgs}"
     )
+
+
+# ── main() dispatcher tests for `collect` subcommand (#447) ────────────────
+
+def _run_deploy_main_collect(argv, monkeypatch, tmp_path):
+    """Call deploy.main() with mocked argv and --experiment-root=tmp_path.
+
+    Mirrors the helper in test_deploy_run.py — main() re-resolves
+    EXPERIMENT_ROOT from --experiment-root (or cwd), so monkeypatching the
+    module-level global is not enough.
+    """
+    import sys as _sys
+    from pipeline import deploy
+    monkeypatch.setattr(_sys, "argv",
+                        ["deploy.py", "--experiment-root", str(tmp_path), *argv])
+    monkeypatch.setattr(deploy, "_tty", False, raising=False)
+    return deploy.main()
+
+
+def _make_collect_run_dir(tmp_path, run_name="trial-1", *,
+                          with_cluster=True, with_metadata=True,
+                          metadata_content=None):
+    """Fixture helper: build a workspace/runs/<run>/ tree for collect dispatcher tests."""
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / "runs" / run_name
+    run_dir.mkdir(parents=True)
+    if with_cluster:
+        (run_dir / "cluster").mkdir()
+    if with_metadata:
+        content = metadata_content if metadata_content is not None else \
+            {"version": 1, "run_name": run_name, "cluster_id": "ocp-east"}
+        (run_dir / "run_metadata.json").write_text(json.dumps(content))
+    return workspace, run_dir
+
+
+def test_main_collect_missing_run_dir_emits_assemble_hint(tmp_path, capsys, monkeypatch):
+    """`deploy.py --run trial-1 collect` with no run dir → assemble hint."""
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "setup_config.json").write_text("{}")
+    with pytest.raises(SystemExit):
+        _run_deploy_main_collect(["--run", "trial-1", "collect"], monkeypatch, tmp_path)
+    assert "run 'sim2real assemble --run trial-1' first" in capsys.readouterr().err
+
+
+def test_main_collect_missing_cluster_dir_emits_assemble_hint(tmp_path, capsys, monkeypatch):
+    """`deploy.py --run trial-1 collect` with runs/trial-1/ but no cluster/ → assemble hint."""
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "setup_config.json").write_text("{}")
+    _make_collect_run_dir(tmp_path, with_cluster=False)
+    with pytest.raises(SystemExit):
+        _run_deploy_main_collect(["--run", "trial-1", "collect"], monkeypatch, tmp_path)
+    assert "run 'sim2real assemble --run trial-1' first" in capsys.readouterr().err
+
+
+def test_main_collect_missing_run_metadata_emits_corrupt_hint(tmp_path, capsys, monkeypatch):
+    """`deploy.py --run trial-1 collect` with no run_metadata.json → 're-assemble' hint."""
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "setup_config.json").write_text("{}")
+    _make_collect_run_dir(tmp_path, with_metadata=False)
+    with pytest.raises(SystemExit):
+        _run_deploy_main_collect(["--run", "trial-1", "collect"], monkeypatch, tmp_path)
+    assert "run metadata corrupted; re-assemble" in capsys.readouterr().err
+
+
+def test_main_collect_missing_cluster_id_emits_corrupt_hint(tmp_path, capsys, monkeypatch):
+    """`deploy.py --run trial-1 collect` with metadata missing cluster_id → 're-assemble' hint."""
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "setup_config.json").write_text("{}")
+    _make_collect_run_dir(tmp_path,
+                          metadata_content={"version": 1, "run_name": "trial-1"})
+    with pytest.raises(SystemExit):
+        _run_deploy_main_collect(["--run", "trial-1", "collect"], monkeypatch, tmp_path)
+    assert "run metadata corrupted; re-assemble" in capsys.readouterr().err
+
+
+def test_cmd_collect_empty_namespaces_exits(tmp_path, capsys, monkeypatch):
+    """_cmd_collect with cluster_config missing 'namespaces' → 'No namespace configured.' exit."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "trial-1"
+    (run_dir / "cluster").mkdir(parents=True)
+
+    # NAMESPACE env var must be unset for the guard to fire.
+    monkeypatch.delenv("NAMESPACE", raising=False)
+
+    class Args:
+        package = None
+        skip_logs = False
+
+    with pytest.raises(SystemExit):
+        deploy._cmd_collect(Args(), run_dir, {})
+    assert "No namespace configured." in capsys.readouterr().err

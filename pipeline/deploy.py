@@ -151,6 +151,38 @@ def _load_cluster_config() -> dict:
     return cluster_ops.read_cluster_config(cluster_ids[0])
 
 
+def _load_run_cluster_config(run_dir: Path) -> dict:
+    """Resolve a run's cluster_config via ``run_metadata.json:cluster_id``.
+
+    Per-run dispatch (issue #446): the run's cluster is recorded in
+    ``runs/<R>/run_metadata.json`` by ``sim2real assemble``, and this helper
+    reads that field then delegates to ``cluster_ops.read_cluster_config``.
+    All error paths emit the exact acceptance-criterion strings from #446
+    and exit — no auto-fix (that is step-5's job).
+    """
+    run_name = run_dir.name
+    if not run_dir.exists() or not (run_dir / "cluster").exists():
+        err(f"run 'sim2real assemble --run {run_name}' first")
+        sys.exit(1)
+
+    meta_path = run_dir / "run_metadata.json"
+    if not meta_path.exists():
+        err("run metadata corrupted; re-assemble")
+        sys.exit(1)
+    try:
+        meta = json.loads(meta_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        err("run metadata corrupted; re-assemble")
+        sys.exit(1)
+
+    cluster_id = meta.get("cluster_id") if isinstance(meta, dict) else None
+    if not cluster_id:
+        err("run metadata corrupted; re-assemble")
+        sys.exit(1)
+
+    return cluster_ops.read_cluster_config(cluster_id)
+
+
 # ── Progress store loading ───────────────────────────────────────────────────
 
 class ProgressUnavailable(RuntimeError):
@@ -163,11 +195,17 @@ class ProgressUnavailable(RuntimeError):
     """
 
 
-def _load_progress(store, *, allow_unreachable: bool = False) -> dict:
+def _load_progress(store, *, allow_unreachable: bool = False,
+                   run_name: str = "") -> dict:
     """Load progress data with consistent corrupt/unreachable handling.
 
     Single entry point for ``store.load()`` across deploy.py subcommands so
     every command surfaces corrupt-data errors with the same UX (issue #140).
+
+    ``run_name`` is folded into the corrupt-data recovery hint when supplied
+    so the user sees the concrete ``sim2real assemble --run <name>`` command
+    to re-run; callers that do not have it in scope get a ``<run-name>``
+    placeholder styled to match the other placeholders in the message.
 
     On ``ValueError`` (corrupt-data signal from ``ConfigMapProgressStore.load``):
     print a clear error pointing at the affected ConfigMap with recovery
@@ -183,8 +221,9 @@ def _load_progress(store, *, allow_unreachable: bool = False) -> dict:
         return store.load()
     except ValueError as exc:
         err(f"Corrupt progress data: {exc}")
-        err("Re-run prepare.py, or fix the ConfigMap manually with "
-            "`kubectl edit configmap <name> -n <namespace>`.")
+        run_token = run_name if run_name else "<run-name>"
+        err(f"Re-assemble the run (sim2real assemble --run {run_token}), or fix "
+            f"the ConfigMap manually with `kubectl edit configmap <name> -n <namespace>`.")
         sys.exit(1)
     except RuntimeError as exc:
         if allow_unreachable:
@@ -197,10 +236,11 @@ def _load_progress(store, *, allow_unreachable: bool = False) -> dict:
 def _write_build_metadata(run_dir: Path, epp_image: str) -> None:
     """Record a successful EPP build in run_metadata.json.
 
-    Sets ``epp_image`` and ``stages.deploy.last_completed_step = "build"`` so
-    ``run.py inspect`` (via ``run_manager.inspect_run``) shows the deploy
-    progress. No-op if run_metadata.json is missing or unparseable — the
-    caller's earlier load/validate path already surfaces those errors.
+    Sets ``epp_image`` and ``stages.deploy.last_completed_step = "build"``.
+    No current reader consumes these fields — they remain for future
+    inspect tooling (see epic #443). No-op if run_metadata.json is missing
+    or unparseable — the caller's earlier load/validate path already
+    surfaces those errors.
     """
     meta_path = run_dir / "run_metadata.json"
     if not meta_path.exists():
@@ -613,7 +653,8 @@ def _cmd_status(args, run_dir: Path,
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
     try:
-        progress = _load_progress(store, allow_unreachable=True)
+        progress = _load_progress(store, allow_unreachable=True,
+                                  run_name=run_dir.name)
     except ProgressUnavailable as exc:
         err(f"Cluster unreachable — cannot read progress ConfigMap: {exc}")
         err("Retry once kubectl can reach the cluster.")
@@ -1432,7 +1473,8 @@ def _cmd_collect(args, run_dir: Path, cluster_config: dict):
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
     try:
-        progress = _load_progress(store, allow_unreachable=True) or None
+        progress = _load_progress(store, allow_unreachable=True,
+                                  run_name=run_dir.name) or None
     except ProgressUnavailable as exc:
         err(f"Cluster unreachable — cannot read progress ConfigMap: {exc}")
         err("Refusing to collect from filesystem-discovered phases without "
@@ -2456,11 +2498,11 @@ def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
     _zero_dispatch_count = 0
 
     # Load or initialize progress
-    progress = _load_progress(store)
+    progress = _load_progress(store, run_name=run_dir.name)
 
     discovered = _load_pairs(cluster_dir)
     if not discovered:
-        err("No pairs found in cluster/. Run prepare.py first."); sys.exit(1)
+        err(f"run 'sim2real assemble --run {run_dir.name}' first"); sys.exit(1)
 
     # Initialize new entries (first run or new pairs added)
     for key, meta in discovered.items():
@@ -2504,10 +2546,10 @@ def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
     store.save(progress)
 
     # Orphans: pair_keys in progress (in scope, still active) but absent from
-    # cluster/. Happens when prepare.py is re-run with a different workload set
-    # between stop and the next run. Without this guard, _pending_pairs would
-    # surface them and the dispatch loop's pair_costs[pair_key] would KeyError
-    # at startup (#408).
+    # cluster/. Happens when sim2real assemble is re-run with a different
+    # workload set between stop and the next run. Without this guard,
+    # _pending_pairs would surface them and the dispatch loop's
+    # pair_costs[pair_key] would KeyError at startup (#408).
     orphans = sorted(
         k for k, v in progress.items()
         if _is_pair_key(k) and k in _scope and k not in discovered
@@ -2515,7 +2557,7 @@ def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
     )
     if orphans:
         warn(f"{len(orphans)} progress entries have no PipelineRun in cluster/ "
-             f"(likely from a prior prepare.py): {orphans}. Skipping. "
+             f"(likely from a prior sim2real assemble): {orphans}. Skipping. "
              f"Remove the entries manually or via `deploy.py reset --only <key>` "
              f"if they should not return.")
 
@@ -2539,7 +2581,23 @@ def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
     timeout_hours = 4
     info(f"Orchestrator: {len(_scope)} pairs in scope, {len(namespaces)} slot(s)")
     if not _work_remaining() and not slots_busy:
-        info(f"All {len(_scope)} pairs in scope already done — nothing to dispatch (use --force to reset)")
+        # Every pair in scope is in a terminal state. Count by status so
+        # the operator can distinguish a legitimately finished scope from
+        # one containing failed / timed-out / stalled pairs (issue #460).
+        # Uses the canonical status tokens ("timed-out" with a hyphen) so
+        # this line and `deploy.py status` speak the same language.
+        _terminal_states = ("done", "failed", "timed-out", "stalled")
+        _counts = {s: 0 for s in _terminal_states}
+        for k, v in progress.items():
+            if _is_pair_key(k) and k in _scope and k in discovered:
+                _status = v.get("status", "")
+                if _status in _counts:
+                    _counts[_status] += 1
+        _breakdown = ", ".join(f"{_counts[s]} {s}" for s in _terminal_states)
+        info(f"All {len(_scope)} pairs in scope are in terminal states "
+             f"({_breakdown}). Nothing to dispatch. Use "
+             f"`deploy.py reset --only <key>` to retry a specific pair, or "
+             f"`deploy.py run --force` to reset all pairs in scope.")
         return
 
     from pipeline.lib.health import RemediationTracker as _HealthTracker
@@ -2829,7 +2887,7 @@ def _cmd_reset(args, run_dir: Path, discovered: dict,
         err("No namespace configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
-    progress = _load_progress(store)
+    progress = _load_progress(store, run_name=run_dir.name)
 
     if not progress:
         info("No progress data found — nothing to reset")
@@ -2884,7 +2942,7 @@ def _cmd_wipe(args, run_dir: Path,
         err("No namespace configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
-    progress = _load_progress(store)
+    progress = _load_progress(store, run_name=run_dir.name)
 
     if not progress:
         info("No progress data found — nothing to wipe")
@@ -3188,15 +3246,16 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict,
         from pipeline.lib.progress import ConfigMapProgressStore
         store = ConfigMapProgressStore(namespace, run_name=run_dir.name)
         try:
-            progress = _load_progress(store, allow_unreachable=True) or None
+            progress = _load_progress(store, allow_unreachable=True,
+                                      run_name=run_dir.name) or None
         except ProgressUnavailable as exc:
             warn(f"ConfigMap unreachable — skipping pre-flight filter "
                  f"validation: {exc}")
             progress = None
         if progress is not None:
             # Mirror _cmd_run's init loop locally so the pre-flight validator
-            # sees pair_keys that prepare.py added since the last run. The
-            # in-cluster orchestrator independently does its own init from
+            # sees pair_keys that sim2real assemble added since the last run.
+            # The in-cluster orchestrator independently does its own init from
             # the ConfigMap and persists; only `workload` and `package` need
             # to be populated here — those are the fields _apply_run_filters
             # reads when building valid_workloads / valid_packages (#414).
@@ -3230,7 +3289,7 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict,
             defaults_content=defaults_content,
         )
     except OSError as exc:
-        err(f"{exc} — run setup.py and prepare.py first")
+        err(f"{exc} — run setup.py and 'sim2real assemble --run {run_dir.name}' first")
         sys.exit(1)
     # subprocess.run used directly because the module's run() helper doesn't
     # support stdin input, which kubectl apply -f - requires.
@@ -3404,17 +3463,8 @@ def main():
     EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if args.experiment_root else Path.cwd()
 
     setup_config = _load_setup_config()
-    cluster_config = _load_cluster_config()
 
     cmd = args.command
-
-    if cmd == "stop":
-        namespaces = [ns for ns in (cluster_config.get("namespaces") or []) if ns]
-        if not namespaces:
-            err("No namespaces configured. Run cluster.py provision with --namespaces.")
-            sys.exit(1)
-        _cmd_stop(namespace=namespaces[0])
-        return
 
     run_name = args.run or setup_config.get("current_run", "")
     if not run_name:
@@ -3422,9 +3472,7 @@ def main():
         sys.exit(1)
     run_dir = EXPERIMENT_ROOT / "workspace" / "runs" / run_name
 
-    if not run_dir.exists():
-        err(f"Run directory not found: {run_dir}")
-        sys.exit(1)
+    cluster_config = _load_run_cluster_config(run_dir)
 
     if cmd == "build":
         namespaces = cluster_config.get("namespaces") or []
@@ -3459,6 +3507,12 @@ def main():
         _cmd_pairs(cluster_dir, keys_only=args.keys_only,
                    workloads_only=args.workloads_only,
                    packages_only=args.packages_only)
+    elif cmd == "stop":
+        namespaces = [ns for ns in (cluster_config.get("namespaces") or []) if ns]
+        if not namespaces:
+            err("No namespaces configured. Run cluster.py provision with --namespaces.")
+            sys.exit(1)
+        _cmd_stop(namespace=namespaces[0])
     else:
         err("No subcommand specified. Use: deploy.py build | run | status | collect | stop | reset | wipe | pairs")
         sys.exit(1)

@@ -410,3 +410,37 @@ def test_wipe_does_not_save_progress(tmp_path, monkeypatch):
     mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
 
     assert save_called == [], "wipe must not call store.save()"
+
+
+def test_main_dispatches_wipe(tmp_path, monkeypatch):
+    """main() routes 'wipe' with the per-run cluster_config (#449).
+
+    Fills the main() dispatcher gap: prior tests exercised _cmd_wipe
+    directly but did not verify the argv → _load_run_cluster_config →
+    _cmd_wipe wiring, nor that the resolved run_dir + cluster_config
+    make it through unchanged.
+    """
+    from unittest.mock import patch
+    import pipeline.deploy as mod
+
+    monkeypatch.setattr("sys.argv", [
+        "deploy.py", "--experiment-root", str(tmp_path),
+        "--run", "trial-1", "wipe", "--yes",
+    ])
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+
+    wipe_calls = []
+
+    def mock_wipe(args, run_dir, *, cluster_config=None):
+        wipe_calls.append((run_dir, cluster_config))
+
+    with patch.object(mod, "_cmd_wipe", mock_wipe), \
+         patch.object(mod, "_load_run_cluster_config",
+                      return_value={"namespaces": ["ns-0"]}), \
+         patch.object(mod, "_load_setup_config", return_value={}):
+        mod.main()
+
+    assert len(wipe_calls) == 1
+    run_dir, cluster_config = wipe_calls[0]
+    assert run_dir.name == "trial-1"
+    assert cluster_config == {"namespaces": ["ns-0"]}

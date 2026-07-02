@@ -7,10 +7,10 @@ The pipeline has two phases:
 ```
 cluster.py provision  (one-time per cluster — bootstrap namespaces, RBAC, PVCs, Tekton tasks, Pipeline definition)
                    ↓
-setup.py → prepare.py → [/sim2real-translate] → deploy.py   (per-workspace + per-run)
+setup.py → sim2real translation register → sim2real assemble → deploy.py   (per-workspace + per-run)
 ```
 
-`run.py` manages runs independently of the main flow.
+`sim2real.py`'s `use` and `list runs` subcommands manage runs independently of the main flow.
 
 ---
 
@@ -25,19 +25,22 @@ When algorithm content lives in its own repo (peer directory), pass `--experimen
 python pipeline/cluster.py provision <cluster_id> --namespaces NS1,NS2,...
 
 # Per-workspace + per-run cycle:
-python pipeline/setup.py   --experiment-root ../admission-control
-python pipeline/prepare.py --experiment-root ../admission-control
-python pipeline/deploy.py  --experiment-root ../admission-control
+python pipeline/setup.py       --experiment-root ../admission-control
+python pipeline/sim2real.py translation register \
+    --algorithm <name> --image <ref> --config <treatment-overlay-path>
+python pipeline/sim2real.py assemble \
+    --translation <hash> --cluster <cluster_id> --run <run_name>
+python pipeline/deploy.py      --experiment-root ../admission-control
 ```
 
 The experiment repo must contain:
-- `transfer.yaml` (or `config/transfer.yaml` for backward compat) — v3 schema with `target`, `config`, `build`, `epp_image` fields
-- `baseline.yaml` — llmdbenchmark-style scenario file (required for Phase 4 assembly)
-- `treatment.yaml` (optional) — merged into `baseline.yaml` for the treatment scenario
-- `algorithm/` and `workloads/` directories as referenced in `transfer.yaml`
+- `transfer.yaml` (or `config/transfer.yaml` for backward compat) — v3 schema with `component`, `baselines`, `algorithms`, `workloads` fields
+- `baselines/<name>.yaml` — llmdbenchmark-style scenario file per baseline (referenced from `transfer.yaml:baselines[].scenario`)
+- `baselines/defaults/*.yaml` (optional) — framework workaround fragments merged as an overlay under each baseline (opt out via `defaults.disable`)
+- `workloads/` directory referenced from `transfer.yaml:workloads`
 - `workspace/` in `.gitignore`
 
-`pipeline/pipeline.yaml` is the static Tekton Pipeline definition (applied by `cluster.py provision`; Phase 4 generates PipelineRuns that reference it).
+`pipeline/pipeline.yaml` is the static Tekton Pipeline definition (applied by `cluster.py provision`; `sim2real assemble` generates PipelineRuns that reference it).
 
 ---
 
@@ -85,7 +88,7 @@ python pipeline/cluster.py provision <cluster_id> --namespaces NS1,NS2,... [flag
 
 Workspace config writer. Writes `workspace/setup_config.json` and `workspace/runs/<run>/run_metadata.json` with operator-side fields (registry, repo_name, current_run, orchestrator_image, sim2real_root). Idempotent.
 
-Cluster-side provisioning (namespaces, RBAC, secrets, PVCs, Tekton tasks, Pipeline definition) lives in `cluster.py provision` and writes a separate `workspace/clusters/<cluster_id>/cluster_config.json`. Run `cluster.py provision` before `prepare.py` / `deploy.py`. The Pipeline manifest override (`--pipeline-yaml`) lives on `cluster.py provision`, not here.
+Cluster-side provisioning (namespaces, RBAC, secrets, PVCs, Tekton tasks, Pipeline definition) lives in `cluster.py provision` and writes a separate `workspace/clusters/<cluster_id>/cluster_config.json`. Run `cluster.py provision` before `sim2real assemble` / `deploy.py`. The Pipeline manifest override (`--pipeline-yaml`) lives on `cluster.py provision`, not here.
 
 ```bash
 python pipeline/setup.py [flags]
@@ -109,45 +112,107 @@ Cluster-scoped fields (`namespaces`, `is_openshift`, `storage_class`, `secret_na
 
 ---
 
-## prepare.py
+## sim2real.py
 
-6-phase state machine. Re-running skips completed phases.
+Top-level CLI introduced in step-1 of the v2 refactor. Subcommands land incrementally across the step-1 epic; this section describes only what ships in step-1 PR 1.
 
-```bash
-python pipeline/prepare.py [--force] [--rebuild-context] [--manifest PATH] [--run NAME]
-```
+### Register a translation (BYO)
 
-| Phase | Name | Skippable |
-|-------|------|-----------|
-| 1 | Init — validate manifest + prerequisites | on re-run |
-| 2 | Context — assemble + cache context doc (SHA-256) | on cache hit |
-| 3 | **Translate checkpoint** — write `skill_input.json`, wait (skipped if no algorithm) | resumes on re-run |
-| 4 | Assembly — resolved scenarios, cluster YAMLs, PipelineRuns | on re-run |
-| 5 | Summary — write `run_summary.md` | on re-run |
-| 6 | **Gate** — print summary, mark `READY TO DEPLOY` | on re-run |
-
-**Phase 1 ref validation**: If `component.ref` is set in the manifest, Phase 1 resolves it via `git rev-parse` in the component submodule and compares against HEAD. A mismatch produces a warning (not a hard error) with the expected/actual SHA and a checkout command. Missing submodule or non-git directory with `component.ref` set is a hard error with an init command.
-
-**Phase 3 checkpoint**: iterates over each algorithm in the manifest. For each, checks whether `generated/{algo_name}/{algo_name}_output.json` exists. If any algorithm is untranslated, writes `skill_input.json` (with `current_algorithm` targeting the next pending algorithm) and exits cleanly (exit 0). Run `/sim2real-translate` in Claude Code, then re-run `prepare.py`. When all algorithms are translated, writes a top-level `translation_output.json` index and proceeds to Phase 4. When no `algorithm` is present in the manifest, Phase 3 is skipped entirely (baseline-only mode).
-
-**Phase 4 assembly** reads baseline scenario files from the experiment root, merges them with skill-generated overlay files from `generated/`. For multi-algorithm runs, each algorithm's overlay is in `generated/{algo_name}/{algo_name}_config.yaml`. For single-algorithm runs, the overlay may be at `generated/{name}_config.yaml` or `generated/treatment_config.yaml` (legacy). Resolved scenario files are written to `cluster/`. PipelineRuns are generated with a `scenarioContent` param containing the fully resolved scenario YAML. Workloads are loaded from the manifest.
-
-**Phase 6 gate**: prints `run_summary.md`, appends `**Verdict: READY TO DEPLOY**` to it, and marks the `gate` phase done. Non-interactive — abort the run by Ctrl-C before invoking `deploy.py`. The recorded verdict is surfaced by `run.py list/inspect` but is not enforced by `deploy.py`.
-
-**Subcommands:**
+`sim2real.py translation register` imports a pre-built EPP image and its treatment overlay YAML as a registered translation. Downstream commands (`assemble`, `deploy.py run`) treat a BYO-registered translation identically to a skill-produced one.
 
 ```bash
-python pipeline/prepare.py status              # show phase state for current run
-python pipeline/prepare.py context             # rebuild context cache only
-python pipeline/prepare.py assemble            # re-run phases 4–6 (translation must exist)
-python pipeline/prepare.py validate-assembly   # run assembly checks standalone
+python pipeline/sim2real.py translation register \
+    --algorithm softreflective \
+    --image ghcr.io/kalantar-msb/sr-router:some-tag \
+    --config path/to/treatment-overlay.yaml \
+    [--baseline-config path/to/baseline-overlay.yaml] \
+    [--registered-hash <expected-sha256-hex>] \
+    [--experiment-root PATH]
 ```
 
-**`--force`** — ignores `.state.json` and regenerates all phases.
+| Flag | Required | Notes |
+|------|----------|-------|
+| `--algorithm NAME` | yes | `[a-z0-9-]+`. Single algorithm per call in step-1. |
+| `--image REF` | yes | Registry ref. If it contains `@sha256:HEX`, that digest is recorded; otherwise `image_digest` is `null` with a warning. |
+| `--config PATH` | yes | Treatment overlay YAML. Validated as YAML before any writes. |
+| `--baseline-config PATH` | no | Baseline overlay YAML, if the translation needs one. |
+| `--registered-hash HASH` | no | Assert the computed `translation_hash` equals this value; error if not. |
+| `--experiment-root PATH` | no | Defaults to cwd. |
 
-**`--rebuild-context`** — ignores SHA cache and re-assembles context.
+**Outputs** — under `workspace/translations/<translation_hash>/`:
 
-Phase state is tracked per-run in `workspace/runs/<run>/.state.json`. Delete it (or use `--force`) to reset.
+- `translation_output.json` — algorithm index + provenance (v1 schema).
+- `registered.json` — image ref + digest (BYO-only audit trail; v1 schema).
+- `generated/<algorithm>/<algorithm>_config.yaml` — the treatment overlay content.
+- `generated/baseline_config.yaml` — present only when `--baseline-config` is given.
+
+**`translation_hash` derivation (BYO):** SHA-256 hex over canonical JSON of `{algorithm_name, config_sha256, image_digest_or_ref}`. Deterministic — same inputs produce the same hash. When the image ref lacks a digest, the raw ref string is substituted for `image_digest_or_ref`, so the hash is stable within the offline session but changes if the same image is later re-registered with a digest ref.
+
+**Idempotency:** re-registering the same triple (algorithm, image, config content) is a no-op — the existing translation directory is detected, a warning is printed, and exit is 0.
+
+**Failure modes:**
+
+- `--config` file missing or malformed YAML → exit 2, no writes.
+- Existing translation directory records a different algorithm name (hash collision) → exit 2, no writes.
+- `--registered-hash` given and does not match computed → exit 2, no writes.
+
+---
+
+## Assemble a run
+
+Once a translation is registered, `sim2real assemble` produces a run directory under `workspace/runs/<run>/` containing the resolved scenario YAMLs, generated PipelineRun manifests, an assembly-slice snapshot, and per-run metadata.
+
+```bash
+python pipeline/sim2real.py assemble \
+    --translation HASH \
+    --cluster CLUSTER_ID \
+    --run RUN_NAME \
+    [--force]
+```
+
+**Inputs read:**
+
+- `workspace/translations/<hash>/translation_output.json` — algorithms + image_ref.
+- `workspace/translations/<hash>/generated/baseline_config.yaml` — optional baseline overlay (written when `translation register --baseline-config` was passed).
+- `workspace/translations/<hash>/generated/<algo>/<algo>_config.yaml` — per-algorithm treatment overlay.
+- `workspace/clusters/<cluster_id>/cluster_config.json` — namespaces, workspace bindings, hf secret name.
+- `<experiment-root>/transfer.yaml` (or `config/transfer.yaml`) — v3 manifest.
+- `<experiment-root>/baselines/<name>.yaml` — baseline bundles referenced by `transfer.yaml:baselines[].scenario`.
+- `<experiment-root>/baselines/defaults/*.yaml` — framework defaults overlays (opt-out via `transfer.yaml:defaults.disable`).
+- `<sim2real-repo>/.gitmodules` and `<sim2real-repo>/{inference-sim,llm-d-benchmark}/` — the framework submodules' clone URLs (from `.gitmodules`) and HEAD SHAs (from `git rev-parse HEAD`), which populate `benchmarkGitRepoUrl` / `benchmarkGitCommit` / `blisGitRepoUrl` / `blisGitCommit` in every generated PipelineRun. Initialize with `git submodule update --init` in the sim2real repo before running `sim2real assemble`; a missing submodule falls back to `"unknown"` for its commit SHA (assemble prints a warning) and the cluster-side `git clone` step then fails visibly at the right point.
+
+**Outputs written to `workspace/runs/<run>/`:**
+
+| File | Purpose |
+|------|---------|
+| `manifest.assembly.yaml` | Verbatim snapshot of the assembly slice from `transfer.yaml` (produced by `pipeline/lib/slicer.py`). |
+| `run_metadata.json` | `{version, run_name, translation_hash, cluster_id, params_hash, image_tag, assembled_at}` — pinned schema, `version: 1`. |
+| `cluster/baseline.yaml` | Resolved baseline scenario (framework defaults → bundle → baseline overlay). |
+| `cluster/<algo>.yaml` | Resolved treatment scenario per registered algorithm (baseline_resolved → treatment bundle diffs → algo overlay → injected image_tag). |
+| `cluster/pipelinerun-<workload>-<package>.yaml` | One PipelineRun per (workload, package). Consumed by `deploy.py run`. |
+
+**Assembly formula** (deep-merged via `pipeline/lib/values.py:deep_merge`):
+
+```
+baseline_resolved  = deep_merge(framework_defaults, baseline_bundle, baseline_overlay)
+treatment_resolved = deep_merge(baseline_resolved, treatment_bundle_diffs, algo_overlay)
+```
+
+Then the treatment scenario has `images.inferenceScheduler` set from `translation_output.json:image_ref`, and every scenario has `huggingface.secretName` set from `cluster_config.json:secret_names.hf_token`.
+
+**`params_hash`** is SHA-256 over the bytes of `manifest.assembly.yaml`. Recorded in `run_metadata.json` for later drift detection (step-4 of the epic).
+
+**Algorithm filtering:** algorithms listed in `transfer.yaml:algorithms` but absent from `translation_output.json:algorithms` are skipped with a warning — the run still assembles for the algorithms that are registered.
+
+**Failure modes:**
+
+- Existing `runs/<run>/` without `--force` → exit 2 with `--force` hint. No writes.
+- Missing translation directory or `translation_output.json` → exit 2, no writes.
+- Missing `cluster_config.json` for `--cluster` → exit 2, no writes.
+- Workload file referenced in `transfer.yaml:workloads` missing → exit 2, no writes.
+- Malformed YAML anywhere in the input chain → exit 2, no writes.
+
+`--force` recursively deletes `workspace/runs/<run>/` before re-materializing it.
 
 ---
 
@@ -188,7 +253,7 @@ python pipeline/deploy.py wipe  [flags]     # delete local result files for pair
 python pipeline/deploy.py pairs   [flags]   # list available pair keys, workloads, and packages
 ```
 
-**`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, and retries pairs that time out. Reads progress from the run-scoped `sim2real-progress-{run}` ConfigMap to resume interrupted runs. Requires a configured namespace. Use `deploy.py collect` to pull results off-cluster after runs complete.
+**`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, and retries pairs that time out. Reads progress from the run-scoped `sim2real-progress-{run}` ConfigMap to resume interrupted runs. Requires a configured namespace. Use `deploy.py collect` to pull results off-cluster after runs complete. The run's cluster is resolved from `workspace/runs/<R>/run_metadata.json:cluster_id`; if the run directory or its `cluster/` subdirectory does not exist, `deploy.py run --run <R>` exits with `run 'sim2real assemble --run <R>' first`, and if `run_metadata.json` is missing, unparseable, or lacks a non-empty `cluster_id`, it exits with `run metadata corrupted; re-assemble`.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -234,7 +299,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 | `--status STATE` | Filter by status (e.g. `running`, `done`, `failed`) |
 | `-s`, `--silent` | Suppress the per-pair table and banner; print only the summary line (machine-readable) |
 
-**`deploy.py collect`** — extracts results from the cluster PVC and writes to `workspace/runs/<run>/results/{phase}/<workload>/`. Repeated collects are incremental: each workload's remote `trace_data.csv` mtime is probed and skipped if the local copy is already up to date. If the mtime probe fails (e.g., pod not running), collection falls back to a full copy — this is the expected degradation path.
+**`deploy.py collect`** — extracts results from the cluster PVC and writes to `workspace/runs/<run>/results/{phase}/<workload>/`. Repeated collects are incremental: each workload's remote `trace_data.csv` mtime is probed and skipped if the local copy is already up to date. If the mtime probe fails (e.g., pod not running), collection falls back to a full copy — this is the expected degradation path. Like `deploy.py run`, the run's cluster is resolved from `workspace/runs/<R>/run_metadata.json:cluster_id`; missing `runs/<R>/` or `runs/<R>/cluster/` exits with `run 'sim2real assemble --run <R>' first`, and a missing / unparseable `run_metadata.json` or missing `cluster_id` exits with `run metadata corrupted; re-assemble`.
 
 Per phase, the resolved llm-d-benchmark plan YAMLs are also pulled into `workspace/runs/<run>/results/{phase}/plans/{flow}/*.yaml` (top-level numbered manifests + `config.yaml`, no `helm/` subdir). Plans are workload-invariant within a phase, so collect picks one workload's latest `root-*` render to source the phase's plans. Plan extraction is best-effort and non-fatal — failures warn but do not block trace collection.
 
@@ -286,19 +351,102 @@ Flags are mutually exclusive. Default (no flag) prints a human-readable table wi
 
 ---
 
-## run.py
+## Manage runs
 
-Manage and switch between runs.
+`pipeline/sim2real.py` exposes two run-management subcommands.
 
 ```bash
-python pipeline/run.py --experiment-root ../admission-control list
-python pipeline/run.py --experiment-root ../admission-control inspect <name>
-python pipeline/run.py --experiment-root ../admission-control switch <name>
+python pipeline/sim2real.py --experiment-root ../admission-control list runs
+python pipeline/sim2real.py --experiment-root ../admission-control use --run <name>
 ```
 
 `--experiment-root` defaults to the current working directory; omit it when running from the experiment repo root.
 
-**`switch`** copies files listed in `translation_output.json` (`files_created` + `files_modified`) into the experiment repo's `llm-d-inference-scheduler/` directory and updates `setup_config.json`. For per-algorithm index format, copies from `generated/{algo_name}/` using full relative paths. Prompts before overwriting uncommitted changes.
+**`sim2real list runs`** — Walks `workspace/runs/*/run_metadata.json` and prints one row per run, newest first (mtime desc). Columns: `RUN_NAME`, `TRANSLATION` (first 8 chars of the translation hash), `CLUSTER`, `ASSEMBLED`. The active run (`current_run` in `setup_config.json`) is marked with `*`. Prints `no runs yet` and exits 0 if `workspace/runs/` is empty or missing. A subdirectory without `run_metadata.json` is skipped; a corrupt `run_metadata.json` renders `?` cells instead of aborting the listing.
+
+**`sim2real use --run <name>`** — Sets `current_run` in `setup_config.json` to the given run. Errors with `"run doesn't exist; try 'sim2real list runs'"` (exit 2) if `workspace/runs/<name>/run_metadata.json` does not exist. Read-modify-write preserves unrelated keys in `setup_config.json`.
+
+The previous `run.py inspect` debug view is dropped without replacement — `cat workspace/runs/<name>/run_metadata.json` is the shortest path. If a structured inspect surfaces demand, a follow-up `sim2real inspect run <name>` can be filed against the epic.
+
+---
+
+## End-of-step-1 BYO demo
+
+The full BYO flow. Every step is idempotent and re-runnable. Substitute your own values for `<cluster_id>`, `<run-name>`, `<algorithm>`, `<image-ref>`, and `<treatment-overlay-path>`.
+
+### Prerequisites
+
+- An experiment repo with `transfer.yaml`, `baselines/<name>.yaml`, and the workloads referenced in `transfer.yaml:workloads`.
+- A cluster with kubectl / Tekton reachable.
+- Registry credentials (HF, image registry) exported or provided via flags.
+
+### 1. Provision the cluster (one-time)
+
+```bash
+python pipeline/cluster.py provision <cluster_id> --namespaces sim2real-0,sim2real-1
+```
+
+Writes `workspace/clusters/<cluster_id>/cluster_config.json`. Idempotent — re-run when adding namespace slots.
+
+### 2. Configure the workspace (one-time per experiment repo)
+
+```bash
+python pipeline/setup.py --experiment-root <experiment-root>
+```
+
+Writes `workspace/setup_config.json` with registry, orchestrator image, and `current_run` defaults.
+
+### 3. Register a translation (BYO)
+
+```bash
+python pipeline/sim2real.py translation register \
+    --algorithm <algorithm> \
+    --image <image-ref> \
+    --config <treatment-overlay-path> \
+    --experiment-root <experiment-root>
+```
+
+Writes `workspace/translations/<hash>/` with `translation_output.json`, `registered.json`, and `generated/<algorithm>/<algorithm>_config.yaml`. Prints the `<hash>` on success.
+
+### 4. Assemble the run
+
+```bash
+python pipeline/sim2real.py assemble \
+    --translation <hash> \
+    --cluster <cluster_id> \
+    --run <run-name> \
+    --experiment-root <experiment-root>
+```
+
+Writes `workspace/runs/<run-name>/` with resolved scenario YAMLs, `pipelinerun-*.yaml` manifests, `manifest.assembly.yaml`, and `run_metadata.json`.
+
+### 5. Deploy (orchestrate PipelineRuns)
+
+```bash
+python pipeline/deploy.py --experiment-root <experiment-root> \
+    --run <run-name> run
+```
+
+Builds the treatment EPP image (if not current), dispatches PipelineRuns across the namespace slots, and polls for completion. Progress lands in the run-scoped `sim2real-progress-<run-name>` ConfigMap. Use `deploy.py --run <run-name> status` to snapshot progress; use `deploy.py --run <run-name> stop` to cancel the remote orchestrator Job (if `--remote` was passed); use `deploy.py --run <run-name> reset` to requeue non-pending pairs (which also cancels their in-flight PipelineRuns).
+
+### 6. Collect results
+
+```bash
+python pipeline/deploy.py --experiment-root <experiment-root> \
+    --run <run-name> collect
+```
+
+Pulls per-pair `per_request_lifecycle_metrics.json` and GPU logs from the cluster PVC into `workspace/runs/<run-name>/results/<phase>/<workload>/`. This is the epic's success gate — the demo is done when the JSON files exist locally.
+
+### Success criterion
+
+For each `<workload>` in `transfer.yaml:workloads` and each `<phase>` in `{baseline, <algorithm>}`:
+
+```
+workspace/runs/<run-name>/results/<phase>/<workload>/per_request_lifecycle_metrics.json
+```
+
+Once these files exist, step-1's BYO demo is complete. Downstream skills (e.g. `/sim2real-analyze`) consume them for latency comparison and report generation.
 
 ---
 
@@ -307,18 +455,16 @@ python pipeline/run.py --experiment-root ../admission-control switch <name>
 | Module | Purpose |
 |--------|---------|
 | `manifest.py` | Loads and validates `transfer.yaml` (v3 schema) |
-| `state_machine.py` | Phase tracking with atomic JSON persistence (`.state.json`) |
-| `context_builder.py` | Assembles context document, caches by SHA-256 hash |
-| `values.py` | Deep-merge utility used by `assemble.py` |
-| `assemble.py` | Scenario assembly: deep-merges bundles + overlays into resolved scenarios |
+| `slicer.py` | Splits `transfer.yaml` into translation-slice vs assembly-slice + computes `translation_hash` |
+| `assemble_run.py` | Assembly logic behind `sim2real assemble` (deep-merge + PipelineRun generation) |
+| `values.py` | Deep-merge utility used by `assemble_run.py` |
 | `tekton.py` | Generates PipelineRun YAMLs |
 | `pod_pending.py` | Classifies pod scheduling failures (recoverable vs not) |
-| `run_manager.py` | `list_runs`, `inspect_run`, `switch_run` logic |
 | `remote.py` | ConfigMap + Job generation for `deploy.py run --remote` |
 | `capacity.py` | Cluster GPU capacity probe (taint / cordon / product filter) |
 | `cluster_ops.py` | Cluster-side primitives: read/write/update `cluster_config.json`, `provision_namespace`, `apply_cluster_resources`, `detect_openshift` |
-| `layout.py` | Workspace path helpers (`workspace_dir`, `cluster_dir`, `cluster_config_path`, `runs_dir`, `setup_config_path`) |
-| `slicer.py` | Splits `transfer.yaml` into translation-slice vs assembly-slice + computes `translation_hash` |
+| `layout.py` | Workspace path helpers (`workspace_dir`, `cluster_dir`, `cluster_config_path`, `runs_dir`, `translations_dir`, `translation_dir`, `setup_config_path`) |
+| `epp.py` | EPP image injection helpers (`inject_epp_image`, `inject_image_ref`) |
 
 ---
 
@@ -328,15 +474,14 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). Key files:
 
 | File | Written by | Read by |
 |------|-----------|---------|
-| `setup_config.json` (workspace fields: registry, repo_name, current_run, orchestrator_image, sim2real_root) | `setup.py` | `prepare.py`, `deploy.py`, `run.py` |
-| `clusters/<id>/cluster_config.json` (cluster fields: cluster_id, namespaces, is_openshift, storage_class, secret_names, workspaces, created_at) | `cluster.py provision` | `deploy.py`, `prepare.py`, `lib/remote.py` |
-| `runs/<run>/.state.json` | `prepare.py` | `prepare.py`, `deploy.py` |
-| `runs/<run>/run_metadata.json` | `setup.py`, `deploy.py` | `deploy.py`, `run.py` |
-| `runs/<run>/skill_input.json` | `prepare.py` Phase 3 | `/sim2real-translate` skill |
-| `runs/<run>/translation_output.json` | `prepare.py` Phase 3 (index) | `prepare.py` Phase 4, `deploy.py`, `run.py` |
-| `runs/<run>/generated/…` | `/sim2real-translate` skill | `prepare.py` Phase 4 |
-| `runs/<run>/cluster/…` | `prepare.py` Phase 4 | `deploy.py` |
-| `runs/<run>/run_summary.md` | `prepare.py` Phase 5 | human review |
+| `setup_config.json` (workspace fields: registry, repo_name, current_run, orchestrator_image, sim2real_root) | `setup.py`, `sim2real.py use` | `deploy.py`, `sim2real.py list runs` |
+| `clusters/<id>/cluster_config.json` (cluster fields: cluster_id, namespaces, is_openshift, storage_class, secret_names, workspaces, created_at) | `cluster.py provision` | `sim2real assemble`, `deploy.py`, `lib/remote.py` |
+| `translations/<hash>/translation_output.json` | `sim2real translation register` | `sim2real assemble`, `deploy.py` |
+| `translations/<hash>/registered.json` | `sim2real translation register` | audit trail |
+| `translations/<hash>/generated/…` | `sim2real translation register` | `sim2real assemble` |
+| `runs/<run>/run_metadata.json` | `sim2real assemble` | `deploy.py`, `sim2real.py list runs` |
+| `runs/<run>/manifest.assembly.yaml` | `sim2real assemble` | reproducibility / drift detection (step-4) |
+| `runs/<run>/cluster/…` | `sim2real assemble` | `deploy.py` |
 | `runs/<run>/results/{phase}/` | `deploy.py collect` | `/sim2real-analyze` skill, `deploy.py wipe` |
 | ConfigMap `sim2real-progress-{run}` | `deploy.py run`, `deploy.py reset` | all `deploy.py` subcommands |
 
@@ -346,7 +491,7 @@ See `CLAUDE.md`'s Workspace Artifacts table for the comprehensive per-file produ
 
 ## <experiment-repo>/transfer.yaml
 
-Manifest consumed by `prepare.py`. Version 3 required.
+Manifest consumed by `sim2real assemble`. Version 3 required.
 
 ```yaml
 kind: sim2real-transfer
@@ -371,13 +516,13 @@ workloads:
   - <path>                  # one or more workload YAMLs
 
 context:
-  text: |                   # freeform instructions for translation skill
-  files: [<path>, ...]      # files assembled into context document (Phase 2)
+  text: |                   # freeform instructions (consumed by step-2's translation skill)
+  files: [<path>, ...]      # files assembled into context document (step-2 consumer)
 
 defaults:                   # optional — controls framework defaults overlay
   disable: []               # fragment stems (filename without .yaml) to skip;
                             # fragments live in <experiment-root>/baselines/defaults/
-                            # and are merged UNDER each baseline at Phase 4. See
+                            # and are merged UNDER each baseline by `sim2real assemble`. See
                             # docs/troubleshooting.md#framework-defaults-overlay.
 
 # v3 fields (required unless noted)
@@ -408,15 +553,15 @@ blis_observe:               # optional — per-transfer overrides for blis obser
   extraArgs: ""             # the Pipeline defaults — Tekton handles the merge.
 ```
 
-All paths are relative to the repo root and validated at Phase 1.
+All paths are relative to the experiment root and validated by `sim2real assemble` at load time.
 
-`component.ref` (optional): tag, branch, or commit SHA identifying the expected version of the component submodule. Phase 1 warns on mismatch (see above).
+`component.ref` (optional): tag, branch, or commit SHA identifying the expected version of the component submodule. Reserved for step-2 (the skill-driven flow that will consume it).
 
 ---
 
 ## Parallel Pool Execution
 
-`cluster.py provision <cluster_id> --namespaces NS1,NS2,...` provisions N namespace slots, each bootstrapped identically. `prepare.py` generates one shared Tekton Pipeline plus one PipelineRun per `(workload, package)` pair. `deploy.py run` orchestrates execution by assigning pairs to free slots, polling for completion, and retrying on timeout. Use `deploy.py collect` to pull results off-cluster. `deploy.py status` reads progress from the ConfigMap.
+`cluster.py provision <cluster_id> --namespaces NS1,NS2,...` provisions N namespace slots, each bootstrapped identically. `sim2real assemble` generates one PipelineRun per `(workload, package)` pair (the shared Tekton Pipeline itself is applied by `cluster.py provision`). `deploy.py run` orchestrates execution by assigning pairs to free slots, polling for completion, and retrying on timeout. Use `deploy.py collect` to pull results off-cluster. `deploy.py status` reads progress from the ConfigMap.
 
 | Artifact | Written by | Read by |
 |----------|-----------|---------|
@@ -428,26 +573,21 @@ All subcommands (`status`, `collect`, `run`, `reset`, `wipe`) use a run-scoped `
 
 ## Scenario Overlay Format
 
-The `/sim2real-translate` skill produces overlay files in `workspace/runs/<run>/generated/`:
+`sim2real translation register` writes overlay files under `workspace/translations/<hash>/generated/` (step-1 BYO path — step-2 will restore the skill-driven producer):
 
-**Per-algorithm layout** (multi-algorithm manifests):
-- `baseline_config.yaml` — shared baseline overlay (merged onto all baselines)
-- `{algo_name}/{algo_name}_config.yaml` — per-algorithm treatment overlay
-- `{algo_name}/{algo_name}_output.json` — per-algorithm translation metadata
-- `{algo_name}/...` — generated source files with full relative paths
-
-**Legacy flat layout** (single-algorithm, backward compat):
-- `baseline_config.yaml` — overlay merged onto `baseline.yaml`
-- `treatment_config.yaml` — overlay merged onto the already-resolved baseline
+- `baseline_config.yaml` — optional shared baseline overlay (present when `--baseline-config` was passed to `translation register`)
+- `{algo_name}/{algo_name}_config.yaml` — per-algorithm treatment overlay (verbatim copy of the `--config` file)
 
 ### Assembly formula
 
+`sim2real assemble` deep-merges via `pipeline/lib/values.py:deep_merge`:
+
 ```python
-baseline_resolved = deep_merge(baseline_bundle, baseline_overlay)
-treatment_resolved = deep_merge(deep_merge(baseline_resolved, treatment_diffs), treatment_overlay)
+baseline_resolved = deep_merge(framework_defaults, baseline_bundle, baseline_overlay)
+treatment_resolved = deep_merge(baseline_resolved, treatment_bundle_diffs, algo_overlay)
 ```
 
-Where `baseline_bundle` is the experiment's `baseline.yaml`, `treatment_diffs` is the experiment's optional `treatment.yaml`, and the overlays are the skill outputs.
+Where `baseline_bundle` is the experiment's `baselines/<name>.yaml`, `treatment_diffs` is the experiment's optional `treatment.yaml`, `framework_defaults` merges `<experiment-root>/baselines/defaults/*.yaml` fragments (opt out via `transfer.yaml:defaults.disable`), and the overlays are the files written by `sim2real translation register`.
 
 ### Deep merge semantics
 
@@ -512,7 +652,7 @@ inferenceExtension:
 
 **Treatment overlay** — only the delta from baseline:
 - `inferenceExtension.pluginsCustomConfig` (evolved scorer config)
-- `images.inferenceScheduler` (custom EPP image — injected by `prepare.py`, not the skill)
+- `images.inferenceScheduler` (custom EPP image — injected by `sim2real assemble` from `translation_output.json:image_ref`)
 
 If treatment uses the same InferenceObjectives as baseline, do NOT repeat them — they propagate from `baseline_resolved`.
 
@@ -521,11 +661,11 @@ If treatment uses the same InferenceObjectives as baseline, do NOT repeat them �
 ## Common patterns
 
 ```bash
-# Resume after translation
-python pipeline/prepare.py
+# Assemble a run
+python pipeline/sim2real.py assemble --translation HASH --cluster CID --run trial-1
 
-# Force full regeneration
-python pipeline/prepare.py --force
+# Re-assemble the same run (clobbers workspace/runs/trial-1/)
+python pipeline/sim2real.py assemble --translation HASH --cluster CID --run trial-1 --force
 
 # Resubmit without rebuilding EPP
 python pipeline/deploy.py --skip-build-epp

@@ -4,7 +4,7 @@ Experiment-config issues operators encounter when running the sim2real pipeline.
 
 ## Framework defaults overlay
 
-The workarounds below are applied automatically by `prepare.py` Phase 4 via a defaults overlay. `sim2real-bootstrap` copies framework templates into `<experiment-root>/baselines/defaults/` at bootstrap time, and `assemble.py` deep-merges enabled fragments under each baseline (precedence: defaults → experiment baseline → skill overlay). Treatment scenarios inherit transitively through the resolved baseline.
+The workarounds below are applied automatically by `sim2real assemble` via a defaults overlay. `sim2real-bootstrap` copies framework templates into `<experiment-root>/baselines/defaults/` at bootstrap time, and `pipeline/lib/assemble_run.py` deep-merges enabled fragments under each baseline (precedence: defaults → experiment baseline → registered overlay). Treatment scenarios inherit transitively through the resolved baseline.
 
 The fragments shipped today:
 

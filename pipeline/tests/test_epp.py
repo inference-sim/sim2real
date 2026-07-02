@@ -2,8 +2,8 @@
 
 import yaml
 
-from pipeline.lib.assemble import assemble_scenarios
 from pipeline.lib.epp import inject_epp_image, inject_image_ref
+from pipeline.lib.values import deep_merge
 from pipeline.lib.tekton import make_pipelinerun_scenario
 
 
@@ -163,20 +163,18 @@ class TestEppIntegration:
         _write(tmp_path / "generated" / "baseline_config.yaml", {})
         _write(tmp_path / "generated" / "treatment_config.yaml", treatment_overlay)
 
-        _, treatment_resolved = assemble_scenarios(
-            baseline_path=tmp_path / "baseline.yaml",
-            treatment_path=None,
-            baseline_overlay_path=tmp_path / "generated" / "baseline_config.yaml",
-            treatment_overlay_path=tmp_path / "generated" / "treatment_config.yaml",
-        )
+        # Deep-merge baseline + overlays inline (was assemble_scenarios in step-0;
+        # removed in step-1 alongside prepare.py).
+        baseline_resolved = deep_merge(baseline_data, {})
+        treatment_resolved = deep_merge(baseline_resolved, treatment_overlay)
 
-        # Inject EPP image (simulating what prepare.py does)
+        # Inject EPP image (simulating what sim2real assemble does)
         inject_epp_image(treatment_resolved, "ghcr.io/test", "my-epp", "run-42")
 
-        # Serialize (same as prepare.py line 452)
+        # Serialize (same shape as sim2real assemble's scenarioContent param)
         scenario_content = yaml.dump(treatment_resolved, default_flow_style=False, allow_unicode=True)
 
-        # Generate PipelineRun (same as prepare.py line 457)
+        # Generate PipelineRun (same shape as sim2real assemble)
         pr = make_pipelinerun_scenario(
             phase="treatment",
             workload={"name": "integration-wl"},
@@ -213,14 +211,11 @@ class TestEppIntegration:
         _write(tmp_path / "generated" / "baseline_config.yaml", {})
         _write(tmp_path / "generated" / "treatment_config.yaml", {})
 
-        baseline_resolved, treatment_resolved = assemble_scenarios(
-            baseline_path=tmp_path / "baseline.yaml",
-            treatment_path=None,
-            baseline_overlay_path=tmp_path / "generated" / "baseline_config.yaml",
-            treatment_overlay_path=tmp_path / "generated" / "treatment_config.yaml",
-        )
+        # Deep-merge inline; empty overlays are no-ops.
+        baseline_resolved = deep_merge(baseline_data, {})
+        treatment_resolved = deep_merge(baseline_resolved, {})
 
-        # Only inject into treatment (as prepare.py does)
+        # Only inject into treatment (as sim2real assemble does)
         inject_epp_image(treatment_resolved, "ghcr.io/test", "my-epp", "run-42")
 
         # Serialize baseline (NOT treatment)

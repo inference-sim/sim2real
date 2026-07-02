@@ -31,7 +31,7 @@ def set_experiment_root(arg: str | Path | None) -> Path:
     """Set the module-level experiment root from a CLI-arg-style value.
 
     Mirrors the resolution rule that today lives inline in
-    ``pipeline/setup.py``, ``pipeline/prepare.py``, and
+    ``pipeline/setup.py``, ``pipeline/sim2real.py``, and
     ``pipeline/deploy.py``: a non-empty ``arg`` is resolved to an absolute
     Path; an empty / None ``arg`` falls back to ``Path.cwd()``.
 
@@ -100,3 +100,28 @@ def setup_config_path() -> Path:
     (cluster-scoped fields move to ``cluster_config.json``).
     """
     return workspace_dir() / "setup_config.json"
+
+
+def translation_dir(translation_hash: str) -> Path:
+    """``workspace/translations/<hash>/``"""
+    return translations_dir() / translation_hash
+
+
+def translation_output_path(translation_hash: str) -> Path:
+    """``workspace/translations/<hash>/translation_output.json``"""
+    return translation_dir(translation_hash) / "translation_output.json"
+
+
+def registered_path(translation_hash: str) -> Path:
+    """``workspace/translations/<hash>/registered.json`` (BYO-only)."""
+    return translation_dir(translation_hash) / "registered.json"
+
+
+def generated_config_path(translation_hash: str, algorithm_name: str) -> Path:
+    """``workspace/translations/<hash>/generated/<algo>/<algo>_config.yaml``"""
+    return (
+        translation_dir(translation_hash)
+        / "generated"
+        / algorithm_name
+        / f"{algorithm_name}_config.yaml"
+    )
