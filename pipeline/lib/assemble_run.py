@@ -13,10 +13,12 @@ Pure module: no argparse, no print. Callers surface errors via the
 
 from __future__ import annotations
 
+import configparser
 import copy
 import hashlib
 import json
 import shutil
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -25,6 +27,90 @@ from pipeline.lib import cluster_ops, layout, slicer
 from pipeline.lib.manifest import ManifestError, load_manifest
 from pipeline.lib.tekton import make_pipelinerun_scenario
 from pipeline.lib.values import deep_merge
+
+
+# Framework repo root — three levels up from pipeline/lib/assemble_run.py.
+# Mirrors pipeline/lib/cluster_ops.py:_REPO_ROOT. Used to locate framework
+# submodules (inference-sim, llm-d-benchmark), which always live in the
+# framework repo — NOT in the experiment repo.
+_REPO_ROOT: Path = Path(__file__).resolve().parent.parent.parent
+
+
+# Framework submodule pair — pinned. These names appear in the PipelineRun
+# spec's benchmarkGit*/blisGit* params, and the cluster-side pipeline
+# clones them by URL and checks out the recorded SHA. The component
+# submodule (tracked by ``manifest["component"]["path"]``) is deliberately
+# out of scope: the component image reference comes from the registered
+# translation, not from a git ref.
+_FRAMEWORK_SUBMODULE_NAMES: tuple[str, ...] = ("inference-sim", "llm-d-benchmark")
+
+
+def discover_framework_submodules(
+    repo_root: Path,
+) -> tuple[dict[str, str], dict[str, str], list[str]]:
+    """Read framework submodule state from ``repo_root``.
+
+    Returns ``(shas, urls, missing)``:
+
+    - ``shas``: ``{name: sha}`` for each framework submodule. Value is
+      ``"unknown"`` when the directory is absent or the SHA lookup fails.
+      Callers pass this through to the PipelineRun spec verbatim; the
+      cluster-side clone step fails visibly on ``"unknown"``, which is
+      the intended posture — assemble succeeds locally so the operator
+      can inspect the run, cluster fails at the right step. Matches
+      legacy ``pipeline/prepare.py:_get_submodule_shas``.
+    - ``urls``: ``{name: url}`` for every framework submodule, sourced
+      from ``<repo_root>/.gitmodules``. Value is ``""`` when
+      ``.gitmodules`` is absent or has no entry for that name. URL
+      discovery is declarative and does not depend on the submodule
+      directory being populated.
+    - ``missing``: sorted list of framework submodule names whose
+      directory does not exist under ``repo_root``. The CLI wrapper
+      surfaces this as an operator warning via the side-band
+      ``missing_submodules`` attr.
+
+    ``repo_root`` is the framework repo root, not the experiment root.
+    """
+    shas: dict[str, str] = {}
+    missing: list[str] = []
+    for name in _FRAMEWORK_SUBMODULE_NAMES:
+        sub = repo_root / name
+        if not sub.exists() or not (sub / ".git").exists():
+            missing.append(name)
+            shas[name] = "unknown"
+            continue
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=sub,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            shas[name] = result.stdout.strip() or "unknown"
+        except (subprocess.CalledProcessError, OSError):
+            shas[name] = "unknown"
+
+    urls: dict[str, str] = {name: "" for name in _FRAMEWORK_SUBMODULE_NAMES}
+    gitmodules_path = repo_root / ".gitmodules"
+    if gitmodules_path.exists():
+        parser = configparser.ConfigParser()
+        try:
+            parser.read(gitmodules_path)
+        except configparser.Error:
+            # Corrupt .gitmodules — leave urls empty; missing already
+            # reflects any absent-on-disk submodules.
+            return shas, urls, sorted(missing)
+        for section in parser.sections():
+            # Sections look like: submodule "<name>"
+            if not (section.startswith('submodule "') and section.endswith('"')):
+                continue
+            name = section[len('submodule "'):-1]
+            if name not in _FRAMEWORK_SUBMODULE_NAMES:
+                continue
+            urls[name] = parser.get(section, "url", fallback="")
+
+    return shas, urls, sorted(missing)
 
 
 class AssembleError(Exception):
