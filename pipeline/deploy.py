@@ -49,7 +49,7 @@ def _c(code: str, text: str) -> str:
     return f"\033[{code}m{text}\033[0m" if _tty else text
 
 
-from pipeline.lib import cluster_ops, layout
+from pipeline.lib import build, cluster_ops, layout
 from pipeline.lib.log import info, ok, warn, err
 from pipeline.lib.redact import redact_yaml_file, redact_yaml_tree
 
@@ -251,7 +251,7 @@ def _write_build_metadata(run_dir: Path, epp_image: str) -> None:
         return
     meta["epp_image"] = epp_image
     meta.setdefault("stages", {}).setdefault("deploy", {})["last_completed_step"] = "build"
-    meta_path.write_text(json.dumps(meta, indent=2))
+    build.atomic_write_json(meta_path, meta)
 
 
 def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
@@ -401,15 +401,13 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
                 sys.exit(1)
 
         info(f"Building image: {ref}")
-        result = run(
-            ["bash", str(build_script),
-             "--run-dir", str(run_dir),
-             "--run-name", run_name,
-             "--namespace", namespace,
-             "--image-ref", ref,
-             "--source-dir", str(source_dir)],
-            check=False,
-            cwd=REPO_ROOT,
+        rc = build.dispatch_buildkit_build(
+            image_ref=ref,
+            build_id=run_name,
+            namespace=namespace,
+            source_dir=source_dir,
+            run_dir=run_dir,
+            repo_root=REPO_ROOT,
         )
 
         # Restore baseline after algorithm build (clean state for next iteration)
@@ -434,7 +432,7 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
                     f"  cd {source_dir} && git checkout -- .")
                 sys.exit(1)
 
-        if result.returncode != 0:
+        if rc != 0:
             err(f"Image build failed for {ref} — see output above")
             sys.exit(1)
 

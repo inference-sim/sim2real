@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -1008,8 +1009,18 @@ class TestAssembleResolvesAlias:
         monkeypatch.setattr(
             sim2real._assemble_run_lib, "assemble_run", fake_assemble
         )
-        # Also stub the manifest file so the pre-check passes.
-        (tmp_path / "transfer.yaml").write_text("kind: sim2real-transfer\n")
+        # Stub a minimal v3-valid transfer.yaml so the new image_ref pre-check
+        # in _cmd_assemble (which now calls manifest.load_manifest) succeeds.
+        # No algorithms declared here → the pre-check's declared_names ∩
+        # recorded_by_name is empty, so it trivially passes.
+        (tmp_path / "transfer.yaml").write_text(yaml.safe_dump({
+            "kind": "sim2real-transfer",
+            "version": 3,
+            "scenario": "smoke",
+            "baselines": [{"name": "base", "scenario": "baselines/base.yaml"}],
+            "component": {"repo": "example.com/x/y", "kind": "scorer"},
+            "context": {"text": "", "files": []},
+        }))
         parser = sim2real.build_parser()
         args = parser.parse_args([
             "--experiment-root", str(tmp_path),
@@ -1099,3 +1110,96 @@ class TestListTranslations:
         assert "2 pending" in out
         assert "1 built" in out
         assert "1 registered" in out
+
+
+class TestAssembleIncompleteTranslationCheck:
+    """--translation with null image_ref on any algorithm → exit 2."""
+
+    def _minimal_assemble_setup(self, tmp_path, image_ref=None):
+        """Materialize the minimum inputs for _cmd_assemble to reach the check.
+
+        Writes:
+          - workspace/setup_config.json (registry/repo_name)
+          - workspace/clusters/c/cluster_config.json
+          - workspace/translations/<hash>/translation_output.json
+          - <exp_root>/transfer.yaml
+        Returns translation_hash.
+        """
+        ws = tmp_path / "workspace"
+        (ws / "clusters" / "c").mkdir(parents=True)
+        (ws / "clusters" / "c" / "cluster_config.json").write_text(json.dumps({
+            "cluster_id": "c",
+            "namespaces": ["sim2real-slot1"],
+            "is_openshift": False,
+            "storage_class": "",
+            "secret_names": {"hf_token": "hf-token"},
+            "workspaces": [],
+        }))
+        thash = "a" * 64
+        tdir = ws / "translations" / thash
+        (tdir / "generated" / "softref").mkdir(parents=True)
+        (tdir / "translation_output.json").write_text(json.dumps({
+            "version": 1, "translation_hash": thash, "source": "skill",
+            "alias": "softref-alias",
+            "algorithms": [{
+                "name": "softref", "source_path": "algorithms/softref.py",
+                "source_sha256": "0" * 64, "config_path": None,
+                "image_ref": image_ref, "image_digest": None,
+            }],
+            "created_at": "2026-07-02T00:00:00Z",
+        }))
+        # A minimal-but-valid transfer.yaml.
+        (tmp_path / "algorithms").mkdir()
+        (tmp_path / "algorithms" / "softref.py").write_text("# stub\n")
+        (tmp_path / "transfer.yaml").write_text(yaml.safe_dump({
+            "kind": "sim2real-transfer", "version": 3,
+            "scenario": "softref-alias",
+            "baselines": [{"name": "base", "scenario": "baselines/base.yaml"}],
+            "algorithms": [
+                {"name": "softref", "source": "algorithms/softref.py",
+                 "defaults": "base"}
+            ],
+            "component": {"repo": "example.com/x/y", "kind": "scorer"},
+            "context": {"text": "", "files": []},
+        }))
+        return thash
+
+    def test_null_image_ref_fails_early_with_actionable_error(
+        self, tmp_path, capsys,
+    ):
+        self._minimal_assemble_setup(tmp_path, image_ref=None)
+        rc = sim2real.main([
+            "--experiment-root", str(tmp_path),
+            "assemble", "--translation", "softref-alias",
+            "--cluster", "c", "--run", "trial-1",
+        ])
+        assert rc == 2
+        err_out = capsys.readouterr().err
+        assert "not built for algorithms" in err_out
+        assert "softref" in err_out
+        assert "sim2real build --translation" in err_out
+        # No writes to runs/ happened.
+        assert not (tmp_path / "workspace" / "runs").exists()
+
+    def test_non_null_image_ref_passes_check(self, tmp_path):
+        """When image_ref is set, the check passes and assemble proceeds
+        into the (mocked) assemble_run.
+
+        Point of this test: verifying the check does NOT short-circuit
+        when the ref is set. We stub the underlying assemble_run to keep
+        the test focused on the check itself."""
+        self._minimal_assemble_setup(
+            tmp_path, image_ref="reg/repo:hash-softref"
+        )
+        with patch.object(
+            sim2real._assemble_run_lib, "assemble_run"
+        ) as mock_assemble:
+            rc = sim2real.main([
+                "--experiment-root", str(tmp_path),
+                "assemble", "--translation", "softref-alias",
+                "--cluster", "c", "--run", "trial-1",
+            ])
+        # If the check errored we would exit 2; passing check means we
+        # reach assemble_run, which is mocked so it returns None → rc=0.
+        assert rc == 0
+        mock_assemble.assert_called_once()
