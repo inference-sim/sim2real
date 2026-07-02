@@ -150,7 +150,47 @@ Also affected (already resolved by step shapes, but worth noting):
 
 ---
 
-### Step 3 — Scenario scaffolding
+### Step 3 — `sim2real-check` port
+
+**Plan says**: Port `.claude/skills/sim2real-check/SKILL.md` to accept `--translation T --run R`. Recompose the "real bundle" view from `workspace/translations/<hash>/generated/` + `workspace/runs/<R>/results/<phase>/<workload>/`. Preserve validation subsection structure. Don't add replica awareness (step 5). Don't fold in bootstrap (step 4).
+
+**Scope reality**:
+
+- **The port isn't mechanical find-replace.** The check skill's mental model today is "one bundle root with `generated/` + `baseline/`/`treatment/` as siblings, all under one directory the user picks." Step 2's outputs live under `workspace/translations/<hash>/generated/`; step 1's collected results live under `workspace/runs/<R>/results/<phase>/<workload>/`. The two roots are decoupled by design (that's the point of the three-dimensional split). The check skill's derivation logic has to compose paths from both at invocation time.
+
+- **The skill uses `AskUserQuestion` today for path confirmation.** Post-port, `--translation T --run R` are inputs; the skill can still confirm-and-adjust but the default is derived from the args. The confirmation prompt becomes a diagnostic rather than the primary input path — flag both cases in the SKILL.md.
+
+- **`sim2real list translations` becomes more useful once check accepts translation refs.** 3D lists it in the command table but no step ships it. Attach as a small deliverable to step 3 (~30 lines) or leave for a follow-up. If step 3 doesn't ship it, operators discover translations via `ls workspace/translations/` — workable but rough.
+
+- **Translation-ref resolution shape must match `build` and `assemble`.** Step 2 lands the resolver (name / prefix / hash). Step 3 reuses it. If step 2's resolver lives in `sim2real.py`, step 3's skill invocation path needs to call into the same code — either via a Python entry point the skill shells out to, or by embedding the resolution rules in the skill's argument-preprocess step.
+
+- **What check reads vs. writes.** Read-only. No new workspace state. Reports go to stdout or a caller-specified path. This makes the port lower-risk than the other skill ports (translate, bootstrap, analyze).
+
+**Open questions resolving in Step 3**:
+
+| # | Question | Source | Why it lands here |
+|---|---|---|---|
+| 36 | Translation-ref resolver shape shared with step 2 | this addendum | Skill must resolve names/prefixes/hashes; either shells out to Python or embeds the rule |
+| 37 | Handling multi-algorithm translations under `--translation T` | this addendum | Check all algorithms in T against run R, or accept `--algorithm A` to narrow? |
+| 38 | Legacy manually-picked-bundle-root mode: keep or drop? | this addendum | Existing users may still have pre-refactor bundles; supporting both modes vs. clean break |
+| 39 | Ship `sim2real list translations` here or defer | this addendum / 3D command table | Small delta; useful for discovery once names are aliases |
+
+**Risks specific to Step 3**:
+
+- The port's biggest risk is silent drift between where step 2 writes and where step 3 reads. Every path-composing rule step 3 encodes has to match step 2's writes exactly. Add an integration test that runs step 2's `assemble` end-to-end + step 3's check on the result.
+- If `sim2real list translations` is deferred, operators debugging a check failure ("which translation did I mean?") have no CLI tool to enumerate their translations. Manageable but rough.
+- The skill's existing `AskUserQuestion`-based prompt UX is well-established. Changing it without breaking user muscle memory means preserving the confirmation prompt even when args are supplied — treat args as defaults, not overrides.
+
+**Out-of-plan work attached to Step 3**:
+
+- Skill's existing tests (if any) rewritten for the new input model.
+- Documentation update in the skill's README describing the `--translation`/`--run` inputs.
+- Optional: `sim2real list translations` command (~30 lines in `sim2real.py`).
+- Integration test: step 2 assemble + step 3 check against the assembled run.
+
+---
+
+### Step 4 — Scenario scaffolding
 
 **Plan says**: Port `/sim2real-bootstrap` to new layout. Add `--byo` mode. "Don't ship a workload library yet unless one is clearly demanded."
 
@@ -162,7 +202,7 @@ Also affected (already resolved by step shapes, but worth noting):
 
 - **Workload library is resolved (not yet, user-provided).** Plan: "Don't ship a workload library yet." `--byo` mode therefore points the user at their own `workloads/` directory or refuses if absent.
 
-**Open questions resolving in Step 3**:
+**Open questions resolving in Step 4**:
 
 | # | Question | Source | Why it lands here |
 |---|---|---|---|
@@ -174,13 +214,13 @@ Resolved by plan / accepted:
 
 | 20 | Workload library shipping | BYO appendix §o.q.1 | Not yet; user-provided. Plan resolves. |
 
-**Risks specific to Step 3**:
+**Risks specific to Step 4**:
 
-- Schema implication: `transfer.yaml` schema (a Step 0 deliverable) must declare `component:` as optional. If Step 0 made it required, Step 3 forces a Step 0 schema amendment. Move this constraint to Step 0's design-epic explicitly.
+- Schema implication: `transfer.yaml` schema (a Step 0 deliverable) must declare `component:` as optional. If Step 0 made it required, Step 4 forces a Step 0 schema amendment. Move this constraint to Step 0's design-epic explicitly.
 - Bootstrap's existing tests use today's experiment-folder shape and produce today's `transfer.yaml`. Both inputs and outputs change. Test rewrite is non-trivial.
 - The skill's templates directory holds `defaults/*.yaml` framework workaround fragments. These follow the experiment repo's `baselines/defaults/` shape. Confirm whether the shape changes (probably not, but verify).
 
-**Out-of-plan work attached to Step 3**:
+**Out-of-plan work attached to Step 4**:
 
 - Bootstrap skill's README update (it has its own).
 - Tests for `--byo` mode (new test surface).
@@ -188,23 +228,23 @@ Resolved by plan / accepted:
 
 ---
 
-### Step 4 — Replicas + iteration filtering
+### Step 5 — Replicas + iteration filtering
 
 **Plan says**: Pair-key suffix support across `_is_pair_key`, `_load_pairs`, status formatting. `replicas` field in `manifest.assembly.yaml`. `replica` PipelineRun param threaded through `pipeline.yaml`. `--iteration` filter on all filter-aware subcommands. `/sim2real-analyze` aggregation. "Verify with a single replica end-to-end before going parallel."
 
 **Scope reality**:
 
-- **The pair-key parser change is larger than implied.** Today's `_is_pair_key` is one line — *just* a metadata-exclusion check, no structured parse. Step 4 introduces a 3-segment key (`wl-<workload>|<package>|i<N>`). Adding the suffix means the parser goes from "is this metadata?" to "parse this into (workload, package, iteration)" — a structural change that touches every callsite that reads pair-key fields. **Measured: `_is_pair_key` and `_load_pairs` together appear ~20 times in `deploy.py`.** Every one of those callsites is a review point.
+- **The pair-key parser change is larger than implied.** Today's `_is_pair_key` is one line — *just* a metadata-exclusion check, no structured parse. Step 5 introduces a 3-segment key (`wl-<workload>|<package>|i<N>`). Adding the suffix means the parser goes from "is this metadata?" to "parse this into (workload, package, iteration)" — a structural change that touches every callsite that reads pair-key fields. **Measured: `_is_pair_key` and `_load_pairs` together appear ~20 times in `deploy.py`.** Every one of those callsites is a review point.
 
 - **`pipeline.yaml` param threading is silent-on-error.** The replicas proposal says: thread `replica` through every task that touches `resultsDir`. Reading current `pipeline.yaml`: it has ~20 params already, and several tasks use `resultsDir`-shaped paths. Forgetting one task = silently wrong directory at runtime, only caught when results land in the wrong place. **The plan flags this** ("verify with a single replica before going parallel") but it deserves a dedicated checklist: list every task in `pipeline.yaml` that references results, confirm each one gets the new param.
 
-- **Additive merge for `assemble`.** Step 1's `assemble` was single-replica (per the plan: "Don't generalize for replicas. Single pair key per (workload, phase)"). Step 4 grows it to support `--replicas N` re-runs with the additive-merge invariant. This is a real API change to a deliverable from three steps prior. Tests for additive-merge edge cases (replicas 3→5: preserve i1..i3, add i4..i5; replicas 3→1: refuse without `--force-shrink`) didn't exist in Step 1 and need to land here.
+- **Additive merge for `assemble`.** Step 1's `assemble` was single-replica (per the plan: "Don't generalize for replicas. Single pair key per (workload, phase)"). Step 5 grows it to support `--replicas N` re-runs with the additive-merge invariant. This is a real API change to a deliverable from three steps prior. Tests for additive-merge edge cases (replicas 3→5: preserve i1..i3, add i4..i5; replicas 3→1: refuse without `--force-shrink`) didn't exist in Step 1 and need to land here.
 
 - **`/sim2real-analyze` aggregation across replicas.** Today the skill reads single per-(phase, workload) directories. New shape: walks `iN/` subdirs and aggregates (mean ± std, percentiles). The replicas proposal suggests an `aggregate.json` pre-skill helper as the simpler shape — recommended. The aggregation math itself is straightforward but the skill's prompt needs significant update.
 
-- **Coexistence problem.** During Step 4 development, runs from Step 1–3 demos lack the `iN/` subdir layout. If they coexist in `runs/<run>/results/`, the analyzer either has to handle both shapes (Step 1–3 demo runs continue to work) or the Step 4 changes invalidate prior-step demo outputs (clean break, simpler analyzer). Pick.
+- **Coexistence problem.** During Step 5 development, runs from Step 1–4 demos lack the `iN/` subdir layout. If they coexist in `runs/<run>/results/`, the analyzer either has to handle both shapes (Step 1–4 demo runs continue to work) or the Step 5 changes invalidate prior-step demo outputs (clean break, simpler analyzer). Pick.
 
-**Open questions resolving in Step 4**:
+**Open questions resolving in Step 5**:
 
 | # | Question | Source | Why it lands here |
 |---|---|---|---|
@@ -217,13 +257,13 @@ Informational, not blocking:
 
 | 25 | Practical replica-count ceiling | replicas §o.q.1 | ConfigMap size for high N; informational |
 
-**Risks specific to Step 4**:
+**Risks specific to Step 5**:
 
-- Pipeline.yaml param threading is the single highest-risk piece of Step 4. Build a checklist; don't trust grep alone.
+- Pipeline.yaml param threading is the single highest-risk piece of Step 5. Build a checklist; don't trust grep alone.
 - `_is_pair_key` semantics change ripple. Today many tests assert `_is_pair_key("_some_metadata") == False`. The new parser must preserve metadata-exclusion AND add structured parsing. Both behaviors tested.
-- Replica index in PipelineRun names: `{phase}-{workload}-{run}-i{N}`. Long workload/run names + i{N} suffix can exceed k8s DNS-label limits (253 chars). Step 4 should add a length validator at name-construction time, not at dispatch time.
+- Replica index in PipelineRun names: `{phase}-{workload}-{run}-i{N}`. Long workload/run names + i{N} suffix can exceed k8s DNS-label limits (253 chars). Step 5 should add a length validator at name-construction time, not at dispatch time.
 
-**Out-of-plan work attached to Step 4**:
+**Out-of-plan work attached to Step 5**:
 
 - PipelineRun name length validator.
 - `aggregate.json` helper (if that path is chosen).
@@ -233,21 +273,21 @@ Informational, not blocking:
 
 ---
 
-### Step 5 — Validate/execute + auto-fix
+### Step 6 — Validate/execute + auto-fix
 
 **Plan says**: `validate()` + `execute()` split for `assemble`, `deploy.py run`, `build`. `--plan` mode. `--no-auto` flag. `--replicas N` shorthand on `deploy.py run`. "Visible auto-execution." "Don't go back and refactor early commands... unless it's a small change."
 
 **Scope reality**:
 
-- **Step 5 is restructure, not polish.** Each affected command grows a `validate()` returning a list of preconditions and an `execute()` doing the work. The dispatcher is new code (~20 lines per the proposal, but realistically more once argparse integration, error formatting, and dependency tracking land). Auto-fix recursion logic + depth-limit decisions are non-trivial.
+- **Step 6 is restructure, not polish.** Each affected command grows a `validate()` returning a list of preconditions and an `execute()` doing the work. The dispatcher is new code (~20 lines per the proposal, but realistically more once argparse integration, error formatting, and dependency tracking land). Auto-fix recursion logic + depth-limit decisions are non-trivial.
 
-- **`deploy.py run`'s behavior changes between Step 1 and Step 5.** Step 1: errors if prereqs missing ("error with 'run sim2real assemble.'"). Step 5: auto-fixes by calling assemble. Same command, two different shapes across the refactor. This is documented in the validate/execute proposal but the plan does not surface it as "a previously-shipped command's behavior changes."
+- **`deploy.py run`'s behavior changes between Step 1 and Step 6.** Step 1: errors if prereqs missing ("error with 'run sim2real assemble.'"). Step 6: auto-fixes by calling assemble. Same command, two different shapes across the refactor. This is documented in the validate/execute proposal but the plan does not surface it as "a previously-shipped command's behavior changes."
 
 - **Coverage is partial.** Plan applies the pattern to three commands: `assemble`, `deploy.py run`, `build`. The validate/execute proposal lists six: `cluster.py provision`, `sim2real translate`, `sim2real build`, `sim2real assemble`, `deploy.py run`, `deploy.py collect`. The plan's "the pattern can spread incrementally" suggests it's OK for some commands to skip — but the asymmetry should be intentional, not silent. Either explicitly mark which commands keep their current shape or fold the missing three in.
 
-- **`--replicas N` shorthand on `deploy.py run` is exactly the auto-execute footgun the proposal flags.** It chains assemble (potentially altering the pair-key set) + run (dispatching against the new set). The proposal says: "always print 'auto-executing: build, assemble, run' before starting." Step 5 should pin this as the dispatcher's contract, not a developer's discretion.
+- **`--replicas N` shorthand on `deploy.py run` is exactly the auto-execute footgun the proposal flags.** It chains assemble (potentially altering the pair-key set) + run (dispatching against the new set). The proposal says: "always print 'auto-executing: build, assemble, run' before starting." Step 6 should pin this as the dispatcher's contract, not a developer's discretion.
 
-**Open questions resolving in Step 5**:
+**Open questions resolving in Step 6**:
 
 | # | Question | Source | Why it lands here |
 |---|---|---|---|
@@ -258,21 +298,21 @@ Informational, not blocking:
 
 Carries forward from Step 0:
 
-| 30 | State-machine skip's relationship to `validate()` | validate/execute §o.q.1 | Step 0 defined `state.json`; Step 5 either reaffirms or refines |
+| 30 | State-machine skip's relationship to `validate()` | validate/execute §o.q.1 | Step 0 defined `state.json`; Step 6 either reaffirms or refines |
 
-**Risks specific to Step 5**:
+**Risks specific to Step 6**:
 
 - The dispatcher is new code that every major command depends on. Bugs here cascade. Tests for the dispatcher itself (not just per-command validate/execute) are essential.
 - "Visible auto-execution" risks becoming "noisy auto-execution" if every cheap precondition prints. Tune for signal — don't announce no-op auto-fixes.
-- `--no-auto` is for scripted environments (CI). Step 5 should add a test mode that asserts `--no-auto` produces the same error message that Step 1's `deploy.py run` produced on missing prereqs — i.e., the failure-mode contract is stable across the refactor.
+- `--no-auto` is for scripted environments (CI). Step 6 should add a test mode that asserts `--no-auto` produces the same error message that Step 1's `deploy.py run` produced on missing prereqs — i.e., the failure-mode contract is stable across the refactor.
 
-**Out-of-plan work attached to Step 5**:
+**Out-of-plan work attached to Step 6**:
 
 - The dispatcher module (new code, with tests).
 - Decision on whether `translate` and `collect` get the pattern here or remain informal.
 - Tests for auto-fix chains (the DAG walker).
 - Decision on `--plan --json` shape if structured output is in scope.
-- A "Step 5.5: orchestrator cleanup pass" — explicitly accept (no cleanup, per plan discipline) or schedule (acknowledge the cumulative Step 1/4/5 modifications to `_cmd_run` left it messy).
+- A "Step 6.5: orchestrator cleanup pass" — explicitly accept (no cleanup, per plan discipline) or schedule (acknowledge the cumulative Step 1/5/6 modifications to `_cmd_run` left it messy).
 
 ---
 
@@ -282,7 +322,7 @@ Work required to declare the refactor "done" but not assigned to any step in the
 
 ### Experiment-repo migration
 
-Existing experiment repos (admission-control, others currently in use) have v3 `transfer.yaml`. The new design requires the translation-slice / assembly-slice format. None of Steps 0–5 says "and update admission-control's transfer.yaml."
+Existing experiment repos (admission-control, others currently in use) have v3 `transfer.yaml`. The new design requires the translation-slice / assembly-slice format. None of Steps 0–6 says "and update admission-control's transfer.yaml."
 
 This work has to happen:
 
@@ -311,7 +351,7 @@ Both are small. Attach `list clusters` to Step 0 and `list translations` to Step
 
 ### Validate/execute coverage gap
 
-Step 5 applies the pattern to `assemble`, `deploy.py run`, `build`. The validate/execute proposal's per-command sketch covers six: those three plus `cluster.py provision`, `sim2real translate`, `deploy.py collect`. The other three either get the pattern in Step 5 or are explicitly informal. Pick.
+Step 6 applies the pattern to `assemble`, `deploy.py run`, `build`. The validate/execute proposal's per-command sketch covers six: those three plus `cluster.py provision`, `sim2real translate`, `deploy.py collect`. The other three either get the pattern in Step 6 or are explicitly informal. Pick.
 
 ### CI / test infrastructure updates
 
@@ -336,7 +376,7 @@ Treat docs updates as a per-step deliverable.
 
 ### PipelineRun name length
 
-Step 4 adds replica suffix to PipelineRun names. K8s DNS-label limit is 253 chars; in practice ~63 for label values. Long workload + run + replica names can exceed. Add a name-length validator at construction time, not dispatch time. Out of band because it crosses Step 4 (introduces the suffix) and `pipeline.yaml` operations broadly.
+Step 5 adds replica suffix to PipelineRun names. K8s DNS-label limit is 253 chars; in practice ~63 for label values. Long workload + run + replica names can exceed. Add a name-length validator at construction time, not dispatch time. Out of band because it crosses Step 5 (introduces the suffix) and `pipeline.yaml` operations broadly.
 
 ### Image-tag mutability enforcement for BYO
 
@@ -354,25 +394,25 @@ Plan lists this as out-of-scope. Accept, but call out that the model permits it 
 
 ## Step weight reality
 
-The plan's table presents six rows of equal visual weight. Honest ordering:
+The plan's table presents seven rows of equal visual weight. Honest ordering:
 
 | Tier | Steps | Why |
 |---|---|---|
-| **Heavy — major refactor** | 0, 1, 4 | Step 0: 282-reference retirement + 5+ schemas + new foundation module. Step 1: 6 new commands + 443-line orchestrator port + new `assemble`. Step 4: pair-key schema change across ~20 callsites + `pipeline.yaml` threading + assemble API growth. |
-| **Medium — substantial but contained** | 2, 5 | Step 2: 2 commands + skill prompt port. Step 5: dispatcher + validate/execute split for 3+ commands + auto-fix logic + 4 flags. |
-| **Light — skill-localized** | 3 | Skill code update + `--byo` mode. Localized to one skill. |
+| **Heavy — major refactor** | 0, 1, 5 | Step 0: 282-reference retirement + 5+ schemas + new foundation module. Step 1: 6 new commands + 443-line orchestrator port + new `assemble`. Step 5: pair-key schema change across ~20 callsites + `pipeline.yaml` threading + assemble API growth. |
+| **Medium — substantial but contained** | 2, 6 | Step 2: 2 commands + skill prompt port. Step 6: dispatcher + validate/execute split for 3+ commands + auto-fix logic + 4 flags. |
+| **Light — skill-localized** | 3, 4 | Step 3: sim2real-check port (path-model rework of one skill, read-only). Step 4: sim2real-bootstrap port + `--byo` mode (skill code update). Each localized to one skill. |
 
 **Pacing implications**:
 
 - Steps 0 and 1 together likely consume the majority of the refactor's total work. They're also where the most unresolved design decisions live.
-- Step 4 is the second-biggest content step. Pair-key parser change ripples across the orchestrator that Step 1 only just ported.
-- Step 3 is the smallest. Resist the urge to bundle other work into it.
+- Step 5 is the second-biggest content step. Pair-key parser change ripples across the orchestrator that Step 1 only just ported.
+- Steps 3 and 4 are the smallest. Resist the urge to bundle other work into them.
 
 **Implication for `design-epic` scheduling**:
 
 - Step 0's design-epic is the highest-leverage. It pins schemas everyone depends on AND the `setup_config.json` strategy AND the pair-key suffix choice. Spend disproportionate time.
-- Step 4's design-epic deserves real time too. It's where the orchestrator gets second-touched and where coexistence questions surface.
-- Step 3 can be a light design pass.
+- Step 5's design-epic deserves real time too. It's where the orchestrator gets second-touched and where coexistence questions surface.
+- Steps 3 and 4 can be light design passes.
 
 **Implication for "Every step ends with a runnable workflow"**:
 
@@ -386,10 +426,10 @@ Things visible only when reading the whole arc.
 
 ### The orchestrator gets touched three times without cleanup
 
-Step 1 says "copy and adapt, don't clean." Step 4 modifies pair-key parsing inside that adapted code. Step 5 restructures the same command's outer shape via validate/execute. By Step 5, `_cmd_run` has been modified three times without being refactored. The plan's discipline ("rewrites earn their shape across steps") accepts this. Two options to make the accept explicit:
+Step 1 says "copy and adapt, don't clean." Step 5 modifies pair-key parsing inside that adapted code. Step 6 restructures the same command's outer shape via validate/execute. By Step 6, `_cmd_run` has been modified three times without being refactored. The plan's discipline ("rewrites earn their shape across steps") accepts this. Two options to make the accept explicit:
 
 - Accept silently (plan's current stance).
-- Add a "Step 5.5" or post-Step-5 cleanup item to refactor the orchestrator with all three pieces of context now in hand.
+- Add a "Step 6.5" or post-Step-6 cleanup item to refactor the orchestrator with all three pieces of context now in hand.
 
 Either is fine. Make it a deliberate choice, not an oversight.
 
@@ -398,34 +438,34 @@ Either is fine. Make it a deliberate choice, not an oversight.
 | Step | `assemble` behavior |
 |---|---|
 | 1 | Single-replica, hand-rolled transfer.yaml, refuse-on-collision (or whatever resolves §o.q.9) |
-| 4 | Adds `--replicas N`, additive merge, `--force-shrink`, `params_hash` drift detection |
-| 5 | Splits into `validate()` + `execute()`, becomes auto-fixable from `deploy.py run` |
+| 5 | Adds `--replicas N`, additive merge, `--force-shrink`, `params_hash` drift detection |
+| 6 | Splits into `validate()` + `execute()`, becomes auto-fixable from `deploy.py run` |
 
-Three API changes to one command in three steps. Plan doesn't surface this; readers see Step 1 deliver `assemble` and may assume it's done. State explicitly: assemble is a Step 1 / 4 / 5 focus area.
+Three API changes to one command in three steps. Plan doesn't surface this; readers see Step 1 deliver `assemble` and may assume it's done. State explicitly: assemble is a Step 1 / 5 / 6 focus area.
 
-### `deploy.py run`'s behavior changes between Step 1 and Step 5
+### `deploy.py run`'s behavior changes between Step 1 and Step 6
 
 | Step | Behavior |
 |---|---|
 | 1 | Errors on missing prereqs; user runs `sim2real assemble` manually |
-| 5 | Auto-fixes cheap missing prereqs (chains assemble, build); `--no-auto` preserves Step 1 behavior |
+| 6 | Auto-fixes cheap missing prereqs (chains assemble, build); `--no-auto` preserves Step 1 behavior |
 
-Documented in the validate/execute proposal but not in the plan. State explicitly: `deploy.py run` ships in Step 1 with one behavior contract and ships again in Step 5 with another.
+Documented in the validate/execute proposal but not in the plan. State explicitly: `deploy.py run` ships in Step 1 with one behavior contract and ships again in Step 6 with another.
 
 ### Skill update fan-out
 
 Skill ownership by step:
 
 - `sim2real-translate` — Step 2 (path port).
-- `sim2real-bootstrap` — Step 3 (port + `--byo` mode).
-- `sim2real-analyze` — Step 4 (replica aggregation).
-- `sim2real-check` — **unassigned**. References old paths. Either attach to Step 2 or note as out-of-band.
+- `sim2real-check` — Step 3 (input-model port).
+- `sim2real-bootstrap` — Step 4 (port + `--byo` mode).
+- `sim2real-analyze` — Step 5 (replica aggregation).
 
 ### Transfer.yaml schema lands in Step 0 but uses by Step 2
 
 Schema decisions Step 0 makes (translation/assembly slice split, optional `component:`, BYO accommodations) are validated only when Step 2 reads them. Feedback loop: Step 2 may surface that Step 0's schema needs revision. Accept — but the design-epic for Step 0 should explicitly leave the schema "v0.9 — final lock after Step 2 reality check." This is honest. Pretending it's final at Step 0 invites Step 2 to either silently violate or re-litigate.
 
-### Step 3's optional-component requirement is a Step 0 constraint
+### Step 4's optional-component requirement is a Step 0 constraint
 
 `--byo` mode produces `transfer.yaml` without `component:` (or with `byo: true`). Step 0's schema must declare `component:` as optional. Easy to forget in Step 0's design-epic; surface it explicitly.
 
@@ -452,45 +492,48 @@ Every open question across the four proposals plus everything surfaced here, wit
 | 13 | Registry-auth strategy (private registries) | this addendum / *3D deferred* | Step 2 + out-of-band | unresolved |
 | 14 | Slice extractor location | this addendum | Step 2 | unresolved |
 | 15 | `build` skip-when-present vs re-build policy | this addendum | Step 2 | unresolved |
-| 16 | *Build placement (standalone vs lazy)* | *3D §o.q.1* | Step 2 / Step 5 | **resolved by step shapes** |
-| 17 | *`--byo` interactive vs stub-only ratio* | *BYO appendix* | Step 3 | unresolved |
-| 18 | *Config.md / BLIS-format vs free-form tolerance* | *BYO appendix* | Step 3 | unresolved |
-| 19 | *Optional `component:` in `transfer.yaml`* | *BYO appendix* | Step 0 (schema impact) / Step 3 (use) | unresolved |
-| 20 | *Workload library shipping* | *BYO appendix §o.q.1* | Step 3 | **resolved (no, user-provided)** |
-| 21 | *Replica decrease semantics* | *replicas §o.q.5* | Step 4 | unresolved |
-| 22 | Old-shape vs new-shape result coexistence | this addendum | Step 4 | unresolved |
-| 23 | *`aggregate.json` helper vs in-skill aggregation* | *replicas §"Analyze"* | Step 4 | unresolved |
-| 24 | `--iteration` filter parser shape (list vs range) | this addendum | Step 4 | unresolved |
-| 25 | *Replica count practical ceiling* | *replicas §o.q.1* | Step 4 | informational |
-| 26 | *Auto-fix DAG depth limit* | *validate/execute §o.q.2* | Step 5 | unresolved |
-| 27 | *`--plan` output format* | *validate/execute §o.q.3* | Step 5 | likely text + `--json` |
-| 28 | Validate/execute coverage (3 commands vs 6) | this addendum | Step 5 | unresolved |
-| 29 | Auto-execute announcement format | this addendum | Step 5 | unresolved |
+| 16 | *Build placement (standalone vs lazy)* | *3D §o.q.1* | Step 2 / Step 6 | **resolved by step shapes** |
+| 17 | *`--byo` interactive vs stub-only ratio* | *BYO appendix* | Step 4 | unresolved |
+| 18 | *Config.md / BLIS-format vs free-form tolerance* | *BYO appendix* | Step 4 | unresolved |
+| 19 | *Optional `component:` in `transfer.yaml`* | *BYO appendix* | Step 0 (schema impact) / Step 4 (use) | unresolved |
+| 20 | *Workload library shipping* | *BYO appendix §o.q.1* | Step 4 | **resolved (no, user-provided)** |
+| 21 | *Replica decrease semantics* | *replicas §o.q.5* | Step 5 | unresolved |
+| 22 | Old-shape vs new-shape result coexistence | this addendum | Step 5 | unresolved |
+| 23 | *`aggregate.json` helper vs in-skill aggregation* | *replicas §"Analyze"* | Step 5 | unresolved |
+| 24 | `--iteration` filter parser shape (list vs range) | this addendum | Step 5 | unresolved |
+| 25 | *Replica count practical ceiling* | *replicas §o.q.1* | Step 5 | informational |
+| 26 | *Auto-fix DAG depth limit* | *validate/execute §o.q.2* | Step 6 | unresolved |
+| 27 | *`--plan` output format* | *validate/execute §o.q.3* | Step 6 | likely text + `--json` |
+| 28 | Validate/execute coverage (3 commands vs 6) | this addendum | Step 6 | unresolved |
+| 29 | Auto-execute announcement format | this addendum | Step 6 | unresolved |
 | 30 | Experiment-repo migration | this addendum | out of band | unresolved |
 | 31 | *Per-cluster registries* | this addendum / *3D deferred* | out of band | unresolved |
 | 32 | `sim2real list clusters` / `list translations` | this addendum | out of band (attach to Step 0/2) | unresolved |
 | 33 | CI workflow updates | this addendum | out of band (every step) | underdocumented in plan |
 | 34 | Documentation churn (CLAUDE.md, READMEs) | this addendum | out of band (every step) | underdocumented in plan |
-| 35 | PipelineRun name length validation | this addendum | out of band (Step 4 introduces) | unresolved |
-| 36 | `sim2real-check` skill update | this addendum | Step 2 or out of band | unresolved |
-| 37 | Orchestrator cleanup pass after Step 5 | this addendum | Step 5.5 or accepted-as-tech-debt | unresolved |
-| 38 | *Cross-translation aggregation* | *plan out-of-scope* | deferred | accepted |
-| 39 | *Kubeconfig context validation* | *3D deferred* | deferred | accepted |
-| 40 | *Per-cluster overlays* | *3D deferred* | deferred | accepted |
+| 35 | PipelineRun name length validation | this addendum | out of band (Step 5 introduces) | unresolved |
+| 36 | Translation-ref resolver shape shared with Step 2 | this addendum | Step 3 | unresolved |
+| 37 | Handling multi-algorithm translations under `--translation T` | this addendum | Step 3 | unresolved |
+| 38 | Legacy manually-picked-bundle-root mode: keep or drop | this addendum | Step 3 | unresolved |
+| 39 | Ship `sim2real list translations` in Step 3 or defer | this addendum | Step 3 | unresolved |
+| 40 | Orchestrator cleanup pass after Step 6 | this addendum | Step 6.5 or accepted-as-tech-debt | unresolved |
+| 41 | *Cross-translation aggregation* | *plan out-of-scope* | deferred | accepted |
+| 42 | *Kubeconfig context validation* | *3D deferred* | deferred | accepted |
+| 43 | *Per-cluster overlays* | *3D deferred* | deferred | accepted |
 
 ---
 
 ## What this addendum does not change
 
-- The plan's step ordering (0 → 1 → 2 → 3 → 4 → 5) is sound and defended well in the original document.
+- The plan's step ordering (0 → 1 → 2 → 3 → 4 → 5 → 6) is sound and defended well in the original document.
 - The plan's discipline ("each step is end-to-end runnable", "no mode flags / no dual paths", "the smallest first slice is BYO") is correct.
 - The plan's final state (3D + replicas + validate/execute fully realized) is reachable from the proposed sequence.
 
 What this addendum changes:
 
-- Per-step open questions are explicitly named and assigned (40 items, was implicit).
+- Per-step open questions are explicitly named and assigned (43 items, was implicit).
 - Out-of-band work is named (10+ items previously silent).
-- Step weight is honestly portrayed (3 heavy, 2 medium, 1 light — was 6 equal).
+- Step weight is honestly portrayed (3 heavy, 2 medium, 2 light — was 7 equal).
 - Inter-step interactions are surfaced (orchestrator triple-touch, assemble monotonic growth, `deploy.py run` behavior change, skill update fan-out, schema-revision feedback loop).
 
 Acting on this addendum is the design-epic's job. This document just makes the work visible.
