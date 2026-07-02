@@ -57,8 +57,7 @@ def discover_framework_submodules(
       Callers pass this through to the PipelineRun spec verbatim; the
       cluster-side clone step fails visibly on ``"unknown"``, which is
       the intended posture — assemble succeeds locally so the operator
-      can inspect the run, cluster fails at the right step. Matches
-      legacy ``pipeline/prepare.py:_get_submodule_shas``.
+      can inspect the run, cluster fails at the right step.
     - ``urls``: ``{name: url}`` for every framework submodule, sourced
       from ``<repo_root>/.gitmodules``. Value is ``""`` when
       ``.gitmodules`` is absent or has no entry for that name. URL
