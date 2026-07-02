@@ -114,7 +114,7 @@ Cluster-scoped fields (`namespaces`, `is_openshift`, `storage_class`, `secret_na
 
 ## sim2real.py
 
-Top-level CLI introduced in step-1 of the v2 refactor. Subcommands land incrementally across the step-1 epic; this section describes only what ships in step-1 PR 1.
+Top-level CLI introduced in step-1 of the v2 refactor. Subcommands: `translation register` (BYO), `translate` and `translate --resume` (skill-driven checkpoint), `build` (per-algorithm image build against a checkpointed translation), `assemble` (materialize a run), `use`, `list runs`, `list translations`.
 
 ### Register a translation (BYO)
 
@@ -212,7 +212,7 @@ python pipeline/sim2real.py build \
 **Prerequisites (fail-early):**
 
 - `skopeo` on `PATH` (`brew install skopeo` / `apt install skopeo` / `dnf install skopeo`). Not required when `--skip-build` is set.
-- Translation completeness: every algorithm declared in `transfer.yaml` must have `translations/<hash>/generated/<algo>/<algo>_output.json` on disk. Run `/sim2real-translate` first if this is missing.
+- Translation completeness: every algorithm listed in `translations/<hash>/translation_output.json:algorithms[]` (written by `sim2real translate`) must have `translations/<hash>/generated/<algo>/<algo>_output.json` on disk. Run `/sim2real-translate` first if this is missing.
 - `workspace/setup_config.json` has non-empty `registry` and `repo_name` (populated by `setup.py`).
 - A single provisioned cluster (`workspace/clusters/<id>/cluster_config.json`) with at least one namespace slot — buildkit runs in `namespaces[0]`.
 - `<experiment-root>/<repo_name>/` exists and contains the component source.
@@ -804,13 +804,13 @@ python pipeline/sim2real.py assemble --translation HASH --cluster CID --run tria
 python pipeline/sim2real.py assemble --translation HASH --cluster CID --run trial-1 --force
 
 # Resubmit without rebuilding EPP
-python pipeline/deploy.py --skip-build-epp
+python pipeline/deploy.py run --skip-build
 
-# Dry-run deploy
-python pipeline/deploy.py --dry-run
+# Reset failed pairs without acting (preview the plan)
+python pipeline/deploy.py reset --dry-run
 
-# Deploy individual packages
-python pipeline/deploy.py --package baseline treatment
+# Run one package only
+python pipeline/deploy.py run --package baseline
 
 # Collect results for a specific package
 python pipeline/deploy.py collect --package treatment

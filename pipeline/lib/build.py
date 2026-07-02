@@ -5,9 +5,15 @@ Consumers:
   - ``pipeline/deploy.py:_cmd_build`` (step-1, run-scoped) — routes its
     buildkit invocation through this module.
 
-Every primitive is failure-tolerant in the "fail-safe → rebuild" direction:
-the skopeo probe returns ``None`` on any error, dispatch returns the exit
-code without raising, atomic_write only raises on filesystem faults.
+Runtime primitives (``probe_image_digest``, ``dispatch_buildkit_build``,
+``atomic_write_json``) are failure-tolerant in the "fail-safe → rebuild"
+direction: the skopeo probe returns ``None`` on any error, dispatch
+returns the exit code without raising on non-zero, atomic_write only
+raises on filesystem faults.
+
+Precondition primitives (``compose_image_ref``, ``check_skopeo``, and
+``dispatch_buildkit_build`` when ``build-epp.sh`` is missing) raise
+``BuildError`` — callers surface those as ``error: ...; return 2``.
 """
 
 from __future__ import annotations
