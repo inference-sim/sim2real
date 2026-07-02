@@ -4576,3 +4576,73 @@ def test_cmd_run_empty_cluster_dir_emits_assemble_hint(tmp_path, capsys, monkeyp
     with pytest.raises(SystemExit):
         deploy._cmd_run(_Args(), run_dir, {"namespaces": ["ns-a"]})
     assert "run 'sim2real assemble --run trial-1' first" in capsys.readouterr().err
+
+
+def test_cmd_run_all_terminal_message_enumerates_states(tmp_path, monkeypatch, capsys):
+    """When every scoped pair is in a terminal state, the run message must
+    (a) enumerate states with counts (0 done, 1 failed, 0 timed-out, 0 stalled),
+    (b) name both escape hatches ('reset --only' and '--force'). Regression
+    guard for issue #460 — the prior message said 'already done' for any
+    terminal state, hiding failures from the operator."""
+    import argparse
+    import yaml as _yaml
+    import pipeline.deploy as mod
+    from pipeline.lib.progress import ConfigMapProgressStore
+
+    run_dir = tmp_path / "runs" / "test-run"
+    cluster_dir = run_dir / "cluster"
+    cluster_dir.mkdir(parents=True)
+
+    # One PipelineRun; its pair key derives to "wl-a-baseline".
+    pr = {
+        "metadata": {"name": "pr-a-baseline", "namespace": "ns"},
+        "spec": {"params": [
+            {"name": "workloadName", "value": "wl-a"},
+            {"name": "phase", "value": "baseline"},
+        ]},
+    }
+    (cluster_dir / "pipelinerun-a-baseline.yaml").write_text(_yaml.dump(pr))
+    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+
+    cluster_config = {"namespaces": ["sim2real-0"]}
+
+    # Pre-existing progress: the one pair is 'failed'. This exercises the
+    # exact scenario the issue calls out — status --run says 'failed',
+    # `run` used to say 'already done', now must enumerate the terminal state.
+    initial_progress = {
+        "wl-a-baseline": {
+            "workload": "wl-a", "package": "baseline",
+            "status": "failed", "namespace": "sim2real-0", "retries": 0,
+        },
+    }
+    monkeypatch.setattr(ConfigMapProgressStore, "load",
+                        lambda self: json.loads(json.dumps(initial_progress)))
+    monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
+
+    # Skip build + slot readiness so we hit the message before dispatch.
+    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
+    monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+
+    args = argparse.Namespace(
+        skip_build=True, max_retries=0, poll_interval=1,
+        pending_threshold=600, max_pending_stalls=10,
+        default_gpu_cost=1, gpu_resource_type="nvidia.com/gpu",
+        only=None, workload=None, package=None, status=None,
+        force=False, skip_teardown=False, remote=False,
+        preserve_pipelineruns=False, shadow_ttl=0,
+    )
+
+    mod._cmd_run(args, run_dir, cluster_config)
+
+    out = capsys.readouterr().out
+    # AC-required substrings:
+    assert "1 failed" in out
+    assert "reset --only" in out
+    # The old misleading string must be gone:
+    assert "already done" not in out
+    # Regression-guard the by-status enumeration explicitly.
+    assert "0 done" in out
+    assert "0 timed-out" in out
+    assert "0 stalled" in out
