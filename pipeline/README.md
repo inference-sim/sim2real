@@ -114,7 +114,7 @@ Cluster-scoped fields (`namespaces`, `is_openshift`, `storage_class`, `secret_na
 
 ## sim2real.py
 
-Top-level CLI introduced in step-1 of the v2 refactor. Subcommands land incrementally across the step-1 epic; this section describes only what ships in step-1 PR 1.
+Top-level CLI introduced in step-1 of the v2 refactor. Subcommands: `translation register` (BYO), `translate` and `translate --resume` (skill-driven checkpoint), `build` (per-algorithm image build against a checkpointed translation), `assemble` (materialize a run), `use`, `list runs`, `list translations`.
 
 ### Register a translation (BYO)
 
@@ -157,6 +157,86 @@ python pipeline/sim2real.py translation register \
 - Existing translation directory records a different algorithm name (hash collision) → exit 2, no writes.
 - `--registered-hash` given and does not match computed → exit 2, no writes.
 - Another translation already owns the `--algorithm` alias with a different hash → exit 2, no writes; re-run with `--force` to reassign.
+
+---
+
+### Translate (skill-driven, step-2)
+
+An alternative to BYO: `sim2real translate` writes a checkpoint that the `/sim2real-translate` Claude skill fills in with translated Go sources, then `sim2real translate --resume` validates the result. `sim2real build` (below) turns those sources into images.
+
+```bash
+python pipeline/sim2real.py translate \
+    [--experiment-root PATH]              # initial run — write checkpoint
+python pipeline/sim2real.py translate --resume
+python pipeline/sim2real.py translate --force  # blow away and re-checkpoint
+```
+
+Two-phase state machine — the operator picks the lane explicitly (plain vs `--resume` vs `--force`). Plain `translate` never mutates a partial directory; use `--force` to clear one, `--resume` to validate a completed one.
+
+| State at `translations/<hash>/` | `translate` | `translate --resume` | `translate --force` |
+|---|---|---|---|
+| Absent | Create dir, write `skill_input.json` + `translation_output.json` with `image_ref: null`. Print checkpoint. Exit 0. | Error: `no translation to resume`. Exit 2. | Same as plain. |
+| Partial (checkpoint files present, some `generated/<algo>/<algo>_output.json` missing) | Error: `translation incomplete — run '/sim2real-translate' then 'translate --resume'`. Exit 2. Never mutates. | Reports missing algorithms by name. Exit 2. Never mutates. | Delete + recreate as if absent. |
+| Complete (all `<algo>_output.json` present) | Print `translation already complete — run 'sim2real build' next` and exit 0. | Same. | Delete + recreate; operator re-runs the skill. |
+
+The translation hash is derived from `transfer.yaml`'s translation slice (scenario, component, context, per-algorithm sources) plus the SHA-256 of each `algorithms[i].source` file's bytes (see `pipeline/lib/slicer.py:translation_hash_with_sources`). Two runs of `translate` with the same `transfer.yaml` and the same source files produce the same hash and reuse the same `translations/<hash>/` directory.
+
+**Outputs** — under `workspace/translations/<translation_hash>/` (initial run only; the skill populates the rest):
+
+- `skill_input.json` — the material `/sim2real-translate` reads (translation hash, experiment root, per-algorithm output paths, context text and files).
+- `translation_output.json` — algorithm index with `image_ref: null` on every entry. `sim2real build` fills these in later.
+- `generated/<algo>/` (empty) — the skill writes `cmd/`, `pkg/`, `<algo>_output.json`, and `<algo>_config.yaml` under this directory.
+
+Once `translate --resume` succeeds, run `sim2real build --translation <alias>` to compile and push images, then `sim2real assemble` as usual.
+
+---
+
+## Build translation images
+
+Once a skill-driven translation is checkpointed (`sim2real translate` + `/sim2real-translate` skill run + `sim2real translate --resume`), `sim2real build` compiles the per-algorithm plugin sources into container images and pushes them to your registry. Each algorithm gets its own image tagged `<translation_hash[:12]>-<algorithm_name>`.
+
+```bash
+python pipeline/sim2real.py build \
+    --translation REF \
+    [--force-rebuild] \
+    [--skip-build] \
+    [--experiment-root PATH]
+```
+
+| Flag | Required | Notes |
+|------|----------|-------|
+| `--translation REF` | yes | alias, hash prefix (min 4 chars), or full 64-char hash — same resolver as `assemble --translation`. |
+| `--force-rebuild` | no | Rebuild and re-push every algorithm even if the registry already has the tag (skips the pre-build probe). |
+| `--skip-build` | no | Skip all probe + build activity. Downstream `sim2real assemble` will fail if any `image_ref` is still null. Useful when you know the images already exist and want to bypass the probe. |
+
+**Prerequisites (fail-early):**
+
+- `skopeo` on `PATH` (`brew install skopeo` / `apt install skopeo` / `dnf install skopeo`). Not required when `--skip-build` is set.
+- Translation completeness: every algorithm listed in `translations/<hash>/translation_output.json:algorithms[]` (written by `sim2real translate`) must have `translations/<hash>/generated/<algo>/<algo>_output.json` on disk. Run `/sim2real-translate` first if this is missing.
+- `workspace/setup_config.json` has non-empty `registry` and `repo_name` (populated by `setup.py`).
+- A single provisioned cluster (`workspace/clusters/<id>/cluster_config.json`) with at least one namespace slot — buildkit runs in `namespaces[0]`.
+- `<experiment-root>/<repo_name>/` exists and contains the component source.
+
+**Behavior per algorithm:**
+
+1. Compose `image_ref = <registry>/<repo_name>:<translation_hash[:12]>-<algo>`.
+2. **Idempotency short-circuit**: if the algorithm's recorded `image_ref` already equals the composed value AND `image_digest` is non-null AND `--force-rebuild` is not set, skip. Prints `already built: <ref> (<digest>)`.
+3. **Pre-build registry probe**: `skopeo inspect docker://<ref>`. Success returns the digest; the digest is written back to `translation_output.json` and the build is skipped. Any failure (network, auth, missing tag, timeout) is treated as "absent → build" (fail-safe).
+4. **Buildkit dispatch**: submits an in-cluster `moby/buildkit:latest` pod that reads component source from a PVC and pushes to the target registry via `registry-secret` (provisioned by `cluster.py provision`). Same `pipeline/scripts/build-epp.sh` code path `deploy.py:_cmd_build` has always used.
+5. **Post-build digest inspect**: `skopeo inspect` runs a second time to record the pushed digest. On success, `image_digest` is set. On failure, the build is still considered successful (the image was pushed); `image_digest` is recorded as `null` with a warning. Digest can be back-filled by a later `sim2real build --force-rebuild`.
+6. **Atomic writeback**: `translations/<hash>/translation_output.json:algorithms[i].image_ref` and `image_digest` are written after every algorithm via tempfile-and-rename. A mid-run failure preserves prior algorithms' recorded state.
+
+Return code: `0` on all-success (including all-idempotent). `2` on any prereq failure or the first build failure (loop stops there — subsequent algorithms are not attempted).
+
+**Common failure modes:**
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `skopeo not found on PATH` | Local prereq missing | Install skopeo per the hint in the error message. |
+| `translation <hash> incomplete — missing outputs for: X` | `/sim2real-translate` has not been run for algorithm X | Run `/sim2real-translate`, then `sim2real translate --resume` to verify, then `sim2real build`. |
+| `workspace/setup_config.json is missing 'registry' or 'repo_name'` | `setup.py` was not run, or was run without `--registry` | `python pipeline/setup.py --registry quay.io/username --repo-name <repo>` |
+| `build failed for <algo> (image_ref=...)` | Buildkit pod exited non-zero — usually a compile error, missing PVC, or bad `registry-secret` | Inspect `kubectl logs epp-build-sim2real-build-<hash8>-<algo> -n <namespace>` for the compiler output. |
+| `translation <ref> not built for algorithms: X` when running `sim2real assemble` | You ran `assemble` before `build` | Run `sim2real build --translation <ref>` first. |
 
 ---
 
@@ -457,12 +537,61 @@ Once these files exist, step-1's BYO demo is complete. Downstream skills (e.g. `
 
 ---
 
+## End-of-step-2 skill-driven demo
+
+Same success criterion as the BYO demo — per-workload per-algorithm `per_request_lifecycle_metrics.json` files exist locally. The difference is that instead of registering a pre-built image (step 3 above), the operator invokes the `/sim2real-translate` Claude skill to produce the plugin source, then `sim2real build` compiles it into images.
+
+### Prerequisites
+
+Same as BYO plus:
+
+- `skopeo` on `PATH` (registry probe).
+- `transfer.yaml:algorithms[]` populated with `source:` paths pointing to the algorithm implementation files (Go or otherwise).
+
+### 1-2. Provision cluster + configure workspace (identical to BYO)
+
+### 3. Checkpoint the translation
+
+```bash
+python pipeline/sim2real.py translate --experiment-root <experiment-root>
+```
+
+Writes `workspace/translations/<hash>/skill_input.json` + `translation_output.json` (with `image_ref: null` per algorithm) and prints the checkpoint message.
+
+### 4. Run the translation skill
+
+At the Claude prompt: `/sim2real-translate`. The skill reads `skill_input.json`, translates each algorithm, and writes `generated/<algo>/{cmd,pkg,<algo>_output.json,<algo>_config.yaml}` under the translation directory.
+
+### 5. Validate the skill's work
+
+```bash
+python pipeline/sim2real.py translate --resume --experiment-root <experiment-root>
+```
+
+Errors if any `generated/<algo>/<algo>_output.json` is missing. Success → exit 0.
+
+### 6. Build images
+
+```bash
+python pipeline/sim2real.py build --translation <alias-or-hash> --experiment-root <experiment-root>
+```
+
+For each algorithm: probe the registry, build if absent, record `image_ref`/`image_digest` in `translation_output.json`. Prints per-algorithm status.
+
+### 7-9. Assemble, deploy, collect (identical to BYO steps 4-6, using the same `--translation` alias)
+
+The same success gate applies — `per_request_lifecycle_metrics.json` under `workspace/runs/<run-name>/results/<phase>/<workload>/`.
+
+---
+
 ## Pipeline library (`pipeline/lib/`)
 
 | Module | Purpose |
 |--------|---------|
 | `manifest.py` | Loads and validates `transfer.yaml` (v3 schema) |
-| `slicer.py` | Splits `transfer.yaml` into translation-slice vs assembly-slice + computes `translation_hash` |
+| `slicer.py` | Splits `transfer.yaml` into translation-slice vs assembly-slice + computes `translation_hash` (`translation_hash_with_sources` folds algorithm source bytes into the hash for the skill-driven flow) |
+| `translation_ref.py` | Shared alias/algorithm-name validator, on-read shim for `translation_output.json` (handles both step-1 legacy and step-2 per-algo shapes), and `resolve_translation_ref` (accepts alias / hash prefix / full hash) |
+| `build.py` | Shared build primitives — image-ref construction, skopeo digest probe, buildkit-pod dispatch, atomic JSON write. Consumed by `sim2real build` and `deploy.py:_cmd_build`. |
 | `assemble_run.py` | Assembly logic behind `sim2real assemble` (deep-merge + PipelineRun generation) |
 | `values.py` | Deep-merge utility used by `assemble_run.py` |
 | `tekton.py` | Generates PipelineRun YAMLs |
@@ -675,13 +804,13 @@ python pipeline/sim2real.py assemble --translation HASH --cluster CID --run tria
 python pipeline/sim2real.py assemble --translation HASH --cluster CID --run trial-1 --force
 
 # Resubmit without rebuilding EPP
-python pipeline/deploy.py --skip-build-epp
+python pipeline/deploy.py run --skip-build
 
-# Dry-run deploy
-python pipeline/deploy.py --dry-run
+# Reset failed pairs without acting (preview the plan)
+python pipeline/deploy.py reset --dry-run
 
-# Deploy individual packages
-python pipeline/deploy.py --package baseline treatment
+# Run one package only
+python pipeline/deploy.py run --package baseline
 
 # Collect results for a specific package
 python pipeline/deploy.py collect --package treatment

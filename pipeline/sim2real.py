@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """sim2real top-level CLI.
 
-Subcommands land incrementally across the step-1 epic. This file is
-created by PR 1 with only ``translation register``. Subsequent PRs add
-``assemble``, ``use``, ``list runs``.
+Subcommands: ``translation register`` (BYO), ``translate`` (skill-driven
+checkpoint + ``--resume``), ``build`` (per-algorithm image build against
+a checkpointed translation), ``assemble`` (materialize a run from a
+translation), ``use`` (flip active run), ``list runs`` /
+``list translations``.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from pipeline.lib import assemble_run as _assemble_run_lib  # noqa: E402
 from pipeline.lib import layout  # noqa: E402 — must follow sys.path guard
+from pipeline.lib.build import atomic_write_json as _atomic_write_json  # noqa: E402
 
 
 def _validate_algorithm_name(name: str) -> str:
@@ -57,31 +60,6 @@ def _extract_digest_from_ref(image_ref: str) -> str | None:
     if len(hex_part) != 64 or not all(c in "0123456789abcdef" for c in hex_part):
         return None
     return digest
-
-
-def _atomic_write_json(path: Path, data: dict) -> None:
-    """Write ``data`` as pretty JSON to ``path`` via a tempfile + os.replace.
-
-    POSIX-atomic on same-filesystem writes. Prevents readers from
-    observing a half-written file during ``--force`` alias reassignment.
-    """
-    import os
-    import tempfile
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(
-        dir=str(path.parent), prefix=".tmp-", suffix=".json"
-    )
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(json.dumps(data, indent=2) + "\n")
-        os.replace(tmp, path)
-    except Exception:
-        # Cleanup on failure; ignore rmtree race with concurrent GC.
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
 
 
 def _clear_alias_on(other_hash: str) -> None:
@@ -508,6 +486,30 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    b = sub.add_parser(
+        "build",
+        help="Build EPP images for each algorithm in a translation",
+    )
+    b.add_argument(
+        "--translation",
+        required=True,
+        metavar="REF",
+        help="alias, hash prefix, or full translation hash",
+    )
+    b.add_argument(
+        "--force-rebuild",
+        action="store_true",
+        help="Rebuild and push even when the registry already has the tag",
+    )
+    b.add_argument(
+        "--skip-build",
+        action="store_true",
+        help=(
+            "Skip probe + build for every algorithm. Downstream 'sim2real "
+            "assemble' will fail if any image_ref is still null."
+        ),
+    )
+
     return parser
 
 
@@ -798,6 +800,225 @@ def _translate_write_checkpoint(
     return 0
 
 
+def _cmd_build(args) -> int:
+    """Build EPP images for every algorithm in a translation.
+
+    Prerequisites (checked in order):
+      1. skopeo on PATH (unless --skip-build).
+      2. Translation ref resolves via translation_ref.resolve_translation_ref.
+      3. Every algorithm has generated/<algo>/<algo>_output.json on disk.
+      4. workspace/setup_config.json has non-empty registry and repo_name.
+
+    Per algorithm:
+      - Compose image_ref = <registry>/<repo>:<translation_hash[:12]>-<algo>.
+      - --skip-build → skip everything, do not touch translation_output.json.
+      - Already-recorded image_ref+digest + no --force-rebuild → idempotent skip.
+      - Pre-build skopeo probe (skipped by --force-rebuild): success writes
+        the digest and continues; failure of any kind → build (fail-safe).
+      - dispatch_buildkit_build; non-zero rc aborts the loop, prior algos'
+        state is preserved (atomic per-algo writes).
+      - Post-build probe records the digest; probe failure → image_digest
+        recorded as null with a warning.
+    """
+    from pipeline.lib import build, cluster_ops, translation_ref
+
+    exp_root = (
+        Path(args.experiment_root).resolve()
+        if args.experiment_root
+        else Path.cwd()
+    )
+    layout.set_experiment_root(str(exp_root))
+
+    if not args.skip_build:
+        try:
+            build.check_skopeo()
+        except build.BuildError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
+    try:
+        translation_hash = translation_ref.resolve_translation_ref(args.translation)
+    except translation_ref.ResolveError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    tout_path = layout.translation_output_path(translation_hash)
+    try:
+        tout = translation_ref.read_translation_output(tout_path)
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    algorithms = tout.get("algorithms") or []
+    if not algorithms:
+        print(
+            f"error: translation {translation_hash} has no algorithms recorded",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Completeness check: every algo must have generated/<algo>/<algo>_output.json.
+    tdir = layout.translation_dir(translation_hash)
+    missing = [
+        a["name"] for a in algorithms
+        if not (tdir / "generated" / a["name"] / f"{a['name']}_output.json").exists()
+    ]
+    if missing:
+        print(
+            f"error: translation {translation_hash} incomplete — "
+            f"missing outputs for: {', '.join(missing)}; "
+            f"run '/sim2real-translate' then 'sim2real translate --resume'",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Registry / repo prereq — read from setup_config.json (mirrors deploy.py).
+    setup_cfg_path = layout.setup_config_path()
+    if not setup_cfg_path.exists():
+        print(
+            "error: workspace/setup_config.json not found — run setup.py first",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        setup_cfg = json.loads(setup_cfg_path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    registry = setup_cfg.get("registry") or ""
+    repo_name = setup_cfg.get("repo_name") or ""
+    if not registry or not repo_name:
+        print(
+            "error: workspace/setup_config.json is missing 'registry' or "
+            "'repo_name' — re-run setup.py with --registry",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Cluster resolution — matches step-0 "single cluster per workspace".
+    if not args.skip_build:
+        cluster_ids = layout.list_cluster_ids()
+        if not cluster_ids:
+            print(
+                "error: no cluster provisioned; run "
+                "'cluster.py provision <cluster_id>' first",
+                file=sys.stderr,
+            )
+            return 2
+        if len(cluster_ids) > 1:
+            print(
+                f"error: multiple clusters found ({cluster_ids}); "
+                "sim2real assumes a single cluster per workspace",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            cluster_config = cluster_ops.read_cluster_config(cluster_ids[0])
+        except (OSError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        namespaces = cluster_config.get("namespaces") or []
+        if not namespaces:
+            print(
+                "error: cluster_config.json has no namespaces; "
+                "re-run 'cluster.py provision --namespaces NS1,...'",
+                file=sys.stderr,
+            )
+            return 2
+        build_namespace = namespaces[0]
+    else:
+        build_namespace = ""
+
+    source_dir = exp_root / repo_name
+    tag_prefix = translation_hash[:12]
+    any_failure = False
+
+    for algo in algorithms:
+        algo_name = algo["name"]
+        try:
+            image_ref = build.compose_image_ref(
+                registry, repo_name, f"{tag_prefix}-{algo_name}"
+            )
+        except build.BuildError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
+        # Idempotency — already recorded with the composed ref and a digest?
+        if (algo.get("image_ref") == image_ref
+                and algo.get("image_digest")
+                and not args.force_rebuild
+                and not args.skip_build):
+            print(f"already built: {image_ref} ({algo['image_digest']})")
+            continue
+
+        if args.skip_build:
+            print(f"skipped (--skip-build) for {algo_name}")
+            continue
+
+        # Pre-build probe (skip if --force-rebuild).
+        if not args.force_rebuild:
+            digest = build.probe_image_digest(image_ref)
+            if digest is not None:
+                algo["image_ref"] = image_ref
+                algo["image_digest"] = digest
+                try:
+                    build.atomic_write_json(tout_path, tout)
+                except OSError as exc:
+                    print(
+                        f"error: failed to write translation_output.json "
+                        f"for {algo_name}: {exc}",
+                        file=sys.stderr,
+                    )
+                    return 2
+                print(f"probe hit: {image_ref} ({digest})")
+                continue
+
+        # Build via buildkit.
+        build_id = f"sim2real-build-{translation_hash[:8]}-{algo_name}"
+        try:
+            rc = build.dispatch_buildkit_build(
+                image_ref=image_ref,
+                build_id=build_id,
+                namespace=build_namespace,
+                source_dir=source_dir,
+                run_dir=tdir,
+                repo_root=_REPO_ROOT,
+            )
+        except build.BuildError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if rc != 0:
+            print(
+                f"error: build failed for {algo_name} (image_ref={image_ref})",
+                file=sys.stderr,
+            )
+            any_failure = True
+            break
+
+        # Post-build probe. The image has been pushed successfully at this
+        # point; a filesystem fault here means we can't record the digest,
+        # not that the build failed. The image_ref is still worth surfacing.
+        digest = build.probe_image_digest(image_ref)
+        algo["image_ref"] = image_ref
+        algo["image_digest"] = digest
+        try:
+            build.atomic_write_json(tout_path, tout)
+        except OSError as exc:
+            print(
+                f"error: built {image_ref} but failed to record digest in "
+                f"translation_output.json: {exc} — re-run 'sim2real build' "
+                f"to record it",
+                file=sys.stderr,
+            )
+            return 2
+        if digest is None:
+            print(f"built {image_ref}; digest not recorded (probe failed)")
+        else:
+            print(f"built {image_ref} ({digest})")
+
+    return 2 if any_failure else 0
+
+
 def _cmd_assemble(args) -> int:
     exp_root = (
         Path(args.experiment_root).resolve()
@@ -814,11 +1035,46 @@ def _cmd_assemble(args) -> int:
         )
         return 2
 
+    from pipeline.lib import manifest as _manifest_mod
     from pipeline.lib import translation_ref
     try:
         translation_hash = translation_ref.resolve_translation_ref(args.translation)
     except translation_ref.ResolveError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    # Fail-early: every algorithm declared in transfer.yaml that is also
+    # recorded in translation_output.json must have a non-null image_ref
+    # (design §Commands §sim2real assemble). Skill-driven translations
+    # start with image_ref: null; the operator must run 'sim2real build'
+    # before 'sim2real assemble'.
+    tout_path = layout.translation_output_path(translation_hash)
+    try:
+        tout = translation_ref.read_translation_output(tout_path)
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    try:
+        _manifest_data = _manifest_mod.load_manifest(manifest_path)
+    except _manifest_mod.ManifestError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    declared_names = {a["name"] for a in (_manifest_data.get("algorithms") or [])}
+    recorded_by_name = {
+        a["name"]: a for a in (tout.get("algorithms") or [])
+        if isinstance(a, dict) and a.get("name")
+    }
+    unbuilt = [
+        name for name in sorted(declared_names & recorded_by_name.keys())
+        if recorded_by_name[name].get("image_ref") is None
+    ]
+    if unbuilt:
+        print(
+            f"error: translation {args.translation} not built for algorithms: "
+            f"{', '.join(unbuilt)} — run 'sim2real build --translation "
+            f"{args.translation}' first",
+            file=sys.stderr,
+        )
         return 2
 
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1026,6 +1282,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_list_translations(args)
     if args.command == "translate":
         return _cmd_translate(args)
+    if args.command == "build":
+        return _cmd_build(args)
     # argparse's required=True on subparsers means this is unreachable in
     # practice; kept for defensive parity with cluster.py.
     return 1
