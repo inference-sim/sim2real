@@ -204,7 +204,7 @@ with all 9 required fields. If the file list changes in a later round, update it
 }
 ```
 
-Note: `review_rounds` and `consensus` are NOT fields in this file — the main session records them in `{TRANSLATIONS_DIR}/review/round_<N>.json` (see Step 4).
+Note: `review_rounds` and `consensus` are NOT fields in this file — you (the writer) record them in `{TRANSLATIONS_DIR}/review/{ALGO_NAME}/round_<N>.json` on each APPROVE / NEEDS_CHANGES round (see Step 4 below).
 
 ## Step 2: Build/Test Gate (You Own This)
 
@@ -248,9 +248,10 @@ snap = Path('$SNAP_DIR')
 target = Path('{TARGET_REPO}')
 for f in o['files_created'] + o.get('files_modified', []):
     src = target / f
-    dst = snap / Path(f).name
+    dst = snap / f
+    dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
-    print(f'  {Path(f).name} -> snapshots/{ALGO_NAME}/v$SNAP_NUM/')
+    print(f'  {f} -> snapshots/{ALGO_NAME}/v$SNAP_NUM/{f}')
 shutil.copy2('{OUTPUT_DIR}/{ALGO_NAME}_config.yaml', snap / '{ALGO_NAME}_config.yaml')
 print(f'Snapshot {ALGO_NAME}/v$SNAP_NUM saved')
 "

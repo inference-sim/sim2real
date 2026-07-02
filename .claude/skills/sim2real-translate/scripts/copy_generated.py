@@ -21,7 +21,7 @@ from pathlib import Path
 def copy_generated(
     target_repo: str, translation_dir: str, algo_name: str | None = None
 ) -> tuple[list[str], list[str]]:
-    """Discover changed/new files via git, update translation_output.json, copy to generated/.
+    """Discover changed/new files via git, update output JSON, copy to generated/ (flat mode) or generated/{algo_name}/ (per-algorithm mode).
 
     Args:
         target_repo: Path to the target repo (e.g., llm-d-inference-scheduler directory).

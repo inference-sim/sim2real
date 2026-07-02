@@ -33,11 +33,13 @@ allowed-tools:
 
 # sim2real-translate
 
-Translate simulation algorithms into production plugins using a two-agent team
-per algorithm: a writer that owns the build/test gate and round loop, and a
-reviewer that is exceptionally critical and includes assembly-simulation
-checks. Runs one algorithm at a time; iterates over every algorithm that
-`skill_input.json:algorithms[]` declares but has no `<algo>_output.json` yet.
+Translate simulation algorithms into production plugins using a three-agent
+team per algorithm: an expert that explores the target repo up front and
+answers technical queries, a writer that owns the build/test gate and round
+loop, and a reviewer that is exceptionally critical and includes
+assembly-simulation checks. Runs one algorithm at a time; iterates over every
+algorithm that `skill_input.json:algorithms[]` declares but has no
+`<algo>_output.json` yet.
 
 ## CRITICAL: Working Directory
 
