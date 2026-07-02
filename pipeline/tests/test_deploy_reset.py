@@ -915,3 +915,41 @@ def test_reset_pair_logs_info_before_cleanup(monkeypatch, capsys):
     mod._reset_pair("wl-c-baseline", entry3, {}, dry_run=True)
     out = capsys.readouterr().out
     assert "Resetting wl-c-baseline" not in out
+
+
+def test_main_dispatches_reset(tmp_path, monkeypatch):
+    """main() routes 'reset' with the per-run cluster_config (#449).
+
+    Fills the main() dispatcher gap: prior tests exercised _cmd_reset
+    directly with hand-mocked state but did not verify the
+    argv → _load_run_cluster_config → _cmd_reset wiring, nor that the
+    resolved run_dir + cluster_config make it through unchanged.
+    """
+    from unittest.mock import patch
+    import pipeline.deploy as mod
+
+    (tmp_path / "workspace" / "runs" / "trial-1" / "cluster").mkdir(parents=True)
+
+    monkeypatch.setattr("sys.argv", [
+        "deploy.py", "--experiment-root", str(tmp_path),
+        "--run", "trial-1", "reset",
+    ])
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+
+    reset_calls = []
+
+    def mock_reset(args, run_dir, discovered, *,
+                   namespaces=None, cluster_config=None):
+        reset_calls.append((run_dir, cluster_config))
+
+    with patch.object(mod, "_cmd_reset", mock_reset), \
+         patch.object(mod, "_load_run_cluster_config",
+                      return_value={"namespaces": ["ns-0"]}), \
+         patch.object(mod, "_load_setup_config", return_value={}), \
+         patch.object(mod, "_load_pairs", return_value={}):
+        mod.main()
+
+    assert len(reset_calls) == 1
+    run_dir, cluster_config = reset_calls[0]
+    assert run_dir.name == "trial-1"
+    assert cluster_config == {"namespaces": ["ns-0"]}
