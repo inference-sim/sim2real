@@ -299,7 +299,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--algorithm",
         required=True,
         type=_validate_algorithm_name,
-        help="Algorithm name (a-z, 0-9, hyphens)",
+        help=(
+            "Algorithm name; also written as the translation's alias. "
+            "Must match [A-Za-z0-9][A-Za-z0-9._-]*, max 128 chars; "
+            "'.' and '..' are rejected."
+        ),
     )
     reg.add_argument(
         "--image",
