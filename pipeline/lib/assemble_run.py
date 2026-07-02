@@ -23,7 +23,7 @@ from pathlib import Path
 
 import yaml
 
-from pipeline.lib import cluster_ops, layout, slicer
+from pipeline.lib import cluster_ops, layout, slicer, translation_ref as _translation_ref
 from pipeline.lib.manifest import ManifestError, load_manifest
 from pipeline.lib.tekton import make_pipelinerun_scenario
 from pipeline.lib.values import deep_merge
@@ -491,14 +491,18 @@ def assemble_run(
         raise AssembleError(f"cannot load manifest {manifest_path}: {exc}") from exc
 
     try:
-        tout = json.loads(tout_path.read_text())
-    except json.JSONDecodeError as exc:
+        tout = _translation_ref.read_translation_output(tout_path)
+    except (json.JSONDecodeError, ValueError) as exc:
         raise AssembleError(
             f"translation_output.json is not valid JSON: {tout_path}: {exc}"
         ) from exc
 
     translated_names = {a.get("name") for a in tout.get("algorithms", [])}
-    image_ref = tout.get("image_ref")
+    # Step-2 shape: image_ref lives per-algo. read_translation_output normalizes
+    # legacy (step-1) top-level image_ref into algorithms[i] via its shim.
+    # Use the first algorithm's image_ref as the run-level image (BYO single-algo).
+    algos = tout.get("algorithms") or []
+    image_ref = algos[0].get("image_ref") if algos else None
     if not image_ref:
         raise AssembleError(
             f"translation_output.json missing image_ref: {tout_path}"
