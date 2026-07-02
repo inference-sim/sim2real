@@ -158,7 +158,7 @@ def _load_run_cluster_config(run_dir: Path) -> dict:
     ``runs/<R>/run_metadata.json`` by ``sim2real assemble``, and this helper
     reads that field then delegates to ``cluster_ops.read_cluster_config``.
     All error paths emit the exact acceptance-criterion strings from #446
-    and exit — no auto-fix (that is step-5's job).
+    and exit — no auto-fix (that is step-6's job).
     """
     run_name = run_dir.name
     if not run_dir.exists() or not (run_dir / "cluster").exists():

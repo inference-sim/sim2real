@@ -91,7 +91,7 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). When no `-
 | `translations/<hash>/generated/baseline_config.yaml` | `sim2real translation register` (via `--baseline-config`) | `sim2real assemble` (baseline overlay) |
 | `translations/<hash>/generated/{algo}/{algo}_config.yaml` | `sim2real translation register` | `sim2real assemble` (per-algo treatment overlay) |
 | `runs/<run>/run_metadata.json` | `sim2real assemble` | `deploy.py`, `sim2real.py list runs` |
-| `runs/<run>/manifest.assembly.yaml` | `sim2real assemble` | reproducibility / drift detection (step-4 of the epic) |
+| `runs/<run>/manifest.assembly.yaml` | `sim2real assemble` | reproducibility / drift detection (step-5 of the epic) |
 | `runs/<run>/cluster/baseline.yaml` | `sim2real assemble` | `deploy.py` |
 | `runs/<run>/cluster/<algo>.yaml` | `sim2real assemble` | `deploy.py` |
 | `runs/<run>/cluster/pipelinerun-*.yaml` | `sim2real assemble` | `deploy.py run` |

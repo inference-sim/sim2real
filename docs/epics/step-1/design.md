@@ -51,9 +51,10 @@ Step 1 does **not**:
 
 - Deliver skill-driven translation (`sim2real translate`) — that is Step 2.
 - Deliver `sim2real build` — Step 2.
-- Deliver scenario bootstrap (`/sim2real-bootstrap` port) — Step 3.
-- Support replicas, `--iteration` filtering, or drift detection — Step 4.
-- Support auto-fix or the validate/execute pattern — Step 5.
+- Deliver `sim2real-check` skill port — Step 3.
+- Deliver scenario bootstrap (`/sim2real-bootstrap` port) — Step 4.
+- Support replicas, `--iteration` filtering, or drift detection — Step 5.
+- Support auto-fix or the validate/execute pattern — Step 6.
 - Support multi-algorithm register into one translation — deferred; each
   `register` call creates a single-algorithm translation.
 - Migrate `admission-control` or other v3 experiment repos — the demo uses
@@ -90,7 +91,7 @@ Addendum questions (Step 1 table) resolved as follows:
 | 8 | Original `_cmd_run`'s fate | Dead code is removed. The PR that ships the new `deploy.py run --run R` deletes the original `_cmd_run` in the same commit. |
 | 9 | `assemble --run R` re-assemble semantics | Refuse by default; `--force` required to overwrite. |
 | 10 | `list runs` ordering/filtering | Recency-first (mtime desc), no filtering flags in step-1. |
-| 11 | Structured pair-key parser in step-1 vs step-4 | Deferred to step-4. Step-1's ported orchestrator keeps today's trivial `_is_pair_key`. |
+| 11 | Structured pair-key parser in step-1 vs step-5 | Deferred to step-5. Step-1's ported orchestrator keeps today's trivial `_is_pair_key`. |
 
 Additional decisions taken during design:
 
@@ -179,7 +180,7 @@ downstream command.
 ```
 
 `params_hash` is SHA-256 of `manifest.assembly.yaml`'s bytes. Step-1
-records it but does not perform drift detection — that's step-4.
+records it but does not perform drift detection — that's step-5.
 
 ### `runs/<R>/manifest.assembly.yaml`
 
@@ -330,10 +331,10 @@ Copy-adapt of today's `_cmd_run` (~443 lines). Delta from today:
   via `layout.cluster_dir(cluster_id)/cluster_config.json`.
 - ConfigMap name: `sim2real-progress-<run_name>` (unchanged shape; already
   keyed by run today).
-- `_is_pair_key`, `_load_pairs` unchanged (deferred to step-4).
+- `_is_pair_key`, `_load_pairs` unchanged (deferred to step-5).
 - No new flags — same interface as today.
 
-**Failure modes on missing prereqs** — no auto-fix (step-5's job):
+**Failure modes on missing prereqs** — no auto-fix (step-6's job):
 
 - `runs/<R>/` doesn't exist → `"run 'sim2real assemble --run <R>' first"`.
 - `runs/<R>/cluster/` missing → same message.
@@ -531,13 +532,14 @@ scope by porting ops subcommands and sweeping docs/CI.
 Not landing in step-1; called out here so `split-epic` doesn't file
 child issues by accident:
 
-- **Structured pair-key parser** → step-4 (Q11).
-- **`params_hash` drift detection** → step-4. Step-1 records the hash.
-- **Auto-fix chains from `deploy.py run`** → step-5.
-- **`--iteration` filter and replicas** → step-4.
-- **`--plan` / `--no-auto` / validate-execute pattern** → step-5.
+- **Structured pair-key parser** → step-5 (Q11).
+- **`params_hash` drift detection** → step-5. Step-1 records the hash.
+- **Auto-fix chains from `deploy.py run`** → step-6.
+- **`--iteration` filter and replicas** → step-5.
+- **`--plan` / `--no-auto` / validate-execute pattern** → step-6.
 - **`sim2real build` / `sim2real translate`** → step-2.
-- **`/sim2real-bootstrap` port** → step-3.
+- **`/sim2real-check` skill port** → step-3.
+- **`/sim2real-bootstrap` port** → step-4.
 - **Multi-algorithm register into one translation** → step-2 alongside
   skill-driven translate.
 
@@ -549,9 +551,9 @@ Called out in the addendum. Step-1 does **not** address these; split-epic
 should skip them:
 
 - Registry auth for private registries (deferred to step-2's build).
-- PipelineRun name length validator (step-4 introduces the suffix that
+- PipelineRun name length validator (step-5 introduces the suffix that
   risks it).
-- Image-tag mutability enforcement (step-4 or later).
+- Image-tag mutability enforcement (step-5 or later).
 - Cross-translation aggregation in `/sim2real-analyze` (accepted as
   out-of-scope for the refactor).
 

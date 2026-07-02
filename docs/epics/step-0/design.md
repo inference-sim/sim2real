@@ -637,7 +637,7 @@ Verified zero matches for `setup_config`, `setup.py`, `namespaces`, `cluster_con
 - `sim2real-translate/SKILL.md:92, 119` reads `sim2real_root` (workspace field — stays) and `current_run` (workspace field — stays).
 - `sim2real-bootstrap/SKILL.md`, `sim2real-check/SKILL.md`: no reads of cluster-scoped fields confirmed by grep.
 
-Skill paths reorganize in later steps (Step 2 rewrites sim2real-translate; Step 3 rewrites sim2real-bootstrap; etc.) — those updates are owned by their respective epics.
+Skill paths reorganize in later steps (Step 2 rewrites sim2real-translate; Step 3 rewrites sim2real-check; Step 4 rewrites sim2real-bootstrap; etc.) — those updates are owned by their respective epics.
 
 ### CI workflow (`.github/workflows/test.yml`)
 
@@ -735,7 +735,7 @@ No `params_hash` (drift detection out per the design discussion: assemble overwr
 }
 ```
 
-### `manifest.assembly.yaml` (Step 4 — assemble with replicas)
+### `manifest.assembly.yaml` (Step 5 — assemble with replicas)
 
 YAML snapshot of the assembly slice at assemble time + `replicas: N` field.
 
@@ -747,7 +747,7 @@ defaults: {disable: [...]}
 algorithms: [{name: sim2real-ac, defaults: baseline-a}]
 ```
 
-Pair-key suffix (`|iN` vs `|rN`) is an open question deferred to Step 4's design-epic.
+Pair-key suffix (`|iN` vs `|rN`) is an open question deferred to Step 5's design-epic.
 
 ### `registered.json` (Step 1 — BYO register)
 
@@ -769,7 +769,7 @@ Image-tag mutability enforcement is an open question deferred to Step 1's design
 
 | Q | Owning step | Surfaced where |
 |---|---|---|
-| Pair-key suffix `\|iN` vs `\|rN` | Step 4 | `manifest.assembly.yaml` schema |
+| Pair-key suffix `\|iN` vs `\|rN` | Step 5 | `manifest.assembly.yaml` schema |
 | Image-tag mutability enforcement for BYO | Step 1 | `registered.json` schema |
 | Cluster context (single-cluster vs multi-cluster read patterns) | Step 1+ | Once `run_metadata.json` exists, callsites can use `cluster_id` from it instead of "the lone cluster" assumption |
 
@@ -789,9 +789,10 @@ Image-tag mutability enforcement is an open question deferred to Step 1's design
 - `assemble`, `translate`, `build`, `use`, `list runs`, `list clusters`, `list translations`, `collect` — all Step 1+.
 - BYO flow (`translation register`) — Step 1.
 - Skill-driven translate flow — Step 2.
-- Bootstrap skill — Step 3.
-- Replicas — Step 4.
-- Validate/execute pattern — Step 5.
+- `sim2real-check` skill — Step 3.
+- Bootstrap skill — Step 4.
+- Replicas — Step 5.
+- Validate/execute pattern — Step 6.
 - Issue #377's `deploy.py slots add/remove/list` — later step that consumes Step 0's substrate.
 - `publish_slot_pool` helper (ConfigMap + `kubectl cp` live propagation) — issue #377's own deliverable.
 - Per-cluster registries, kubeconfig context validation, per-cluster overlays — 3D-deferred.

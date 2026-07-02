@@ -200,7 +200,7 @@ treatment_resolved = deep_merge(baseline_resolved, treatment_bundle_diffs, algo_
 
 Then the treatment scenario has `images.inferenceScheduler` set from `translation_output.json:image_ref`, and every scenario has `huggingface.secretName` set from `cluster_config.json:secret_names.hf_token`.
 
-**`params_hash`** is SHA-256 over the bytes of `manifest.assembly.yaml`. Recorded in `run_metadata.json` for later drift detection (step-4 of the epic).
+**`params_hash`** is SHA-256 over the bytes of `manifest.assembly.yaml`. Recorded in `run_metadata.json` for later drift detection (step-5 of the epic).
 
 **Algorithm filtering:** algorithms listed in `transfer.yaml:algorithms` but absent from `translation_output.json:algorithms` are skipped with a warning — the run still assembles for the algorithms that are registered.
 
@@ -480,7 +480,7 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). Key files:
 | `translations/<hash>/registered.json` | `sim2real translation register` | audit trail |
 | `translations/<hash>/generated/…` | `sim2real translation register` | `sim2real assemble` |
 | `runs/<run>/run_metadata.json` | `sim2real assemble` | `deploy.py`, `sim2real.py list runs` |
-| `runs/<run>/manifest.assembly.yaml` | `sim2real assemble` | reproducibility / drift detection (step-4) |
+| `runs/<run>/manifest.assembly.yaml` | `sim2real assemble` | reproducibility / drift detection (step-5) |
 | `runs/<run>/cluster/…` | `sim2real assemble` | `deploy.py` |
 | `runs/<run>/results/{phase}/` | `deploy.py collect` | `/sim2real-analyze` skill, `deploy.py wipe` |
 | ConfigMap `sim2real-progress-{run}` | `deploy.py run`, `deploy.py reset` | all `deploy.py` subcommands |
