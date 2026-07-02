@@ -24,6 +24,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from pipeline.lib import assemble_run as _assemble_run_lib  # noqa: E402
 from pipeline.lib import layout  # noqa: E402 — must follow sys.path guard
+from pipeline.lib.build import atomic_write_json as _atomic_write_json  # noqa: E402
 
 
 def _validate_algorithm_name(name: str) -> str:
@@ -57,31 +58,6 @@ def _extract_digest_from_ref(image_ref: str) -> str | None:
     if len(hex_part) != 64 or not all(c in "0123456789abcdef" for c in hex_part):
         return None
     return digest
-
-
-def _atomic_write_json(path: Path, data: dict) -> None:
-    """Write ``data`` as pretty JSON to ``path`` via a tempfile + os.replace.
-
-    POSIX-atomic on same-filesystem writes. Prevents readers from
-    observing a half-written file during ``--force`` alias reassignment.
-    """
-    import os
-    import tempfile
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(
-        dir=str(path.parent), prefix=".tmp-", suffix=".json"
-    )
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(json.dumps(data, indent=2) + "\n")
-        os.replace(tmp, path)
-    except Exception:
-        # Cleanup on failure; ignore rmtree race with concurrent GC.
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
 
 
 def _clear_alias_on(other_hash: str) -> None:

@@ -161,7 +161,10 @@ The `pipeline/` scripts form a linear dependency chain, with a one-time cluster 
 ```
 cluster.py provision  (one-time per cluster)
                    ↓
-setup.py → sim2real translation register → sim2real assemble → deploy.py
+setup.py → [BYO: sim2real translation register] OR
+           [Skill: sim2real translate → /sim2real-translate → sim2real translate --resume → sim2real build]
+                   ↓
+sim2real assemble → deploy.py
 ```
 
 Each stage communicates with the next through files written to `workspace/`. When modifying any stage, you **must** trace both directions:
