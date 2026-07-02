@@ -1025,3 +1025,77 @@ class TestAssembleResolvesAlias:
         assert rc == 0
         assert captured["hash"] == thash
         assert captured["ref"] == "my-algo"
+
+
+class TestListTranslations:
+    def test_empty_prints_no_translations(self, capsys, tmp_path):
+        # translations_dir absent.
+        rc = sim2real._cmd_list_translations(
+            sim2real.build_parser().parse_args(["list", "translations"])
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "no translations yet" in out
+
+    def test_shows_alias_hash_source_images_created(self, capsys, tmp_path):
+        from pipeline.lib import layout
+        layout.set_experiment_root(tmp_path)
+        base = layout.translations_dir()
+        base.mkdir(parents=True)
+
+        h1 = "a" * 64
+        (base / h1).mkdir()
+        (base / h1 / "translation_output.json").write_text(json.dumps({
+            "version": 1,
+            "translation_hash": h1,
+            "source": "skill",
+            "alias": "softreflective-v1",
+            "algorithms": [{"name": "sr", "image_ref": "quay.io/x:v1"}],
+            "created_at": "2026-07-02T14:00:00Z",
+        }))
+
+        h2 = "b" * 64
+        (base / h2).mkdir()
+        (base / h2 / "translation_output.json").write_text(json.dumps({
+            "version": 1,
+            "translation_hash": h2,
+            "source": "skill",
+            "alias": "compare-a-b",
+            "algorithms": [
+                {"name": "a", "image_ref": None},
+                {"name": "b", "image_ref": None},
+            ],
+            "created_at": "2026-07-02T14:30:00Z",
+        }))
+
+        h3 = "c" * 64
+        (base / h3).mkdir()
+        (base / h3 / "translation_output.json").write_text(json.dumps({
+            "version": 1,
+            "translation_hash": h3,
+            "source": "byo",
+            "alias": None,
+            "algorithms": [{"name": "legacy", "image_ref": "ghcr.io/y:v1"}],
+            "created_at": "2026-07-01T10:00:00Z",
+        }))
+
+        rc = sim2real._cmd_list_translations(
+            sim2real.build_parser().parse_args(["list", "translations"])
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        lines = out.strip().splitlines()
+        # Header + 3 rows, newest first.
+        assert "ALIAS" in lines[0]
+        assert "HASH" in lines[0]
+        assert "SOURCE" in lines[0]
+        assert "IMAGES" in lines[0]
+        assert "CREATED" in lines[0]
+        # h2 is newest by created_at; h1 middle; h3 oldest.
+        assert "compare-a-b" in lines[1]
+        assert "softreflective-v1" in lines[2]
+        assert "-" in lines[3].split()[0:2]  # ALIAS column shows "-"
+
+        assert "2 pending" in out
+        assert "1 built" in out
+        assert "1 registered" in out

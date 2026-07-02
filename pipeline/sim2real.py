@@ -369,6 +369,7 @@ def build_parser() -> argparse.ArgumentParser:
     lst = sub.add_parser("list", help="List workspace-scoped resources")
     lsub = lst.add_subparsers(dest="subcommand", required=True)
     lsub.add_parser("runs", help="List runs, newest first")
+    lsub.add_parser("translations", help="List translations, newest first")
 
     return parser
 
@@ -533,6 +534,28 @@ def _read_current_run() -> str:
         return ""
 
 
+def _summarize_images(source: str, algos: list[dict]) -> str:
+    """Return the IMAGES column value for one translation.
+
+    - BYO source: 'N registered' — BYO images are pre-built at register.
+    - Skill source, all algos have image_ref: 'N built'.
+    - Skill source, all null: 'N pending'.
+    - Skill source, mixed: 'N/M built'.
+    - Empty algos list: '-'.
+    """
+    total = len(algos)
+    if total == 0:
+        return "-"
+    built = sum(1 for a in algos if a.get("image_ref"))
+    if source == "byo":
+        return f"{total} registered"
+    if built == total:
+        return f"{total} built"
+    if built == 0:
+        return f"{total} pending"
+    return f"{built}/{total} built"
+
+
 def _format_assembled(iso: str) -> str:
     """Turn an ISO-8601 UTC timestamp into "YYYY-MM-DD HH:MM" for display.
 
@@ -546,6 +569,38 @@ def _format_assembled(iso: str) -> str:
         return dt.strftime("%Y-%m-%d %H:%M")
     except (ValueError, TypeError):
         return "?"
+
+
+def _cmd_list_translations(_args) -> int:
+    from pipeline.lib import translation_ref
+    base = layout.translations_dir()
+    entries = list(translation_ref.iter_translations(base))
+    if not entries:
+        print("no translations yet")
+        return 0
+
+    # Newest-first by created_at; tie-break on hash for determinism.
+    def sort_key(item):
+        thash, data = item
+        return (data.get("created_at") or "", thash)
+
+    entries.sort(key=sort_key, reverse=True)
+
+    fmt = "{alias:<20} {hash:<12} {source:<8} {images:<15} {created}"
+    print(fmt.format(
+        alias="ALIAS", hash="HASH", source="SOURCE",
+        images="IMAGES", created="CREATED",
+    ))
+    for thash, data in entries:
+        alias = data.get("alias") or "-"
+        source = data.get("source") or "?"
+        images = _summarize_images(source, data.get("algorithms") or [])
+        created = _format_assembled(data.get("created_at") or "")
+        print(fmt.format(
+            alias=alias, hash=thash[:12], source=source,
+            images=images, created=created,
+        ))
+    return 0
 
 
 def _cmd_list_runs(_args) -> int:
@@ -609,6 +664,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_use(args)
     if args.command == "list" and args.subcommand == "runs":
         return _cmd_list_runs(args)
+    if args.command == "list" and args.subcommand == "translations":
+        return _cmd_list_translations(args)
     # argparse's required=True on subparsers means this is unreachable in
     # practice; kept for defensive parity with cluster.py.
     return 1
