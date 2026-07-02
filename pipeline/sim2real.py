@@ -390,6 +390,14 @@ def _cmd_assemble(args) -> int:
             "in translation_output.json — skipped",
             file=sys.stderr,
         )
+    for name in getattr(_assemble_run_lib.assemble_run, "missing_submodules", []):
+        print(
+            f"warning: framework submodule '{name}' not initialized — "
+            "PipelineRun params will use 'unknown' as the commit SHA; "
+            "cluster-side clone will fail. Run `git submodule update --init` "
+            "in the sim2real repo to fix.",
+            file=sys.stderr,
+        )
     print(f"assembled run {args.run}")
     return 0
 

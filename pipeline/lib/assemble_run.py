@@ -13,10 +13,12 @@ Pure module: no argparse, no print. Callers surface errors via the
 
 from __future__ import annotations
 
+import configparser
 import copy
 import hashlib
 import json
 import shutil
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -25,6 +27,90 @@ from pipeline.lib import cluster_ops, layout, slicer
 from pipeline.lib.manifest import ManifestError, load_manifest
 from pipeline.lib.tekton import make_pipelinerun_scenario
 from pipeline.lib.values import deep_merge
+
+
+# Framework repo root — three levels up from pipeline/lib/assemble_run.py.
+# Mirrors pipeline/lib/cluster_ops.py:_REPO_ROOT. Used to locate framework
+# submodules (inference-sim, llm-d-benchmark), which always live in the
+# framework repo — NOT in the experiment repo.
+_REPO_ROOT: Path = Path(__file__).resolve().parent.parent.parent
+
+
+# Framework submodule pair — pinned. These names appear in the PipelineRun
+# spec's benchmarkGit*/blisGit* params, and the cluster-side pipeline
+# clones them by URL and checks out the recorded SHA. The component
+# submodule (tracked by ``manifest["component"]["path"]``) is deliberately
+# out of scope: the component image reference comes from the registered
+# translation, not from a git ref.
+_FRAMEWORK_SUBMODULE_NAMES: tuple[str, ...] = ("inference-sim", "llm-d-benchmark")
+
+
+def discover_framework_submodules(
+    repo_root: Path,
+) -> tuple[dict[str, str], dict[str, str], list[str]]:
+    """Read framework submodule state from ``repo_root``.
+
+    Returns ``(shas, urls, missing)``:
+
+    - ``shas``: ``{name: sha}`` for each framework submodule. Value is
+      ``"unknown"`` when the directory is absent or the SHA lookup fails.
+      Callers pass this through to the PipelineRun spec verbatim; the
+      cluster-side clone step fails visibly on ``"unknown"``, which is
+      the intended posture — assemble succeeds locally so the operator
+      can inspect the run, cluster fails at the right step. Matches
+      legacy ``pipeline/prepare.py:_get_submodule_shas``.
+    - ``urls``: ``{name: url}`` for every framework submodule, sourced
+      from ``<repo_root>/.gitmodules``. Value is ``""`` when
+      ``.gitmodules`` is absent or has no entry for that name. URL
+      discovery is declarative and does not depend on the submodule
+      directory being populated.
+    - ``missing``: sorted list of framework submodule names whose
+      directory does not exist under ``repo_root``. The CLI wrapper
+      surfaces this as an operator warning via the side-band
+      ``missing_submodules`` attr.
+
+    ``repo_root`` is the framework repo root, not the experiment root.
+    """
+    shas: dict[str, str] = {}
+    missing: list[str] = []
+    for name in _FRAMEWORK_SUBMODULE_NAMES:
+        sub = repo_root / name
+        if not sub.exists() or not (sub / ".git").exists():
+            missing.append(name)
+            shas[name] = "unknown"
+            continue
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=sub,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            shas[name] = result.stdout.strip() or "unknown"
+        except (subprocess.CalledProcessError, OSError):
+            shas[name] = "unknown"
+
+    urls: dict[str, str] = {name: "" for name in _FRAMEWORK_SUBMODULE_NAMES}
+    gitmodules_path = repo_root / ".gitmodules"
+    if gitmodules_path.exists():
+        parser = configparser.ConfigParser()
+        try:
+            parser.read(gitmodules_path)
+        except configparser.Error:
+            # Corrupt .gitmodules — leave urls empty; missing already
+            # reflects any absent-on-disk submodules.
+            return shas, urls, sorted(missing)
+        for section in parser.sections():
+            # Sections look like: submodule "<name>"
+            if not (section.startswith('submodule "') and section.endswith('"')):
+                continue
+            name = section[len('submodule "'):-1]
+            if name not in _FRAMEWORK_SUBMODULE_NAMES:
+                continue
+            urls[name] = parser.get(section, "url", fallback="")
+
+    return shas, urls, sorted(missing)
 
 
 class AssembleError(Exception):
@@ -361,10 +447,18 @@ def assemble_run(
     The list of algorithms present in the manifest but absent from the
     registered translation is stored on ``assemble_run.skipped_algorithms``
     for the CLI wrapper to surface as warnings.
+
+    Framework submodules (``inference-sim``, ``llm-d-benchmark``) whose
+    directory is not initialized are similarly recorded on
+    ``assemble_run.missing_submodules``. The four PipelineRun params
+    (``benchmarkGit*``, ``blisGit*``) fall back to ``"unknown"`` in
+    that case so the run assembles locally; the cluster-side clone
+    step then fails visibly at the right point.
     """
     layout.set_experiment_root(experiment_root)
     # Reset side-band state each call — see docstring above.
     assemble_run.skipped_algorithms = []  # type: ignore[attr-defined]
+    assemble_run.missing_submodules = []  # type: ignore[attr-defined]
 
     # 1. Validation --------------------------------------------------------
     tdir = layout.translation_dir(translation_hash)
@@ -493,6 +587,14 @@ def assemble_run(
         scenarios_list[0].get("model", {}).get("name", "") if scenarios_list else ""
     )
 
+    # Framework submodule discovery — populates the four benchmarkGit*/
+    # blisGit* params on every generated PipelineRun (issue #458). Missing
+    # submodules are recorded on the side-band attr for the CLI wrapper.
+    submodule_shas, submodule_urls, missing_submodules = (
+        discover_framework_submodules(_REPO_ROOT)
+    )
+    assemble_run.missing_submodules = missing_submodules  # type: ignore[attr-defined]
+
     generate_pipelineruns(
         run_dir=run_dir,
         packages=packages,
@@ -502,11 +604,8 @@ def assemble_run(
         pipeline_name=pipeline_name,
         observe=observe,
         model_name=model_name,
-        # Step-1 does not read git submodule state — PR 3 will. Empty strings
-        # accepted by tekton.make_pipelinerun_scenario; downstream chart handles
-        # the absence.
-        submodule_shas={},
-        submodule_urls={},
+        submodule_shas=submodule_shas,
+        submodule_urls=submodule_urls,
     )
 
     # 8. Write run_metadata.json ------------------------------------------
@@ -526,5 +625,6 @@ def assemble_run(
     assemble_run.skipped_algorithms = skipped_algo_names  # type: ignore[attr-defined]
 
 
-# Initialize the side-band attribute so `getattr` in the CLI works on first call.
+# Initialize side-band attributes so `getattr` in the CLI works on first call.
 assemble_run.skipped_algorithms = []  # type: ignore[attr-defined]
+assemble_run.missing_submodules = []  # type: ignore[attr-defined]
