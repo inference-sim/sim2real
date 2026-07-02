@@ -3450,15 +3450,6 @@ def main():
 
     cmd = args.command
 
-    if cmd == "stop":
-        cluster_config = _load_cluster_config()
-        namespaces = [ns for ns in (cluster_config.get("namespaces") or []) if ns]
-        if not namespaces:
-            err("No namespaces configured. Run cluster.py provision with --namespaces.")
-            sys.exit(1)
-        _cmd_stop(namespace=namespaces[0])
-        return
-
     run_name = args.run or setup_config.get("current_run", "")
     if not run_name:
         err("No run name. Use --run NAME or set current_run in setup_config.json.")
@@ -3500,6 +3491,12 @@ def main():
         _cmd_pairs(cluster_dir, keys_only=args.keys_only,
                    workloads_only=args.workloads_only,
                    packages_only=args.packages_only)
+    elif cmd == "stop":
+        namespaces = [ns for ns in (cluster_config.get("namespaces") or []) if ns]
+        if not namespaces:
+            err("No namespaces configured. Run cluster.py provision with --namespaces.")
+            sys.exit(1)
+        _cmd_stop(namespace=namespaces[0])
     else:
         err("No subcommand specified. Use: deploy.py build | run | status | collect | stop | reset | wipe | pairs")
         sys.exit(1)
