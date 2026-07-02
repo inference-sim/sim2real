@@ -649,6 +649,30 @@ def _cmd_translate(args) -> int:
     expected_names = [a["name"] for a in declared_algos]
     state, missing = _translate_state(thash, expected_names)
 
+    # Alias uniqueness — the scenario doubles as the translation's alias.
+    # Design §Alias: "translate and register both refuse if another
+    # translation has the same alias value pointing at a different hash,
+    # unless --force is passed." Mirror `_cmd_translation_register`'s check
+    # (sim2real.py:_register_translation), but skip it for --resume — resume
+    # never mutates the dir, so a stale alias elsewhere doesn't affect it.
+    if not args.resume:
+        other_hash = translation_ref.find_by_alias(
+            scenario, layout.translations_dir()
+        )
+        if other_hash is not None and other_hash != thash:
+            if not args.force:
+                print(
+                    f"error: alias {scenario!r} already assigned to translation "
+                    f"{other_hash}; pass --force to reassign",
+                    file=sys.stderr,
+                )
+                return 2
+            try:
+                _clear_alias_on(other_hash)
+            except OSError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+
     if args.resume:
         if state == "nothing":
             print(
@@ -759,7 +783,7 @@ def _translate_write_checkpoint(
     skin = _build_skill_input(
         translation_hash=thash,
         experiment_root=exp_root,
-        translations_dir=layout.translations_dir(),
+        translations_dir=layout.translation_dir(thash),
         scenario=scenario,
         baseline=skin_baseline,
         algorithms=algo_records,

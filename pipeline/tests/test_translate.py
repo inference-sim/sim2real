@@ -292,6 +292,12 @@ class TestTranslateEmpty:
         skin = json.loads((tdir / "skill_input.json").read_text())
         assert skin["scenario"] == "softreflective-v1"
         assert skin["algorithms"][0]["name"] == "softreflective"
+        # skill_input.translations_dir must be the hash-specific directory,
+        # not its parent — design pins the value as
+        # "/absolute/path/to/workspace/translations/<hash>" so per-algo
+        # output paths (relative to translations_dir) land in the right
+        # subtree.
+        assert skin["translations_dir"] == str(tdir)
 
     def test_plain_prints_checkpoint_message(self, tmp_path, capsys):
         _write_manifest(tmp_path)
@@ -414,3 +420,69 @@ class TestTranslateHashCollision:
         assert _run_translate([]) == 2
         err = capsys.readouterr().err
         assert "incomplete" in err
+
+
+class TestTranslateAliasCollision:
+    """Alias-uniqueness invariant per design §Alias.
+
+    Two experiments sharing the same scenario name (== alias) must not
+    silently coexist under different hashes. Plain translate refuses;
+    --force reassigns atomically by clearing the alias on the previous
+    translation. Mirrors the behavior enforced by
+    `_cmd_translation_register`.
+    """
+
+    def _plant_other_translation(self, tmp_path, alias, other_hash="b" * 64):
+        """Simulate a pre-existing translation with the given alias under a
+        different hash than the current manifest would produce."""
+        other = tmp_path / "workspace" / "translations" / other_hash
+        (other / "generated" / "old_algo").mkdir(parents=True)
+        (other / "translation_output.json").write_text(json.dumps({
+            "version": 1,
+            "translation_hash": other_hash,
+            "source": "skill",
+            "alias": alias,
+            "algorithms": [{"name": "old_algo"}],
+            "created_at": "2026-07-01T00:00:00Z",
+        }))
+        return other_hash
+
+    def test_plain_refuses_when_alias_belongs_to_different_hash(self, tmp_path, capsys):
+        _write_manifest(tmp_path, scenario="softreflective-v1")
+        other = self._plant_other_translation(tmp_path, "softreflective-v1")
+        assert _run_translate([]) == 2
+        err = capsys.readouterr().err
+        assert "already assigned to translation" in err
+        assert other in err
+        assert "--force" in err
+
+    def test_force_reassigns_alias_atomically(self, tmp_path):
+        manifest_path = _write_manifest(tmp_path, scenario="softreflective-v1")
+        other = self._plant_other_translation(tmp_path, "softreflective-v1")
+        thash = _compute_hash(tmp_path, manifest_path)
+        assert _run_translate(["--force"]) == 0
+        # New translation carries the alias.
+        new_tout = json.loads(
+            (tmp_path / "workspace" / "translations" / thash
+             / "translation_output.json").read_text()
+        )
+        assert new_tout["alias"] == "softreflective-v1"
+        # Old translation's alias was cleared.
+        old_tout = json.loads(
+            (tmp_path / "workspace" / "translations" / other
+             / "translation_output.json").read_text()
+        )
+        assert old_tout["alias"] is None
+
+    def test_resume_ignores_foreign_alias_collision(self, tmp_path):
+        """--resume never mutates the dir, so a stale alias on a different
+        translation should not block a resume validation. In the "nothing"
+        state --resume still errors (there's nothing to resume) — this test
+        asserts that error is about the missing translation, not the alias
+        collision."""
+        _write_manifest(tmp_path, scenario="softreflective-v1")
+        self._plant_other_translation(tmp_path, "softreflective-v1")
+        # The current experiment has no translation yet → "nothing" +
+        # --resume → error "no translation to resume", NOT an alias error.
+        rc = _run_translate(["--resume"])
+        assert rc == 2  # nothing-to-resume is still an error; different cause.
