@@ -3,8 +3,9 @@
 Consumers: `sim2real translation register` (validates --algorithm, writes
 alias + normalized schema), `sim2real assemble --translation` (routes the
 CLI ref through `resolve_translation_ref`), `sim2real list translations`
-(iterates via `iter_translations` in newest-first order), and, later,
-step-2 `sim2real translate` / `sim2real build`.
+(iterates via `iter_translations`; the list command sorts by
+``created_at`` itself — this module does not order its results), and,
+later, step-2 `sim2real translate` / `sim2real build`.
 
 The on-read shim (`read_translation_output`) normalizes step-1 BYO
 translations (top-level ``image_ref``/``image_digest`` at the object
@@ -16,7 +17,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from collections.abc import Iterator
 from pathlib import Path
