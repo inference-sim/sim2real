@@ -25,14 +25,21 @@ def copy_generated(
 
     Args:
         target_repo: Path to the target repo (e.g., llm-d-inference-scheduler directory).
-        translation_dir: Path to the translation directory (workspace/translations/<hash>/)
-            containing translation_output.json.
-        algo_name: When set, files are written to generated/{algo_name}/ preserving
-            full relative paths; an {algo_name}_output.json is also written there.
-            When None, existing flat-copy behavior with basename collision check.
+        translation_dir: Path to the translation directory
+            (``workspace/translations/<hash>/``). In flat mode (``algo_name`` is
+            None) must contain ``translation_output.json``; in per-algorithm mode
+            (``algo_name`` set) must contain
+            ``generated/{algo_name}/{algo_name}_output.json``, written by the
+            writer agent before this call.
+        algo_name: When set, files are written to ``generated/{algo_name}/``
+            preserving full relative paths; ``{algo_name}_output.json`` is
+            updated in place there. When None, existing flat-copy behavior
+            with basename collision check.
 
     Returns:
-        Tuple of (files_created, files_modified) as written to translation_output.json.
+        Tuple of (files_created, files_modified) as written to
+        ``translation_output.json`` (flat mode) or
+        ``{algo_name}_output.json`` (per-algorithm mode).
     """
     target = Path(target_repo)
     rd = Path(translation_dir)

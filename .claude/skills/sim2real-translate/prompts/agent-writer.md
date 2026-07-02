@@ -47,7 +47,7 @@ Expert agent name (for queries): {EXPERT_AGENT_NAME}
 ## Tool Discipline
 
 **Do not explore `{TARGET_REPO}` yourself** beyond reading specific files you already
-know the path to (from the context document or Expert answers).
+know the path to (from the context files or Expert answers).
 
 The context files ({CONTEXT_FILE_PATHS}) give you the architecture overview and signal mapping. For anything
 code-level — Go interface signatures, struct definitions, factory function patterns,
@@ -101,8 +101,8 @@ assembly time.
     substitutes `${model.idLabel}` at render time (requires llm-d-benchmark
     >= PR #1103).
 
-  Everything else MUST be copied verbatim from the project's context document
-  (typically `config.md`) at the field level. In particular: copy the entire
+  Everything else MUST be copied verbatim from the project's context files
+  (typically including `config.md`) at the field level. In particular: copy the entire
   `spec.poolRef` block (including `group`, `name`, and any other keys), not
   just `name`. Same applies to `apiVersion`, `metadata`, `spec.priority`, and
   any other nested fields the project's `config.md` declares — if it's in
@@ -138,9 +138,12 @@ Read:
 3. `{ALGO_SOURCE}` — the algorithm source
 
 Your goal: produce `{OUTPUT_DIR}/{ALGO_NAME}_config.yaml` — a **llmdbenchmark scenario overlay**
-containing ONLY what differs from the baseline. Since assembly computes
-`treatment_resolved = deep_merge(baseline_resolved, treatment_overlay)`, anything already in
-baseline propagates automatically.
+containing ONLY plugin-specific additions not already covered by the algorithm's diffs.
+Since assembly computes
+`treatment_resolved = deep_merge(deep_merge(baseline_resolved, treatment_diffs), treatment_overlay)`
+— where `treatment_diffs` comes from the algorithm's `scenario/treatment.yaml` in the
+experiment repo — anything already in either the baseline or the diffs propagates
+automatically; only add things neither layer supplies.
 
 **Output format** (same structure as baseline overlay):
 - Top-level `scenario:` list with one dict

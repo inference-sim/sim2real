@@ -155,9 +155,14 @@ interpreted relative to `experiment_root` (for `source_path`) or
 `translations_dir` (for `output_dir`, `config_output_path`,
 `baseline.generated_overlay_path`):
 
+Path-safe emission: each `ALGO` row is TAB-delimited; each context file path is
+written to a separate line in a dedicated file (`/tmp/sim2real_translate_ctx_paths.txt`)
+so paths containing spaces are preserved unchanged. `CONTEXT_TEXT` is base64-encoded
+to survive newlines and non-printable characters in operator-supplied notes.
+
 ```bash
 python3 - "$TRANSLATIONS_DIR" "$EXPERIMENT_ROOT" <<'PY' > /tmp/sim2real_translate_algos.txt
-import json, sys
+import json, sys, base64
 from pathlib import Path
 tdir = Path(sys.argv[1])
 exp = Path(sys.argv[2])
@@ -173,10 +178,12 @@ if baseline is not None:
 else:
     print("BASELINE_OVERLAY_REL=")
 ctx = si.get("context") or {}
-print("CONTEXT_TEXT_B64=" + __import__("base64").b64encode(
+print("CONTEXT_TEXT_B64=" + base64.b64encode(
     (ctx.get("text") or "").encode()).decode())
+# Write context paths (one per line) to a dedicated file — paths may contain spaces.
+ctx_paths_out = Path("/tmp/sim2real_translate_ctx_paths.txt")
 paths = [str(exp / p) for p in (ctx.get("file_paths") or [])]
-print("CONTEXT_FILE_PATHS=" + " ".join(paths))
+ctx_paths_out.write_text("".join(p + "\n" for p in paths))
 for algo in si["algorithms"]:
     print("ALGO\t" + "\t".join([
         algo["name"],
@@ -194,24 +201,36 @@ if [ -n "$BASELINE_OVERLAY_REL" ]; then
 else
     BASELINE_OVERLAY_PATH=""
 fi
-CONTEXT_TEXT=$(grep '^CONTEXT_TEXT_B64=' /tmp/sim2real_translate_algos.txt | cut -d= -f2- | base64 -d 2>/dev/null || true)
-CONTEXT_FILE_PATHS=$(grep '^CONTEXT_FILE_PATHS=' /tmp/sim2real_translate_algos.txt | cut -d= -f2-)
+CONTEXT_TEXT_B64_VAL=$(grep '^CONTEXT_TEXT_B64=' /tmp/sim2real_translate_algos.txt | cut -d= -f2-)
+if [ -n "$CONTEXT_TEXT_B64_VAL" ]; then
+    CONTEXT_TEXT=$(printf '%s' "$CONTEXT_TEXT_B64_VAL" | base64 -d) || {
+        echo "HALT: failed to decode CONTEXT_TEXT_B64"; exit 1;
+    }
+else
+    CONTEXT_TEXT=""
+fi
+# When the writer/reviewer/expert prompts substitute {CONTEXT_FILE_PATHS},
+# they receive the newline-delimited file contents (spaces preserved).
+CONTEXT_FILE_PATHS=$(cat /tmp/sim2real_translate_ctx_paths.txt)
 ```
 
 Verify that every algorithm source and every context file exists (absolute
-paths):
+paths; iterate via `< <(...)` so `exit 1` inside the loop halts the outer
+script, and read context paths line-by-line so paths containing spaces are
+preserved):
 
 ```bash
-grep -E '^ALGO\b' /tmp/sim2real_translate_algos.txt | while IFS=$'\t' read -r _ name source_rel _ _ _; do
+while IFS=$'\t' read -r _ name source_rel _ _ _; do
     test -f "$EXPERIMENT_ROOT/$source_rel" || {
         echo "HALT: algorithm source not found: $EXPERIMENT_ROOT/$source_rel"
         exit 1
     }
-done || exit 1
+done < <(grep -E '^ALGO\b' /tmp/sim2real_translate_algos.txt) || exit 1
 
-for p in $CONTEXT_FILE_PATHS; do
+while IFS= read -r p; do
+    [ -n "$p" ] || continue
     test -f "$p" || { echo "HALT: context file not found: $p"; exit 1; }
-done
+done < /tmp/sim2real_translate_ctx_paths.txt || exit 1
 ```
 
 ## Idempotency Check
@@ -320,6 +339,12 @@ to answer queries.
 
 Wait for the Writer to send a message to the main session. Handle each case:
 
+**On `expert-ready: ...`:**
+
+The Expert has finished initialization and is ready for queries. Log
+`"Expert initialized"` and continue waiting for the next message (no reply
+to the Expert needed — its readiness state is implicit from here on).
+
 **On `baseline-ready: ...`:**
 
 If `$BASELINE_OVERLAY_PATH` is empty (manifest declares no baseline overlay),
@@ -360,7 +385,7 @@ Plugin files: <files_created from ${ALGO_NAME}_output.json>
 ⚠ This algorithm's translation is INCOMPLETE until you reply. Source files
   have NOT yet been copied to $OUTPUT_DIR/. Choose one:
 
-  • Reply `done`             → finalize: copy source overlay to $OUTPUT_DIR/,
+  • Reply `done`             → finalize: copy plugin source files from the target repo into $OUTPUT_DIR/,
                                shut down the team, and move to the next algorithm
   • Reply `feedback: <text>` → iterate one more review round with the feedback
 
@@ -487,7 +512,7 @@ TaskUpdate all open tasks → completed.
 
 ## What This Skill Does NOT Do
 
-- Does not compute or verify `translation_hash` — that comes from `skill_input.json`, written by `sim2real translate`.
+- Does not drift from the pinned `translation_hash`: it calls `slicer.translation_hash_with_sources` at the same call site `sim2real translate` uses (so hashes stay identical) and then looks up `translations/<hash>/skill_input.json`. It does not cross-check the hash inside `skill_input.json` against the recomputed value — divergence there is treated as a caller bug in `sim2real translate`, not a skill invariant.
 - Does not build container images (`sim2real build`'s job).
 - Does not touch cluster config, bundle inputs, or run summaries.
 - Job: produce working, reviewed Go plugin source + treatment overlay + per-algo metadata under `translations/<hash>/generated/<algo>/`.
