@@ -489,6 +489,15 @@ Add `translation_hash_with_sources(manifest: dict, experiment_root: Path) -> str
 - Update `CLAUDE.md` documenting the alias UX + the new `translations/<hash>/` schema fields.
 - Tests: registry-probe-hit skips build, registry-probe-miss triggers build, `--force-rebuild` overrides skip, `--skip-build` bypasses everything, probe-auth-failure treated as miss, missing-skopeo fails cleanly, post-build inspect failure records `image_ref` with null digest + warning, `image_ref`/`image_digest` written back per-algo, incomplete-translation exits with actionable error, `assemble` fails early on null `image_ref`.
 
+### PR 6 — CI, docs, and dead-code sweep
+
+Final cleanup pass over the surface introduced by PRs 1–5. Land last.
+
+- **CI.** `.github/workflows/test.yml` lists individual test files explicitly (per today's `CLAUDE.md` §CI); the existing `pipeline/` glob is not enough. Audit the workflow and add entries for every new test file created by PRs 1–5 — expected additions: `pipeline/tests/test_translation_ref.py` (PR 2), `pipeline/tests/test_translate.py` (PR 3), `pipeline/tests/test_build.py` (PR 5), plus any new golden-file / integration test files. Verify `ruff check pipeline/ .claude/skills/ --select F` runs clean against the merged tree.
+- **Documentation.** Verify PR 5's `pipeline/README.md` and `CLAUDE.md` updates cover every user-facing surface added or changed (`translate`, `build`, `list translations`, alias resolver, `--force-rebuild`/`--skip-build`, new per-algo `translation_output.json` schema, the `translations/<hash>/` layout). Update module-level docstrings in touched files (`sim2real.py`, `pipeline/lib/slicer.py`, new `pipeline/lib/translation_ref.py`, new `pipeline/lib/build.py`). Fix any stale references to the pre-refactor `prepare.py` / `runs/<run>/generated/` that survived step-0/step-1 outside of the skill.
+- **Dead-code sweep beyond the skill.** PR 4 sweeps `.claude/skills/sim2real-translate/`; this task sweeps everywhere else. Targets: DISABLED-era comments and dead branches in `sim2real.py` and `deploy.py`, unused imports and orphaned helpers exposed after the `_cmd_build` extraction in PR 5 (once both callers route through `pipeline/lib/build.py`, remove any leftovers in `deploy.py` that no consumer references), obsolete overlay-path constants, and any TODO/FIXME markers that PRs 1–5 resolved. Delete rather than mark. **Keep the on-read compat shim** in `pipeline/lib/translation_ref.py` for the legacy top-level-`image_ref` shape — that's live compat, not dead code.
+- No new production behavior; no new tests beyond what CI needs to keep working.
+
 ## Ordering constraints
 
 - PR 1 has no dependencies. Land first.
@@ -496,6 +505,7 @@ Add `translation_hash_with_sources(manifest: dict, experiment_root: Path) -> str
 - PR 3 depends on PR 1 (uses `translation_hash_with_sources`) and PR 2 (writes the alias field).
 - PR 4 depends on PR 3 (the skill's `skill_input.json` reads what `translate` writes).
 - PR 5 depends on PR 2 (uses the alias resolver for `--translation`) and, for end-to-end, PR 3 (needs a translation dir to build against — either skill-driven from PR 3 or BYO-registered from step-1).
+- PR 6 depends on all of PRs 1–5; lands last so the audit sees the final merged surface.
 
 ## Risks
 
