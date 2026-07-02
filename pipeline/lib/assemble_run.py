@@ -447,10 +447,18 @@ def assemble_run(
     The list of algorithms present in the manifest but absent from the
     registered translation is stored on ``assemble_run.skipped_algorithms``
     for the CLI wrapper to surface as warnings.
+
+    Framework submodules (``inference-sim``, ``llm-d-benchmark``) whose
+    directory is not initialized are similarly recorded on
+    ``assemble_run.missing_submodules``. The four PipelineRun params
+    (``benchmarkGit*``, ``blisGit*``) fall back to ``"unknown"`` in
+    that case so the run assembles locally; the cluster-side clone
+    step then fails visibly at the right point.
     """
     layout.set_experiment_root(experiment_root)
     # Reset side-band state each call — see docstring above.
     assemble_run.skipped_algorithms = []  # type: ignore[attr-defined]
+    assemble_run.missing_submodules = []  # type: ignore[attr-defined]
 
     # 1. Validation --------------------------------------------------------
     tdir = layout.translation_dir(translation_hash)
@@ -579,6 +587,14 @@ def assemble_run(
         scenarios_list[0].get("model", {}).get("name", "") if scenarios_list else ""
     )
 
+    # Framework submodule discovery — populates the four benchmarkGit*/
+    # blisGit* params on every generated PipelineRun (issue #458). Missing
+    # submodules are recorded on the side-band attr for the CLI wrapper.
+    submodule_shas, submodule_urls, missing_submodules = (
+        discover_framework_submodules(_REPO_ROOT)
+    )
+    assemble_run.missing_submodules = missing_submodules  # type: ignore[attr-defined]
+
     generate_pipelineruns(
         run_dir=run_dir,
         packages=packages,
@@ -588,11 +604,8 @@ def assemble_run(
         pipeline_name=pipeline_name,
         observe=observe,
         model_name=model_name,
-        # Step-1 does not read git submodule state — PR 3 will. Empty strings
-        # accepted by tekton.make_pipelinerun_scenario; downstream chart handles
-        # the absence.
-        submodule_shas={},
-        submodule_urls={},
+        submodule_shas=submodule_shas,
+        submodule_urls=submodule_urls,
     )
 
     # 8. Write run_metadata.json ------------------------------------------
@@ -612,5 +625,6 @@ def assemble_run(
     assemble_run.skipped_algorithms = skipped_algo_names  # type: ignore[attr-defined]
 
 
-# Initialize the side-band attribute so `getattr` in the CLI works on first call.
+# Initialize side-band attributes so `getattr` in the CLI works on first call.
 assemble_run.skipped_algorithms = []  # type: ignore[attr-defined]
+assemble_run.missing_submodules = []  # type: ignore[attr-defined]

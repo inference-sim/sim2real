@@ -469,6 +469,101 @@ class TestAssembleRun:
         assert len(meta["params_hash"]) == 64
         assert meta["assembled_at"] == "2026-07-01T14:05:00Z"
 
+    def test_pipelinerun_params_include_framework_submodule_state(
+        self, tmp_path, monkeypatch
+    ):
+        """assemble() populates benchmarkGit*/blisGit* params from a fake
+        framework repo layout (issue #458). Verified end-to-end: build an
+        experiment + a fake framework repo with both submodules, patch
+        the helper, run assemble, read one generated PipelineRun, check
+        the four params."""
+        fx = _make_experiment(
+            tmp_path,
+            algo_names_registered=["sr"],
+            algo_names_manifest=["sr"],
+        )
+
+        fake_repo = tmp_path / "framework"
+        fake_repo.mkdir()
+        _write_gitmodules(fake_repo, {
+            "inference-sim": "https://example.com/inference-sim.git",
+            "llm-d-benchmark": "https://example.com/llm-d-benchmark.git",
+        })
+        _init_fake_submodule(fake_repo / "inference-sim")
+        _init_fake_submodule(fake_repo / "llm-d-benchmark")
+
+        monkeypatch.setattr(
+            assemble_run, "_REPO_ROOT", fake_repo,
+        )
+
+        assemble_run.assemble_run(
+            translation_hash=fx["translation_hash"],
+            cluster_id=fx["cluster_id"],
+            run_name="trial-1",
+            experiment_root=fx["exp_root"],
+            manifest_path=fx["manifest_path"],
+            force=False,
+            now_iso="2026-07-02T00:00:00Z",
+        )
+
+        pr = yaml.safe_load(
+            (fx["exp_root"] / "workspace/runs/trial-1/cluster/"
+             "pipelinerun-wl-a-baseline.yaml").read_text()
+        )
+        params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
+        assert params["benchmarkGitRepoUrl"] == "https://example.com/llm-d-benchmark.git"
+        assert params["blisGitRepoUrl"] == "https://example.com/inference-sim.git"
+        assert params["benchmarkGitCommit"] not in ("", "unknown")
+        assert params["blisGitCommit"] not in ("", "unknown")
+        assert assemble_run.assemble_run.missing_submodules == []  # type: ignore[attr-defined]
+
+    def test_missing_submodule_falls_back_to_unknown_and_warns(
+        self, tmp_path, monkeypatch
+    ):
+        """When a framework submodule is missing on disk, assemble()
+        still writes the PipelineRuns using 'unknown' as the commit and
+        records the name on the side-band attr (issue #458). The URL
+        still comes through because it's parsed from .gitmodules."""
+        fx = _make_experiment(
+            tmp_path,
+            algo_names_registered=["sr"],
+            algo_names_manifest=["sr"],
+        )
+
+        fake_repo = tmp_path / "framework"
+        fake_repo.mkdir()
+        _write_gitmodules(fake_repo, {
+            "inference-sim": "https://example.com/inference-sim.git",
+            "llm-d-benchmark": "https://example.com/llm-d-benchmark.git",
+        })
+        # Only inference-sim is initialized; llm-d-benchmark is missing.
+        _init_fake_submodule(fake_repo / "inference-sim")
+
+        monkeypatch.setattr(
+            assemble_run, "_REPO_ROOT", fake_repo,
+        )
+
+        assemble_run.assemble_run(
+            translation_hash=fx["translation_hash"],
+            cluster_id=fx["cluster_id"],
+            run_name="trial-1",
+            experiment_root=fx["exp_root"],
+            manifest_path=fx["manifest_path"],
+            force=False,
+            now_iso="2026-07-02T00:00:00Z",
+        )
+
+        pr = yaml.safe_load(
+            (fx["exp_root"] / "workspace/runs/trial-1/cluster/"
+             "pipelinerun-wl-a-baseline.yaml").read_text()
+        )
+        params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
+        assert params["benchmarkGitCommit"] == "unknown"
+        assert params["blisGitCommit"] not in ("", "unknown")
+        # URL comes from .gitmodules — not affected by the missing dir.
+        assert params["benchmarkGitRepoUrl"] == "https://example.com/llm-d-benchmark.git"
+        assert assemble_run.assemble_run.missing_submodules == ["llm-d-benchmark"]  # type: ignore[attr-defined]
+
     def test_filters_unregistered_algorithms(self, tmp_path):
         fx = _make_experiment(
             tmp_path,
