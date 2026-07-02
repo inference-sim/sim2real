@@ -12,12 +12,8 @@ from pipeline.lib import translation_ref
 from pipeline.lib.translation_ref import (
     ResolveError,
     ValidationError,
-    validate_name,
-    is_full_hash,
-    read_translation_output,
-    find_by_alias,
-    iter_translations,
     resolve_translation_ref,
+    validate_name,
 )
 
 

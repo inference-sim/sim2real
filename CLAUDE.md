@@ -58,7 +58,7 @@ python pipeline/sim2real.py --experiment-root ../admission-control use --run <ru
 
 **`pipeline/deploy.py`** — Builds EPP image and orchestrates PipelineRun execution across namespace slots (`deploy.py run`). Use `deploy.py collect` to pull results from the cluster PVC after runs complete. Operates independently of `transfer.yaml` — driven by workspace files, `setup_config.json`, and `clusters/<id>/cluster_config.json`.
 
-**`pipeline/sim2real.py` (`use`, `list runs`)** — Manage runs. `use --run <name>` flips `current_run` in `setup_config.json`. `list runs` prints all runs newest-first (mtime desc) with the active run marked `*`.
+**`pipeline/sim2real.py` (`use`, `list runs`, `list translations`)** — Manage runs and translations. `use --run <name>` flips `current_run` in `setup_config.json`. `list runs` prints all runs newest-first (mtime desc) with the active run marked `*`. `list translations` prints all translations newest-first (by `created_at`) with `ALIAS / HASH / SOURCE / IMAGES / CREATED` columns. Downstream commands (`assemble --translation`, and step-2's `build --translation`) accept an alias, a hash prefix (min 4 chars), or a full hash — resolution happens via `pipeline/lib/translation_ref.py:resolve_translation_ref`.
 
 **`pipeline/cluster.py`** — Cluster-side bootstrap. `cluster.py provision <cluster_id> --namespaces NS1,NS2,...` provisions namespaces, RBAC, Secrets, PVCs, Tekton tasks, and the cluster-wide Pipeline definition, and writes `workspace/clusters/<cluster_id>/cluster_config.json`. Idempotent — re-run when adding or changing namespace slots.
 
@@ -68,6 +68,7 @@ python pipeline/sim2real.py --experiment-root ../admission-control use --run <ru
 |--------|---------|
 | `manifest.py` | Loads and validates `transfer.yaml` (v3 schema) |
 | `slicer.py` | Splits `transfer.yaml` into translation-slice vs assembly-slice + computes `translation_hash` |
+| `translation_ref.py` | Shared alias/algorithm-name validator, on-read shim for `translation_output.json` (handles both step-1 legacy and step-2 per-algo shapes), and `resolve_translation_ref` (accepts alias / hash prefix / full hash) |
 | `assemble_run.py` | Assembly logic behind `sim2real assemble` (deep-merge + PipelineRun generation) |
 | `values.py` | Deep-merge utility (`deep_merge`) used by `assemble_run.py` |
 | `tekton.py` | Generates PipelineRun YAMLs for scenario-based benchmarks |
@@ -86,7 +87,7 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). When no `-
 |------|-----------|---------|
 | `setup_config.json` (workspace fields: registry, repo_name, current_run, orchestrator_image, sim2real_root) | `setup.py`, `sim2real.py use` | `deploy.py`, `sim2real.py list runs` |
 | `clusters/<id>/cluster_config.json` (cluster fields: cluster_id, namespaces, is_openshift, storage_class, secret_names, workspaces, pipeline_yaml (optional), created_at) | `cluster.py provision` | `sim2real assemble`, `deploy.py`, `lib/remote.py` |
-| `translations/<hash>/translation_output.json` | `sim2real translation register` | `sim2real assemble`, `deploy.py` |
+| `translations/<hash>/translation_output.json` (step-2 shape: top-level `alias`; per-algo `image_ref`/`image_digest`/`config_path`/`source_path`/`source_sha256` inside `algorithms[i]`. Step-1 legacy files with top-level `image_ref` remain readable via `translation_ref.read_translation_output`) | `sim2real translation register` | `sim2real assemble`, `sim2real list translations`, `deploy.py` |
 | `translations/<hash>/registered.json` | `sim2real translation register` | audit trail |
 | `translations/<hash>/generated/baseline_config.yaml` | `sim2real translation register` (via `--baseline-config`) | `sim2real assemble` (baseline overlay) |
 | `translations/<hash>/generated/{algo}/{algo}_config.yaml` | `sim2real translation register` | `sim2real assemble` (per-algo treatment overlay) |

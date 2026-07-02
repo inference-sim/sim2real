@@ -132,16 +132,17 @@ python pipeline/sim2real.py translation register \
 
 | Flag | Required | Notes |
 |------|----------|-------|
-| `--algorithm NAME` | yes | `[a-z0-9-]+`. Single algorithm per call in step-1. |
+| `--algorithm NAME` | yes | `[A-Za-z0-9][A-Za-z0-9._-]*`, max 128 chars, reject `.` / `..`. Also written as the translation's `alias`. Single algorithm per call. |
 | `--image REF` | yes | Registry ref. If it contains `@sha256:HEX`, that digest is recorded; otherwise `image_digest` is `null` with a warning. |
 | `--config PATH` | yes | Treatment overlay YAML. Validated as YAML before any writes. |
 | `--baseline-config PATH` | no | Baseline overlay YAML, if the translation needs one. |
 | `--registered-hash HASH` | no | Assert the computed `translation_hash` equals this value; error if not. |
+| `--force` | no | Reassign the alias (`--algorithm` value) if another translation already owns it. Clears the alias on the previous translation atomically. |
 | `--experiment-root PATH` | no | Defaults to cwd. |
 
 **Outputs** — under `workspace/translations/<translation_hash>/`:
 
-- `translation_output.json` — algorithm index + provenance (v1 schema).
+- `translation_output.json` — algorithm index + provenance (v1 schema). Includes `alias` (top-level, same value as `--algorithm`) and per-algorithm `image_ref` / `image_digest` inside `algorithms[i]`. Step-1 legacy files (top-level `image_ref`) remain readable via a compatibility shim in `pipeline/lib/translation_ref.py`.
 - `registered.json` — image ref + digest (BYO-only audit trail; v1 schema).
 - `generated/<algorithm>/<algorithm>_config.yaml` — the treatment overlay content.
 - `generated/baseline_config.yaml` — present only when `--baseline-config` is given.
@@ -155,6 +156,7 @@ python pipeline/sim2real.py translation register \
 - `--config` file missing or malformed YAML → exit 2, no writes.
 - Existing translation directory records a different algorithm name (hash collision) → exit 2, no writes.
 - `--registered-hash` given and does not match computed → exit 2, no writes.
+- Another translation already owns the `--algorithm` alias with a different hash → exit 2, no writes; re-run with `--force` to reassign.
 
 ---
 
@@ -164,15 +166,17 @@ Once a translation is registered, `sim2real assemble` produces a run directory u
 
 ```bash
 python pipeline/sim2real.py assemble \
-    --translation HASH \
+    --translation REF \
     --cluster CLUSTER_ID \
     --run RUN_NAME \
     [--force]
 ```
 
+`--translation` accepts an alias, a hash prefix (min 4 chars), or the full 64-char hash. Aliases are checked before prefixes, so a 4-char alias always resolves to its exact owner rather than a colliding hash prefix. Ambiguous prefixes exit 2 listing the candidates. Run `sim2real list translations` to see what's available.
+
 **Inputs read:**
 
-- `workspace/translations/<hash>/translation_output.json` — algorithms + image_ref.
+- `workspace/translations/<hash>/translation_output.json` — algorithms with per-algo `image_ref`. Legacy step-1 files (top-level `image_ref`) are read transparently via `pipeline/lib/translation_ref.py`'s on-read shim.
 - `workspace/translations/<hash>/generated/baseline_config.yaml` — optional baseline overlay (written when `translation register --baseline-config` was passed).
 - `workspace/translations/<hash>/generated/<algo>/<algo>_config.yaml` — per-algorithm treatment overlay.
 - `workspace/clusters/<cluster_id>/cluster_config.json` — namespaces, workspace bindings, hf secret name.
@@ -198,11 +202,11 @@ baseline_resolved  = deep_merge(framework_defaults, baseline_bundle, baseline_ov
 treatment_resolved = deep_merge(baseline_resolved, treatment_bundle_diffs, algo_overlay)
 ```
 
-Then the treatment scenario has `images.inferenceScheduler` set from `translation_output.json:image_ref`, and every scenario has `huggingface.secretName` set from `cluster_config.json:secret_names.hf_token`.
+Then each treatment scenario has `images.inferenceScheduler` set from that algorithm's own `translation_output.json:algorithms[i].image_ref`, and every scenario has `huggingface.secretName` set from `cluster_config.json:secret_names.hf_token`.
 
 **`params_hash`** is SHA-256 over the bytes of `manifest.assembly.yaml`. Recorded in `run_metadata.json` for later drift detection (step-4 of the epic).
 
-**Algorithm filtering:** algorithms listed in `transfer.yaml:algorithms` but absent from `translation_output.json:algorithms` are skipped with a warning — the run still assembles for the algorithms that are registered.
+**Algorithm filtering:** algorithms listed in `transfer.yaml:algorithms` but absent from `translation_output.json:algorithms` are skipped with a warning — the run still assembles for the algorithms that are registered. Algorithms that ARE in the translation but whose `image_ref` is still `null` (skill-driven translation before `sim2real build`) fail fast: `assemble` exits 2 with `translation <ref> not built for algorithms: <names> — run 'sim2real build --translation <ref>' first`.
 
 **Failure modes:**
 
@@ -351,16 +355,19 @@ Flags are mutually exclusive. Default (no flag) prints a human-readable table wi
 
 ---
 
-## Manage runs
+## Manage translations and runs
 
-`pipeline/sim2real.py` exposes two run-management subcommands.
+`pipeline/sim2real.py` exposes list/use subcommands for translations and runs.
 
 ```bash
+python pipeline/sim2real.py --experiment-root ../admission-control list translations
 python pipeline/sim2real.py --experiment-root ../admission-control list runs
 python pipeline/sim2real.py --experiment-root ../admission-control use --run <name>
 ```
 
 `--experiment-root` defaults to the current working directory; omit it when running from the experiment repo root.
+
+**`sim2real list translations`** — Walks `workspace/translations/*/translation_output.json` and prints one row per translation, newest first (by `created_at`). Columns: `ALIAS` (`-` if the translation has none), `HASH` (first 12 chars), `SOURCE` (`skill` or `byo`), `IMAGES` (`N built` when every algorithm has an `image_ref`, `N pending` when none, `N/M built` mixed, `N registered` for BYO), `CREATED`. Prints `no translations yet` and exits 0 if the directory is empty or missing. Malformed `translation_output.json` files are logged as warnings and skipped, so a stray file doesn't break the listing.
 
 **`sim2real list runs`** — Walks `workspace/runs/*/run_metadata.json` and prints one row per run, newest first (mtime desc). Columns: `RUN_NAME`, `TRANSLATION` (first 8 chars of the translation hash), `CLUSTER`, `ASSEMBLED`. The active run (`current_run` in `setup_config.json`) is marked with `*`. Prints `no runs yet` and exits 0 if `workspace/runs/` is empty or missing. A subdirectory without `run_metadata.json` is skipped; a corrupt `run_metadata.json` renders `?` cells instead of aborting the listing.
 
@@ -652,7 +659,7 @@ inferenceExtension:
 
 **Treatment overlay** — only the delta from baseline:
 - `inferenceExtension.pluginsCustomConfig` (evolved scorer config)
-- `images.inferenceScheduler` (custom EPP image — injected by `sim2real assemble` from `translation_output.json:image_ref`)
+- `images.inferenceScheduler` (custom EPP image — injected by `sim2real assemble` from `translation_output.json:algorithms[i].image_ref` for the matching algorithm)
 
 If treatment uses the same InferenceObjectives as baseline, do NOT repeat them — they propagate from `baseline_resolved`.
 
