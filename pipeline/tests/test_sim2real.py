@@ -536,11 +536,6 @@ class TestMainEndToEnd:
         cfg = tmp_path / "treatment.yaml"
         cfg.write_text("scorer: mine\n")
 
-        def flaky_atomic_write(path, data):
-            if path.name == "translation_output.json":
-                raise OSError("simulated: disk full")
-            sim2real._atomic_write_json.__wrapped__(path, data)
-
         # Wrap: call the real impl for non-output.json paths.
         original = sim2real._atomic_write_json
 
