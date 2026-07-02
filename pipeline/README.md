@@ -179,6 +179,7 @@ python pipeline/sim2real.py assemble \
 - `<experiment-root>/transfer.yaml` (or `config/transfer.yaml`) — v3 manifest.
 - `<experiment-root>/baselines/<name>.yaml` — baseline bundles referenced by `transfer.yaml:baselines[].scenario`.
 - `<experiment-root>/baselines/defaults/*.yaml` — framework defaults overlays (opt-out via `transfer.yaml:defaults.disable`).
+- `<sim2real-repo>/.gitmodules` and `<sim2real-repo>/{inference-sim,llm-d-benchmark}/` — the framework submodules' clone URLs (from `.gitmodules`) and HEAD SHAs (from `git rev-parse HEAD`), which populate `benchmarkGitRepoUrl` / `benchmarkGitCommit` / `blisGitRepoUrl` / `blisGitCommit` in every generated PipelineRun. Initialize with `git submodule update --init` in the sim2real repo before running `sim2real assemble`; a missing submodule falls back to `"unknown"` for its commit SHA (assemble prints a warning) and the cluster-side `git clone` step then fails visibly at the right point.
 
 **Outputs written to `workspace/runs/<run>/`:**
 
