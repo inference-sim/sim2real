@@ -627,10 +627,13 @@ def assemble_run(
 
     # 8. Write run_metadata.json ------------------------------------------
     # image_tag is a single-image summary field for backward-compat; use the
-    # first algorithm's image_ref (sufficient for BYO single-algo runs).
+    # first *kept* algorithm's image_ref. Reading from kept_algos rather
+    # than tout["algorithms"][0] guards against the multi-algo case where
+    # translated_algos contains an algo that was filtered out of the run,
+    # which would otherwise leak a null image_tag past the built-algo check.
     run_meta_image_tag = (
-        tout["algorithms"][0]["image_ref"]
-        if tout.get("algorithms") else ""
+        translated_algos[kept_algos[0]["name"]]["image_ref"]
+        if kept_algos else ""
     )
     write_run_metadata(
         run_dir,

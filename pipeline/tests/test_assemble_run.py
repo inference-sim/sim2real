@@ -920,7 +920,15 @@ class TestIncompleteTranslation:
         cluster_cfg_path.write_text(json.dumps({
             "id": "cX", "namespaces": ["ns1"], "workspaces": {},
         }))
-        with pytest.raises(assemble_run.AssembleError, match="not built for algorithms"):
+        # Regression-protect the design-verbatim message shape: the user's
+        # typed ref appears BOTH in the failure line and in the suggested
+        # `sim2real build --translation <ref>` command, joined by an em-dash
+        # (U+2014, not "--").
+        with pytest.raises(
+            assemble_run.AssembleError,
+            match=r"translation not-built not built for algorithms: ac1 — "
+                  r"run 'sim2real build --translation not-built' first",
+        ):
             assemble_run.assemble_run(
                 translation_hash=thash,
                 translation_ref="not-built",
