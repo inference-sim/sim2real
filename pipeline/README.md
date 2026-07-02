@@ -369,6 +369,86 @@ The previous `run.py inspect` debug view is dropped without replacement — `cat
 
 ---
 
+## End-of-step-1 BYO demo
+
+The full BYO flow. Every step is idempotent and re-runnable. Substitute your own values for `<cluster_id>`, `<run-name>`, `<algorithm>`, `<image-ref>`, and `<treatment-overlay-path>`.
+
+### Prerequisites
+
+- An experiment repo with `transfer.yaml`, `baselines/<name>.yaml`, and the workloads referenced in `transfer.yaml:workloads`.
+- A cluster with kubectl / Tekton reachable.
+- Registry credentials (HF, image registry) exported or provided via flags.
+
+### 1. Provision the cluster (one-time)
+
+```bash
+python pipeline/cluster.py provision <cluster_id> --namespaces sim2real-0,sim2real-1
+```
+
+Writes `workspace/clusters/<cluster_id>/cluster_config.json`. Idempotent — re-run when adding namespace slots.
+
+### 2. Configure the workspace (one-time per experiment repo)
+
+```bash
+python pipeline/setup.py --experiment-root <experiment-root>
+```
+
+Writes `workspace/setup_config.json` with registry, orchestrator image, and `current_run` defaults.
+
+### 3. Register a translation (BYO)
+
+```bash
+python pipeline/sim2real.py translation register \
+    --algorithm <algorithm> \
+    --image <image-ref> \
+    --config <treatment-overlay-path> \
+    --experiment-root <experiment-root>
+```
+
+Writes `workspace/translations/<hash>/` with `translation_output.json`, `registered.json`, and `generated/<algorithm>/<algorithm>_config.yaml`. Prints the `<hash>` on success.
+
+### 4. Assemble the run
+
+```bash
+python pipeline/sim2real.py assemble \
+    --translation <hash> \
+    --cluster <cluster_id> \
+    --run <run-name> \
+    --experiment-root <experiment-root>
+```
+
+Writes `workspace/runs/<run-name>/` with resolved scenario YAMLs, `pipelinerun-*.yaml` manifests, `manifest.assembly.yaml`, and `run_metadata.json`.
+
+### 5. Deploy (orchestrate PipelineRuns)
+
+```bash
+python pipeline/deploy.py --experiment-root <experiment-root> \
+    --run <run-name> run
+```
+
+Builds the treatment EPP image (if not current), dispatches PipelineRuns across the namespace slots, and polls for completion. Progress lands in the run-scoped `sim2real-progress-<run-name>` ConfigMap. Use `deploy.py --run <run-name> status` to snapshot progress; use `deploy.py --run <run-name> stop` to cancel the remote orchestrator Job (if `--remote` was passed); use `deploy.py --run <run-name> reset` to requeue non-pending pairs (which also cancels their in-flight PipelineRuns).
+
+### 6. Collect results
+
+```bash
+python pipeline/deploy.py --experiment-root <experiment-root> \
+    --run <run-name> collect
+```
+
+Pulls per-pair `per_request_lifecycle_metrics.json` and GPU logs from the cluster PVC into `workspace/runs/<run-name>/results/<phase>/<workload>/`. This is the epic's success gate — the demo is done when the JSON files exist locally.
+
+### Success criterion
+
+For each `<workload>` in `transfer.yaml:workloads` and each `<phase>` in `{baseline, <algorithm>}`:
+
+```
+workspace/runs/<run-name>/results/<phase>/<workload>/per_request_lifecycle_metrics.json
+```
+
+Once these files exist, step-1's BYO demo is complete. Downstream skills (e.g. `/sim2real-analyze`) consume them for latency comparison and report generation.
+
+---
+
 ## Pipeline library (`pipeline/lib/`)
 
 | Module | Purpose |
