@@ -337,8 +337,8 @@ def build_parser() -> argparse.ArgumentParser:
     asm.add_argument(
         "--translation",
         required=True,
-        metavar="HASH",
-        help="translation hash (from `sim2real translation register`)",
+        metavar="REF",
+        help="alias, hash prefix, or full translation hash",
     )
     asm.add_argument(
         "--cluster",
@@ -455,10 +455,18 @@ def _cmd_assemble(args) -> int:
         )
         return 2
 
+    from pipeline.lib import translation_ref
+    try:
+        translation_hash = translation_ref.resolve_translation_ref(args.translation)
+    except translation_ref.ResolveError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         _assemble_run_lib.assemble_run(
-            translation_hash=args.translation,
+            translation_hash=translation_hash,
+            translation_ref=args.translation,
             cluster_id=args.cluster,
             run_name=args.run,
             experiment_root=exp_root,

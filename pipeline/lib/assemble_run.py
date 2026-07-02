@@ -419,6 +419,7 @@ def _resolve_scenario_path(
 def assemble_run(
     *,
     translation_hash: str,
+    translation_ref: str,
     cluster_id: str,
     run_name: str,
     experiment_root: Path,
@@ -443,6 +444,10 @@ def assemble_run(
 
     Raises AssembleError on any validation failure. Validation happens
     before ``run_dir`` is (re)created — no partial writes on failure.
+
+    ``translation_ref`` is the user-facing ref (alias/prefix/hash) as typed at
+    the CLI. Used only in error messages — internal logic uses
+    ``translation_hash``.
 
     The list of algorithms present in the manifest but absent from the
     registered translation is stored on ``assemble_run.skipped_algorithms``
@@ -497,21 +502,28 @@ def assemble_run(
             f"translation_output.json is not valid JSON: {tout_path}: {exc}"
         ) from exc
 
-    translated_names = {a.get("name") for a in tout.get("algorithms", [])}
-    # Step-2 shape: image_ref lives per-algo. read_translation_output normalizes
-    # legacy (step-1) top-level image_ref into algorithms[i] via its shim.
-    # Use the first algorithm's image_ref as the run-level image (BYO single-algo).
-    algos = tout.get("algorithms") or []
-    image_ref = algos[0].get("image_ref") if algos else None
-    if not image_ref:
-        raise AssembleError(
-            f"translation_output.json missing image_ref: {tout_path}"
-        )
+    translated_algos = {
+        a.get("name"): a for a in tout.get("algorithms", []) or []
+    }
+    translated_names = set(translated_algos.keys())
 
     kept_algos, skipped_algo_names = filter_algorithms(
         manifest.get("algorithms", []) or [],
         translated_names=translated_names,
     )
+
+    # Incomplete-translation check: any kept algo with null image_ref means
+    # the build step has not run yet.
+    unbuilt = [
+        a["name"] for a in kept_algos
+        if not translated_algos[a["name"]].get("image_ref")
+    ]
+    if unbuilt:
+        raise AssembleError(
+            f"translation {translation_ref} not built for algorithms: "
+            f"{', '.join(unbuilt)} — run 'sim2real build --translation "
+            f"{translation_ref}' first"
+        )
 
     # 3. Snapshot assembly slice + params_hash ----------------------------
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -564,7 +576,8 @@ def assemble_run(
             diffs_path=diffs_path,
             overlay_path=overlay_path,
         )
-        inject_image_tag(resolved, image_ref)
+        algo_image_ref = translated_algos[algo_name]["image_ref"]
+        inject_image_tag(resolved, algo_image_ref)
         packages.append((algo_name, resolved))
 
     # 5. Inject hf secret on every package --------------------------------
@@ -613,6 +626,12 @@ def assemble_run(
     )
 
     # 8. Write run_metadata.json ------------------------------------------
+    # image_tag is a single-image summary field for backward-compat; use the
+    # first algorithm's image_ref (sufficient for BYO single-algo runs).
+    run_meta_image_tag = (
+        tout["algorithms"][0]["image_ref"]
+        if tout.get("algorithms") else ""
+    )
     write_run_metadata(
         run_dir,
         {
@@ -621,7 +640,7 @@ def assemble_run(
             "translation_hash": translation_hash,
             "cluster_id": cluster_id,
             "params_hash": params_hash,
-            "image_tag": image_ref,
+            "image_tag": run_meta_image_tag,
             "assembled_at": now_iso,
         },
     )

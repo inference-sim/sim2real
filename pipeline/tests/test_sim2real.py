@@ -980,3 +980,48 @@ class TestAliasCollision:
         )
         assert old_data["alias"] is None
         assert layout.translation_dir(h_old).exists()
+
+
+class TestAssembleResolvesAlias:
+    def test_assemble_accepts_alias(self, tmp_path, monkeypatch):
+        # This is a smoke test — we mock assemble_run to just capture
+        # the resolved hash. Full assemble behavior is exercised in
+        # test_assemble_run.py.
+        cfg = tmp_path / "algo.yaml"
+        cfg.write_text("scenario: []\n")
+        thash, _ = sim2real._register_translation(
+            algorithm_name="my-algo",
+            image_ref="ghcr.io/x:v1",
+            config_path=cfg,
+            baseline_config_path=None,
+            registered_hash=None,
+            now_iso="2026-07-02T14:00:00Z",
+        )
+
+        captured = {}
+        def fake_assemble(*, translation_hash, translation_ref, cluster_id,
+                          run_name, experiment_root, manifest_path,
+                          force, now_iso):
+            captured["hash"] = translation_hash
+            captured["ref"] = translation_ref
+
+        monkeypatch.setattr(
+            sim2real._assemble_run_lib, "assemble_run", fake_assemble
+        )
+        # Also stub the manifest file so the pre-check passes.
+        (tmp_path / "transfer.yaml").write_text("kind: sim2real-transfer\n")
+        parser = sim2real.build_parser()
+        args = parser.parse_args([
+            "--experiment-root", str(tmp_path),
+            "assemble",
+            "--translation", "my-algo",
+            "--cluster", "cX",
+            "--run", "r1",
+        ])
+        sim2real.layout.set_experiment_root(str(tmp_path))
+        # Mocking cluster_config lookup is out of scope here; the fake
+        # replaces assemble_run entirely so cluster_config is never read.
+        rc = sim2real._cmd_assemble(args)
+        assert rc == 0
+        assert captured["hash"] == thash
+        assert captured["ref"] == "my-algo"
