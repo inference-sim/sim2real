@@ -100,18 +100,17 @@ assembly time.
 - Top-level `scenario:` list with one dict
 - The `name` field MUST match the scenario name in the experiment's baseline file exactly
   (mismatched names cause llmdbenchmark to deploy multiple scenarios instead of merging)
-- InferenceObjectives go in `extraObjects`. The format pins one rule:
-  - `spec.poolRef.name` MUST equal `${model.idLabel}-gaie` so llm-d-benchmark
-    substitutes `${model.idLabel}` at render time (requires llm-d-benchmark
-    >= PR #1103).
-
-  Everything else MUST be copied verbatim from the project's context files
-  (typically including `config.md`) at the field level. In particular: copy the entire
-  `spec.poolRef` block (including `group`, `name`, and any other keys), not
-  just `name`. Same applies to `apiVersion`, `metadata`, `spec.priority`, and
-  any other nested fields the project's `config.md` declares — if it's in
-  config.md's InferenceObjective, it MUST appear in the generated output.
-  Do not paraphrase or selectively include fields.
+- InferenceObjectives go in `extraObjects`. Copy the InferenceObjective
+  verbatim from the project's context files (typically `config.md`) at the
+  field level. In particular: copy the entire `spec.poolRef` block
+  (including `group`, `name`, and any other keys). Same applies to
+  `apiVersion`, `metadata`, `spec.priority`, and any other nested fields
+  the project's `config.md` declares — if it's in config.md's
+  InferenceObjective, it MUST appear in the generated output. Do not
+  paraphrase or selectively include fields, and do not substitute or
+  rewrite `${model.idLabel}` — llm-d-benchmark expands it at render time
+  (requires llm-d-benchmark >= PR #1103), so pass any such placeholders
+  through verbatim.
 - Plugin config in `inferenceExtension.pluginsCustomConfig` as a YAML-in-YAML string
 - Only include fields you are adding or overriding
 
