@@ -277,12 +277,12 @@ def _cmd_build(
 
     run_meta_path = run_dir / "run_metadata.json"
     if not run_meta_path.exists():
-        err("run_metadata.json not found — run setup.py first.")
+        err(f"run_metadata.json not found at {run_meta_path} — run 'sim2real assemble --run <name>' first.")
         sys.exit(1)
     try:
         run_meta = json.loads(run_meta_path.read_text())
     except json.JSONDecodeError as e:
-        err(f"run_metadata.json is not valid JSON: {e}. Re-run setup.py.")
+        err(f"run_metadata.json is not valid JSON: {e}. Re-run 'sim2real assemble --run <name>'.")
         sys.exit(1)
 
     component_image = run_meta.get("component_image")
@@ -290,7 +290,7 @@ def _cmd_build(
         info("No component_image in run metadata — skipping image build")
         return "skip"
     if not component_image:
-        err("component_image is empty in run_metadata.json — re-run setup.py with a valid --registry.")
+        err("component_image is empty in run_metadata.json — re-run 'sim2real assemble --run <name>'.")
         sys.exit(1)
 
     if skip_build:
@@ -308,7 +308,7 @@ def _cmd_build(
 
     registry = run_meta.get("registry", "")
     if not registry:
-        err("registry is empty in run_metadata.json — re-run setup.py with a valid --registry.")
+        err("registry is empty in run_metadata.json — re-run 'sim2real assemble --run <name>'.")
         sys.exit(1)
     repo_name = run_meta.get("repo_name", "llm-d-inference-scheduler")
     run_name = run_dir.name

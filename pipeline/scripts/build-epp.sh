@@ -7,7 +7,7 @@ set -euo pipefail
 #          [--image-ref <ref>] [--source-dir <path>] [--experiment-root <path>]
 #
 # When --image-ref and --source-dir are provided, uses them directly.
-# Otherwise reads registry/repo from run_metadata.json (created by /sim2real-setup).
+# Otherwise reads registry/repo from run_metadata.json (created by `sim2real assemble`).
 # Requires a dockerconfigjson Secret in the namespace for push credentials;
 # the caller passes its name via --registry-secret-name (populated from
 # cluster_config.json:secret_names.registry_creds).
