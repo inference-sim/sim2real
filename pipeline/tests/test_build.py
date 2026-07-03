@@ -184,6 +184,7 @@ class TestDispatchBuildkitBuild:
                 source_dir=source_dir,
                 run_dir=run_dir,
                 repo_root=repo_root,
+                registry_secret_name="my-registry-creds",
             )
         assert rc == 0
         assert mock_run.called
@@ -200,6 +201,13 @@ class TestDispatchBuildkitBuild:
         assert str(run_dir) in cmd
         assert "--run-name" in cmd
         assert "build-xyz" in cmd
+        assert "--registry-secret-name" in cmd
+        assert "my-registry-creds" in cmd
+        # Enforce adjacency between the flag and its value — otherwise a
+        # future refactor could split them and the shell script would
+        # parse the next flag as the secret name.
+        flag_idx = cmd.index("--registry-secret-name")
+        assert cmd[flag_idx + 1] == "my-registry-creds"
 
     def test_returns_nonzero_on_script_failure(self, tmp_path):
         (tmp_path / "src").mkdir()
@@ -211,6 +219,7 @@ class TestDispatchBuildkitBuild:
                 image_ref="r/r:t", build_id="b", namespace="ns",
                 source_dir=tmp_path / "src", run_dir=tmp_path / "run",
                 repo_root=tmp_path / "repo",
+                registry_secret_name="rc",
             )
         assert rc == 42
 
@@ -220,6 +229,23 @@ class TestDispatchBuildkitBuild:
                 image_ref="r/r:t", build_id="b", namespace="ns",
                 source_dir=tmp_path, run_dir=tmp_path,
                 repo_root=tmp_path,
+                registry_secret_name="rc",
+            )
+
+    def test_raises_when_registry_secret_name_empty(self, tmp_path):
+        """Fail-early: an empty secret name would make build-epp.sh
+        parse the next argv token as the secret name, then either fail
+        the existence check with a useless message or (worse) point at
+        an unrelated Secret. Refuse before we ever exec bash.
+        """
+        (tmp_path / "pipeline" / "scripts").mkdir(parents=True)
+        (tmp_path / "pipeline" / "scripts" / "build-epp.sh").touch()
+        with pytest.raises(build.BuildError, match="registry_secret_name"):
+            build.dispatch_buildkit_build(
+                image_ref="r/r:t", build_id="b", namespace="ns",
+                source_dir=tmp_path, run_dir=tmp_path,
+                repo_root=tmp_path,
+                registry_secret_name="",
             )
 
     def test_cwd_is_repo_root(self, tmp_path):
@@ -232,6 +258,7 @@ class TestDispatchBuildkitBuild:
                 image_ref="r/r:t", build_id="b", namespace="ns",
                 source_dir=tmp_path / "src", run_dir=tmp_path / "run",
                 repo_root=tmp_path,
+                registry_secret_name="rc",
             )
         assert mock_run.call_args.kwargs.get("cwd") == tmp_path
 
@@ -388,15 +415,19 @@ class TestSim2realBuildLoop:
     """
 
     def _make_cluster_config(self, tmp_path, cluster_id="test-cluster",
-                             namespaces=("sim2real-slot1",)):
+                             namespaces=("sim2real-slot1",),
+                             registry_creds="registry-creds"):
         cdir = tmp_path / "workspace" / "clusters" / cluster_id
         cdir.mkdir(parents=True)
+        secret_names = {"hf_token": "hf-token"}
+        if registry_creds is not None:
+            secret_names["registry_creds"] = registry_creds
         (cdir / "cluster_config.json").write_text(json.dumps({
             "cluster_id": cluster_id,
             "namespaces": list(namespaces),
             "is_openshift": False,
             "storage_class": "",
-            "secret_names": {"hf_token": "hf-token"},
+            "secret_names": secret_names,
             "workspaces": [],
         }))
 
@@ -448,11 +479,73 @@ class TestSim2realBuildLoop:
         assert rc == 0
         assert mock_probe.call_count == 2  # pre + post
         mock_build.assert_called_once()
+        # sim2real build must forward the secret name from
+        # cluster_config.secret_names.registry_creds to
+        # dispatch_buildkit_build, otherwise the buildkit pod mounts the
+        # wrong Secret (issue #480).
+        assert (
+            mock_build.call_args.kwargs["registry_secret_name"]
+            == "registry-creds"
+        )
 
         data = self._read_translation_output(tmp_path, thash)
         algo = data["algorithms"][0]
         assert algo["image_ref"] == f"quay.io/user/sched:{thash[:12]}-softref"
         assert algo["image_digest"] == "sha256:" + "b" * 64
+
+    def test_forwards_custom_registry_secret_name_from_cluster_config(
+        self, tmp_path
+    ):
+        """Non-default secret_names.registry_creds must propagate all the
+        way to dispatch — the fix for #480 is undone if a caller ever
+        substitutes a hardcoded string.
+        """
+        _make_workspace(tmp_path)
+        self._make_cluster_config(tmp_path, registry_creds="my-org-creds")
+        _make_translation(tmp_path, alias="softref")
+
+        with patch("pipeline.lib.build.shutil.which",
+                   return_value="/usr/bin/skopeo"), \
+             patch("pipeline.lib.build.probe_image_digest",
+                   side_effect=[None, "sha256:" + "b" * 64]), \
+             patch("pipeline.lib.build.dispatch_buildkit_build",
+                   return_value=0) as mock_build:
+            rc = sim2real.main([
+                "--experiment-root", str(tmp_path),
+                "build", "--translation", "softref",
+            ])
+        assert rc == 0
+        assert (
+            mock_build.call_args.kwargs["registry_secret_name"]
+            == "my-org-creds"
+        )
+
+    def test_missing_registry_creds_in_cluster_config_exits_2(
+        self, tmp_path, capsys
+    ):
+        """cluster_config.json without secret_names.registry_creds → the
+        command must fail-early with an actionable message pointing at
+        cluster.py provision, before touching skopeo or spawning any
+        buildkit pod.
+        """
+        _make_workspace(tmp_path)
+        # registry_creds=None omits the key from secret_names entirely.
+        self._make_cluster_config(tmp_path, registry_creds=None)
+        _make_translation(tmp_path, alias="softref")
+
+        with patch("pipeline.lib.build.probe_image_digest") as mock_probe, \
+             patch("pipeline.lib.build.dispatch_buildkit_build") as mock_build, \
+             patch("pipeline.lib.build.check_skopeo"):
+            rc = sim2real.main([
+                "--experiment-root", str(tmp_path),
+                "build", "--translation", "softref",
+            ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "registry_creds" in err
+        assert "cluster.py provision" in err
+        mock_probe.assert_not_called()
+        mock_build.assert_not_called()
 
     def test_force_rebuild_ignores_probe_hit(self, tmp_path):
         _make_workspace(tmp_path)

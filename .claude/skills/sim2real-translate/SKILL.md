@@ -153,7 +153,7 @@ test -f "$TRANSLATIONS_DIR/skill_input.json" || {
 Load per-algorithm inputs from `skill_input.json`. Every path in the file is
 interpreted relative to `experiment_root` (for `source_path`) or
 `translations_dir` (for `output_dir`, `config_output_path`,
-`baseline.generated_overlay_path`):
+`algorithms[i].baseline_overlay_path`):
 
 Path-safe emission: each `ALGO` row is TAB-delimited; each context file path is
 written to a separate line in a dedicated file (`/tmp/sim2real_translate_ctx_paths.txt`)
@@ -172,11 +172,6 @@ required = ("version", "translation_hash", "experiment_root", "translations_dir"
 missing = [k for k in required if k not in si]
 if missing:
     raise SystemExit(f"HALT: skill_input.json missing keys: {missing}")
-baseline = si.get("baseline")
-if baseline is not None:
-    print("BASELINE_OVERLAY_REL=" + baseline["generated_overlay_path"])
-else:
-    print("BASELINE_OVERLAY_REL=")
 ctx = si.get("context") or {}
 print("CONTEXT_TEXT_B64=" + base64.b64encode(
     (ctx.get("text") or "").encode()).decode())
@@ -185,22 +180,21 @@ ctx_paths_out = Path("/tmp/sim2real_translate_ctx_paths.txt")
 paths = [str(exp / p) for p in (ctx.get("file_paths") or [])]
 ctx_paths_out.write_text("".join(p + "\n" for p in paths))
 for algo in si["algorithms"]:
+    # baseline_overlay_path is None when this algorithm's ``defaults``
+    # baseline isn't in ``skill_input.baselines`` (or the manifest has
+    # no baselines at all) — emit an empty string so the writer's
+    # Phase 2 skip-check triggers.
     print("ALGO\t" + "\t".join([
         algo["name"],
         algo["source_path"],
         algo["output_dir"],
         algo["config_output_path"],
+        algo.get("baseline_overlay_path") or "",
         algo.get("notes") or "",
     ]))
 PY
 [ $? -eq 0 ] || exit 1
 
-BASELINE_OVERLAY_REL=$(grep '^BASELINE_OVERLAY_REL=' /tmp/sim2real_translate_algos.txt | cut -d= -f2-)
-if [ -n "$BASELINE_OVERLAY_REL" ]; then
-    BASELINE_OVERLAY_PATH="$TRANSLATIONS_DIR/$BASELINE_OVERLAY_REL"
-else
-    BASELINE_OVERLAY_PATH=""
-fi
 CONTEXT_TEXT_B64_VAL=$(grep '^CONTEXT_TEXT_B64=' /tmp/sim2real_translate_algos.txt | cut -d= -f2-)
 if [ -n "$CONTEXT_TEXT_B64_VAL" ]; then
     CONTEXT_TEXT=$(printf '%s' "$CONTEXT_TEXT_B64_VAL" | base64 -d) || {
@@ -220,7 +214,7 @@ script, and read context paths line-by-line so paths containing spaces are
 preserved):
 
 ```bash
-while IFS=$'\t' read -r _ name source_rel _ _ _; do
+while IFS=$'\t' read -r _ name source_rel _ _ _ _; do
     test -f "$EXPERIMENT_ROOT/$source_rel" || {
         echo "HALT: algorithm source not found: $EXPERIMENT_ROOT/$source_rel"
         exit 1
@@ -240,7 +234,7 @@ every algorithm is complete, exit with an "already complete" message:
 
 ```bash
 INCOMPLETE_ALGOS=""
-while IFS=$'\t' read -r _ name _ output_dir _ _; do
+while IFS=$'\t' read -r _ name _ output_dir _ _ _; do
     algo_out="$TRANSLATIONS_DIR/$output_dir/${name}_output.json"
     if [ ! -f "$algo_out" ]; then
         INCOMPLETE_ALGOS="$INCOMPLETE_ALGOS $name"
@@ -267,12 +261,17 @@ For each `ALGO_NAME` in `$INCOMPLETE_ALGOS`:
 
 ```bash
 # Extract this algorithm's row from /tmp/sim2real_translate_algos.txt.
-IFS=$'\t' read -r _ _ ALGO_SOURCE_REL OUTPUT_DIR_REL CONFIG_OUTPUT_REL ALGO_NOTES < <(
+IFS=$'\t' read -r _ _ ALGO_SOURCE_REL OUTPUT_DIR_REL CONFIG_OUTPUT_REL BASELINE_OVERLAY_REL ALGO_NOTES < <(
     awk -F$'\t' -v n="$ALGO_NAME" '$1=="ALGO" && $2==n {print}' /tmp/sim2real_translate_algos.txt
 )
 ALGO_SOURCE="$EXPERIMENT_ROOT/$ALGO_SOURCE_REL"
 OUTPUT_DIR="$TRANSLATIONS_DIR/$OUTPUT_DIR_REL"
 CONFIG_OUTPUT_PATH="$TRANSLATIONS_DIR/$CONFIG_OUTPUT_REL"
+if [ -n "$BASELINE_OVERLAY_REL" ]; then
+    BASELINE_OVERLAY_PATH="$TRANSLATIONS_DIR/$BASELINE_OVERLAY_REL"
+else
+    BASELINE_OVERLAY_PATH=""
+fi
 # The new skill_input schema has no algorithm_config field — parameters (if
 # any) live inside the source file. Pass "" so the prompts take their
 # "parameter-free" branches when reasoning about configurable weights.
@@ -295,8 +294,10 @@ variable:
 - `{EXPERIMENT_ROOT}` → `$EXPERIMENT_ROOT`
 - `{TRANSLATIONS_DIR}` → `$TRANSLATIONS_DIR`
 - `{OUTPUT_DIR}` → `$OUTPUT_DIR`
-- `{BASELINE_OVERLAY_PATH}` → `$BASELINE_OVERLAY_PATH` (empty string when the
-  manifest declares no baseline overlay — writer's Phase 2 handles this)
+- `{BASELINE_OVERLAY_PATH}` → `$BASELINE_OVERLAY_PATH` (per-algorithm — points
+  at the overlay for THIS algorithm's baseline via `algorithms[i].baseline_overlay_path`;
+  empty when the algorithm's `defaults` isn't in `skill_input.baselines` or the
+  manifest has no baselines — writer's Phase 2 handles this)
 - `{ALGO_SOURCE}` → `$ALGO_SOURCE`
 - `{ALGO_CONFIG}` → `$ALGO_CONFIG` (always empty string; see Step 1 comment)
 - `{ALGO_NAME}` → `$ALGO_NAME`

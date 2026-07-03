@@ -81,14 +81,16 @@ Example queries:
 
 Use TaskCreate: `"Phase 2: Baseline Config Derivation"` → TaskUpdate in_progress
 
-**Skip check:** If `{BASELINE_OVERLAY_PATH}` is empty (the manifest declared no baseline
-overlay for this translation), skip Phase 2 entirely and proceed to Phase 3. If
-`{BASELINE_OVERLAY_PATH}` is set and the file already exists (written by a prior algorithm's
-skill invocation in the same translation), skip Phase 2 — send:
+**Skip check:** If `{BASELINE_OVERLAY_PATH}` is empty (this algorithm's baseline is not
+in the manifest's `baselines[]` — should not happen for valid manifests), skip Phase 2
+entirely and proceed to Phase 3. If `{BASELINE_OVERLAY_PATH}` is set and the file already
+exists (written by a prior algorithm's skill invocation in the same translation whose
+`defaults` cross-references the same baseline), skip Phase 2 — send:
 ```
 SendMessage({MAIN_SESSION_NAME}, "baseline-ready: {BASELINE_OVERLAY_PATH}")
 ```
-and wait for "continue". Baseline config is shared across algorithms in the same translation.
+and wait for "continue". Algorithms that share a baseline (via `defaults`) share this
+overlay file; algorithms with distinct baselines produce distinct overlay files.
 
 Use the inputs listed in the upfront "Inputs — Read These Now" table.
 
@@ -100,18 +102,17 @@ assembly time.
 - Top-level `scenario:` list with one dict
 - The `name` field MUST match the scenario name in the experiment's baseline file exactly
   (mismatched names cause llmdbenchmark to deploy multiple scenarios instead of merging)
-- InferenceObjectives go in `extraObjects`. The format pins one rule:
-  - `spec.poolRef.name` MUST equal `${model.idLabel}-gaie` so llm-d-benchmark
-    substitutes `${model.idLabel}` at render time (requires llm-d-benchmark
-    >= PR #1103).
-
-  Everything else MUST be copied verbatim from the project's context files
-  (typically including `config.md`) at the field level. In particular: copy the entire
-  `spec.poolRef` block (including `group`, `name`, and any other keys), not
-  just `name`. Same applies to `apiVersion`, `metadata`, `spec.priority`, and
-  any other nested fields the project's `config.md` declares — if it's in
-  config.md's InferenceObjective, it MUST appear in the generated output.
-  Do not paraphrase or selectively include fields.
+- InferenceObjectives go in `extraObjects`. Copy the InferenceObjective
+  verbatim from the project's context files (typically `config.md`) at the
+  field level. In particular: copy the entire `spec.poolRef` block
+  (including `group`, `name`, and any other keys). Same applies to
+  `apiVersion`, `metadata`, `spec.priority`, and any other nested fields
+  the project's `config.md` declares — if it's in config.md's
+  InferenceObjective, it MUST appear in the generated output. Do not
+  paraphrase or selectively include fields, and do not substitute or
+  rewrite `${model.idLabel}` — llm-d-benchmark expands it at render time
+  (requires llm-d-benchmark >= PR #1103), so pass any such placeholders
+  through verbatim.
 - Plugin config in `inferenceExtension.pluginsCustomConfig` as a YAML-in-YAML string
 - Only include fields you are adding or overriding
 
