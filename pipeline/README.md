@@ -86,7 +86,9 @@ python pipeline/cluster.py provision <cluster_id> --namespaces NS1,NS2,... [flag
 
 ## setup.py
 
-Workspace config writer. Writes `workspace/setup_config.json` and `workspace/runs/<run>/run_metadata.json` with operator-side fields (registry, repo_name, current_run, orchestrator_image, sim2real_root). Idempotent.
+Workspace config writer. Writes `workspace/setup_config.json` with operator-side fields (registry, repo_name, orchestrator_image, sim2real_root). Idempotent.
+
+Run-directory materialization is owned by `sim2real assemble`; setup.py does not touch `workspace/runs/`. The `current_run` field in `setup_config.json` is written by `sim2real use` — setup.py leaves any pre-existing value in place.
 
 Cluster-side provisioning (namespaces, RBAC, secrets, PVCs, Tekton tasks, Pipeline definition) lives in `cluster.py provision` and writes a separate `workspace/clusters/<cluster_id>/cluster_config.json`. Run `cluster.py provision` before `sim2real assemble` / `deploy.py`. The Pipeline manifest override (`--pipeline-yaml`) lives on `cluster.py provision`, not here.
 
@@ -100,7 +102,6 @@ python pipeline/setup.py [flags]
 | `--repo-name NAME` | — | `llm-d-inference-scheduler` |
 | `--registry-user USER` | `REGISTRY_USER` | interactive (with `--test-push`) |
 | `--registry-token TOKEN` | `REGISTRY_TOKEN` | interactive (with `--test-push`) |
-| `--run NAME` | — | `sim2real-YYYY-MM-DD` |
 | `--experiment-root PATH` | — | current working directory |
 | `--orchestrator-image IMAGE` | `ORCHESTRATOR_IMAGE` | `ghcr.io/inference-sim/sim2real/orchestrator:latest` |
 | `--test-push` | — | false |
@@ -483,7 +484,7 @@ Writes `workspace/clusters/<cluster_id>/cluster_config.json`. Idempotent — re-
 python pipeline/setup.py --experiment-root <experiment-root>
 ```
 
-Writes `workspace/setup_config.json` with registry, orchestrator image, and `current_run` defaults.
+Writes `workspace/setup_config.json` with registry, repo name, and orchestrator image. Does not touch `workspace/runs/` — that's `sim2real assemble`'s job.
 
 ### 3. Register a translation (BYO)
 
@@ -612,7 +613,8 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). Key files:
 
 | File | Written by | Read by |
 |------|-----------|---------|
-| `setup_config.json` (workspace fields: registry, repo_name, current_run, orchestrator_image, sim2real_root) | `setup.py`, `sim2real.py use` | `deploy.py`, `sim2real.py list runs` |
+| `setup_config.json` (workspace fields: registry, repo_name, orchestrator_image, sim2real_root) | `setup.py` | `deploy.py`, `sim2real.py list runs` |
+| `setup_config.json:current_run` (active run pointer) | `sim2real.py use` | `deploy.py` (default `--run`), `sim2real.py list runs` (active-mark `*`) |
 | `clusters/<id>/cluster_config.json` (cluster fields: cluster_id, namespaces, is_openshift, storage_class, secret_names, workspaces, created_at) | `cluster.py provision` | `sim2real assemble`, `deploy.py`, `lib/remote.py` |
 | `translations/<hash>/translation_output.json` | `sim2real translation register` | `sim2real assemble`, `deploy.py` |
 | `translations/<hash>/registered.json` | `sim2real translation register` | audit trail |

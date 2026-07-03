@@ -54,7 +54,7 @@ python pipeline/sim2real.py --experiment-root ../admission-control use --run <ru
 
 **Backward compat:** Omitting `--experiment-root` defaults to the current working directory. Run all pipeline commands from the experiment repo root and the default will resolve correctly without the flag.
 
-**`pipeline/setup.py`** — One-time workspace config writer. Writes `setup_config.json` and `run_metadata.json` with operator-side fields (registry, repo name, current run, orchestrator image, sim2real_root). Idempotent — safe to re-run. Cluster-side bootstrap (namespaces, RBAC, secrets, PVCs, Tekton tasks, Pipeline definition, and the optional `--pipeline-yaml` manifest override) lives in `cluster.py provision`.
+**`pipeline/setup.py`** — One-time workspace config writer. Writes `setup_config.json` with operator-side fields (registry, repo name, orchestrator image, sim2real_root). Idempotent — safe to re-run. Does not touch `workspace/runs/` — run directory materialization is owned by `sim2real assemble`. `current_run` in `setup_config.json` is owned by `sim2real use`. Cluster-side bootstrap (namespaces, RBAC, secrets, PVCs, Tekton tasks, Pipeline definition, and the optional `--pipeline-yaml` manifest override) lives in `cluster.py provision`.
 
 **`pipeline/sim2real.py translation register`** — Records a BYO translation on disk. Writes `workspace/translations/<hash>/translation_output.json` (algorithm index + provenance), `registered.json` (image ref + digest), and `generated/<algo>/<algo>_config.yaml` (verbatim copy of the treatment overlay). `translation_hash` is deterministic — same inputs produce the same hash. See [`pipeline/README.md`](pipeline/README.md#register-a-translation) for the flag reference and idempotency rules.
 
@@ -96,7 +96,8 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). When no `-
 
 | File | Written by | Read by |
 |------|-----------|---------|
-| `setup_config.json` (workspace fields: registry, repo_name, current_run, orchestrator_image, sim2real_root) | `setup.py`, `sim2real.py use` | `deploy.py`, `sim2real.py list runs` |
+| `setup_config.json` (workspace fields: registry, repo_name, orchestrator_image, sim2real_root) | `setup.py` | `deploy.py`, `sim2real.py list runs` |
+| `setup_config.json:current_run` (active run pointer) | `sim2real.py use` | `deploy.py` (default `--run`), `sim2real.py list runs` (active-mark `*`) |
 | `clusters/<id>/cluster_config.json` (cluster fields: cluster_id, namespaces, is_openshift, storage_class, secret_names, workspaces, pipeline_yaml (optional), created_at) | `cluster.py provision` | `sim2real assemble`, `deploy.py`, `lib/remote.py` |
 | `translations/<hash>/translation_output.json` (step-2 shape: top-level `alias`; per-algo `image_ref`/`image_digest`/`config_path`/`source_path`/`source_sha256` inside `algorithms[i]`. Step-1 legacy files with top-level `image_ref` remain readable via `translation_ref.read_translation_output`) | `sim2real translation register` (BYO); `sim2real translate` (skill; writes null image fields); `sim2real build` (fills `image_ref`/`image_digest` per algo) | `sim2real assemble`, `sim2real list translations`, `deploy.py` |
 | `translations/<hash>/skill_input.json` (skill-driven only) | `sim2real translate` | `/sim2real-translate` skill |

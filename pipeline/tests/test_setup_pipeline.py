@@ -4,6 +4,11 @@ Cluster-side responsibilities (namespace, RBAC, secrets, PVCs, Tekton) moved
 to pipeline/cluster.py + pipeline/lib/cluster_ops.py — see issue #424 and
 the epic #416 design. Tests for those primitives live in
 pipeline/tests/test_cluster_ops.py and pipeline/tests/test_cluster_py.py.
+
+Run-directory materialization (workspace/runs/<run>/) moved to
+`sim2real assemble` in step-2 — see issue #481. setup.py no longer touches
+workspace/runs/ or writes run_metadata.json or current_run. Tests here
+enforce that invariant.
 """
 import json
 import pytest
@@ -15,7 +20,6 @@ def _make_config(**overrides):
     defaults = dict(
         registry="quay.io/test",
         repo_name="llm-d-inference-scheduler",
-        run_name="test-run",
         registry_user="user",
         registry_token="token",
     )
@@ -33,17 +37,13 @@ class TestSetupConfigJson:
         original = setup_module.EXPERIMENT_ROOT
         setup_module.EXPERIMENT_ROOT = tmp_path
         try:
-            run_dir = tmp_path / "workspace" / "runs" / "test-run"
-            run_dir.mkdir(parents=True)
-
             cfg = _make_config(orchestrator_image="ghcr.io/x/orch:abc")
-            step_config_output(cfg, run_dir)
+            step_config_output(cfg)
 
             data = json.loads((tmp_path / "workspace" / "setup_config.json").read_text())
             assert data["registry"] == "quay.io/test"
             assert data["repo_name"] == "llm-d-inference-scheduler"
             assert data["orchestrator_image"] == "ghcr.io/x/orch:abc"
-            assert data["current_run"] == "test-run"
             assert "sim2real_root" in data
         finally:
             setup_module.EXPERIMENT_ROOT = original
@@ -56,9 +56,7 @@ class TestSetupConfigJson:
         original = setup_module.EXPERIMENT_ROOT
         setup_module.EXPERIMENT_ROOT = tmp_path
         try:
-            run_dir = tmp_path / "workspace" / "runs" / "test-run"
-            run_dir.mkdir(parents=True)
-            step_config_output(_make_config(), run_dir)
+            step_config_output(_make_config())
             data = json.loads((tmp_path / "workspace" / "setup_config.json").read_text())
             assert "orchestrator_image" in data
             assert data["orchestrator_image"] == ""
@@ -66,23 +64,24 @@ class TestSetupConfigJson:
             setup_module.EXPERIMENT_ROOT = original
 
     @pytest.mark.parametrize("removed_key", [
+        # Cluster-side (moved to cluster.py provision + cluster_config.json)
         "namespace", "namespaces", "is_openshift", "storage_class",
         "hf_secret_name", "workspaces", "tektonc_dir", "setup_timestamp",
         "container_runtime",
         # #442: pipeline_yaml moved to cluster.py provision + cluster_config.json.
         "pipeline_yaml",
+        # #481: current_run is owned by sim2real use.
+        "current_run",
     ])
     def test_removed_keys_absent(self, tmp_path, removed_key):
-        """Cluster-scoped and cruft keys are not written to setup_config.json."""
+        """Cluster-scoped, run-scoped, and cruft keys are not written to setup_config.json."""
         from pipeline.setup import step_config_output
         import pipeline.setup as setup_module
 
         original = setup_module.EXPERIMENT_ROOT
         setup_module.EXPERIMENT_ROOT = tmp_path
         try:
-            run_dir = tmp_path / "workspace" / "runs" / "test-run"
-            run_dir.mkdir(parents=True)
-            step_config_output(_make_config(), run_dir)
+            step_config_output(_make_config())
             data = json.loads((tmp_path / "workspace" / "setup_config.json").read_text())
             assert removed_key not in data
         finally:
@@ -90,7 +89,10 @@ class TestSetupConfigJson:
 
     def test_preserves_keys_owned_by_other_writers(self, tmp_path):
         """A pre-existing setup_config.json with foreign keys is preserved
-        on re-run — setup.py only owns the keys it writes."""
+        on re-run — setup.py only owns the keys it writes. In particular,
+        ``current_run`` (owned by ``sim2real use``) must survive a setup
+        re-run.
+        """
         from pipeline.setup import step_config_output
         import pipeline.setup as setup_module
 
@@ -99,21 +101,70 @@ class TestSetupConfigJson:
         try:
             workspace = tmp_path / "workspace"
             workspace.mkdir(parents=True)
-            # Simulate a foreign key (e.g. a future cluster_id pointer, or
-            # any other writer's field) already in the file.
+            # Simulate current_run set by `sim2real use` plus an unrelated
+            # foreign key.
             (workspace / "setup_config.json").write_text(json.dumps({
                 "registry": "old.example/x",
+                "current_run": "trial-1",
                 "foreign_key": "must-survive",
             }))
-            run_dir = workspace / "runs" / "test-run"
-            run_dir.mkdir(parents=True)
-            step_config_output(_make_config(), run_dir)
+            step_config_output(_make_config())
 
             data = json.loads((workspace / "setup_config.json").read_text())
             assert data["registry"] == "quay.io/test"  # refreshed
+            assert data["current_run"] == "trial-1"    # preserved (owned by `sim2real use`)
             assert data["foreign_key"] == "must-survive"  # preserved
         finally:
             setup_module.EXPERIMENT_ROOT = original
+
+
+class TestSetupDoesNotTouchRuns:
+    """Regression tests for issue #481 — setup.py must not create or
+    modify anything under ``workspace/runs/``. Any write there would
+    collide with ``sim2real assemble``'s existence guard on a fresh
+    workspace.
+    """
+
+    def test_step_config_output_does_not_create_runs_dir(self, tmp_path):
+        from pipeline.setup import step_config_output
+        import pipeline.setup as setup_module
+
+        original = setup_module.EXPERIMENT_ROOT
+        setup_module.EXPERIMENT_ROOT = tmp_path
+        try:
+            step_config_output(_make_config())
+        finally:
+            setup_module.EXPERIMENT_ROOT = original
+
+        assert not (tmp_path / "workspace" / "runs").exists()
+
+    def test_step_config_output_leaves_existing_runs_dir_untouched(
+        self, tmp_path
+    ):
+        """A pre-existing runs/<run>/ from a prior ``sim2real assemble``
+        must survive a setup re-run byte-for-byte. If setup.py touched
+        the directory, it would collide with the assemble guard on the
+        NEXT ``sim2real assemble --run <other>`` invocation.
+        """
+        from pipeline.setup import step_config_output
+        import pipeline.setup as setup_module
+
+        run_dir = tmp_path / "workspace" / "runs" / "trial-1"
+        run_dir.mkdir(parents=True)
+        marker = run_dir / "marker.txt"
+        marker.write_text("assembled-by-sim2real")
+
+        original = setup_module.EXPERIMENT_ROOT
+        setup_module.EXPERIMENT_ROOT = tmp_path
+        try:
+            step_config_output(_make_config())
+        finally:
+            setup_module.EXPERIMENT_ROOT = original
+
+        assert marker.read_text() == "assembled-by-sim2real"
+        # No sibling runs/<other> directory was created.
+        siblings = [p.name for p in (tmp_path / "workspace" / "runs").iterdir()]
+        assert siblings == ["trial-1"]
 
 
 class TestBuildParser:
@@ -123,7 +174,6 @@ class TestBuildParser:
         ("--registry", "REG"),
         ("--repo-name", "NAME"),
         ("--orchestrator-image", "img"),
-        ("--run", "n"),
         ("--experiment-root", "/x"),
         ("--test-push", None),       # store_true
         ("--test-push-tag", "t"),
@@ -137,6 +187,8 @@ class TestBuildParser:
         "--no-cluster", "--redeploy-tasks",
         # #442: --pipeline-yaml moved to cluster.py provision.
         "--pipeline-yaml",
+        # #481: --run moved to `sim2real assemble --run` / `sim2real use --run`.
+        "--run",
     ]
 
     @pytest.mark.parametrize("flag,value", KEPT_FLAGS)
@@ -151,103 +203,3 @@ class TestBuildParser:
         from pipeline.setup import build_parser
         with pytest.raises(SystemExit):
             build_parser().parse_args([flag, "x"])
-
-
-class TestRunMetadataIdempotent:
-    """Re-running setup must preserve deploy-owned fields in run_metadata.json (issue #365)."""
-
-    def _run_setup(self, tmp_path, **cfg_overrides):
-        from pipeline.setup import step_config_output
-        import pipeline.setup as setup_module
-
-        original = setup_module.EXPERIMENT_ROOT
-        setup_module.EXPERIMENT_ROOT = tmp_path
-        try:
-            run_dir = tmp_path / "workspace" / "runs" / "test-run"
-            run_dir.mkdir(parents=True, exist_ok=True)
-            cfg = _make_config(**cfg_overrides)
-            step_config_output(cfg, run_dir)
-            return run_dir
-        finally:
-            setup_module.EXPERIMENT_ROOT = original
-
-    def test_preserves_source_hashes_on_rerun(self, tmp_path):
-        """Deploy-written source_hashes must survive a setup re-run."""
-        run_dir = self._run_setup(tmp_path)
-        meta_path = run_dir / "run_metadata.json"
-
-        meta = json.loads(meta_path.read_text())
-        meta["source_hashes"] = {"quay.io/test/llm-d-inference-scheduler:test-run": "abc123def456"}
-        meta_path.write_text(json.dumps(meta))
-
-        self._run_setup(tmp_path)
-
-        meta2 = json.loads(meta_path.read_text())
-        assert meta2.get("source_hashes") == {
-            "quay.io/test/llm-d-inference-scheduler:test-run": "abc123def456"
-        }
-
-    def test_preserves_epp_image_on_rerun(self, tmp_path):
-        """Deploy-written epp_image must survive a setup re-run."""
-        run_dir = self._run_setup(tmp_path)
-        meta_path = run_dir / "run_metadata.json"
-
-        meta = json.loads(meta_path.read_text())
-        meta["epp_image"] = "quay.io/test/llm-d-inference-scheduler:test-run"
-        meta_path.write_text(json.dumps(meta))
-
-        self._run_setup(tmp_path)
-
-        meta2 = json.loads(meta_path.read_text())
-        assert meta2.get("epp_image") == "quay.io/test/llm-d-inference-scheduler:test-run"
-
-    def test_preserves_stages_deploy_last_completed_step(self, tmp_path):
-        """stages.deploy.last_completed_step (deploy-owned) must survive a setup re-run."""
-        run_dir = self._run_setup(tmp_path)
-        meta_path = run_dir / "run_metadata.json"
-
-        meta = json.loads(meta_path.read_text())
-        meta.setdefault("stages", {}).setdefault("deploy", {})["last_completed_step"] = "build"
-        meta_path.write_text(json.dumps(meta))
-
-        self._run_setup(tmp_path)
-
-        meta2 = json.loads(meta_path.read_text())
-        assert meta2["stages"]["deploy"].get("last_completed_step") == "build"
-
-    def test_refreshes_setup_owned_fields_on_rerun(self, tmp_path):
-        """Setup-owned fields (registry, repo_name) reflect the latest cfg on re-run."""
-        from pipeline.setup import step_config_output
-        import pipeline.setup as setup_module
-
-        run_dir = self._run_setup(tmp_path)
-        meta_path = run_dir / "run_metadata.json"
-
-        original = setup_module.EXPERIMENT_ROOT
-        setup_module.EXPERIMENT_ROOT = tmp_path
-        try:
-            cfg2 = _make_config(registry="quay.io/new-registry", repo_name="new-repo")
-            step_config_output(cfg2, run_dir)
-        finally:
-            setup_module.EXPERIMENT_ROOT = original
-
-        meta2 = json.loads(meta_path.read_text())
-        assert meta2["registry"] == "quay.io/new-registry"
-        assert meta2["repo_name"] == "new-repo"
-
-    def test_first_run_creates_metadata(self, tmp_path):
-        """First-run path produces setup-owned fields. Cluster-scoped fields
-        are NOT written by setup.py anymore (cluster_config.json owns them)."""
-        run_dir = self._run_setup(tmp_path)
-        meta = json.loads((run_dir / "run_metadata.json").read_text())
-        assert meta["version"] == 1
-        assert meta["registry"] == "quay.io/test"
-        assert meta["repo_name"] == "llm-d-inference-scheduler"
-        assert meta["component_image"] == "quay.io/test/llm-d-inference-scheduler:test-run"
-        assert meta["stages"]["setup"]["status"] == "completed"
-        assert meta["stages"]["prepare"] == {"status": "pending"}
-        assert meta["stages"]["deploy"] == {"status": "pending"}
-        assert meta["stages"]["results"] == {"status": "pending"}
-        # Cluster-scoped fields are NOT written by setup anymore.
-        for absent in ("namespace", "storage_class", "is_openshift", "container_runtime"):
-            assert absent not in meta

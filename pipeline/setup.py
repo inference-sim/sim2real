@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """sim2real workspace config writer.
 
-Writes `workspace/setup_config.json` and `workspace/runs/<run>/run_metadata.json`
-with operator-side fields. Optionally runs a registry credential test push.
+Writes `workspace/setup_config.json` with operator-side fields (registry,
+repo name, orchestrator image, sim2real_root). Optionally runs a registry
+credential test push.
+
+Run-directory materialization is owned by `sim2real assemble`; this script
+does not touch `workspace/runs/`. `current_run` in `setup_config.json` is
+owned by `sim2real use`.
 
 Cluster-side provisioning (namespaces, RBAC, secrets, PVCs, Tekton) lives in
 `pipeline/cluster.py provision`; this script no longer touches the cluster.
@@ -15,14 +20,12 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 @dataclass
 class SetupConfig:
     registry: str
     repo_name: str
-    run_name: str
     registry_user: str
     registry_token: str
     orchestrator_image: str = ""
@@ -49,7 +52,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="pipeline/setup.py",
         description="Workspace config writer for the sim2real pipeline.\n"
-                    "Writes setup_config.json + run_metadata.json. Idempotent.\n"
+                    "Writes setup_config.json (operator-side fields only). Idempotent.\n"
+                    "Run directories are created by `sim2real assemble`.\n"
                     "Cluster-side provisioning lives in `cluster.py provision`.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -67,7 +71,6 @@ Examples:
                                                         help="Registry repository name [llm-d-inference-scheduler]")
     p.add_argument("--registry-user",  metavar="USER",  help="Registry username (used by --test-push)")
     p.add_argument("--registry-token", metavar="TOKEN", help="Registry token (used by --test-push)")
-    p.add_argument("--run",            metavar="NAME",  help="Run name [sim2real-YYYY-MM-DD]")
     p.add_argument("--experiment-root", metavar="PATH", dest="experiment_root",
                    help="Root of the experiment repo (default: current working directory)")
     p.add_argument("--test-push",      action="store_true",
@@ -127,31 +130,10 @@ def _detect_container_runtime() -> str:
     return next((rt for rt in ["podman", "docker"] if which(rt)), "")
 
 
-def _resolve_run_name(args: argparse.Namespace) -> tuple[str, Path]:
-    """Resolve run name, handle directory collision."""
-    default = f"sim2real-{datetime.now().strftime('%Y-%m-%d')}"
-    run_name = args.run or prompt("run_name", "Enter a name for this run", default=default)
-
-    while True:
-        run_dir = EXPERIMENT_ROOT / "workspace" / "runs" / run_name
-        if run_dir.exists():
-            warn(f"Run '{run_name}' already exists at {run_dir}")
-            answer = prompt("overwrite", "Overwrite it, or enter a new name? [overwrite/NAME]",
-                            default="overwrite")
-            if answer.strip().lower() in ("overwrite", "o", "y", "yes", ""):
-                break
-            run_name = answer.strip()
-        else:
-            break
-
-    run_dir.mkdir(parents=True, exist_ok=True)
-    return run_name, run_dir
-
-
 # ── Step 1: Configuration ────────────────────────────────────────────
 
-def collect_config(args: argparse.Namespace) -> tuple[SetupConfig, Path, str]:
-    """Step 1: Collect operator-side config. Returns (config, run_dir, container_runtime)."""
+def collect_config(args: argparse.Namespace) -> tuple[SetupConfig, str]:
+    """Step 1: Collect operator-side config. Returns (config, container_runtime)."""
     step(1, 3, "Configuration")
 
     config_path = EXPERIMENT_ROOT / "workspace" / "setup_config.json"
@@ -168,8 +150,6 @@ def collect_config(args: argparse.Namespace) -> tuple[SetupConfig, Path, str]:
         repo_name = args.repo_name
     else:
         repo_name = prompt("repo_name", "Registry repo name", default=repo_default)
-
-    run_name, run_dir = _resolve_run_name(args)
 
     # Registry credentials are workspace-scoped (used by step_test_push). The
     # in-cluster registry credentials Secret (name recorded in
@@ -206,12 +186,11 @@ def collect_config(args: argparse.Namespace) -> tuple[SetupConfig, Path, str]:
 
     cfg = SetupConfig(
         registry=registry, repo_name=repo_name,
-        run_name=run_name,
         registry_user=reg_user, registry_token=reg_token,
         orchestrator_image=orchestrator_image,
     )
     ok(f"Configuration complete (registry={registry or '(none)'})")
-    return cfg, run_dir, container_rt
+    return cfg, container_rt
 
 # ── Step 2: Registry credential test ─────────────────────────────────
 
@@ -301,29 +280,24 @@ def step_test_push(cfg: SetupConfig, container_rt: str, test_push_tag: str,
 
 # ── Step 3: Config Output ────────────────────────────────────────────
 
-def step_config_output(cfg: SetupConfig, run_dir: Path) -> None:
-    """Step 3: Write setup_config.json and run_metadata.json.
+def step_config_output(cfg: SetupConfig) -> None:
+    """Step 3: Write setup_config.json.
 
-    Both files are read-modify-write. setup_config.json now preserves keys
-    this script doesn't own (e.g. future cluster_id pointer or any other
-    writer's field). run_metadata.json preserves deploy-owned keys
-    (source_hashes, epp_image, stages.deploy.last_completed_step). See #365.
+    Read-modify-write — preserves keys this script doesn't own. Values
+    written: registry, repo_name, sim2real_root, orchestrator_image.
+    ``current_run`` is owned by ``sim2real use``; run directories and
+    ``run_metadata.json`` are owned by ``sim2real assemble``. This
+    script only touches workspace-scoped operator fields.
     """
     step(3, 3, "Config")
 
     workspace = EXPERIMENT_ROOT / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
 
-    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    commit = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "rev-parse", "--short", "HEAD"],
-        capture_output=True, text=True, check=False,
-    ).stdout.strip() or "unknown"
-
     # setup_config.json — operator-side fields only. Cluster-side fields
     # (namespaces, is_openshift, storage_class, secret_names, workspaces)
     # live in workspace/clusters/<id>/cluster_config.json, written by
-    # `cluster.py provision`.
+    # `cluster.py provision`. `current_run` is written by `sim2real use`.
     setup_config_path = workspace / "setup_config.json"
     existing_setup = {}
     if setup_config_path.exists():
@@ -336,45 +310,9 @@ def step_config_output(cfg: SetupConfig, run_dir: Path) -> None:
         "repo_name": cfg.repo_name,
         "sim2real_root": str(REPO_ROOT),
         "orchestrator_image": cfg.orchestrator_image,
-        "current_run": cfg.run_name,
     })
     setup_config_path.write_text(json.dumps(existing_setup, indent=2))
     ok(f"Setup config → {setup_config_path}")
-
-    # run_metadata.json — read-modify-write so deploy-owned keys
-    # (source_hashes, epp_image, stages.deploy.last_completed_step) survive
-    # setup re-runs. See issue #365.
-    meta_path = run_dir / "run_metadata.json"
-    if meta_path.exists():
-        try:
-            existing = json.loads(meta_path.read_text())
-        except json.JSONDecodeError:
-            existing = {}
-    else:
-        existing = {}
-
-    existing.update({
-        "version": 1,
-        "registry": cfg.registry,
-        "repo_name": cfg.repo_name,
-        "created_at": now_iso,
-        "pipeline_commit": commit,
-    })
-    if cfg.registry:
-        existing["component_image"] = f"{cfg.registry}/{cfg.repo_name}:{cfg.run_name}"
-
-    stages = existing.setdefault("stages", {})
-    stages["setup"] = {
-        "status": "completed",
-        "completed_at": now_iso,
-        "summary": "Workspace config written",
-    }
-    stages.setdefault("prepare", {"status": "pending"})
-    stages.setdefault("deploy",  {"status": "pending"})
-    stages.setdefault("results", {"status": "pending"})
-
-    meta_path.write_text(json.dumps(existing, indent=2))
-    ok(f"Run metadata → {meta_path}")
 
 
 # ── main ─────────────────────────────────────────────────────────────
@@ -385,9 +323,9 @@ def main() -> int:
     global EXPERIMENT_ROOT
     EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if getattr(args, "experiment_root", None) else Path.cwd()
 
-    cfg, run_dir, container_rt = collect_config(args)
+    cfg, container_rt = collect_config(args)
     step_test_push(cfg, container_rt, args.test_push_tag, args.test_push)
-    step_config_output(cfg, run_dir)
+    step_config_output(cfg)
 
     # Completion
     print()
@@ -395,15 +333,16 @@ def main() -> int:
     print()
     cfg_path = EXPERIMENT_ROOT / "workspace" / "setup_config.json"
     print(f"Setup config:  {cfg_path}")
-    print(f"Run name:      {cfg.run_name}")
-    print(f"Run directory: {run_dir}")
     print()
     print("Next steps:")
-    print("  1. Provision cluster: python pipeline/cluster.py provision <cluster_id> --namespaces NS1[,NS2,...]")
+    print("  1. Provision cluster:      python pipeline/cluster.py provision <cluster_id> --namespaces NS1[,NS2,...]")
     print("  2. Edit <experiment-root>/transfer.yaml (algorithm source, workloads, context)")
-    print("  3. Register a translation: python pipeline/sim2real.py translation register \\")
+    print("  3a. Skill-driven translate: python pipeline/sim2real.py translate")
+    print("      (then run /sim2real-translate in Claude, then 'sim2real translate --resume')")
+    print("      Followed by:            python pipeline/sim2real.py build --translation REF")
+    print("  3b. Or BYO register:        python pipeline/sim2real.py translation register \\")
     print("                                 --algorithm NAME --image REF --config PATH")
-    print("  4. Assemble a run:         python pipeline/sim2real.py assemble \\")
+    print("  4. Assemble a run:          python pipeline/sim2real.py assemble \\")
     print("                                 --translation HASH --cluster CLUSTER_ID --run RUN_NAME")
     return 0
 
