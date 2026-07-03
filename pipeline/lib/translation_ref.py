@@ -1,11 +1,13 @@
 """Shared alias/hash resolver + validation + on-read shim for translations.
 
 Consumers: `sim2real translation register` (validates --algorithm, writes
-alias + normalized schema), `sim2real assemble --translation` (routes the
-CLI ref through `resolve_translation_ref`), `sim2real list translations`
-(iterates via `iter_translations`; the list command sorts by
-``created_at`` itself — this module does not order its results), and,
-later, step-2 `sim2real translate` / `sim2real build`.
+alias + normalized schema), `sim2real translate` (writes the checkpoint
+schema before the skill runs), `sim2real build` (fills per-algorithm
+``image_ref`` / ``image_digest`` after each build via atomic write),
+`sim2real assemble --translation` (routes the CLI ref through
+`resolve_translation_ref`), and `sim2real list translations` (iterates
+via `iter_translations`; the list command sorts by ``created_at``
+itself — this module does not order its results).
 
 The on-read shim (`read_translation_output`) normalizes step-1 BYO
 translations (top-level ``image_ref``/``image_digest`` at the object

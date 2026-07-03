@@ -163,8 +163,7 @@ class TestEppIntegration:
         _write(tmp_path / "generated" / "baseline_config.yaml", {})
         _write(tmp_path / "generated" / "treatment_config.yaml", treatment_overlay)
 
-        # Deep-merge baseline + overlays inline (was assemble_scenarios in step-0;
-        # removed in step-1 alongside prepare.py).
+        # Deep-merge baseline + overlays inline.
         baseline_resolved = deep_merge(baseline_data, {})
         treatment_resolved = deep_merge(baseline_resolved, treatment_overlay)
 

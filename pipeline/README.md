@@ -709,10 +709,10 @@ All subcommands (`status`, `collect`, `run`, `reset`, `wipe`) use a run-scoped `
 
 ## Scenario Overlay Format
 
-`sim2real translation register` writes overlay files under `workspace/translations/<hash>/generated/` (step-1 BYO path — step-2 will restore the skill-driven producer):
+Overlay files live under `workspace/translations/<hash>/generated/`. Both translation producers write the same layout: `sim2real translation register` (BYO) copies the operator-supplied config in, and the `/sim2real-translate` skill (skill-driven) writes it from the translated Go source.
 
 - `baseline_config.yaml` — optional shared baseline overlay (present when `--baseline-config` was passed to `translation register`)
-- `{algo_name}/{algo_name}_config.yaml` — per-algorithm treatment overlay (verbatim copy of the `--config` file)
+- `{algo_name}/{algo_name}_config.yaml` — per-algorithm treatment overlay (verbatim copy of the `--config` file for BYO; produced by the skill for skill-driven)
 
 ### Assembly formula
 

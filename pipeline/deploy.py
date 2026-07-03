@@ -2201,7 +2201,7 @@ def _check_slot_ready(namespace: str, hf_secret_name: str = "hf-secret") -> tupl
     Returns (ready, list_of_failure_reasons).
 
     Note: Tekton tasks presence check is not yet implemented; assumes
-    ``setup.py`` has been run.
+    ``cluster.py provision`` has been run.
     """
     failures = []
 

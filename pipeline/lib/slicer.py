@@ -11,11 +11,24 @@ Partitions a loaded v3 ``transfer.yaml`` dict into two slices:
 
 Slice membership is design-locked here; future additive manifest fields
 default to the assembly slice unless their stem is added to
-``TRANSLATION_FIELDS``. The first consumer is Step 2's ``translate``
-command (not yet implemented); Step 0 ships this as a ready substrate.
+``TRANSLATION_FIELDS``. Consumed by ``sim2real translate`` (hashes the
+translation slice to key ``translations/<hash>/``) and ``sim2real
+assemble`` (snapshots the assembly slice into
+``runs/<R>/manifest.assembly.yaml``).
 
-The hash is SHA-256 over canonical (sorted-key, no-whitespace) JSON of
-``translation_slice`` — stable across YAML formatter / writer differences.
+Two hashes are exported:
+
+- ``translation_hash`` — SHA-256 over canonical (sorted-key,
+  no-whitespace) JSON of the translation slice. Stable across YAML
+  formatter / writer differences. No production consumer today; kept
+  exported for tests and future slice-keyed callers. The BYO
+  ``translation register`` path uses a separate
+  ``_compute_translation_hash`` in ``pipeline/sim2real.py`` that folds
+  image digest + config bytes + algorithm name.
+- ``translation_hash_with_sources`` — folds each
+  ``algorithms[i].source`` file's bytes (SHA-256) into the digest,
+  so edits to algorithm source under a stable ``transfer.yaml`` still
+  produce a new hash. Used by skill-driven ``sim2real translate``.
 """
 
 from __future__ import annotations
