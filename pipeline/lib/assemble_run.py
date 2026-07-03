@@ -539,7 +539,6 @@ def assemble_run(
         disable=(manifest.get("defaults") or {}).get("disable") or [],
     )
     generated_root = tdir / "generated"
-    baseline_overlay_path = generated_root / "baseline_config.yaml"
 
     packages: list[tuple[str, dict]] = []
     resolved_baselines: dict[str, dict] = {}
@@ -550,9 +549,17 @@ def assemble_run(
         )
         if bundle_path is None:
             raise AssembleError(f"baseline '{bl_name}' has no scenario file")
+        overlay_path = generated_root / f"baseline_{bl_name}" / "baseline_config.yaml"
+        if not overlay_path.exists():
+            # BYO ``translation register`` writes the shared step-1
+            # ``generated/baseline_config.yaml`` at the generated root.
+            # Fall back to that layout when the per-baseline dir is
+            # absent so BYO translations remain resolvable.
+            legacy_overlay = generated_root / "baseline_config.yaml"
+            overlay_path = legacy_overlay if legacy_overlay.exists() else None
         resolved = resolve_baseline(
             bundle_path=bundle_path,
-            overlay_path=baseline_overlay_path,
+            overlay_path=overlay_path,
             framework_defaults=framework_defaults,
         )
         resolved_baselines[bl_name] = resolved

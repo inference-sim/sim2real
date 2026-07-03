@@ -182,7 +182,7 @@ def _build_skill_input(
     experiment_root: Path,
     translations_dir: Path,
     scenario: str,
-    baseline: dict | None,
+    baselines: list[dict],
     algorithms: list[dict],
     context: dict,
 ) -> dict:
@@ -191,16 +191,22 @@ def _build_skill_input(
     Absolute paths at the top level so the skill doesn't have to compose
     them; per-algorithm ``output_dir`` and ``config_output_path`` are
     relative to ``translations_dir``. ``source_path`` is relative to
-    ``experiment_root``. ``baseline`` is ``None`` when the manifest has no
-    baseline overlay.
+    ``experiment_root``. ``baselines`` is a list — one entry per baseline
+    that any algorithm's ``defaults`` cross-references (see
+    ``manifest.py``'s baselines↔algorithms xref). Empty list is valid
+    (no referenced baseline overlay) — the writer's Phase 2 loop
+    collapses to a no-op.
     """
+    baseline_overlay_by_name = {
+        bl["name"]: bl["generated_overlay_path"] for bl in baselines
+    }
     return {
         "version": 1,
         "translation_hash": translation_hash,
         "experiment_root": str(experiment_root),
         "translations_dir": str(translations_dir),
         "scenario": scenario,
-        "baseline": baseline,
+        "baselines": baselines,
         "algorithms": [
             {
                 "name": a["name"],
@@ -208,6 +214,7 @@ def _build_skill_input(
                 "source_sha256": a["source_sha256"],
                 "output_dir": f"generated/{a['name']}",
                 "config_output_path": f"generated/{a['name']}/{a['name']}_config.yaml",
+                "baseline_overlay_path": baseline_overlay_by_name.get(a.get("defaults")),
                 "notes": a.get("notes", ""),
             }
             for a in algorithms
@@ -753,6 +760,7 @@ def _translate_write_checkpoint(
             "name": name,
             "source_path": source_rel,
             "source_sha256": source_sha,
+            "defaults": algo.get("defaults"),
             "notes": algo.get("notes", ""),
         })
 
@@ -765,14 +773,31 @@ def _translate_write_checkpoint(
     )
     _atomic_write_json(layout.translation_output_path(thash), tout)
 
-    baseline_manifest = manifest.get("baseline") or None
-    if baseline_manifest:
-        skin_baseline: dict | None = {
-            "config_path": baseline_manifest.get("config"),
-            "generated_overlay_path": "generated/baseline_config.yaml",
+    # skill_input.baselines is the list of baseline entries whose overlays
+    # the skill's Phase 2 must produce. Only baselines that are actually
+    # cross-referenced by ``algorithms[*].defaults`` need overlays;
+    # unreferenced baselines are dropped. Manifest validation
+    # (``manifest.py``) makes ``defaults`` required on every algorithm and
+    # ensures it names a real baseline, so the referenced set matches the
+    # set of baselines any downstream treatment scenario merges onto. The
+    # defensive ``baselines[0]`` fallback covers manifests with baselines
+    # but zero algorithms (assemble can still run for baseline-only
+    # standby workloads).
+    manifest_baselines = manifest.get("baselines") or []
+    referenced: set[str] = {
+        a["defaults"] for a in manifest.get("algorithms", []) if a.get("defaults")
+    }
+    if not referenced and manifest_baselines:
+        referenced = {manifest_baselines[0]["name"]}
+    skin_baselines: list[dict] = [
+        {
+            "name": bl["name"],
+            "config_path": bl.get("config"),
+            "generated_overlay_path": f"generated/baseline_{bl['name']}/baseline_config.yaml",
         }
-    else:
-        skin_baseline = None
+        for bl in manifest_baselines
+        if bl["name"] in referenced
+    ]
 
     # Bridge manifest ``context.files`` → skill_input ``context.file_paths``
     # (design §Schemas §skill_input.json). Manifest keys are pinned by
@@ -787,7 +812,7 @@ def _translate_write_checkpoint(
         experiment_root=exp_root,
         translations_dir=layout.translation_dir(thash),
         scenario=scenario,
-        baseline=skin_baseline,
+        baselines=skin_baselines,
         algorithms=algo_records,
         context=context,
     )

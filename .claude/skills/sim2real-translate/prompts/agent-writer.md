@@ -81,14 +81,16 @@ Example queries:
 
 Use TaskCreate: `"Phase 2: Baseline Config Derivation"` → TaskUpdate in_progress
 
-**Skip check:** If `{BASELINE_OVERLAY_PATH}` is empty (the manifest declared no baseline
-overlay for this translation), skip Phase 2 entirely and proceed to Phase 3. If
-`{BASELINE_OVERLAY_PATH}` is set and the file already exists (written by a prior algorithm's
-skill invocation in the same translation), skip Phase 2 — send:
+**Skip check:** If `{BASELINE_OVERLAY_PATH}` is empty (this algorithm's baseline is not
+in the manifest's `baselines[]` — should not happen for valid manifests), skip Phase 2
+entirely and proceed to Phase 3. If `{BASELINE_OVERLAY_PATH}` is set and the file already
+exists (written by a prior algorithm's skill invocation in the same translation whose
+`defaults` cross-references the same baseline), skip Phase 2 — send:
 ```
 SendMessage({MAIN_SESSION_NAME}, "baseline-ready: {BASELINE_OVERLAY_PATH}")
 ```
-and wait for "continue". Baseline config is shared across algorithms in the same translation.
+and wait for "continue". Algorithms that share a baseline (via `defaults`) share this
+overlay file; algorithms with distinct baselines produce distinct overlay files.
 
 Use the inputs listed in the upfront "Inputs — Read These Now" table.
 

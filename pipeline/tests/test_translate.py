@@ -137,7 +137,7 @@ class TestBuildSkillInput:
             experiment_root=exp,
             translations_dir=tdir,
             scenario="softreflective-v1",
-            baseline=None,
+            baselines=[],
             algorithms=[{
                 "name": "softreflective",
                 "source_path": "algorithms/softreflective.py",
@@ -155,7 +155,7 @@ class TestBuildSkillInput:
             experiment_root=Path("/e"),
             translations_dir=Path("/t"),
             scenario="s",
-            baseline=None,
+            baselines=[],
             algorithms=[{
                 "name": "softreflective",
                 "source_path": "algorithms/softreflective.py",
@@ -168,34 +168,97 @@ class TestBuildSkillInput:
         assert a["output_dir"] == "generated/softreflective"
         assert a["config_output_path"] == "generated/softreflective/softreflective_config.yaml"
 
-    def test_baseline_null_when_absent(self):
+    def test_baselines_empty_when_absent(self):
         skin = sim2real._build_skill_input(
             translation_hash="a" * 64,
             experiment_root=Path("/e"),
             translations_dir=Path("/t"),
             scenario="s",
-            baseline=None,
+            baselines=[],
             algorithms=[],
             context={"text": "", "file_paths": []},
         )
-        assert skin["baseline"] is None
+        assert skin["baselines"] == []
 
-    def test_baseline_populated_when_present(self):
+    def test_baselines_populated_when_present(self):
         skin = sim2real._build_skill_input(
             translation_hash="a" * 64,
             experiment_root=Path("/e"),
             translations_dir=Path("/t"),
             scenario="s",
-            baseline={
+            baselines=[{
+                "name": "base",
                 "config_path": "baselines/base.yaml",
-                "generated_overlay_path": "generated/baseline_config.yaml",
-            },
+                "generated_overlay_path": "generated/baseline_base/baseline_config.yaml",
+            }],
             algorithms=[],
             context={"text": "hint text", "file_paths": ["docs/a.md"]},
         )
-        assert skin["baseline"]["config_path"] == "baselines/base.yaml"
+        assert skin["baselines"][0]["name"] == "base"
+        assert skin["baselines"][0]["config_path"] == "baselines/base.yaml"
+        assert skin["baselines"][0]["generated_overlay_path"] == (
+            "generated/baseline_base/baseline_config.yaml"
+        )
         assert skin["context"]["text"] == "hint text"
         assert skin["context"]["file_paths"] == ["docs/a.md"]
+
+    def test_algorithm_baseline_overlay_path_resolves_via_defaults(self):
+        skin = sim2real._build_skill_input(
+            translation_hash="a" * 64,
+            experiment_root=Path("/e"),
+            translations_dir=Path("/t"),
+            scenario="s",
+            baselines=[
+                {
+                    "name": "base",
+                    "config_path": None,
+                    "generated_overlay_path": "generated/baseline_base/baseline_config.yaml",
+                },
+                {
+                    "name": "alt",
+                    "config_path": None,
+                    "generated_overlay_path": "generated/baseline_alt/baseline_config.yaml",
+                },
+            ],
+            algorithms=[
+                {
+                    "name": "algo1",
+                    "source_path": "algorithms/a1.py",
+                    "source_sha256": "a" * 64,
+                    "defaults": "base",
+                    "notes": "",
+                },
+                {
+                    "name": "algo2",
+                    "source_path": "algorithms/a2.py",
+                    "source_sha256": "b" * 64,
+                    "defaults": "alt",
+                    "notes": "",
+                },
+            ],
+            context={"text": "", "file_paths": []},
+        )
+        overlay_by_algo = {a["name"]: a["baseline_overlay_path"] for a in skin["algorithms"]}
+        assert overlay_by_algo["algo1"] == "generated/baseline_base/baseline_config.yaml"
+        assert overlay_by_algo["algo2"] == "generated/baseline_alt/baseline_config.yaml"
+
+    def test_algorithm_baseline_overlay_path_null_when_defaults_unreferenced(self):
+        skin = sim2real._build_skill_input(
+            translation_hash="a" * 64,
+            experiment_root=Path("/e"),
+            translations_dir=Path("/t"),
+            scenario="s",
+            baselines=[],
+            algorithms=[{
+                "name": "algo1",
+                "source_path": "algorithms/a1.py",
+                "source_sha256": "a" * 64,
+                "defaults": "not-in-baselines",
+                "notes": "",
+            }],
+            context={"text": "", "file_paths": []},
+        )
+        assert skin["algorithms"][0]["baseline_overlay_path"] is None
 
     def test_notes_default_to_empty(self):
         skin = sim2real._build_skill_input(
@@ -203,7 +266,7 @@ class TestBuildSkillInput:
             experiment_root=Path("/e"),
             translations_dir=Path("/t"),
             scenario="s",
-            baseline=None,
+            baselines=[],
             algorithms=[{
                 "name": "algo1",
                 "source_path": "algorithms/a.py",
@@ -298,6 +361,17 @@ class TestTranslateEmpty:
         # output paths (relative to translations_dir) land in the right
         # subtree.
         assert skin["translations_dir"] == str(tdir)
+        # baselines list carries the one baseline `softreflective` builds on;
+        # per-algorithm baseline_overlay_path resolves via defaults="base".
+        assert skin["baselines"] == [{
+            "name": "base",
+            "config_path": None,
+            "generated_overlay_path": "generated/baseline_base/baseline_config.yaml",
+        }]
+        assert (
+            skin["algorithms"][0]["baseline_overlay_path"]
+            == "generated/baseline_base/baseline_config.yaml"
+        )
 
     def test_plain_prints_checkpoint_message(self, tmp_path, capsys):
         _write_manifest(tmp_path)
