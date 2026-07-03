@@ -183,9 +183,10 @@ The translation hash is derived from `transfer.yaml`'s translation slice (scenar
 
 **Outputs** — under `workspace/translations/<translation_hash>/` (initial run only; the skill populates the rest):
 
-- `skill_input.json` — the material `/sim2real-translate` reads (translation hash, experiment root, per-algorithm output paths, context text and files).
+- `skill_input.json` — the material `/sim2real-translate` reads. Pinned schema (see `docs/epics/step-2/design.md`) — includes `translation_hash`, absolute `experiment_root` and `translations_dir`, `scenario`, a `baselines[]` list (one entry per baseline that any algorithm's `defaults` cross-references, each carrying `name`, `config_path`, and a `generated_overlay_path` under `generated/baseline_<name>/`), `algorithms[]` (each with `source_path`, `source_sha256`, `output_dir`, `config_output_path`, and a `baseline_overlay_path` resolved via `defaults`), and `context` (text + file paths).
 - `translation_output.json` — algorithm index with `image_ref: null` on every entry. `sim2real build` fills these in later.
 - `generated/<algo>/` (empty) — the skill writes `cmd/`, `pkg/`, `<algo>_output.json`, and `<algo>_config.yaml` under this directory.
+- `generated/baseline_<name>/` (empty) — one directory per referenced baseline. The skill writes `baseline_config.yaml` under each. Shared by all algorithms whose `defaults` names that baseline.
 
 Once `translate --resume` succeeds, run `sim2real build --translation <alias>` to compile and push images, then `sim2real assemble` as usual.
 
@@ -257,7 +258,8 @@ python pipeline/sim2real.py assemble \
 **Inputs read:**
 
 - `workspace/translations/<hash>/translation_output.json` — algorithms with per-algo `image_ref`. Legacy step-1 files (top-level `image_ref`) are read transparently via `pipeline/lib/translation_ref.py`'s on-read shim.
-- `workspace/translations/<hash>/generated/baseline_config.yaml` — optional baseline overlay (written when `translation register --baseline-config` was passed).
+- `workspace/translations/<hash>/generated/baseline_<name>/baseline_config.yaml` — per-baseline overlay (skill-driven; written by `/sim2real-translate` for each baseline that any algorithm's `defaults` names). Assemble applies each entry to its matching `manifest.baselines[]` entry.
+- `workspace/translations/<hash>/generated/baseline_config.yaml` — legacy BYO overlay (written by `translation register --baseline-config`). Applied to every baseline in the manifest when the per-baseline directory above is absent — falls back automatically so BYO translations remain resolvable.
 - `workspace/translations/<hash>/generated/<algo>/<algo>_config.yaml` — per-algorithm treatment overlay.
 - `workspace/clusters/<cluster_id>/cluster_config.json` — namespaces, workspace bindings, hf secret name.
 - `<experiment-root>/transfer.yaml` (or `config/transfer.yaml`) — v3 manifest.
@@ -709,10 +711,16 @@ All subcommands (`status`, `collect`, `run`, `reset`, `wipe`) use a run-scoped `
 
 ## Scenario Overlay Format
 
-Overlay files live under `workspace/translations/<hash>/generated/`. Both translation producers write the same layout: `sim2real translation register` (BYO) copies the operator-supplied config in, and the `/sim2real-translate` skill (skill-driven) writes it from the translated Go source.
+Overlay files live under `workspace/translations/<hash>/generated/`. The baseline overlay layout differs between the two translation producers:
 
-- `baseline_config.yaml` — optional shared baseline overlay (present when `--baseline-config` was passed to `translation register`)
-- `{algo_name}/{algo_name}_config.yaml` — per-algorithm treatment overlay (verbatim copy of the `--config` file for BYO; produced by the skill for skill-driven)
+- **Skill-driven** (`/sim2real-translate`) — writes one overlay per referenced baseline at `baseline_<name>/baseline_config.yaml`. Assemble reads each baseline's overlay from its own directory.
+- **BYO** (`sim2real translation register`) — writes a single shared overlay at `baseline_config.yaml` (the operator-supplied `--baseline-config` file). Applied to every baseline in the manifest; used as the fallback when a per-baseline directory is absent.
+
+Overlays present in each translation:
+
+- `baseline_<name>/baseline_config.yaml` — per-baseline overlay (skill-driven). One directory per baseline that any algorithm's `defaults` cross-references.
+- `baseline_config.yaml` — legacy shared overlay (BYO). Present when `--baseline-config` was passed to `translation register`.
+- `{algo_name}/{algo_name}_config.yaml` — per-algorithm treatment overlay (verbatim copy of the `--config` file for BYO; produced by the skill for skill-driven).
 
 ### Assembly formula
 

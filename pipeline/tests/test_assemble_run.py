@@ -577,6 +577,56 @@ class TestAssembleRun:
         assert params["benchmarkGitRepoUrl"] == "https://example.com/llm-d-benchmark.git"
         assert assemble_run.assemble_run.missing_submodules == ["llm-d-benchmark"]  # type: ignore[attr-defined]
 
+    def test_skill_driven_per_baseline_overlay_is_applied(self, tmp_path):
+        """The PR's headline contract: assemble reads the per-baseline
+        overlay at ``generated/baseline_<name>/baseline_config.yaml``
+        (skill-driven layout) and applies it to that baseline. If the
+        primary path in ``assemble_run.py`` regressed to the wrong
+        subpath — or reverted to the shared root — this test would
+        fail.
+        """
+        fx = _make_experiment(
+            tmp_path,
+            algo_names_registered=["sr"],
+            algo_names_manifest=["sr"],
+        )
+        # Simulate a skill-driven translation: write ONLY the
+        # per-baseline overlay under generated/baseline_<name>/. No
+        # legacy top-level file — ensures the primary branch is under
+        # test, not the fallback.
+        tdir = fx["exp_root"] / "workspace" / "translations" / fx["translation_hash"]
+        per_baseline_overlay = (
+            tdir / "generated" / "baseline_baseline" / "baseline_config.yaml"
+        )
+        marker_extra_object = {
+            "kind": "InferenceObjective",
+            "metadata": {"name": "skill-marker"},
+        }
+        _write_yaml(
+            per_baseline_overlay,
+            {"scenario": [{"name": "test-scenario", "extraObjects": [marker_extra_object]}]},
+        )
+        # Precondition: the legacy top-level file must NOT exist so that
+        # a passing assertion proves the primary branch (not the
+        # fallback) resolved the overlay.
+        assert not (tdir / "generated" / "baseline_config.yaml").exists()
+
+        assemble_run.assemble_run(
+            translation_hash=fx["translation_hash"],
+            translation_ref=fx["translation_hash"],
+            cluster_id=fx["cluster_id"],
+            run_name="trial-1",
+            experiment_root=fx["exp_root"],
+            manifest_path=fx["manifest_path"],
+            force=False,
+            now_iso="2026-07-01T14:05:00Z",
+        )
+        run_dir = fx["exp_root"] / "workspace" / "runs" / "trial-1"
+        baseline_yaml = yaml.safe_load((run_dir / "cluster" / "baseline.yaml").read_text())
+        scenarios = baseline_yaml["scenario"]
+        scenario = next(s for s in scenarios if s["name"] == "test-scenario")
+        assert scenario["extraObjects"] == [marker_extra_object]
+
     def test_byo_legacy_baseline_overlay_at_generated_root_is_applied(self, tmp_path):
         """BYO ``translation register`` writes a single shared overlay at
         ``translations/<hash>/generated/baseline_config.yaml`` (no
