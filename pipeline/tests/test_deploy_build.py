@@ -1,10 +1,13 @@
 """Tests for deploy build subcommand."""
 import json
 import subprocess
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import yaml
 
+from pipeline import deploy
 from pipeline.deploy import build_parser
 
 
@@ -203,3 +206,82 @@ class TestWriteBuildMetadata:
         _write_build_metadata(run_dir, "img:tag")
 
         assert (run_dir / "run_metadata.json").read_text() == "not json {{{"
+
+
+class TestCmdBuildForwardsRegistrySecretName:
+    """Regression tests for issue #480 — deploy.py:_cmd_build must
+    thread cluster_config.secret_names.registry_creds through to
+    dispatch_buildkit_build. Without this, buildkit mounts the wrong
+    (or a nonexistent) k8s Secret and pushes fail after rotation.
+    """
+
+    def _make_run_dir(self, tmp_path: Path, *, component_image: str = "img:tag") -> Path:
+        run_dir = tmp_path / "run"
+        (run_dir / "cluster").mkdir(parents=True)
+        (run_dir / "run_metadata.json").write_text(json.dumps({
+            "version": 1,
+            "component_image": component_image,
+            "registry": "ghcr.io/org",
+            "repo_name": "sched",
+            "stages": {},
+        }))
+        # Source dir on the experiment root — _cmd_build reads it via
+        # EXPERIMENT_ROOT / repo_name.
+        (tmp_path / "sched").mkdir()
+        deploy.EXPERIMENT_ROOT = tmp_path
+        return run_dir
+
+    def test_forwards_registry_secret_name_to_dispatch(self, tmp_path):
+        run_dir = self._make_run_dir(tmp_path)
+        with patch("pipeline.lib.ensure_image.collect_scenario_images",
+                   return_value=[{"image_ref": "ghcr.io/org/sched:r", "package": "treatment"}]), \
+             patch("pipeline.lib.ensure_image.image_needs_build",
+                   return_value=True), \
+             patch("pipeline.lib.ensure_image.compute_source_hash",
+                   return_value="hash-x"), \
+             patch("pipeline.lib.ensure_image.save_source_hash"), \
+             patch("pipeline.lib.build.dispatch_buildkit_build",
+                   return_value=0) as mock_dispatch:
+            deploy._cmd_build(
+                run_dir,
+                namespace="sim2real-slot-0",
+                skip_build=False,
+                registry_secret_name="my-org-creds",
+            )
+        assert mock_dispatch.called
+        assert (
+            mock_dispatch.call_args.kwargs["registry_secret_name"]
+            == "my-org-creds"
+        )
+
+    def test_missing_registry_secret_name_exits_1(self, tmp_path, capsys):
+        run_dir = self._make_run_dir(tmp_path)
+        # Should abort before any build primitive is called.
+        with patch("pipeline.lib.ensure_image.collect_scenario_images") as m_col, \
+             patch("pipeline.lib.build.dispatch_buildkit_build") as m_dispatch, \
+             pytest.raises(SystemExit) as excinfo:
+            deploy._cmd_build(
+                run_dir,
+                namespace="sim2real-slot-0",
+                skip_build=False,
+                registry_secret_name="",
+            )
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "registry_creds" in err
+        assert "cluster.py provision" in err
+        m_col.assert_not_called()
+        m_dispatch.assert_not_called()
+
+    def test_skip_build_does_not_require_registry_secret_name(self, tmp_path):
+        """--skip-build returns 'skip' before touching credentials, so
+        an empty secret name must NOT cause an error in that path.
+        """
+        run_dir = self._make_run_dir(tmp_path)
+        result = deploy._cmd_build(
+            run_dir,
+            namespace="sim2real-slot-0",
+            skip_build=True,
+            registry_secret_name="",
+        )
+        assert result == "skip"

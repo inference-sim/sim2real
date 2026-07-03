@@ -254,11 +254,21 @@ def _write_build_metadata(run_dir: Path, epp_image: str) -> None:
     build.atomic_write_json(meta_path, meta)
 
 
-def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
+def _cmd_build(
+    run_dir: Path,
+    namespace: str,
+    skip_build: bool,
+    registry_secret_name: str,
+) -> str:
     """Ensure all required scenario images exist. Returns 'built', 'skip', or 'current'.
 
     Iterates over resolved scenarios in cluster/, extracts image refs,
     and builds any that are stale (source hash mismatch).
+
+    ``registry_secret_name`` is the k8s Secret name holding the
+    dockerconfigjson push credentials — resolved from
+    ``cluster_config.json:secret_names.registry_creds`` by callers.
+    Empty string aborts before dispatch.
     """
     from pipeline.lib.ensure_image import (
         collect_scenario_images, compute_source_hash,
@@ -286,6 +296,13 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
     if skip_build:
         info("--skip-build: skipping image build")
         return "skip"
+
+    if not registry_secret_name:
+        err(
+            "cluster_config.json has no secret_names.registry_creds — "
+            "re-run 'cluster.py provision --registry-user U --registry-token T'"
+        )
+        sys.exit(1)
 
     step(1, "Ensure Images")
 
@@ -408,6 +425,7 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
             source_dir=source_dir,
             run_dir=run_dir,
             repo_root=REPO_ROOT,
+            registry_secret_name=registry_secret_name,
         )
 
         # Restore baseline after algorithm build (clean state for next iteration)
@@ -2429,7 +2447,15 @@ def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
     if not namespaces or not namespaces[0]:
         err("No namespaces configured. Run cluster.py provision with --namespaces."); sys.exit(1)
 
-    _cmd_build(run_dir, namespace=namespaces[0], skip_build=args.skip_build)
+    registry_secret_name = (
+        (cluster_config.get("secret_names") or {}).get("registry_creds") or ""
+    )
+    _cmd_build(
+        run_dir,
+        namespace=namespaces[0],
+        skip_build=args.skip_build,
+        registry_secret_name=registry_secret_name,
+    )
 
     max_retries = getattr(args, "max_retries", 2)
     poll_interval = getattr(args, "poll_interval", 30)
@@ -3266,7 +3292,15 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict,
                     }
             _resolve_scope(progress, args)
 
-    _cmd_build(run_dir, namespace=namespace, skip_build=args.skip_build)
+    registry_secret_name = (
+        (cluster_config.get("secret_names") or {}).get("registry_creds") or ""
+    )
+    _cmd_build(
+        run_dir,
+        namespace=namespace,
+        skip_build=args.skip_build,
+        registry_secret_name=registry_secret_name,
+    )
 
     workspace_dir = EXPERIMENT_ROOT / "workspace"
     run_name = run_dir.name
@@ -3476,8 +3510,15 @@ def main():
         namespaces = cluster_config.get("namespaces") or []
         if not namespaces or not namespaces[0]:
             err("No namespaces configured. Run cluster.py provision with --namespaces."); sys.exit(1)
-        _cmd_build(run_dir, namespace=namespaces[0],
-                   skip_build=getattr(args, "skip_build", False))
+        registry_secret_name = (
+            (cluster_config.get("secret_names") or {}).get("registry_creds") or ""
+        )
+        _cmd_build(
+            run_dir,
+            namespace=namespaces[0],
+            skip_build=getattr(args, "skip_build", False),
+            registry_secret_name=registry_secret_name,
+        )
         return
 
     if cmd == "run":

@@ -951,8 +951,19 @@ def _cmd_build(args) -> int:
             )
             return 2
         build_namespace = namespaces[0]
+        registry_secret_name = (
+            (cluster_config.get("secret_names") or {}).get("registry_creds") or ""
+        )
+        if not registry_secret_name:
+            print(
+                "error: cluster_config.json has no secret_names.registry_creds; "
+                "re-run 'cluster.py provision --registry-user U --registry-token T'",
+                file=sys.stderr,
+            )
+            return 2
     else:
         build_namespace = ""
+        registry_secret_name = ""
 
     source_dir = exp_root / repo_name
     tag_prefix = translation_hash[:12]
@@ -1008,6 +1019,7 @@ def _cmd_build(args) -> int:
                 source_dir=source_dir,
                 run_dir=tdir,
                 repo_root=_REPO_ROOT,
+                registry_secret_name=registry_secret_name,
             )
         except build.BuildError as exc:
             print(f"error: {exc}", file=sys.stderr)

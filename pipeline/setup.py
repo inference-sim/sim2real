@@ -172,8 +172,10 @@ def collect_config(args: argparse.Namespace) -> tuple[SetupConfig, Path, str]:
     run_name, run_dir = _resolve_run_name(args)
 
     # Registry credentials are workspace-scoped (used by step_test_push). The
-    # in-cluster registry-secret is created by cluster.py provision, which
-    # collects credentials independently — see #435 for the dedup plan.
+    # in-cluster registry credentials Secret (name recorded in
+    # cluster_config.json:secret_names.registry_creds — default
+    # ``registry-creds``) is created by cluster.py provision, which collects
+    # credentials independently — see #435 for the dedup plan.
     reg_user = args.registry_user or os.environ.get("REGISTRY_USER", "")
     reg_token = args.registry_token or os.environ.get("REGISTRY_TOKEN", "")
     docker_server = registry.split("/")[0] if registry else ""

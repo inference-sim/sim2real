@@ -106,7 +106,7 @@ python pipeline/setup.py [flags]
 | `--test-push` | — | false |
 | `--test-push-tag TAG` | — | `_test-image-push` |
 
-**`--test-push`** — optional workspace-scoped registry credential check (pull busybox, tag, push to `<registry>/<repo_name>:<test-push-tag>`, pull back). Skipped when no registry is configured or no container runtime (`podman`/`docker`) is found. `--registry-user` / `--registry-token` (or `REGISTRY_USER` / `REGISTRY_TOKEN`) gate the registry login. The cluster-side `registry-secret` is created independently by `cluster.py provision`; see #435 for the dedup plan.
+**`--test-push`** — optional workspace-scoped registry credential check (pull busybox, tag, push to `<registry>/<repo_name>:<test-push-tag>`, pull back). Skipped when no registry is configured or no container runtime (`podman`/`docker`) is found. `--registry-user` / `--registry-token` (or `REGISTRY_USER` / `REGISTRY_TOKEN`) gate the registry login. The cluster-side registry credentials Secret (name recorded in `cluster_config.json:secret_names.registry_creds` — default `registry-creds`) is created independently by `cluster.py provision`; see #435 for the dedup plan.
 
 Cluster-scoped fields (`namespaces`, `is_openshift`, `storage_class`, `secret_names`, `workspaces`, `pipeline_yaml`) live in `workspace/clusters/<cluster_id>/cluster_config.json`, written by `cluster.py provision`. PVC bind state (`data-pvc`, `source-pvc`) is gated by `deploy.py`'s slot-readiness check before `deploy.py run` accepts a namespace slot.
 
@@ -223,7 +223,7 @@ python pipeline/sim2real.py build \
 1. Compose `image_ref = <registry>/<repo_name>:<translation_hash[:12]>-<algo>`.
 2. **Idempotency short-circuit**: if the algorithm's recorded `image_ref` already equals the composed value AND `image_digest` is non-null AND `--force-rebuild` is not set, skip. Prints `already built: <ref> (<digest>)`.
 3. **Pre-build registry probe**: `skopeo inspect docker://<ref>`. Success returns the digest; the digest is written back to `translation_output.json` and the build is skipped. Any failure (network, auth, missing tag, timeout) is treated as "absent → build" (fail-safe).
-4. **Buildkit dispatch**: submits an in-cluster `moby/buildkit:latest` pod that reads component source from a PVC and pushes to the target registry via `registry-secret` (provisioned by `cluster.py provision`). Same `pipeline/scripts/build-epp.sh` code path `deploy.py:_cmd_build` has always used.
+4. **Buildkit dispatch**: submits an in-cluster `moby/buildkit:latest` pod that reads component source from a PVC and pushes to the target registry via the credentials Secret whose name is recorded in `cluster_config.json:secret_names.registry_creds` (default `registry-creds`, provisioned by `cluster.py provision`). Same `pipeline/scripts/build-epp.sh` code path `deploy.py:_cmd_build` has always used; the Secret name is threaded in via `--registry-secret-name`.
 5. **Post-build digest inspect**: `skopeo inspect` runs a second time to record the pushed digest. On success, `image_digest` is set. On failure, the build is still considered successful (the image was pushed); `image_digest` is recorded as `null` with a warning. Digest can be back-filled by a later `sim2real build --force-rebuild`.
 6. **Atomic writeback**: `translations/<hash>/translation_output.json:algorithms[i].image_ref` and `image_digest` are written after every algorithm via tempfile-and-rename. A mid-run failure preserves prior algorithms' recorded state.
 
@@ -236,7 +236,7 @@ Return code: `0` on all-success (including all-idempotent). `2` on any prereq fa
 | `skopeo not found on PATH` | Local prereq missing | Install skopeo per the hint in the error message. |
 | `translation <hash> incomplete — missing outputs for: X` | `/sim2real-translate` has not been run for algorithm X | Run `/sim2real-translate`, then `sim2real translate --resume` to verify, then `sim2real build`. |
 | `workspace/setup_config.json is missing 'registry' or 'repo_name'` | `setup.py` was not run, or was run without `--registry` | `python pipeline/setup.py --registry quay.io/username --repo-name <repo>` |
-| `build failed for <algo> (image_ref=...)` | Buildkit pod exited non-zero — usually a compile error, missing PVC, or bad `registry-secret` | Inspect `kubectl logs epp-build-sim2real-build-<hash8>-<algo> -n <namespace>` for the compiler output. |
+| `build failed for <algo> (image_ref=...)` | Buildkit pod exited non-zero — usually a compile error, missing PVC, or bad registry credentials Secret (see `cluster_config.json:secret_names.registry_creds`) | Inspect `kubectl logs epp-build-sim2real-build-<hash8>-<algo> -n <namespace>` for the compiler output. |
 | `translation <ref> not built for algorithms: X` when running `sim2real assemble` | You ran `assemble` before `build` | Run `sim2real build --translation <ref>` first. |
 
 ---

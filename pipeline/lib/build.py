@@ -89,16 +89,33 @@ def dispatch_buildkit_build(
     source_dir: Path,
     run_dir: Path,
     repo_root: Path,
+    registry_secret_name: str,
 ) -> int:
     """Invoke ``pipeline/scripts/build-epp.sh`` and return its exit code.
 
     Passes every arg the script requires. The script does the actual
-    buildkit-pod submit, source-copy PVC upload, and registry-secret
-    check. Never raises on non-zero exit — the caller inspects the
-    return code (and may retry, log, or record a null-digest result).
+    buildkit-pod submit, source-copy PVC upload, and registry
+    credentials Secret check. Never raises on non-zero exit — the
+    caller inspects the return code (and may retry, log, or record a
+    null-digest result).
 
-    Raises ``BuildError`` only when ``build-epp.sh`` itself is missing.
+    ``registry_secret_name`` is the k8s Secret name that holds the
+    dockerconfigjson push credentials. Callers read it from
+    ``cluster_config.json:secret_names.registry_creds`` — the same
+    single-source-of-truth that ``cluster.py provision`` writes to.
+    Empty string is rejected (BuildError) rather than sent to the shell
+    script, because build-epp.sh would then read the wrong (or no)
+    Secret and buildkit would fail to authenticate.
+
+    Raises ``BuildError`` when ``build-epp.sh`` is missing or
+    ``registry_secret_name`` is empty.
     """
+    if not registry_secret_name:
+        raise BuildError(
+            "registry_secret_name must not be empty — populate "
+            "cluster_config.json:secret_names.registry_creds via "
+            "'cluster.py provision'"
+        )
     build_script = repo_root / "pipeline" / "scripts" / "build-epp.sh"
     if not build_script.exists():
         raise BuildError(f"build-epp.sh not found at {build_script}")
@@ -110,6 +127,7 @@ def dispatch_buildkit_build(
             "--namespace", namespace,
             "--image-ref", image_ref,
             "--source-dir", str(source_dir),
+            "--registry-secret-name", registry_secret_name,
         ],
         check=False,
         cwd=repo_root,
