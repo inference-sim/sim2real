@@ -80,7 +80,7 @@ python pipeline/cluster.py provision <cluster_id> --namespaces NS1,NS2,... [flag
 
 **What it provisions per namespace:** namespace, RBAC bindings, Secrets (HF, registry, GitHub, Docker Hub), PVCs (data, source), Tekton tasks, and the cluster-wide Pipeline definition. Re-runs reconcile via `kubectl apply` — drift is overwritten.
 
-**Boundary with `setup.py`:** anything operator-side (registry choice, repo name, current run, orchestrator image, sim2real_root) belongs in `setup.py` and lands in `setup_config.json`. Anything cluster-side (namespaces, RBAC, secrets, PVCs, Tekton tasks, Pipeline definition, Pipeline manifest override) belongs in `cluster.py provision` and lands in `cluster_config.json`. The two never write the same file.
+**Boundary with `setup.py`:** anything operator-side (registry choice, repo name, orchestrator image, sim2real_root) belongs in `setup.py` and lands in `setup_config.json`. The `current_run` pointer in that same file is written by `sim2real use` (setup.py leaves it alone). Anything cluster-side (namespaces, RBAC, secrets, PVCs, Tekton tasks, Pipeline definition, Pipeline manifest override) belongs in `cluster.py provision` and lands in `cluster_config.json`. The three writers never overlap on the same key.
 
 ---
 
@@ -184,7 +184,7 @@ The translation hash is derived from `transfer.yaml`'s translation slice (scenar
 
 **Outputs** — under `workspace/translations/<translation_hash>/` (initial run only; the skill populates the rest):
 
-- `skill_input.json` — the material `/sim2real-translate` reads. Pinned schema (see `docs/epics/step-2/design.md`) — includes `translation_hash`, absolute `experiment_root` and `translations_dir`, `scenario`, a `baselines[]` list (one entry per baseline that any algorithm's `defaults` cross-references, each carrying `name`, `config_path`, and a `generated_overlay_path` under `generated/baseline_<name>/`), `algorithms[]` (each with `source_path`, `source_sha256`, `output_dir`, `config_output_path`, and a `baseline_overlay_path` resolved via `defaults`), and `context` (text + file paths).
+- `skill_input.json` — the material `/sim2real-translate` reads. Pinned schema (see `docs/epics/step-2/design.md`) — includes `translation_hash`, absolute `experiment_root` and `translations_dir`, `scenario`, a `baselines[]` list (one entry per baseline that any algorithm's `defaults` cross-references, each carrying `name` and a `generated_overlay_path` under `generated/baseline_<name>/`), `algorithms[]` (each with `source_path`, `source_sha256`, `output_dir`, `config_output_path`, and a `baseline_overlay_path` resolved via `defaults`), and `context` (text + file paths).
 - `translation_output.json` — algorithm index with `image_ref: null` on every entry. `sim2real build` fills these in later.
 - `generated/<algo>/` (empty) — the skill writes `cmd/`, `pkg/`, `<algo>_output.json`, and `<algo>_config.yaml` under this directory.
 - `generated/baseline_<name>/` (empty) — one directory per referenced baseline. The skill writes `baseline_config.yaml` under each. Shared by all algorithms whose `defaults` names that baseline.

@@ -188,17 +188,21 @@ class TestBuildSkillInput:
             scenario="s",
             baselines=[{
                 "name": "base",
-                "config_path": "baselines/base.yaml",
                 "generated_overlay_path": "generated/baseline_base/baseline_config.yaml",
             }],
             algorithms=[],
             context={"text": "hint text", "file_paths": ["docs/a.md"]},
         )
         assert skin["baselines"][0]["name"] == "base"
-        assert skin["baselines"][0]["config_path"] == "baselines/base.yaml"
         assert skin["baselines"][0]["generated_overlay_path"] == (
             "generated/baseline_base/baseline_config.yaml"
         )
+        # ``config_path`` was dropped in the #480/#481 review cycle — the
+        # v3 manifest schema nests baseline config paths under
+        # sim.config / real.config, and no downstream consumer read the
+        # top-level field. Assert its absence to catch accidental
+        # re-introduction.
+        assert "config_path" not in skin["baselines"][0]
         assert skin["context"]["text"] == "hint text"
         assert skin["context"]["file_paths"] == ["docs/a.md"]
 
@@ -211,12 +215,10 @@ class TestBuildSkillInput:
             baselines=[
                 {
                     "name": "base",
-                    "config_path": None,
                     "generated_overlay_path": "generated/baseline_base/baseline_config.yaml",
                 },
                 {
                     "name": "alt",
-                    "config_path": None,
                     "generated_overlay_path": "generated/baseline_alt/baseline_config.yaml",
                 },
             ],
@@ -365,7 +367,6 @@ class TestTranslateEmpty:
         # per-algorithm baseline_overlay_path resolves via defaults="base".
         assert skin["baselines"] == [{
             "name": "base",
-            "config_path": None,
             "generated_overlay_path": "generated/baseline_base/baseline_config.yaml",
         }]
         assert (

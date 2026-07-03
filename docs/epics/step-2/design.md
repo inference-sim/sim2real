@@ -202,7 +202,6 @@ The contract between `sim2real translate` (Python) and `/sim2real-translate` (sk
   "baselines": [
     {
       "name": "base",
-      "config_path": "baselines/base.yaml",
       "generated_overlay_path": "generated/baseline_base/baseline_config.yaml"
     }
   ],

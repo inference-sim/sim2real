@@ -792,7 +792,6 @@ def _translate_write_checkpoint(
     skin_baselines: list[dict] = [
         {
             "name": bl["name"],
-            "config_path": bl.get("config"),
             "generated_overlay_path": f"generated/baseline_{bl['name']}/baseline_config.yaml",
         }
         for bl in manifest_baselines
