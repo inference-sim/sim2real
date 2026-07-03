@@ -213,6 +213,7 @@ The contract between `sim2real translate` (Python) and `/sim2real-translate` (sk
       "source_sha256": "e3b0c44…",
       "output_dir": "generated/softreflective",
       "config_output_path": "generated/softreflective/softreflective_config.yaml",
+      "baseline_overlay_path": "generated/baseline_base/baseline_config.yaml",
       "notes": "…free-form guidance from transfer.yaml.context…"
     }
   ],
@@ -225,10 +226,11 @@ The contract between `sim2real translate` (Python) and `/sim2real-translate` (sk
 
 Field semantics:
 
-- **Paths are relative to `experiment_root` or `translations_dir`** as appropriate — `algorithms[i].source_path` is relative to `experiment_root`; `algorithms[i].output_dir`, `config_output_path`, and `baselines[i].generated_overlay_path` are relative to `translations_dir`. Absolute-path variants of `experiment_root` and `translations_dir` are provided at the top level so the skill doesn't have to compose them itself.
+- **Paths are relative to `experiment_root` or `translations_dir`** as appropriate — `algorithms[i].source_path` is relative to `experiment_root`; `algorithms[i].output_dir`, `config_output_path`, `algorithms[i].baseline_overlay_path`, and `baselines[i].generated_overlay_path` are relative to `translations_dir`. Absolute-path variants of `experiment_root` and `translations_dir` are provided at the top level so the skill doesn't have to compose them itself.
 - **`baselines`** is a list — one entry per baseline that any `algorithms[*].defaults` cross-references (`manifest.py` requires `defaults` and validates it names a real `baselines[].name`). Unreferenced baselines are dropped by `sim2real translate`. When the manifest declares baselines but no algorithms, the list defensively includes `baselines[0]` so assemble can still resolve a baseline for standby workloads. `baselines` may be empty; the writer's Phase 2 loop collapses to a no-op. Each entry's `generated_overlay_path` lives under `generated/baseline_<name>/baseline_config.yaml`.
 - **Source content is not embedded.** The skill reads algorithm source files directly from `experiment_root/algorithms[i].source_path`. That keeps `skill_input.json` small and lets the skill inspect the full source file (imports, comments) rather than a truncated JSON blob.
 - **`algorithms[i].output_dir`** is the directory the skill must populate with `{cmd,pkg,<name>_output.json,<name>_config.yaml}` — matches the layout under `translations/<hash>/generated/<name>/`.
+- **`algorithms[i].baseline_overlay_path`** resolves this algorithm's `defaults` cross-reference into the concrete per-baseline overlay path (points into one of the `baselines[]` entries' `generated_overlay_path`). Null when the algorithm's `defaults` names a baseline that isn't in `baselines[]` (rare — the manifest layer prevents this for valid v3 shapes). Algorithms with the same `defaults` receive the same path; the writer's Phase 2 skip-if-exists check keeps them from clobbering each other.
 - **`context`** carries the `transfer.yaml:context` block (text + file paths) so the skill has the same free-form input the pre-refactor `prepare.py` fed it.
 
 `skill_input.json` is written by `sim2real translate` at initial-run time and is not mutated afterward. The skill reads it at its Step 0 and writes into the paths it names.

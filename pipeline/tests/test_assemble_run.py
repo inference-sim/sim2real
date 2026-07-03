@@ -577,6 +577,50 @@ class TestAssembleRun:
         assert params["benchmarkGitRepoUrl"] == "https://example.com/llm-d-benchmark.git"
         assert assemble_run.assemble_run.missing_submodules == ["llm-d-benchmark"]  # type: ignore[attr-defined]
 
+    def test_byo_legacy_baseline_overlay_at_generated_root_is_applied(self, tmp_path):
+        """BYO ``translation register`` writes a single shared overlay at
+        ``translations/<hash>/generated/baseline_config.yaml`` (no
+        per-baseline subdirectory). Assemble must fall back to that path
+        when the per-baseline dir is absent, or every BYO translation
+        loses its baseline overlay content silently.
+        """
+        fx = _make_experiment(
+            tmp_path,
+            algo_names_registered=["sr"],
+            algo_names_manifest=["sr"],
+        )
+        # Simulate BYO translation register: write ONLY the legacy shared
+        # overlay path — no ``generated/baseline_<name>/`` subdirectory.
+        tdir = fx["exp_root"] / "workspace" / "translations" / fx["translation_hash"]
+        legacy_overlay = tdir / "generated" / "baseline_config.yaml"
+        marker_extra_object = {"kind": "InferenceObjective", "metadata": {"name": "byo-marker"}}
+        _write_yaml(
+            legacy_overlay,
+            {"scenario": [{"name": "test-scenario", "extraObjects": [marker_extra_object]}]},
+        )
+        # Guard the precondition: per-baseline dir must NOT exist so the
+        # code path under test is the legacy-fallback branch.
+        assert not (tdir / "generated" / "baseline_baseline" / "baseline_config.yaml").exists()
+
+        assemble_run.assemble_run(
+            translation_hash=fx["translation_hash"],
+            translation_ref=fx["translation_hash"],
+            cluster_id=fx["cluster_id"],
+            run_name="trial-1",
+            experiment_root=fx["exp_root"],
+            manifest_path=fx["manifest_path"],
+            force=False,
+            now_iso="2026-07-01T14:05:00Z",
+        )
+        run_dir = fx["exp_root"] / "workspace" / "runs" / "trial-1"
+        baseline_yaml = yaml.safe_load((run_dir / "cluster" / "baseline.yaml").read_text())
+        # The legacy overlay's extraObjects should have deep-merged onto
+        # the baseline scenario. If the fallback regressed to overlay_path=None,
+        # this field would be absent.
+        scenarios = baseline_yaml["scenario"]
+        scenario = next(s for s in scenarios if s["name"] == "test-scenario")
+        assert scenario["extraObjects"] == [marker_extra_object]
+
     def test_filters_unregistered_algorithms(self, tmp_path):
         fx = _make_experiment(
             tmp_path,
