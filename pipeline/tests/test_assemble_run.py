@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from pipeline.lib import assemble_run, layout, slicer
+from pipeline.lib import assemble_run, layout, resolve, slicer
 
 
 def _init_fake_submodule(sub: Path) -> None:
@@ -1033,3 +1033,103 @@ class TestIncompleteTranslation:
                 force=False,
                 now_iso="2026-07-02T14:00:00Z",
             )
+
+
+class TestAssembleResolveContract:
+    """Couples assemble→resolve on the same fixture to catch silent schema
+    drift between what assemble writes and what resolve consumes. A pure
+    unit test on either side alone can't catch drift — both would evolve
+    together against the same fixture. This test asserts the on-disk
+    contract instead.
+    """
+
+    def test_resolve_reads_what_assemble_writes(self, tmp_path):
+        fx = _make_experiment(
+            tmp_path,
+            algo_names_registered=["sr"],
+            algo_names_manifest=["sr"],
+        )
+        # The baseline overlay is a translate-time artifact: neither
+        # _make_experiment nor assemble_run writes it, but resolve
+        # advertises translation.baselines[].generated_overlay_path
+        # unconditionally. Stub it so the path-existence walk below
+        # is unqualified.
+        baseline_overlay = (
+            fx["exp_root"] / "workspace" / "translations"
+            / fx["translation_hash"] / "generated"
+            / "baseline_baseline" / "baseline_config.yaml"
+        )
+        baseline_overlay.parent.mkdir(parents=True, exist_ok=True)
+        baseline_overlay.write_text("{}\n")
+
+        run_name = "trial-1"
+        assemble_run.assemble_run(
+            translation_hash=fx["translation_hash"],
+            translation_ref=fx["translation_hash"],
+            cluster_id=fx["cluster_id"],
+            run_name=run_name,
+            experiment_root=fx["exp_root"],
+            manifest_path=fx["manifest_path"],
+            force=False,
+            now_iso="2026-07-04T00:00:00Z",
+        )
+
+        view = resolve.resolve_run(fx["exp_root"], run_name)
+
+        # (1) Every path field resolve advertises exists on disk.
+        # results.results_dir is excluded — the ``collect`` command
+        # populates results/, not ``assemble``; resolve exposes the
+        # path as a pointer, not an existence claim.
+        expected_paths = [
+            view["run_dir"],
+            view["cluster_config_path"],
+            view["experiment_root"],
+            view["translation"]["translations_dir"],
+            view["translation"]["generated_dir"],
+            view["manifest_assembly"]["path"],
+            view["cluster_scenarios"]["cluster_dir"],
+            view["cluster_scenarios"]["baseline_yaml"],
+            *view["cluster_scenarios"]["treatment_yamls"].values(),
+            *view["cluster_scenarios"]["pipelinerun_yamls"],
+            *[a["generated_dir"] for a in view["translation"]["algorithms"]],
+            *[a["config_path"] for a in view["translation"]["algorithms"]],
+            *[b["generated_overlay_path"] for b in view["translation"]["baselines"]],
+        ]
+        for p in expected_paths:
+            assert p is not None, "resolve returned None for a path we expected to exist"
+            assert Path(p).exists(), f"resolve JSON references missing path: {p}"
+
+        # (2) Value round-trip on the fields both sides share.
+        run_meta_path = (
+            fx["exp_root"] / "workspace" / "runs" / run_name / "run_metadata.json"
+        )
+        run_meta = json.loads(run_meta_path.read_text())
+        assert view["run_name"] == run_meta["run_name"]
+        assert view["cluster_id"] == run_meta["cluster_id"]
+        assert view["translation"]["hash"] == run_meta["translation_hash"]
+        assert view["image_tag"] == run_meta["image_tag"]
+        assert view["params_hash"] == run_meta["params_hash"]
+        assert view["assembled_at"] == run_meta["assembled_at"]
+
+        # (3) Workloads round-trip: transfer.yaml → manifest.assembly.yaml → view.
+        assert view["manifest_assembly"]["workloads"] == ["workloads/w1.yaml"]
+
+        # (4) Schema-completeness: every key assemble writes to
+        # run_metadata.json is one resolve knows about. Adding a new
+        # field to run_metadata.json without extending resolve (and
+        # this whitelist) will fire this assertion — the intended
+        # drift-detection signal for this test.
+        known_keys = {
+            "version",
+            "run_name",
+            "translation_hash",
+            "cluster_id",
+            "params_hash",
+            "image_tag",
+            "assembled_at",
+        }
+        extra = set(run_meta.keys()) - known_keys
+        assert not extra, (
+            f"assemble writes keys not in resolve's known set: {sorted(extra)}. "
+            f"Add the field to resolve_run's return dict and to this whitelist."
+        )
