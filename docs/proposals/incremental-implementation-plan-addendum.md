@@ -314,6 +314,48 @@ Carries forward from Step 0:
 - Decision on `--plan --json` shape if structured output is in scope.
 - A "Step 6.5: orchestrator cleanup pass" — explicitly accept (no cleanup, per plan discipline) or schedule (acknowledge the cumulative Step 1/5/6 modifications to `_cmd_run` left it messy).
 
+### Step 7 — `sim2real-analyze` port + standard analysis library
+
+**Plan says**: Port `sim2real-analyze` to consume `sim2real resolve --run R`, replace hardcoded `baseline`/`treatment` with dynamic phases, introduce a small library of ready-to-run standard analyses under `analyses/`, keep metric definitions verbatim.
+
+**Scope reality**:
+
+- **The port is smaller than step 3's.** `sim2real-analyze` already accepts `--run NAME` and reads `workspace/runs/<name>/`. What it doesn't know is that "phase" isn't always `baseline`/`treatment` — post-step-2, it's the package name (baseline + each algorithm). Fixing this is a straightforward enumeration change.
+
+- **The standard-analysis library is the load-bearing new deliverable.** Today `sim2real-analyze` ships one baked-in table (`compute_table.py`) plus example scripts inline in the SKILL.md. That's a low ceiling — the moment an operator wants TTFT-CDF-plus-error-rate-overlaid, they hand-write it via the interactive loop every time. Ready-to-run standard analyses under `analyses/` turn common asks into `--analysis <name>` invocations.
+
+- **Standard analyses to ship (initial set)**:
+  - `latency-table` — the current comparison table, generalized to N phases (replaces `compute_table.py`)
+  - `ttft-cdf` — per-workload TTFT CDF across all phases with P50/P99 reference lines
+  - `tpot-cdf` — same for TPOT
+  - `e2e-cdf` — same for end-to-end
+  - `throughput-over-time` — per-workload requests-per-second timeline across phases
+  - `error-rate` — per-phase, per-workload success/error rate summary
+  - Others (saturation-vs-latency, request-size distributions) as follow-ups; not blocking
+
+- **Shared runtime shim**. Each analysis script accepts a common CLI: `--resolved-json <path> --output-dir <path> [--workload W] [--phase P]`. The skill invokes them uniformly. This is the value of the `sim2real resolve` JSON — it becomes the single input contract for every analysis.
+
+**Open questions resolving in Step 7**:
+
+| # | Question | Source | Why it lands here |
+|---|---|---|---|
+| 60 | Where does the analyses/ library live vs the SKILL.md's inline examples | this addendum | Ship both (library for standard, SKILL.md prose for ad-hoc guidance) vs migrate all examples to library |
+| 61 | What's a "standard" analysis worth shipping vs. what stays as a doc'd example | this addendum | Curation call — err small, expand as demand shows up |
+| 62 | Cross-run comparison support timing | this addendum | Step 7 keeps it as interactive-loop only; a `sim2real resolve` extension for multiple runs would live later |
+| 63 | Should the skill emit a machine-readable analysis-index (`analyses/index.json`) so operators can enumerate what's available | this addendum | Small deliverable; useful for tab-completion and for future CI-style batch analysis |
+
+**Risks specific to Step 7**:
+
+- The initial standard-analysis set is a curation problem more than a technical one. Shipping too many produces noise; shipping too few produces churn. Land the six-or-so items above and let real usage indicate what to add.
+- The `--analysis <name>` argument surface risks becoming a de-facto CLI over time. Keep it lightweight — no plugin registration, no options-per-analysis beyond the shared shim.
+- If step 5 (replicas) lands before step 7, the analyses need to know how to aggregate across replicas. That's a step-5-shape question; step-7's initial cut assumes single-replica-per-phase.
+
+**Out-of-plan work attached to Step 7**:
+
+- `pipeline/lib/resolve.py` (from step 3) may need a small extension to expose fields the analyses want (e.g., pod names for GPU-log cross-reference). Reactive; treat as a modification to step-3's schema.
+- Documentation update in the skill's `README.md` (or a new one under `analyses/README.md`) listing shipped analyses.
+- Integration test: run step-2 assemble → step-3 collect (or fake fixture) → step-7 `--analysis latency-table` → assert chart PNG and summary JSON emitted.
+
 ---
 
 ## Out of band
@@ -459,7 +501,7 @@ Skill ownership by step:
 - `sim2real-translate` — Step 2 (path port).
 - `sim2real-check` — Step 3 (input-model port).
 - `sim2real-bootstrap` — Step 4 (port + `--byo` mode).
-- `sim2real-analyze` — Step 5 (replica aggregation).
+- `sim2real-analyze` — Step 5 (replica aggregation, layered on top of the current shape), Step 7 (input-model port to `sim2real resolve` + standard analysis library).
 
 ### Transfer.yaml schema lands in Step 0 but uses by Step 2
 
