@@ -49,7 +49,7 @@ def _c(code: str, text: str) -> str:
     return f"\033[{code}m{text}\033[0m" if _tty else text
 
 
-from pipeline.lib import cluster_ops, layout
+from pipeline.lib import build, cluster_ops, layout
 from pipeline.lib.log import info, ok, warn, err
 from pipeline.lib.redact import redact_yaml_file, redact_yaml_tree
 
@@ -251,14 +251,24 @@ def _write_build_metadata(run_dir: Path, epp_image: str) -> None:
         return
     meta["epp_image"] = epp_image
     meta.setdefault("stages", {}).setdefault("deploy", {})["last_completed_step"] = "build"
-    meta_path.write_text(json.dumps(meta, indent=2))
+    build.atomic_write_json(meta_path, meta)
 
 
-def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
+def _cmd_build(
+    run_dir: Path,
+    namespace: str,
+    skip_build: bool,
+    registry_secret_name: str,
+) -> str:
     """Ensure all required scenario images exist. Returns 'built', 'skip', or 'current'.
 
     Iterates over resolved scenarios in cluster/, extracts image refs,
     and builds any that are stale (source hash mismatch).
+
+    ``registry_secret_name`` is the k8s Secret name holding the
+    dockerconfigjson push credentials — resolved from
+    ``cluster_config.json:secret_names.registry_creds`` by callers.
+    Empty string aborts before dispatch.
     """
     from pipeline.lib.ensure_image import (
         collect_scenario_images, compute_source_hash,
@@ -267,12 +277,12 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
 
     run_meta_path = run_dir / "run_metadata.json"
     if not run_meta_path.exists():
-        err("run_metadata.json not found — run setup.py first.")
+        err(f"run_metadata.json not found at {run_meta_path} — run 'sim2real assemble --run <name>' first.")
         sys.exit(1)
     try:
         run_meta = json.loads(run_meta_path.read_text())
     except json.JSONDecodeError as e:
-        err(f"run_metadata.json is not valid JSON: {e}. Re-run setup.py.")
+        err(f"run_metadata.json is not valid JSON: {e}. Re-run 'sim2real assemble --run <name>'.")
         sys.exit(1)
 
     component_image = run_meta.get("component_image")
@@ -280,18 +290,25 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
         info("No component_image in run metadata — skipping image build")
         return "skip"
     if not component_image:
-        err("component_image is empty in run_metadata.json — re-run setup.py with a valid --registry.")
+        err("component_image is empty in run_metadata.json — re-run 'sim2real assemble --run <name>'.")
         sys.exit(1)
 
     if skip_build:
         info("--skip-build: skipping image build")
         return "skip"
 
+    if not registry_secret_name:
+        err(
+            "cluster_config.json has no secret_names.registry_creds — "
+            "re-run 'cluster.py provision --registry-user U --registry-token T'"
+        )
+        sys.exit(1)
+
     step(1, "Ensure Images")
 
     registry = run_meta.get("registry", "")
     if not registry:
-        err("registry is empty in run_metadata.json — re-run setup.py with a valid --registry.")
+        err("registry is empty in run_metadata.json — re-run 'sim2real assemble --run <name>'.")
         sys.exit(1)
     repo_name = run_meta.get("repo_name", "llm-d-inference-scheduler")
     run_name = run_dir.name
@@ -401,15 +418,14 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
                 sys.exit(1)
 
         info(f"Building image: {ref}")
-        result = run(
-            ["bash", str(build_script),
-             "--run-dir", str(run_dir),
-             "--run-name", run_name,
-             "--namespace", namespace,
-             "--image-ref", ref,
-             "--source-dir", str(source_dir)],
-            check=False,
-            cwd=REPO_ROOT,
+        rc = build.dispatch_buildkit_build(
+            image_ref=ref,
+            build_id=run_name,
+            namespace=namespace,
+            source_dir=source_dir,
+            run_dir=run_dir,
+            repo_root=REPO_ROOT,
+            registry_secret_name=registry_secret_name,
         )
 
         # Restore baseline after algorithm build (clean state for next iteration)
@@ -434,7 +450,7 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
                     f"  cd {source_dir} && git checkout -- .")
                 sys.exit(1)
 
-        if result.returncode != 0:
+        if rc != 0:
             err(f"Image build failed for {ref} — see output above")
             sys.exit(1)
 
@@ -2203,7 +2219,7 @@ def _check_slot_ready(namespace: str, hf_secret_name: str = "hf-secret") -> tupl
     Returns (ready, list_of_failure_reasons).
 
     Note: Tekton tasks presence check is not yet implemented; assumes
-    ``setup.py`` has been run.
+    ``cluster.py provision`` has been run.
     """
     failures = []
 
@@ -2431,7 +2447,15 @@ def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
     if not namespaces or not namespaces[0]:
         err("No namespaces configured. Run cluster.py provision with --namespaces."); sys.exit(1)
 
-    _cmd_build(run_dir, namespace=namespaces[0], skip_build=args.skip_build)
+    registry_secret_name = (
+        (cluster_config.get("secret_names") or {}).get("registry_creds") or ""
+    )
+    _cmd_build(
+        run_dir,
+        namespace=namespaces[0],
+        skip_build=args.skip_build,
+        registry_secret_name=registry_secret_name,
+    )
 
     max_retries = getattr(args, "max_retries", 2)
     poll_interval = getattr(args, "poll_interval", 30)
@@ -3268,7 +3292,15 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict,
                     }
             _resolve_scope(progress, args)
 
-    _cmd_build(run_dir, namespace=namespace, skip_build=args.skip_build)
+    registry_secret_name = (
+        (cluster_config.get("secret_names") or {}).get("registry_creds") or ""
+    )
+    _cmd_build(
+        run_dir,
+        namespace=namespace,
+        skip_build=args.skip_build,
+        registry_secret_name=registry_secret_name,
+    )
 
     workspace_dir = EXPERIMENT_ROOT / "workspace"
     run_name = run_dir.name
@@ -3478,8 +3510,15 @@ def main():
         namespaces = cluster_config.get("namespaces") or []
         if not namespaces or not namespaces[0]:
             err("No namespaces configured. Run cluster.py provision with --namespaces."); sys.exit(1)
-        _cmd_build(run_dir, namespace=namespaces[0],
-                   skip_build=getattr(args, "skip_build", False))
+        registry_secret_name = (
+            (cluster_config.get("secret_names") or {}).get("registry_creds") or ""
+        )
+        _cmd_build(
+            run_dir,
+            namespace=namespaces[0],
+            skip_build=getattr(args, "skip_build", False),
+            registry_secret_name=registry_secret_name,
+        )
         return
 
     if cmd == "run":

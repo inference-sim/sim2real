@@ -3,11 +3,14 @@ set -euo pipefail
 
 # ── Build EPP image on Kubernetes cluster ──────────────────────────
 # Usage: build-epp.sh --run-dir <path> --run-name <name> --namespace <ns>
+#          --registry-secret-name <name>
 #          [--image-ref <ref>] [--source-dir <path>] [--experiment-root <path>]
 #
 # When --image-ref and --source-dir are provided, uses them directly.
-# Otherwise reads registry/repo from run_metadata.json (created by /sim2real-setup).
-# Requires registry-secret in the namespace for push credentials.
+# Otherwise reads registry/repo from run_metadata.json (created by `sim2real assemble`).
+# Requires a dockerconfigjson Secret in the namespace for push credentials;
+# the caller passes its name via --registry-secret-name (populated from
+# cluster_config.json:secret_names.registry_creds).
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 info()  { echo -e "${BLUE}[INFO]${NC}  $*"; }
@@ -24,24 +27,26 @@ trap cleanup EXIT
 RUN_DIR=""
 RUN_NAME=""
 NAMESPACE=""
+REGISTRY_SECRET_NAME=""
 EXPERIMENT_ROOT=""
 IMAGE_REF=""
 SOURCE_DIR=""
 
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --run-dir)          RUN_DIR="$2"; shift 2 ;;
-    --run-name)         RUN_NAME="$2"; shift 2 ;;
-    --namespace)        NAMESPACE="$2"; shift 2 ;;
-    --experiment-root)  EXPERIMENT_ROOT="$2"; shift 2 ;;
-    --image-ref)        IMAGE_REF="$2"; shift 2 ;;
-    --source-dir)       SOURCE_DIR="$2"; shift 2 ;;
+    --run-dir)              RUN_DIR="$2"; shift 2 ;;
+    --run-name)             RUN_NAME="$2"; shift 2 ;;
+    --namespace)            NAMESPACE="$2"; shift 2 ;;
+    --registry-secret-name) REGISTRY_SECRET_NAME="$2"; shift 2 ;;
+    --experiment-root)      EXPERIMENT_ROOT="$2"; shift 2 ;;
+    --image-ref)            IMAGE_REF="$2"; shift 2 ;;
+    --source-dir)           SOURCE_DIR="$2"; shift 2 ;;
     *) err "Unknown arg: $1"; exit 1 ;;
   esac
 done
 
-if [ -z "${RUN_DIR}" ] || [ -z "${RUN_NAME}" ] || [ -z "${NAMESPACE}" ]; then
-  err "Usage: build-epp.sh --run-dir <path> --run-name <name> --namespace <ns> [--experiment-root <path>]"
+if [ -z "${RUN_DIR}" ] || [ -z "${RUN_NAME}" ] || [ -z "${NAMESPACE}" ] || [ -z "${REGISTRY_SECRET_NAME}" ]; then
+  err "Usage: build-epp.sh --run-dir <path> --run-name <name> --namespace <ns> --registry-secret-name <name> [--experiment-root <path>]"
   exit 1
 fi
 
@@ -74,23 +79,22 @@ info "Target image: ${FULL_IMAGE}"
 info "Source dir: ${SCHEDULER_DIR}"
 
 # ── Step 2: Check registry secret ─────────────────────────────────
-info "Checking registry-secret..."
-if ! kubectl get secret registry-secret -n "${NAMESPACE}" >/dev/null 2>&1; then
-  err "registry-secret not found in namespace ${NAMESPACE}"
+info "Checking registry secret '${REGISTRY_SECRET_NAME}'..."
+if ! kubectl get secret "${REGISTRY_SECRET_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+  err "registry secret '${REGISTRY_SECRET_NAME}' not found in namespace ${NAMESPACE}"
   echo
-  echo "If using Quay.io, ensure you have:"
-  echo "  1. A robot account with 'Write' permission on your repository"
-  echo "  2. The robot account's Docker config JSON"
+  echo "This Secret is provisioned by 'cluster.py provision --registry-user <u> --registry-token <t>';"
+  echo "its name is recorded in cluster_config.json:secret_names.registry_creds."
   echo
-  echo "Create the secret:"
-  echo "  kubectl create secret docker-registry registry-secret \\"
+  echo "If provisioning by hand instead, create with:"
+  echo "  kubectl create secret docker-registry ${REGISTRY_SECRET_NAME} \\"
   echo "    --namespace ${NAMESPACE} \\"
   echo "    --docker-server=quay.io \\"
   echo "    --docker-username=<robot-account-name> \\"
   echo "    --docker-password=<robot-account-token>"
   exit 1
 fi
-ok "registry-secret found"
+ok "registry secret '${REGISTRY_SECRET_NAME}' found"
 
 # ── Step 3: Copy source to cluster ─────────────────────────────────
 info "Copying ${DIR_BASENAME} source to cluster..."
@@ -168,7 +172,7 @@ spec:
         claimName: source-pvc
     - name: registry-creds
       secret:
-        secretName: registry-secret
+        secretName: ${REGISTRY_SECRET_NAME}
         items:
           - key: .dockerconfigjson
             path: config.json

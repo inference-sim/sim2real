@@ -34,8 +34,8 @@ def git_repo(tmp_path):
 
 
 @pytest.fixture
-def run_dir(tmp_path):
-    """Create a run directory with a minimal translation_output.json."""
+def translation_dir(tmp_path):
+    """Create a translation directory with a minimal translation_output.json."""
     rd = tmp_path / "run"
     rd.mkdir()
     (rd / "translation_output.json").write_text(json.dumps({
@@ -52,122 +52,122 @@ def run_dir(tmp_path):
     return rd
 
 
-def test_modified_tracked_file(git_repo, run_dir):
+def test_modified_tracked_file(git_repo, translation_dir):
     """Modified tracked files appear in files_modified."""
     (git_repo / "existing.go").write_text("package main\n// changed")
-    created, modified = cg.copy_generated(str(git_repo), str(run_dir))
+    created, modified = cg.copy_generated(str(git_repo), str(translation_dir))
     assert modified == ["existing.go"]
     assert created == []
 
 
-def test_new_untracked_file(git_repo, run_dir):
+def test_new_untracked_file(git_repo, translation_dir):
     """New untracked files appear in files_created."""
     (git_repo / "pkg" / "plugins").mkdir(parents=True)
     (git_repo / "pkg" / "plugins" / "new_plugin.go").write_text("package plugins")
-    created, modified = cg.copy_generated(str(git_repo), str(run_dir))
+    created, modified = cg.copy_generated(str(git_repo), str(translation_dir))
     assert "pkg/plugins/new_plugin.go" in created
     assert modified == []
 
 
-def test_files_copied_to_generated(git_repo, run_dir):
+def test_files_copied_to_generated(git_repo, translation_dir):
     """All listed files exist in generated/ after copy."""
     (git_repo / "existing.go").write_text("package main\n// changed")
     (git_repo / "new_file.go").write_text("package main\n// new")
-    cg.copy_generated(str(git_repo), str(run_dir))
-    gen = run_dir / "generated"
+    cg.copy_generated(str(git_repo), str(translation_dir))
+    gen = translation_dir / "generated"
     assert (gen / "existing.go").exists()
     assert (gen / "new_file.go").exists()
 
 
-def test_translation_output_updated(git_repo, run_dir):
+def test_translation_output_updated(git_repo, translation_dir):
     """translation_output.json lists are overwritten with git state."""
-    o = json.loads((run_dir / "translation_output.json").read_text())
+    o = json.loads((translation_dir / "translation_output.json").read_text())
     o["files_created"] = ["stale.go"]
     o["files_modified"] = ["also_stale.go"]
-    (run_dir / "translation_output.json").write_text(json.dumps(o))
+    (translation_dir / "translation_output.json").write_text(json.dumps(o))
 
     (git_repo / "existing.go").write_text("package main\n// changed")
-    cg.copy_generated(str(git_repo), str(run_dir))
+    cg.copy_generated(str(git_repo), str(translation_dir))
 
-    result = json.loads((run_dir / "translation_output.json").read_text())
+    result = json.loads((translation_dir / "translation_output.json").read_text())
     assert result["files_modified"] == ["existing.go"]
     assert result["files_created"] == []
     assert "stale.go" not in result["files_created"]
 
 
-def test_empty_diff_empty_lists(git_repo, run_dir):
+def test_empty_diff_empty_lists(git_repo, translation_dir):
     """No changes -> empty lists, no files in generated/."""
-    created, modified = cg.copy_generated(str(git_repo), str(run_dir))
+    created, modified = cg.copy_generated(str(git_repo), str(translation_dir))
     assert created == []
     assert modified == []
-    gen = run_dir / "generated"
+    gen = translation_dir / "generated"
     if gen.exists():
         assert list(gen.iterdir()) == []
 
 
-def test_nested_path_uses_basename(git_repo, run_dir):
+def test_nested_path_uses_basename(git_repo, translation_dir):
     """Files in subdirectories use basename in generated/."""
     (git_repo / "pkg" / "deep").mkdir(parents=True)
     (git_repo / "pkg" / "deep" / "nested.go").write_text("package deep")
-    cg.copy_generated(str(git_repo), str(run_dir))
-    gen = run_dir / "generated"
+    cg.copy_generated(str(git_repo), str(translation_dir))
+    gen = translation_dir / "generated"
     assert (gen / "nested.go").exists()
 
 
-def test_mixed_created_and_modified(git_repo, run_dir):
+def test_mixed_created_and_modified(git_repo, translation_dir):
     """Both created and modified files are correctly classified in one call."""
     (git_repo / "existing.go").write_text("package main\n// changed")
     (git_repo / "pkg").mkdir()
     (git_repo / "pkg" / "new_plugin.go").write_text("package pkg")
-    created, modified = cg.copy_generated(str(git_repo), str(run_dir))
+    created, modified = cg.copy_generated(str(git_repo), str(translation_dir))
     assert modified == ["existing.go"]
     assert "pkg/new_plugin.go" in created
-    result = json.loads((run_dir / "translation_output.json").read_text())
+    result = json.loads((translation_dir / "translation_output.json").read_text())
     assert result["files_modified"] == ["existing.go"]
     assert "pkg/new_plugin.go" in result["files_created"]
-    gen = run_dir / "generated"
+    gen = translation_dir / "generated"
     assert (gen / "existing.go").exists()
     assert (gen / "new_plugin.go").exists()
 
 
-def test_config_yamls_preserved(git_repo, run_dir):
+def test_config_yamls_preserved(git_repo, translation_dir):
     """Config yamls placed by writer agent survive the copy step."""
-    gen = run_dir / "generated"
+    gen = translation_dir / "generated"
     gen.mkdir()
     (gen / "baseline_config.yaml").write_text("baseline: true")
     (gen / "treatment_config.yaml").write_text("treatment: true")
 
     (git_repo / "existing.go").write_text("package main\n// changed")
-    cg.copy_generated(str(git_repo), str(run_dir))
+    cg.copy_generated(str(git_repo), str(translation_dir))
 
     assert (gen / "baseline_config.yaml").read_text() == "baseline: true"
     assert (gen / "treatment_config.yaml").read_text() == "treatment: true"
     assert (gen / "existing.go").exists()
 
 
-def test_basename_collision_raises(git_repo, run_dir):
+def test_basename_collision_raises(git_repo, translation_dir):
     """Basename collision between different paths raises ValueError."""
     (git_repo / "pkg" / "scorer").mkdir(parents=True)
     (git_repo / "pkg" / "admission").mkdir(parents=True)
     (git_repo / "pkg" / "scorer" / "config.go").write_text("package scorer")
     (git_repo / "pkg" / "admission" / "config.go").write_text("package admission")
     with pytest.raises(ValueError, match="Basename collision.*config.go"):
-        cg.copy_generated(str(git_repo), str(run_dir))
+        cg.copy_generated(str(git_repo), str(translation_dir))
 
 
-def test_deleted_file_excluded(git_repo, run_dir):
+def test_deleted_file_excluded(git_repo, translation_dir):
     """Deleted tracked files do not appear in files_modified."""
     (git_repo / "existing.go").unlink()
-    created, modified = cg.copy_generated(str(git_repo), str(run_dir))
+    created, modified = cg.copy_generated(str(git_repo), str(translation_dir))
     assert "existing.go" not in modified
     assert created == []
 
 
-def test_preserves_other_json_fields(git_repo, run_dir):
+def test_preserves_other_json_fields(git_repo, translation_dir):
     """Other fields in translation_output.json are not disturbed."""
     (git_repo / "existing.go").write_text("package main\n// changed")
-    cg.copy_generated(str(git_repo), str(run_dir))
-    result = json.loads((run_dir / "translation_output.json").read_text())
+    cg.copy_generated(str(git_repo), str(translation_dir))
+    result = json.loads((translation_dir / "translation_output.json").read_text())
     assert result["plugin_type"] == "scorer"
     assert result["description"] == "test plugin"
 
@@ -175,9 +175,9 @@ def test_preserves_other_json_fields(git_repo, run_dir):
 # --- Per-algorithm subdirectory tests ---
 
 
-def _setup_algo_output(run_dir, algo_name="myalgo"):
+def _setup_algo_output(translation_dir, algo_name="myalgo"):
     """Pre-create per-algo output JSON as the writer would before copy_generated runs."""
-    algo_dir = run_dir / "generated" / algo_name
+    algo_dir = translation_dir / "generated" / algo_name
     algo_dir.mkdir(parents=True, exist_ok=True)
     (algo_dir / f"{algo_name}_output.json").write_text(json.dumps({
         "plugin_type": "scorer",
@@ -192,14 +192,14 @@ def _setup_algo_output(run_dir, algo_name="myalgo"):
     }))
 
 
-def test_per_algorithm_subdirectory(git_repo, run_dir):
+def test_per_algorithm_subdirectory(git_repo, translation_dir):
     """With algo_name, files go to generated/{algo_name}/ preserving full paths."""
-    _setup_algo_output(run_dir)
+    _setup_algo_output(translation_dir)
     (git_repo / "pkg" / "scorer").mkdir(parents=True)
     (git_repo / "pkg" / "scorer" / "plugin.go").write_text("package scorer")
     (git_repo / "existing.go").write_text("package main\n// changed")
-    created, modified = cg.copy_generated(str(git_repo), str(run_dir), algo_name="myalgo")
-    gen = run_dir / "generated" / "myalgo"
+    created, modified = cg.copy_generated(str(git_repo), str(translation_dir), algo_name="myalgo")
+    gen = translation_dir / "generated" / "myalgo"
     assert gen.exists()
     # Full relative paths preserved
     assert (gen / "pkg" / "scorer" / "plugin.go").exists()
@@ -208,26 +208,26 @@ def test_per_algorithm_subdirectory(git_repo, run_dir):
     assert "existing.go" in modified
 
 
-def test_per_algorithm_no_basename_collision(git_repo, run_dir):
+def test_per_algorithm_no_basename_collision(git_repo, translation_dir):
     """With algo_name, same basename in different dirs does NOT raise."""
-    _setup_algo_output(run_dir)
+    _setup_algo_output(translation_dir)
     (git_repo / "pkg" / "scorer").mkdir(parents=True)
     (git_repo / "pkg" / "admission").mkdir(parents=True)
     (git_repo / "pkg" / "scorer" / "config.go").write_text("package scorer")
     (git_repo / "pkg" / "admission" / "config.go").write_text("package admission")
     # Should not raise — full paths can't collide
-    created, modified = cg.copy_generated(str(git_repo), str(run_dir), algo_name="myalgo")
-    gen = run_dir / "generated" / "myalgo"
+    created, modified = cg.copy_generated(str(git_repo), str(translation_dir), algo_name="myalgo")
+    gen = translation_dir / "generated" / "myalgo"
     assert (gen / "pkg" / "scorer" / "config.go").exists()
     assert (gen / "pkg" / "admission" / "config.go").exists()
 
 
-def test_per_algorithm_output_json(git_repo, run_dir):
+def test_per_algorithm_output_json(git_repo, translation_dir):
     """With algo_name, {algo_name}_output.json is updated in the subdirectory."""
-    _setup_algo_output(run_dir)
+    _setup_algo_output(translation_dir)
     (git_repo / "existing.go").write_text("package main\n// changed")
-    cg.copy_generated(str(git_repo), str(run_dir), algo_name="myalgo")
-    gen = run_dir / "generated" / "myalgo"
+    cg.copy_generated(str(git_repo), str(translation_dir), algo_name="myalgo")
+    gen = translation_dir / "generated" / "myalgo"
     algo_out = gen / "myalgo_output.json"
     assert algo_out.exists()
     data = json.loads(algo_out.read_text())

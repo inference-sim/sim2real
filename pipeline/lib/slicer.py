@@ -11,17 +11,31 @@ Partitions a loaded v3 ``transfer.yaml`` dict into two slices:
 
 Slice membership is design-locked here; future additive manifest fields
 default to the assembly slice unless their stem is added to
-``TRANSLATION_FIELDS``. The first consumer is Step 2's ``translate``
-command (not yet implemented); Step 0 ships this as a ready substrate.
+``TRANSLATION_FIELDS``. Consumed by ``sim2real translate`` (hashes the
+translation slice to key ``translations/<hash>/``) and ``sim2real
+assemble`` (snapshots the assembly slice into
+``runs/<R>/manifest.assembly.yaml``).
 
-The hash is SHA-256 over canonical (sorted-key, no-whitespace) JSON of
-``translation_slice`` — stable across YAML formatter / writer differences.
+Two hashes are exported:
+
+- ``translation_hash`` — SHA-256 over canonical (sorted-key,
+  no-whitespace) JSON of the translation slice. Stable across YAML
+  formatter / writer differences. No production consumer today; kept
+  exported for tests and future slice-keyed callers. The BYO
+  ``translation register`` path uses a separate
+  ``_compute_translation_hash`` in ``pipeline/sim2real.py`` that folds
+  image digest + config bytes + algorithm name.
+- ``translation_hash_with_sources`` — folds each
+  ``algorithms[i].source`` file's bytes (SHA-256) into the digest,
+  so edits to algorithm source under a stable ``transfer.yaml`` still
+  produce a new hash. Used by skill-driven ``sim2real translate``.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 from typing import Any
 
 TRANSLATION_FIELDS: list[str] = [
@@ -99,6 +113,65 @@ def translation_hash(manifest: dict) -> str:
     """
     canonical = json.dumps(
         translation_slice(manifest),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def translation_hash_with_sources(manifest: dict, experiment_root: Path) -> str:
+    """SHA-256 over the translation slice folded with each algorithm's source bytes.
+
+    Reads every ``algorithms[i].source`` file from ``experiment_root``,
+    computes its SHA-256, and folds the per-algorithm digests (sorted by
+    algorithm name) into a canonical envelope alongside
+    ``translation_slice(manifest)``. Callers use this when the translation
+    result depends on algorithm source contents — the skill-driven step-2
+    ``translate`` path.
+
+    Envelope shape (canonical JSON, sorted keys, no whitespace):
+
+        {"slice": <translation_slice>,
+         "sources": [{"name": <str>, "sha256": <hex>}, ...  # sorted by name
+                    ]}
+
+    Algorithm-order normalization: ``sources`` is sorted by ``name`` so
+    ``[a, b]`` and ``[b, a]`` produce the same hash. Algorithms without a
+    ``source`` field are skipped (they contribute nothing to the sources
+    list — matches the projection semantics of ``translation_slice``).
+
+    Raises:
+        AssembleError: if any ``algorithms[i].source`` file does not exist
+        under ``experiment_root``. Message format: ``source file not
+        found: <path>``.
+    """
+    # Deferred import to avoid the ``assemble_run -> slicer`` import cycle.
+    from pipeline.lib.assemble_run import AssembleError
+
+    sources: list[dict[str, str]] = []
+    algos = manifest.get("algorithms") or []
+    for algo in _sorted_by_name(algos):
+        if not isinstance(algo, dict):
+            continue
+        source_rel = algo.get("source")
+        if source_rel is None:
+            continue
+        source_path = experiment_root / source_rel
+        try:
+            data = source_path.read_bytes()
+        except FileNotFoundError as exc:
+            raise AssembleError(f"source file not found: {source_path}") from exc
+        sources.append(
+            {
+                "name": algo.get("name", ""),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+        )
+
+    envelope = {"slice": translation_slice(manifest), "sources": sources}
+    canonical = json.dumps(
+        envelope,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,

@@ -2152,14 +2152,14 @@ def test_cmd_build_missing_metadata(tmp_path):
     """Missing run_metadata.json → sys.exit."""
     from pipeline.deploy import _cmd_build
     with pytest.raises(SystemExit):
-        _cmd_build(tmp_path, namespace="ns", skip_build=False)
+        _cmd_build(tmp_path, namespace="ns", skip_build=False, registry_secret_name="registry-creds")
 
 
 def test_cmd_build_no_component_image(tmp_path, capsys):
     """component_image absent → skip."""
     from pipeline.deploy import _cmd_build
     (tmp_path / "run_metadata.json").write_text(json.dumps({"registry": "quay.io/me"}))
-    result = _cmd_build(tmp_path, namespace="ns", skip_build=False)
+    result = _cmd_build(tmp_path, namespace="ns", skip_build=False, registry_secret_name="registry-creds")
     assert result == "skip"
 
 
@@ -2168,7 +2168,7 @@ def test_cmd_build_empty_component_image(tmp_path):
     from pipeline.deploy import _cmd_build
     (tmp_path / "run_metadata.json").write_text(json.dumps({"component_image": ""}))
     with pytest.raises(SystemExit):
-        _cmd_build(tmp_path, namespace="ns", skip_build=False)
+        _cmd_build(tmp_path, namespace="ns", skip_build=False, registry_secret_name="registry-creds")
 
 
 def test_cmd_build_skip_flag(tmp_path, capsys):
@@ -2177,7 +2177,7 @@ def test_cmd_build_skip_flag(tmp_path, capsys):
     (tmp_path / "run_metadata.json").write_text(
         json.dumps({"component_image": "quay.io/me/sched:r1", "registry": "quay.io/me", "repo_name": "sched"})
     )
-    result = _cmd_build(tmp_path, namespace="ns", skip_build=True)
+    result = _cmd_build(tmp_path, namespace="ns", skip_build=True, registry_secret_name="")
     assert result == "skip"
 
 
