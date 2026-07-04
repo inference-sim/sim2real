@@ -466,6 +466,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="run name — must correspond to workspace/runs/<RUN_NAME>/",
     )
 
+    res = sub.add_parser(
+        "resolve",
+        help="Emit a hydrated JSON view of a run (metadata + paths)",
+    )
+    res.add_argument(
+        "--run",
+        required=True,
+        metavar="RUN_NAME",
+        help="run name — must correspond to workspace/runs/<RUN_NAME>/",
+    )
+
     lst = sub.add_parser("list", help="List workspace-scoped resources")
     lsub = lst.add_subparsers(dest="subcommand", required=True)
     lsub.add_parser("runs", help="List runs, newest first")
@@ -1147,6 +1158,26 @@ def _cmd_assemble(args) -> int:
     return 0
 
 
+def _cmd_resolve(args) -> int:
+    """Emit the hydrated JSON view of ``workspace/runs/<--run>/`` on stdout.
+
+    Exit 0 on success (parseable JSON on stdout). Exit 2 on any
+    ``ResolveError`` from ``pipeline.lib.resolve`` — the specific
+    message goes to stderr and includes a pointer to the ``sim2real``
+    command that would repair the missing/corrupt state.
+    """
+    from pipeline.lib import resolve as resolve_mod
+    try:
+        view = resolve_mod.resolve_run(
+            layout.experiment_root(), args.run
+        )
+    except resolve_mod.ResolveError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(view, indent=2))
+    return 0
+
+
 def _cmd_use(args) -> int:
     run_dir = layout.runs_dir() / args.run
     if not run_dir.is_dir() or not (run_dir / "run_metadata.json").exists():
@@ -1312,6 +1343,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_assemble(args)
     if args.command == "use":
         return _cmd_use(args)
+    if args.command == "resolve":
+        return _cmd_resolve(args)
     if args.command == "list" and args.subcommand == "runs":
         return _cmd_list_runs(args)
     if args.command == "list" and args.subcommand == "translations":
