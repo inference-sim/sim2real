@@ -27,7 +27,7 @@ python pipeline/cluster.py provision <cluster_id> --namespaces NS1,NS2,...
 # Per-workspace + per-run cycle:
 python pipeline/setup.py       --experiment-root ../admission-control
 python pipeline/sim2real.py translation register \
-    --algorithm <name> --image <ref> --config <treatment-overlay-path>
+    --algorithm <name>=<image-ref>@<config-path>
 python pipeline/sim2real.py assemble \
     --translation <hash> --cluster <cluster_id> --run <run_name>
 python pipeline/deploy.py      --experiment-root ../admission-control
@@ -168,7 +168,7 @@ python pipeline/sim2real.py translation register \
 **`translation_hash` derivation (BYO, batched):** SHA-256 hex over canonical JSON of a list of `{name, image, config}` dicts sorted by `name`, where `config` is the SHA-256 of the overlay file content and `image` is the digest ref if present (otherwise the raw ref string). Order-invariant — registering the same algorithms in a different order produces the same hash.
 
 ```
-sha256(canonical-json(sorted-by-name list of {name, image_digest_or_ref, config_sha256}))
+sha256(canonical-json(sorted-by-name list of {name, image, config}))
 ```
 
 **Idempotency:** re-registering the same set of (algorithm, image, config-content) tuples — in any order — is a no-op. The existing translation directory is detected, a warning is printed, and exit is 0.
