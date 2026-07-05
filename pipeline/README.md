@@ -129,7 +129,7 @@ Pass `--algorithm` once per algorithm. Each value is a single `NAME=IMAGE@CONFIG
 # N=2 example
 python pipeline/sim2real.py translation register \
     --algorithm softreflective=ghcr.io/org/sr-router:v1@overlays/sr.yaml \
-    --algorithm eager=ghcr.io/org/eager-router:v1@sha256:abc123@overlays/eager.yaml \
+    --algorithm eager=ghcr.io/org/eager-router@sha256:<64-hex-digest>@overlays/eager.yaml \
     [--baseline-config path/to/baseline-overlay.yaml] \
     [--registered-hash <expected-sha256-hex>] \
     [--experiment-root PATH]
@@ -140,7 +140,7 @@ python pipeline/sim2real.py translation register \
 | `--algorithm NAME=IMAGE@CONFIG` | yes (repeatable) | `NAME` follows `[A-Za-z0-9][A-Za-z0-9._-]*`, max 128 chars, no `.` / `..`. `IMAGE` is the registry ref. `CONFIG` is the treatment overlay YAML path. Rightmost `@` is the split point, so digest refs (e.g. `image@sha256:abc`) work. **Overlay paths containing `@` cannot be represented** (structural constraint — the `@` would be misread as part of the image ref). Overlay paths containing `=` are supported. |
 | `--baseline-config PATH` | no | Baseline overlay YAML, if the translation needs one. |
 | `--registered-hash HASH` | no | Assert the computed `translation_hash` equals this value; error if not. |
-| `--force` | no | Reassign an alias if another translation already owns it. Only meaningful for N=1 (N>1 translations have `alias=null`). |
+| `--force` | no | Reassign an alias if another translation already owns it. Applies per-algorithm for any N — use `--force` whenever any algorithm name in the batch was previously used as an alias by a different translation. For N>1 the newly-registered translation itself has `alias=null` (batched translations are referenced by hash); `--force` only clears the colliding aliases on the previous owners. |
 | `--experiment-root PATH` | no | Defaults to cwd. |
 
 #### Deprecated form: `--algorithm NAME --image REF --config PATH`
