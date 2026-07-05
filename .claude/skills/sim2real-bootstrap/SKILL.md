@@ -424,7 +424,7 @@ to produce the plugin sources, then `sim2real build` compiles them into images):
   4. Validate the skill's outputs:
        python pipeline/sim2real.py translate --resume
   5. Build per-algorithm images:
-       python pipeline/sim2real.py build
+       python pipeline/sim2real.py build --translation <hash>
   6. Assemble a run:
        python pipeline/sim2real.py assemble \
          --translation <hash> --cluster <cluster_id> --run <run_name>
