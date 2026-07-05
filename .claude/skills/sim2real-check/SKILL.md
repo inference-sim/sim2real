@@ -15,7 +15,7 @@ Parse user input for these flags (all optional; auto-detect fills in the rest):
 - `--run <name>` — a workspace-registered run name. Requires the run to have been assembled by `sim2real assemble --run <name>`. Mutually exclusive with `--real`.
 - `--experiment-root <path>` — override the experiment repo root. Defaults to the current working directory. Used only in `--run` mode and in the auto-detect fallback; silently ignored in `--real` mode.
 
-Removed vs. the pre-refactor version of this skill: `--translation`, `--algorithm`, `--workload` (all redundant now — `--run` resolves them from disk).
+Removed as CLI flags vs. the pre-refactor version of this skill: `--translation`, `--algorithm`, `--workload` (all redundant now — `--run` resolves them from disk). `WORKLOAD` persists as an interactive-only override at the confirmation prompt (scope a check run to one workload without re-invoking the skill).
 
 ## Step 0: Resolve Input, Populate Variables, Confirm With User
 
@@ -42,31 +42,60 @@ if [ -n "$RUN" ]; then
     # Resolve-mode: pull the hydrated JSON view of the run and parse it.
     # --experiment-root is a top-level flag on sim2real (before the
     # subcommand), not a subcommand-scoped flag.
-    sim2real --experiment-root "$EXPERIMENT_ROOT" resolve --run "$RUN" \
-        > /tmp/sim2real_check_resolved.json
-    CONFIGS_DIR=$(jq -r '.translation.generated_dir' /tmp/sim2real_check_resolved.json)
-    RESULTS_DIR=$(jq -r '.results.results_dir' /tmp/sim2real_check_resolved.json)
-    PHASES=$(jq -r '.results.phases_with_data | join(" ")' /tmp/sim2real_check_resolved.json)
+    #
+    # Use a per-invocation temp file (mktemp) so a stale file from a
+    # prior failed run can't be silently reused.
+    RESOLVED_JSON=$(mktemp -t sim2real_check_resolved.XXXXXX.json)
+    trap 'rm -f "$RESOLVED_JSON"' EXIT
+    if ! sim2real --experiment-root "$EXPERIMENT_ROOT" resolve --run "$RUN" \
+            > "$RESOLVED_JSON"; then
+        echo "ERROR: 'sim2real resolve --run $RUN' failed. Verify the run exists"
+        echo "with 'sim2real list runs', or pass --experiment-root <path>."
+        exit 1
+    fi
+    # Mandatory fields — use `jq -re` so a schema mismatch fails loudly
+    # instead of silently coalescing to an empty string.
+    CONFIGS_DIR=$(jq -re '.translation.generated_dir' "$RESOLVED_JSON") || {
+        echo "ERROR: '.translation.generated_dir' missing from resolve output — schema drift?"
+        exit 1
+    }
+    RESULTS_DIR=$(jq -re '.results.results_dir' "$RESOLVED_JSON") || {
+        echo "ERROR: '.results.results_dir' missing from resolve output — schema drift?"
+        exit 1
+    }
+    PHASES=$(jq -re '.results.phases_with_data | join(" ")' "$RESOLVED_JSON") || {
+        echo "ERROR: '.results.phases_with_data' missing from resolve output — schema drift?"
+        exit 1
+    }
     # WORKLOADS_BY_PHASE is a bash associative array keyed by phase name.
     declare -A WORKLOADS_BY_PHASE
     while IFS=$'\t' read -r phase wls; do
         WORKLOADS_BY_PHASE["$phase"]="$wls"
-    done < <(jq -r '.results.workloads_by_phase | to_entries[] | "\(.key)\t\(.value | join(" "))"' /tmp/sim2real_check_resolved.json)
-    TRANSLATION_HASH=$(jq -r '.translation.hash' /tmp/sim2real_check_resolved.json)
-    IMAGE_TAG=$(jq -r '.image_tag' /tmp/sim2real_check_resolved.json)
-    MANIFEST_ASSEMBLY_PATH=$(jq -r '.manifest_assembly.path // ""' /tmp/sim2real_check_resolved.json)
-    CLUSTER_CONFIG_PATH=$(jq -r '.cluster_config_path // ""' /tmp/sim2real_check_resolved.json)
+    done < <(jq -r '.results.workloads_by_phase | to_entries[] | "\(.key)\t\(.value | join(" "))"' "$RESOLVED_JSON")
+    TRANSLATION_HASH=$(jq -r '.translation.hash' "$RESOLVED_JSON")
+    IMAGE_TAG=$(jq -r '.image_tag' "$RESOLVED_JSON")
+    MANIFEST_ASSEMBLY_PATH=$(jq -r '.manifest_assembly.path // ""' "$RESOLVED_JSON")
+    CLUSTER_CONFIG_PATH=$(jq -r '.cluster_config_path // ""' "$RESOLVED_JSON")
     # BASELINE_CONFIG_PATH resolves the first baseline overlay in the
     # workspace's nested-under-baseline_<name>/ shape. Empty if the run has
     # no baseline. Downstream check subsections that need the baseline
     # EPP config reference this variable.
-    BASELINE_CONFIG_PATH=$(jq -r '.translation.baselines[0].generated_overlay_path // ""' /tmp/sim2real_check_resolved.json)
-    # WORKLOADS_DIR is the experiment repo's workload YAML directory.
-    # In resolve-mode there is no per-run copy — the manifest.assembly.yaml
-    # names the source files, all under $EXPERIMENT_ROOT/workloads/.
-    WORKLOADS_DIR=$(jq -r '.experiment_root' /tmp/sim2real_check_resolved.json)/workloads
+    BASELINE_CONFIG_PATH=$(jq -r '.translation.baselines[0].generated_overlay_path // ""' "$RESOLVED_JSON")
+    # WORKLOADS_DIR points at the experiment repo's workload YAML directory.
+    # In resolve-mode, workload paths in manifest.assembly.yaml are resolved
+    # relative to $EXPERIMENT_ROOT (arbitrary relative paths per
+    # pipeline/lib/assemble_run.py:_load_workload). By convention the project
+    # places them under workloads/, so WORKLOADS_DIR defaults to that. If the
+    # experiment repo uses a different layout, override WORKLOADS_DIR at the
+    # confirmation prompt or read manifest.assembly.yaml's workloads list to
+    # discover the actual paths.
+    WORKLOADS_DIR=$(jq -r '.experiment_root' "$RESOLVED_JSON")/workloads
 elif [ -n "$REAL" ]; then
     # Legacy-mode: scan the bundle directly. Populate the same variables.
+    if [ ! -d "$REAL" ]; then
+        echo "ERROR: --real path '$REAL' does not exist or is not a directory."
+        exit 1
+    fi
     # Pre-refactor bundles vary in shape: some have phase dirs as direct
     # children of $REAL, others under $REAL/results/. Probe both.
     CONFIGS_DIR="$REAL/generated"
@@ -75,16 +104,27 @@ elif [ -n "$REAL" ]; then
     else
         RESULTS_DIR="$REAL"
     fi
+    if [ ! -d "$RESULTS_DIR" ]; then
+        echo "ERROR: results directory not found at '$RESULTS_DIR'."
+        echo "Expected either '$REAL/results/' or '$REAL/' to contain phase subdirectories."
+        exit 1
+    fi
     # Discover phase dirs via denylist rather than allowlist — the current
     # skill accepts arbitrarily named phase dirs (e.g., baseline/, treatment/
     # or quartic/, control/). Anything under RESULTS_DIR that's a directory
     # AND not one of the well-known non-phase names is a candidate phase.
-    PHASES=$(ls "$RESULTS_DIR" 2>/dev/null | while read d; do
+    PHASES=$(ls "$RESULTS_DIR" | while read d; do
         case "$d" in
             generated|workloads|results_charts|snapshots|review|cluster|plans) ;;
             *) [ -d "$RESULTS_DIR/$d" ] && echo "$d" ;;
         esac
     done | tr '\n' ' ')
+    if [ -z "${PHASES// }" ]; then
+        echo "ERROR: no phase directories found under '$RESULTS_DIR'."
+        echo "Contents: $(ls "$RESULTS_DIR" 2>/dev/null | tr '\n' ' ')"
+        echo "Expected phase subdirectories (e.g. baseline/, treatment/)."
+        exit 1
+    fi
     # Legacy bundles list workloads as siblings under each phase dir. No
     # trace_data.csv predicate — a phase dir with named workload subdirs
     # is enough (matches the pre-refactor skill's behavior).
@@ -109,14 +149,25 @@ else
 fi
 ```
 
+### Auxiliary detection (all modes)
+
+Regardless of which mode-dispatch branch ran, the checks below need four additional variables — `SIM` (the simulation bundle), `BLIS` (the simulator codebase), `GAIE` (the gateway-api-inference-extension codebase), and `LLMD` (the llm-d-inference-scheduler codebase). The mode-dispatch block does not populate them. Run this detection *after* the mode dispatch completes, in every mode, using the same predicates as the pre-refactor skill:
+
+- **Sim bundle** (`SIM`): if `--sim` was passed, use it verbatim. Otherwise scan `$EXPERIMENT_ROOT/experiments/*/` for directories containing `README.md` + `algorithm/` + `workloads/`. First match wins. Common patterns: `sim2real_bundle*`, `sim2real_*bundle*`. Leave unset if no candidate is found.
+- **BLIS codebase** (`BLIS`): current working directory if it contains `sim/` + `go.mod`; otherwise search `../` and `tmp/` for a directory with the same shape.
+- **GAIE codebase** (`GAIE`): look for `gateway-api-inference-extension` under `tmp/`, `../`, or nearby.
+- **llm-d scheduler** (`LLMD`): look for `llm-d-inference-scheduler` under `tmp/`, `../`, or nearby.
+
+**Required vs. optional at check time:**
+
+- `SIM` is dereferenced by Sections 1a (`$SIM/workloads/`), 2a (`$SIM/config.md`), 2d (`$SIM/config.md`), 3 (`$SIM/algorithm/`), 4d (`$SIM/README.md`), and 5b (`$SIM/README.md`). If `SIM` is unset after auto-detect, surface it at the confirmation prompt as `SIM: (not found — required)` and require the operator to provide `SIM=<path>` before typing `ok`. Do not proceed with an empty `SIM`.
+- `GAIE` and `LLMD` are used by the "CODE PROOF REQUIRED" checks in Sections 3 and 4. If either is unset after auto-detect, either the operator supplies it at the confirmation prompt, or the affected sub-checks emit `INAPPLICABLE — <codebase> unavailable` in their report entries instead of PASS/FAIL.
+- `BLIS` is used by Section 1c/1d to cite `distribution.go` line numbers. Same treatment as GAIE/LLMD — supply at prompt, or emit `INAPPLICABLE`.
+
 ### Auto-detect + user picker (when neither `--run` nor `--real` is provided)
 
 1. Enumerate workspace-registered runs: scan `$EXPERIMENT_ROOT/workspace/runs/*/run_metadata.json`.
 2. Enumerate legacy bundles: scan `$EXPERIMENT_ROOT/experiments/*/` for directories containing `generated/` + at least one phase-shaped sibling.
-3. Auto-detect the auxiliary codebases the current skill discovers — same predicates as pre-refactor:
-   - **BLIS codebase**: current working directory (check for `sim/` dir and `go.mod`). Populates `BLIS`.
-   - **GAIE codebase**: look for `gateway-api-inference-extension` under `tmp/`, `../`, or nearby. Populates `GAIE`.
-   - **llm-d scheduler**: look for `llm-d-inference-scheduler` under `tmp/`, `../`, or nearby. Populates `LLMD`.
 
 Then present candidates as a plain-text numbered list and ask the user to pick by number (do NOT use `AskUserQuestion` — respond with the list in your message and wait for the user's reply):
 
@@ -148,7 +199,7 @@ Once the variables are populated (from `--run`, `--real`, or auto-detect), prese
 I resolved the following paths. Reply `ok` to proceed, or reply with
 overrides (e.g. `SIM=/other/path`, `WORKLOAD=w7`) followed by `ok`.
 
-Sim bundle (SIM):                <path>
+Sim bundle (SIM):                <path or "(not found — required)">
 Real / run input:                <RUN=trial-3 or REAL=/path>
 Configs dir (CONFIGS_DIR):       <path>
 Results dir (RESULTS_DIR):       <path>
@@ -167,7 +218,7 @@ Workload filter (WORKLOAD):      <name or "(all)">
 
 **Args are defaults, not silent overrides.** If the user provided `--sim`/`--real`/`--run` on invocation, still show the resolved values here so the operator can override any of them before checks run.
 
-Do NOT proceed until the user replies `ok` (or equivalent).
+Do NOT proceed until the user replies `ok` (or equivalent). Additionally, do NOT proceed if `SIM` is unset — every check subsection dereferences it. If auto-detect failed to find a sim bundle and the operator did not pass `--sim`, block on `SIM=<path>` at the prompt.
 
 ## Goal
 
