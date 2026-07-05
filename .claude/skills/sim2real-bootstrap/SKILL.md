@@ -14,6 +14,11 @@ user-invocable: true
 
 Turn a BLIS-generated experiment folder into a pipeline-ready sim2real bundle.
 
+> For pre-built EPP images without BLIS-format inputs (no `algorithms/*.go`, no
+> `config.md`), use `--byo` mode instead — the operator supplies a baseline
+> scenario and per-algorithm overlays directly, and bootstrap emits a batched
+> `sim2real translation register` command.
+
 ## Arguments
 
 `$ARGUMENTS` is the path to the experiment folder. Defaults to the current directory if omitted.
@@ -41,7 +46,11 @@ The experiment folder MUST contain:
 ## Task Execution
 
 Use TaskCreate to track progress. Execute tasks sequentially; each
-derive-and-approve task MUST pause for user confirmation via AskUserQuestion.
+derive-and-approve task MUST pause and ask the operator to confirm the
+derived values before proceeding. Present the derived values, then ask
+a plain-text numbered question — e.g. *"Proceed with these values? (1)
+yes  (2) revise <field>  (3) abort"* — and wait for a reply. Do NOT use
+`AskUserQuestion`.
 
 ---
 
@@ -105,7 +114,7 @@ LATEST_RELEASE=$(git tag --sort=-version:refname | grep -v rc | head -1)
 # If no: use commit from folder docs or latest main
 ```
 
-**Present to user with AskUserQuestion:**
+**Present to user with a plain-text numbered prompt** (do NOT use `AskUserQuestion`):
 ```
 Derived target component:
   repo: <url>
@@ -114,7 +123,14 @@ Derived target component:
     - latest release: <tag> (interfaces present? yes/no)
     - folder-pinned commit: <ref> (interfaces present? yes/no)
     - recommended: <chosen ref> (<reason>)
+
+Pick a ref:
+  (1) latest release (<tag>)
+  (2) folder-pinned commit (<ref>)
+  (3) revise (specify a different ref)
+  (4) abort
 ```
+Wait for the operator's reply before proceeding.
 
 If >1 candidate found, halt and report — bootstrap supports only one target.
 
@@ -396,15 +412,37 @@ Exit code 0 and all fields printed = success.
 
 Tell the user:
 ```
-Bootstrap complete. Next steps:
-  1. Run: python pipeline/setup.py --experiment-root $EXPERIMENT_ROOT
-  2. Register a translation:
-       python pipeline/sim2real.py translation register \
-         --algorithm NAME --image REF --config PATH_TO_TREATMENT_OVERLAY
-  3. Assemble a run:
+Bootstrap complete. Next steps (skill-driven translation flow — BLIS output has
+algorithms[].source, so `sim2real translate` runs the /sim2real-translate skill
+to produce the plugin sources, then `sim2real build` compiles them into images):
+
+  1. Configure the workspace:
+       python pipeline/setup.py --experiment-root $EXPERIMENT_ROOT
+  2. Checkpoint the translation:
+       python pipeline/sim2real.py translate
+  3. Run the /sim2real-translate skill to produce plugin sources for each algorithm.
+  4. Validate the skill's outputs:
+       python pipeline/sim2real.py translate --resume
+  5. Build per-algorithm images:
+       python pipeline/sim2real.py build
+  6. Assemble a run:
        python pipeline/sim2real.py assemble \
-         --translation HASH --cluster CLUSTER_ID --run RUN_NAME
+         --translation <hash> --cluster <cluster_id> --run <run_name>
+  7. Validate against a real cluster (after `deploy.py run` + `deploy.py collect`):
+       /sim2real-check --run <run_name>
 ```
+
+If the operator instead has pre-built EPP images on hand (no skill-driven
+translation), they can skip steps 2-5 and register the images directly with
+the batched register form:
+
+```
+python pipeline/sim2real.py translation register \
+    --algorithm <name>=<image-ref>@<config-path>          # repeatable
+```
+
+(The step-1 single-algorithm form `--algorithm NAME --image REF --config PATH`
+still works but emits a deprecation warning — prefer the batched form.)
 
 ## Reference: Bundled Files
 
