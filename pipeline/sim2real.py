@@ -78,26 +78,28 @@ def _clear_alias_on(other_hash: str) -> None:
     _atomic_write_json(other_path, data)
 
 
-def _compute_translation_hash(
-    image_digest_or_ref: str,
-    config_bytes: bytes,
-    algorithm_name: str,
-) -> str:
-    """SHA-256 hex over canonical JSON of the three BYO inputs.
+def _compute_translation_hash(entries: list[dict]) -> str:
+    """SHA-256 hex over canonical-JSON of the sorted-by-name algorithm list.
 
-    Design: ``translation_hash = sha256(image_digest_or_ref || config || name)``.
-    Implementation embeds ``sha256(config)`` in a canonical JSON envelope
-    (sorted keys, no whitespace) to prevent boundary-shift collisions
-    from raw concatenation while preserving determinism. Mirrors
-    ``pipeline/lib/slicer.translation_hash``'s canonical-JSON approach.
+    Each entry is ``{"name": str, "image": str, "config_sha": str}`` where
+    ``image`` is the ``sha256:...`` digest when the image ref carried one,
+    else the raw ref. ``config_sha`` is ``sha256(config_bytes).hexdigest()``.
+
+    Order-invariant: entries are sorted by ``name`` before serialization.
+    Deterministic in the algorithm-set membership — same triples in a
+    different order produce the same hash. N=1 uses the same shape as
+    N>1 (list of one entry), superseding the step-1 formula.
     """
-    config_sha = hashlib.sha256(config_bytes).hexdigest()
+    sorted_entries = sorted(entries, key=lambda e: e["name"])
     canonical = json.dumps(
-        {
-            "algorithm_name": algorithm_name,
-            "config_sha256": config_sha,
-            "image_digest_or_ref": image_digest_or_ref,
-        },
+        [
+            {
+                "config": e["config_sha"],
+                "image": e["image"],
+                "name": e["name"],
+            }
+            for e in sorted_entries
+        ],
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,

@@ -78,31 +78,79 @@ class TestExtractDigest:
 
 
 class TestComputeTranslationHash:
-    def test_is_deterministic(self):
-        h1 = sim2real._compute_translation_hash("sha256:aa", b"config: 1\n", "algo")
-        h2 = sim2real._compute_translation_hash("sha256:aa", b"config: 1\n", "algo")
+    """Batched hash formula (replaces step-1 single-algo formula for all N)."""
+
+    def _e(self, name: str, image: str = "sha256:aa", config: bytes = b"c") -> dict:
+        import hashlib
+        return {
+            "name": name,
+            "image": image,
+            "config_sha": hashlib.sha256(config).hexdigest(),
+        }
+
+    def test_is_deterministic_n1(self):
+        h1 = sim2real._compute_translation_hash([self._e("algo")])
+        h2 = sim2real._compute_translation_hash([self._e("algo")])
         assert h1 == h2
-        assert len(h1) == 64  # sha256 hex length
+        assert len(h1) == 64
+
+    def test_is_deterministic_n2(self):
+        h1 = sim2real._compute_translation_hash([self._e("a"), self._e("b")])
+        h2 = sim2real._compute_translation_hash([self._e("a"), self._e("b")])
+        assert h1 == h2
+        assert len(h1) == 64
+
+    def test_order_invariant(self):
+        h_ab = sim2real._compute_translation_hash([self._e("a"), self._e("b")])
+        h_ba = sim2real._compute_translation_hash([self._e("b"), self._e("a")])
+        assert h_ab == h_ba
 
     def test_changes_with_algorithm_name(self):
-        h1 = sim2real._compute_translation_hash("sha256:aa", b"c", "a")
-        h2 = sim2real._compute_translation_hash("sha256:aa", b"c", "b")
+        h1 = sim2real._compute_translation_hash([self._e("a")])
+        h2 = sim2real._compute_translation_hash([self._e("b")])
         assert h1 != h2
 
-    def test_changes_with_config_content(self):
-        h1 = sim2real._compute_translation_hash("sha256:aa", b"a", "algo")
-        h2 = sim2real._compute_translation_hash("sha256:aa", b"b", "algo")
+    def test_changes_with_config(self):
+        h1 = sim2real._compute_translation_hash([self._e("a", config=b"x")])
+        h2 = sim2real._compute_translation_hash([self._e("a", config=b"y")])
         assert h1 != h2
 
     def test_changes_with_image_ref(self):
-        h1 = sim2real._compute_translation_hash("sha256:aa", b"c", "algo")
-        h2 = sim2real._compute_translation_hash("sha256:bb", b"c", "algo")
+        h1 = sim2real._compute_translation_hash([self._e("a", image="sha256:aa")])
+        h2 = sim2real._compute_translation_hash([self._e("a", image="sha256:bb")])
         assert h1 != h2
 
     def test_offline_ref_produces_stable_hash(self):
-        h1 = sim2real._compute_translation_hash("ghcr.io/foo:v1", b"c", "algo")
-        h2 = sim2real._compute_translation_hash("ghcr.io/foo:v1", b"c", "algo")
+        e = self._e("a", image="ghcr.io/foo:v1")
+        h1 = sim2real._compute_translation_hash([e])
+        h2 = sim2real._compute_translation_hash([e])
         assert h1 == h2
+
+    def test_adding_algo_changes_hash(self):
+        h1 = sim2real._compute_translation_hash([self._e("a")])
+        h2 = sim2real._compute_translation_hash([self._e("a"), self._e("b")])
+        assert h1 != h2
+
+    def test_n1_new_differs_from_n1_old_shape(self):
+        """The new formula wraps entries in a list, so N=1 hashes differ
+        from the step-1 formula (which framed a single dict). Documented
+        break in the design (no long-lived step-1 registrations exist)."""
+        import hashlib
+        import json as _json
+        new_hash = sim2real._compute_translation_hash([self._e("a")])
+        # Old formula: sha256(canonical-json({algorithm_name, config_sha256, image_digest_or_ref}))
+        old_canonical = _json.dumps(
+            {
+                "algorithm_name": "a",
+                "config_sha256": hashlib.sha256(b"c").hexdigest(),
+                "image_digest_or_ref": "sha256:aa",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        old_hash = hashlib.sha256(old_canonical.encode("utf-8")).hexdigest()
+        assert new_hash != old_hash
 
 
 class TestBuildSchemas:
