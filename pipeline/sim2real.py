@@ -656,6 +656,21 @@ def _cmd_translate(args) -> int:
             print(f"error: invalid algorithm name: {exc}", file=sys.stderr)
             return 2
 
+    # BYO guard (issue #497): BYO algorithms have no `source:` for the
+    # skill-driven translate pipeline. The BYO path is `sim2real
+    # translation register`, which attaches a pre-built image directly.
+    # Error early with a pointer rather than silently writing a
+    # checkpoint whose sources slice omits the BYO entries.
+    for algo in declared_algos:
+        if algo.get("byo") is True:
+            print(
+                f"error: cannot translate algorithm '{algo['name']}' — no "
+                f"`source:` in transfer.yaml (BYO algorithm; use "
+                f"`sim2real translation register` directly).",
+                file=sys.stderr,
+            )
+            return 2
+
     try:
         thash = slicer.translation_hash_with_sources(manifest, exp_root)
     except (_assemble_run_lib.AssembleError, OSError) as exc:

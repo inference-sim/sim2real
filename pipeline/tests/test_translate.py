@@ -561,3 +561,58 @@ class TestTranslateAliasCollision:
         # --resume → error "no translation to resume", NOT an alias error.
         rc = _run_translate(["--resume"])
         assert rc == 2  # nothing-to-resume is still an error; different cause.
+
+
+# ── BYO guard (issue #497) ────────────────────────────────────────────────
+
+
+class TestTranslateByoGuard:
+    """`sim2real translate` refuses to run on BYO algorithms — the BYO
+    path is `sim2real translation register`, not `translate`."""
+
+    def _write_byo_manifest(self, tmp_path):
+        exp = tmp_path
+        (exp / "algorithms").mkdir(exist_ok=True)
+        manifest = {
+            "kind": "sim2real-transfer",
+            "version": 3,
+            "scenario": "byo-scenario",
+            "baselines": [{"name": "base", "scenario": "baseline-scenario"}],
+            "algorithms": [
+                {"name": "byoalgo", "defaults": "base", "byo": True},
+            ],
+            "context": {"text": "", "files": []},
+        }
+        path = exp / "transfer.yaml"
+        path.write_text(yaml.safe_dump(manifest))
+        return path
+
+    def test_all_byo_manifest_errors(self, tmp_path, capsys):
+        self._write_byo_manifest(tmp_path)
+        assert _run_translate([]) == 2
+        err = capsys.readouterr().err
+        assert "cannot translate algorithm 'byoalgo'" in err
+        assert "sim2real translation register" in err
+
+    def test_mixed_manifest_errors_on_byo_algo(self, tmp_path, capsys):
+        """One BYO + one BLIS algorithm → still errors, naming the BYO one."""
+        exp = tmp_path
+        (exp / "algorithms").mkdir(exist_ok=True)
+        (exp / "algorithms" / "blisalgo.py").write_text("# stub\n")
+        manifest = {
+            "kind": "sim2real-transfer",
+            "version": 3,
+            "scenario": "mixed-scenario",
+            "baselines": [{"name": "base", "scenario": "baseline-scenario"}],
+            "algorithms": [
+                {"name": "byoalgo", "defaults": "base", "byo": True},
+                {"name": "blisalgo", "defaults": "base",
+                 "source": "algorithms/blisalgo.py"},
+            ],
+            "component": {"repo": "example.com/x/y", "kind": "scorer"},
+            "context": {"text": "", "files": []},
+        }
+        (exp / "transfer.yaml").write_text(yaml.safe_dump(manifest))
+        assert _run_translate([]) == 2
+        err = capsys.readouterr().err
+        assert "cannot translate algorithm 'byoalgo'" in err
