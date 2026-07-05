@@ -656,6 +656,21 @@ def _cmd_translate(args) -> int:
             print(f"error: invalid algorithm name: {exc}", file=sys.stderr)
             return 2
 
+    # BYO guard (issue #497): BYO algorithms have no `source:` for the
+    # skill-driven translate pipeline. The BYO path is `sim2real
+    # translation register`, which attaches a pre-built image directly.
+    # Error early with a pointer rather than silently writing a
+    # checkpoint whose sources slice omits the BYO entries.
+    for algo in declared_algos:
+        if algo.get("byo") is True:
+            print(
+                f"error: cannot translate algorithm '{algo['name']}' — no "
+                f"`source:` in transfer.yaml (BYO algorithm; use "
+                f"`sim2real translation register` directly).",
+                file=sys.stderr,
+            )
+            return 2
+
     try:
         thash = slicer.translation_hash_with_sources(manifest, exp_root)
     except (_assemble_run_lib.AssembleError, OSError) as exc:
@@ -855,13 +870,35 @@ def _cmd_build(args) -> int:
       - Post-build probe records the digest; probe failure → image_digest
         recorded as null with a warning.
     """
-    from pipeline.lib import build, cluster_ops, translation_ref
+    from pipeline.lib import build, cluster_ops, manifest as _manifest, translation_ref
 
     exp_root = (
         Path(args.experiment_root).resolve()
         if args.experiment_root
         else Path.cwd()
     )
+
+    # BYO guard (issue #497): if a transfer.yaml is discoverable and
+    # declares no `component:` (all algorithms marked `byo: true`), the
+    # images are pre-built and there is nothing to build. Error early
+    # rather than proceeding to skopeo/translation resolution. Unparseable
+    # manifests defer to the downstream path so their error wins.
+    manifest_path = exp_root / "transfer.yaml"
+    if not manifest_path.exists():
+        manifest_path = exp_root / "config" / "transfer.yaml"
+    if manifest_path.exists():
+        try:
+            _mf = _manifest.load_manifest(manifest_path)
+        except _manifest.ManifestError:
+            _mf = None
+        if _mf is not None and "component" not in _mf:
+            print(
+                "error: nothing to build — this transfer.yaml declares no "
+                "component (all algorithms are BYO; images are pre-built).",
+                file=sys.stderr,
+            )
+            return 2
+
     layout.set_experiment_root(str(exp_root))
 
     if not args.skip_build:
