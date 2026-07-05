@@ -729,3 +729,117 @@ def test_defaults_block_rejects_unknown_keys(tmp_path):
     path = _write_manifest(tmp_path, data)
     with pytest.raises(ManifestError, match="defaults contains unknown keys.*enable"):
         load_manifest(path)
+
+
+# ── byo: true per-algorithm marker (v3 schema addition, issue #497) ──────
+
+
+def test_byo_true_algorithm_loads_without_source(tmp_path):
+    """`algorithms[i].byo: true` makes `source:` optional for that entry.
+
+    Non-BYO manifests still need `component:`, so keep the MINIMAL_V3
+    component block; loosening `component:` is exercised separately.
+    """
+    data = {
+        **MINIMAL_V3,
+        "algorithms": [
+            {"name": "byoalgo", "defaults": "baseline", "byo": True},
+        ],
+    }
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["algorithms"][0]["name"] == "byoalgo"
+    assert m["algorithms"][0]["byo"] is True
+    assert "source" not in m["algorithms"][0]
+
+
+def test_byo_false_algorithm_still_requires_source(tmp_path):
+    """`byo: false` leaves `source:` required — regression."""
+    data = {
+        **MINIMAL_V3,
+        "algorithms": [
+            {"name": "treatment", "defaults": "baseline", "byo": False},
+        ],
+    }
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="algorithms.*source"):
+        load_manifest(path)
+
+
+def test_byo_absent_algorithm_still_requires_source(tmp_path):
+    """Absent `byo:` behaves identically to `byo: false` — regression."""
+    data = {
+        **MINIMAL_V3,
+        "algorithms": [
+            {"name": "treatment", "defaults": "baseline"},
+        ],
+    }
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="algorithms.*source"):
+        load_manifest(path)
+
+
+@pytest.mark.parametrize("bad_value", ["true", 1, 0, [True], {"v": True}])
+def test_byo_must_be_boolean(tmp_path, bad_value):
+    """Non-bool `byo:` is rejected with an error naming the field and type."""
+    data = {
+        **MINIMAL_V3,
+        "algorithms": [
+            {"name": "byoalgo", "defaults": "baseline", "byo": bad_value,
+             "source": "sim2real_golden/routers/router_adaptive_v2.go"},
+        ],
+    }
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="byo.*bool"):
+        load_manifest(path)
+
+
+def test_component_optional_when_all_algorithms_byo(tmp_path):
+    """`component:` may be absent when every algorithm carries `byo: true`."""
+    data = {k: v for k, v in MINIMAL_V3.items() if k != "component"}
+    data["algorithms"] = [
+        {"name": "byoa", "defaults": "baseline", "byo": True},
+        {"name": "byob", "defaults": "baseline", "byo": True},
+    ]
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert "component" not in m
+    assert len(m["algorithms"]) == 2
+
+
+def test_component_required_when_mixed_byo_and_blis(tmp_path):
+    """`component:` still required when any algorithm is non-BYO."""
+    data = {k: v for k, v in MINIMAL_V3.items() if k != "component"}
+    data["algorithms"] = [
+        {"name": "byoalgo", "defaults": "baseline", "byo": True},
+        {"name": "blisalgo", "defaults": "baseline",
+         "source": "sim2real_golden/routers/router_adaptive_v2.go"},
+    ]
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="component.*required"):
+        load_manifest(path)
+
+
+def test_byo_manifest_loads_cleanly_for_downstream(tmp_path):
+    """A BYO manifest through `load_manifest` produces a dict whose
+    downstream consumers (`translation register`, `assemble`) can access
+    without dereferencing a field the BYO entry omits.
+
+    Issue #497 acceptance: "load a BYO manifest through
+    `manifest.load_manifest` and verify no field a BYO entry omits is
+    dereferenced." Asserts the fields register/assemble actually read
+    (algorithm `name`, `defaults`, `byo`) are present, and `source:` /
+    `component:` are absent.
+    """
+    data = {k: v for k, v in MINIMAL_V3.items() if k != "component"}
+    data["algorithms"] = [
+        {"name": "byoa", "defaults": "baseline", "byo": True},
+    ]
+    path = _write_manifest(tmp_path, data)
+    m = load_manifest(path)
+    assert m["algorithms"][0]["name"] == "byoa"
+    assert m["algorithms"][0]["defaults"] == "baseline"
+    assert m["algorithms"][0]["byo"] is True
+    assert "source" not in m["algorithms"][0]
+    assert "component" not in m
+    assert m["algorithms"][0]["defaults"] in {b["name"] for b in m["baselines"]}
