@@ -8,35 +8,166 @@ description: Validate a sim2real translation bundle against its simulation bundl
 $ARGUMENTS
 ```
 
-Parse user input if provided (e.g., `--sim <path> --real <path> --workload <name>`).
+Parse user input for these flags (all optional; auto-detect fills in the rest):
 
-## Step 0: Auto-Detect and Confirm Paths
+- `--sim <path>` — path to the simulation bundle (BLIS output).
+- `--real <path>` — path to a pre-refactor legacy real bundle on disk. Mutually exclusive with `--run`.
+- `--run <name>` — a workspace-registered run name. Requires the run to have been assembled by `sim2real assemble --run <name>`. Mutually exclusive with `--real`.
+- `--experiment-root <path>` — override the experiment repo root. Defaults to the current working directory. Used only in `--run` mode and in the auto-detect fallback; silently ignored in `--real` mode.
 
-Before running ANY checks, **auto-detect** paths by scanning the working directory and context, then **confirm with the user** using `AskUserQuestion`.
+Removed vs. the pre-refactor version of this skill: `--translation`, `--algorithm`, `--workload` (all redundant now — `--run` resolves them from disk).
 
-### Auto-Detection Strategy
+## Step 0: Resolve Input, Populate Variables, Confirm With User
 
-1. **Sim bundle**: Look for directories containing `README.md` + `algorithm/` + `workloads/` under `experiments/`. Common patterns: `sim2real_bundle*`, `sim2real_*bundle*`.
-2. **Real bundle**: Look for directories containing `generated/` + (`baseline/` or `treatment/`) under `experiments/`. Common patterns: `bad_and_good*`, `*admission*`, `*deployment*`.
-3. **BLIS codebase**: The current working directory (check for `sim/` dir and `go.mod`).
-4. **GAIE codebase**: Look for `gateway-api-inference-extension` under `tmp/`, `../`, or nearby.
-5. **llm-d scheduler**: Look for `llm-d-inference-scheduler` under `tmp/`, `../`, or nearby.
-6. **Workloads**: List subdirectories under `<real>/baseline/` and `<real>/treatment/`.
+Before running ANY checks, resolve the input into a common set of named shell variables, then confirm with the user before proceeding. Every downstream check subsection references these variables — Steps 1-N are mode-agnostic.
 
-Use `Glob` and `Bash` (ls) to find candidates. Then present findings to the user:
+### Mutex enforcement
+
+If both `--run` and `--real` are set, exit with:
 
 ```
-I found the following paths. Please confirm or correct:
-
-Sim bundle:      <detected or "not found">
-Real bundle:     <detected or "not found">
-BLIS codebase:   <detected or "not found">
-GAIE codebase:   <detected or "not found">
-llm-d scheduler: <detected or "not found">
-Workload(s):     <detected or "all">
+--run and --real are mutually exclusive; --run resolves a workspace-registered run, --real reads a filesystem bundle path.
 ```
 
-Use `AskUserQuestion` to let them confirm or provide corrections. Do NOT proceed until confirmed.
+### Mode dispatch
+
+Three modes: `--run` (resolve), `--real` (legacy), or neither (auto-detect + user picker). Each mode populates the same variable set.
+
+```bash
+# --experiment-root <path> resolves to a directory. Default to the current
+# working directory when the flag is absent.
+EXPERIMENT_ROOT="${EXPERIMENT_ROOT:-$(pwd)}"
+
+if [ -n "$RUN" ]; then
+    # Resolve-mode: pull the hydrated JSON view of the run and parse it.
+    # --experiment-root is a top-level flag on sim2real (before the
+    # subcommand), not a subcommand-scoped flag.
+    sim2real --experiment-root "$EXPERIMENT_ROOT" resolve --run "$RUN" \
+        > /tmp/sim2real_check_resolved.json
+    CONFIGS_DIR=$(jq -r '.translation.generated_dir' /tmp/sim2real_check_resolved.json)
+    RESULTS_DIR=$(jq -r '.results.results_dir' /tmp/sim2real_check_resolved.json)
+    PHASES=$(jq -r '.results.phases_with_data | join(" ")' /tmp/sim2real_check_resolved.json)
+    # WORKLOADS_BY_PHASE is a bash associative array keyed by phase name.
+    declare -A WORKLOADS_BY_PHASE
+    while IFS=$'\t' read -r phase wls; do
+        WORKLOADS_BY_PHASE["$phase"]="$wls"
+    done < <(jq -r '.results.workloads_by_phase | to_entries[] | "\(.key)\t\(.value | join(" "))"' /tmp/sim2real_check_resolved.json)
+    TRANSLATION_HASH=$(jq -r '.translation.hash' /tmp/sim2real_check_resolved.json)
+    IMAGE_TAG=$(jq -r '.image_tag' /tmp/sim2real_check_resolved.json)
+    MANIFEST_ASSEMBLY_PATH=$(jq -r '.manifest_assembly.path // ""' /tmp/sim2real_check_resolved.json)
+    CLUSTER_CONFIG_PATH=$(jq -r '.cluster_config_path // ""' /tmp/sim2real_check_resolved.json)
+    # BASELINE_CONFIG_PATH resolves the first baseline overlay in the
+    # workspace's nested-under-baseline_<name>/ shape. Empty if the run has
+    # no baseline. Downstream check subsections that need the baseline
+    # EPP config reference this variable.
+    BASELINE_CONFIG_PATH=$(jq -r '.translation.baselines[0].generated_overlay_path // ""' /tmp/sim2real_check_resolved.json)
+    # WORKLOADS_DIR is the experiment repo's workload YAML directory.
+    # In resolve-mode there is no per-run copy — the manifest.assembly.yaml
+    # names the source files, all under $EXPERIMENT_ROOT/workloads/.
+    WORKLOADS_DIR=$(jq -r '.experiment_root' /tmp/sim2real_check_resolved.json)/workloads
+elif [ -n "$REAL" ]; then
+    # Legacy-mode: scan the bundle directly. Populate the same variables.
+    # Pre-refactor bundles vary in shape: some have phase dirs as direct
+    # children of $REAL, others under $REAL/results/. Probe both.
+    CONFIGS_DIR="$REAL/generated"
+    if [ -d "$REAL/results" ]; then
+        RESULTS_DIR="$REAL/results"
+    else
+        RESULTS_DIR="$REAL"
+    fi
+    # Discover phase dirs via denylist rather than allowlist — the current
+    # skill accepts arbitrarily named phase dirs (e.g., baseline/, treatment/
+    # or quartic/, control/). Anything under RESULTS_DIR that's a directory
+    # AND not one of the well-known non-phase names is a candidate phase.
+    PHASES=$(ls "$RESULTS_DIR" 2>/dev/null | while read d; do
+        case "$d" in
+            generated|workloads|results_charts|snapshots|review|cluster|plans) ;;
+            *) [ -d "$RESULTS_DIR/$d" ] && echo "$d" ;;
+        esac
+    done | tr '\n' ' ')
+    # Legacy bundles list workloads as siblings under each phase dir. No
+    # trace_data.csv predicate — a phase dir with named workload subdirs
+    # is enough (matches the pre-refactor skill's behavior).
+    declare -A WORKLOADS_BY_PHASE
+    for phase in $PHASES; do
+        wls=$(ls -d "$RESULTS_DIR/$phase"/*/ 2>/dev/null | xargs -I{} basename {} | tr '\n' ' ')
+        WORKLOADS_BY_PHASE["$phase"]="$wls"
+    done
+    # These variables are resolve-mode-only. Empty in legacy mode; downstream
+    # checks that reference them silently skip (they're new to resolve-mode).
+    TRANSLATION_HASH=""
+    IMAGE_TAG=""
+    MANIFEST_ASSEMBLY_PATH=""
+    CLUSTER_CONFIG_PATH=""
+    BASELINE_CONFIG_PATH="$CONFIGS_DIR/baseline_config.yaml"
+    WORKLOADS_DIR="$REAL/workloads"
+else
+    # Neither flag provided → auto-detect flow. Enumerate candidates from
+    # both workspace runs and legacy bundles, then let the user pick.
+    # See the "Auto-detect + user picker" subsection below.
+    :
+fi
+```
+
+### Auto-detect + user picker (when neither `--run` nor `--real` is provided)
+
+1. Enumerate workspace-registered runs: scan `$EXPERIMENT_ROOT/workspace/runs/*/run_metadata.json`.
+2. Enumerate legacy bundles: scan `$EXPERIMENT_ROOT/experiments/*/` for directories containing `generated/` + at least one phase-shaped sibling.
+3. Auto-detect the auxiliary codebases the current skill discovers — same predicates as pre-refactor:
+   - **BLIS codebase**: current working directory (check for `sim/` dir and `go.mod`). Populates `BLIS`.
+   - **GAIE codebase**: look for `gateway-api-inference-extension` under `tmp/`, `../`, or nearby. Populates `GAIE`.
+   - **llm-d scheduler**: look for `llm-d-inference-scheduler` under `tmp/`, `../`, or nearby. Populates `LLMD`.
+
+Then present candidates as a plain-text numbered list and ask the user to pick by number (do NOT use `AskUserQuestion` — respond with the list in your message and wait for the user's reply):
+
+```
+I found the following candidate inputs. Reply with a number to pick one,
+or reply with `--run <name>` / `--real <path>` to override.
+
+Workspace runs (--run mode):
+  1) --run trial-3         (assembled 2026-07-04, translation softreflective)
+  2) --run trial-2         (assembled 2026-07-03, translation quartic)
+
+Legacy bundles (--real mode):
+  3) --real experiments/bad_and_good_admission-2025-10-14
+```
+
+If nothing is found:
+
+```
+no workspace runs at <experiment-root>/workspace/runs/ and no legacy bundles at <experiment-root>/experiments/. Run 'sim2real assemble --run <name>' to create a run, or pass --real <path> to check a legacy bundle.
+```
+
+After the user picks, populate the variables using the `--run` or `--real` branch above.
+
+### Confirmation prompt (all modes)
+
+Once the variables are populated (from `--run`, `--real`, or auto-detect), present the resolved values as defaults and ask the user to confirm or override. Plain-text prompt, no `AskUserQuestion`:
+
+```
+I resolved the following paths. Reply `ok` to proceed, or reply with
+overrides (e.g. `SIM=/other/path`, `WORKLOAD=w7`) followed by `ok`.
+
+Sim bundle (SIM):                <path>
+Real / run input:                <RUN=trial-3 or REAL=/path>
+Configs dir (CONFIGS_DIR):       <path>
+Results dir (RESULTS_DIR):       <path>
+Phases with data (PHASES):       <space-separated list>
+Workloads by phase:              <phase>: <workloads>, ...
+Baseline config (BASELINE_CONFIG_PATH): <path or "(none)">
+Translation hash:                <hash or "(legacy mode)">
+Image tag:                       <tag or "(legacy mode)">
+Manifest assembly path:          <path or "(legacy mode)">
+Cluster config path:             <path or "(legacy mode)">
+BLIS codebase:                   <path or "(not found)">
+GAIE codebase:                   <path or "(not found)">
+llm-d scheduler (LLMD):          <path or "(not found)">
+Workload filter (WORKLOAD):      <name or "(all)">
+```
+
+**Args are defaults, not silent overrides.** If the user provided `--sim`/`--real`/`--run` on invocation, still show the resolved values here so the operator can override any of them before checks run.
+
+Do NOT proceed until the user replies `ok` (or equivalent).
 
 ## Goal
 
@@ -62,8 +193,11 @@ For numerical checks, always show a comparison table. For code/config checks, sh
 - **Simulation codebase** (`BLIS`): confirmed by user
 - **GAIE codebase** (`GAIE`): confirmed by user
 - **llm-d scheduler** (`LLMD`): confirmed by user
-- **Sim bundle** (`SIM`): `<sim>/README.md`, `<sim>/config.md`, `<sim>/algorithm/`, `<sim>/workloads/`, `<sim>/results/`
-- **Real bundle** (`REAL`): `<real>/generated/` (Go plugins + YAML configs), `<real>/baseline/<workload>/` and `<real>/treatment/<workload>/` (each with `trace_header.yaml`, `trace_data.csv`, `server_logs/`, `epp_stream_done`)
+- **Sim bundle** (`SIM`): `$SIM/README.md`, `$SIM/config.md`, `$SIM/algorithm/`, `$SIM/workloads/`, `$SIM/results/`
+- **Configs directory** (`CONFIGS_DIR`): Go plugins + YAML configs. In resolve-mode this is the translation's `generated/` dir under `workspace/translations/<hash>/`; in legacy-mode it's `$REAL/generated/`.
+- **Results directory** (`RESULTS_DIR`): per-phase workload data. Iterate `$PHASES` × `${WORKLOADS_BY_PHASE[$phase]}` and reference `$RESULTS_DIR/<phase>/<workload>/` (each with `trace_header.yaml`, `trace_data.csv`, `server_logs/`, `epp_stream_done`).
+- **Baseline config path** (`BASELINE_CONFIG_PATH`): specific baseline EPP config YAML. Empty when no baseline is configured; check subsections that reference it should skip in that case.
+- **Workloads directory** (`WORKLOADS_DIR`): source workload YAMLs. Resolve-mode: `<experiment-root>/workloads/`. Legacy-mode: `$REAL/workloads/`.
 
 ## Checklist
 
@@ -73,18 +207,18 @@ Run ALL checks below.
 
 ### 1. WORKLOAD PARITY
 
-For each workload in the real bundle, find the matching workload YAML spec. **Lookup order:**
-1. First check `<real>/workloads/` — if the real bundle contains its own workload YAMLs, use those as the source of truth (they reflect any rate rescaling done during sim2real translation).
-2. If not found there, fall back to `<sim>/workloads/`.
+For each phase in `$PHASES`, and for each workload in `${WORKLOADS_BY_PHASE[$phase]}`, find the matching workload YAML spec. **Lookup order:**
+1. First check `$WORKLOADS_DIR` — if a workload YAML exists there, use it as the source of truth (in legacy mode this reflects any rate rescaling done during pre-refactor sim2real translation; in resolve mode it points at the experiment repo's workload directory).
+2. If not found there, fall back to `$SIM/workloads/`.
 
-When both exist, note any differences (especially `aggregate_rate`) and use the **real bundle's workload YAML** as the expected value for parity checks.
+When both exist, note any differences (especially `aggregate_rate`) and use the **`$WORKLOADS_DIR` copy** as the expected value for parity checks.
 
 **1a. Arrival Rate (QPS)**
 - **Intended QPS**: compute from `trace_data.csv` `arrival_time_us` column: `num_requests / (max - min arrival)`. This is the rate the load generator *scheduled* requests at.
 - **Actual QPS**: compute from `trace_data.csv` `send_time_us` column: `num_requests / (max - min send_time)`. This is the rate requests were *actually sent* to the server. If actual QPS << intended QPS, the load generator hit a concurrency ceiling and requests queued client-side.
-- From workload YAML: `aggregate_rate` (prefer `<real>/workloads/`, fall back to `<sim>/workloads/`)
+- From workload YAML: `aggregate_rate` (prefer `$WORKLOADS_DIR`, fall back to `$SIM/workloads/`)
 - Tolerance: intended QPS within 5% of spec. If actual QPS is more than 5% below intended QPS, emit WARN — this means the load generator couldn't keep up with the schedule (likely concurrency ceiling or server backpressure), so the server saw less load than intended and results are not comparable to simulation.
-- Show: table with spec rate (note source: real or sim YAML), intended QPS, actual QPS — all three columns so the reader can spot concurrency bottlenecks
+- Show: table with spec rate (note source: `$WORKLOADS_DIR` or `$SIM/workloads/`), intended QPS, actual QPS — all three columns so the reader can spot concurrency bottlenecks
 
 **1b. SLO Class Distribution**
 - From sim: each client's `rate_fraction`
@@ -136,7 +270,7 @@ When both exist, note any differences (especially `aggregate_rate`) and use the 
 **2a. vLLM Server Config**
 Read `trace_header.yaml` AND the first vLLM server log from `server_logs/` to extract actual config.
 
-Check these against `<sim>/config.md`:
+Check these against `$SIM/config.md`:
 - Model name (exact match)
 - TP degree (`tensor_parallel_size`)
 - GPU type (from log or header)
@@ -151,14 +285,14 @@ Show: table with each config param — expected (from config.md), actual (from s
 
 **2b. Instance Count**
 - From sim: `--num-instances` in run commands or config.md
-- From real: count distinct server log files in `server_logs/`
+- From real: count distinct server log files in `server_logs/` (across `$RESULTS_DIR/<phase>/<workload>/server_logs/` for each phase × workload)
 - Show: expected count vs actual count
 
 **2c. Variant Isolation — CRITICAL CHECK**
 
-The real bundle may contain multiple experiment variants (e.g., `baseline/`, `treatment/` or `quartic/`, `control/`). This check verifies that the variants are **identical in all respects except the flow control policy** — ensuring a clean A/B comparison.
+The real bundle may contain multiple experiment variants — one per phase in `$PHASES` (e.g., `baseline`, `treatment`, or `quartic`, `control`). This check verifies that the variants are **identical in all respects except the flow control policy** — ensuring a clean A/B comparison.
 
-**Locate configs:** Find all EndpointPickerConfig YAMLs in `<real>/generated/` (e.g., `baseline_config.yaml`, `<treatment>/treatment_config.yaml`, `<control>/control_config.yaml`).
+**Locate configs:** Find all EndpointPickerConfig YAMLs under `$CONFIGS_DIR/`. In legacy-mode the baseline sits at `$CONFIGS_DIR/baseline_config.yaml` and per-treatment overlays live at `$CONFIGS_DIR/<treatment>/<treatment>_config.yaml`. In resolve-mode the baseline overlay path is exposed as `$BASELINE_CONFIG_PATH` and per-treatment overlays live at `$CONFIGS_DIR/<treatment>/<treatment>_config.yaml` (nested under `<treatment>/`).
 
 **For each pair of configs, diff the following sections and classify:**
 
@@ -188,18 +322,18 @@ The real bundle may contain multiple experiment variants (e.g., `baseline/`, `tr
 
 **2d. EPP & InferenceObjective Config Parity vs `config.md`**
 
-Step 2c is a cross-variant **identity** check — all variants can be wrong in the same way and 2c still passes. This sub-section is the **correctness** check against the project-supplied truth in `<sim>/config.md`.
+Step 2c is a cross-variant **identity** check — all variants can be wrong in the same way and 2c still passes. This sub-section is the **correctness** check against the project-supplied truth in `$SIM/config.md`.
 
-**Conditional**: run only if `<sim>/config.md` contains EPP config blocks (markdown sections matching `## llm-d EPP Configuration — Baseline|Treatment|Control`) and/or InferenceObjective entries (`## Priority Bands`, or any fenced YAML with `kind: InferenceObjective`). Otherwise SKIP with note "no EPP / InferenceObjective blocks in config.md."
+**Conditional**: run only if `$SIM/config.md` contains EPP config blocks (markdown sections matching `## llm-d EPP Configuration — Baseline|Treatment|Control`) and/or InferenceObjective entries (`## Priority Bands`, or any fenced YAML with `kind: InferenceObjective`). Otherwise SKIP with note "no EPP / InferenceObjective blocks in config.md."
 
 **Source-of-truth → generated artifact mapping:**
 
 | `config.md` block | Generated artifact |
 |---|---|
-| `## llm-d EPP Configuration — Baseline` | `<real>/generated/baseline_config.yaml` → `inferenceExtension.pluginsCustomConfig.custom-plugins.yaml` (parse the inner YAML string) |
-| `## llm-d EPP Configuration — Treatment` | `<real>/generated/<treatment>/<treatment>_config.yaml` deep-merged onto baseline |
-| `## llm-d EPP Configuration — Control` | `<real>/generated/<control>/<control>_config.yaml` deep-merged onto baseline |
-| InferenceObjective entries (`kind: InferenceObjective`) | `<real>/generated/baseline_config.yaml` → `extraObjects` filtered to `kind: InferenceObjective` |
+| `## llm-d EPP Configuration — Baseline` | `$BASELINE_CONFIG_PATH` → `inferenceExtension.pluginsCustomConfig.custom-plugins.yaml` (parse the inner YAML string) |
+| `## llm-d EPP Configuration — Treatment` | `$CONFIGS_DIR/<treatment>/<treatment>_config.yaml` deep-merged onto baseline |
+| `## llm-d EPP Configuration — Control` | `$CONFIGS_DIR/<control>/<control>_config.yaml` deep-merged onto baseline |
+| InferenceObjective entries (`kind: InferenceObjective`) | `$BASELINE_CONFIG_PATH` → `extraObjects` filtered to `kind: InferenceObjective` |
 
 **Compare these fields (order-independent for lists):**
 
@@ -218,7 +352,7 @@ Step 2c is a cross-variant **identity** check — all variants can be wrong in t
 
 ### 3. SIGNAL PARITY
 
-Read the algorithm files from `<sim>/algorithm/` and the generated Go plugin from `<real>/generated/`.
+Read the algorithm files from `$SIM/algorithm/` and the generated Go plugin from `$CONFIGS_DIR/`.
 
 **IMPORTANT: Code proof requirement.** For every claim about how GAIE/llm-d works, you MUST show the actual source code from the `GAIE` or `LLMD` codebase as proof. Do not make claims based on field names or assumptions — grep the codebase and show file:line and the relevant code snippet.
 
@@ -278,20 +412,20 @@ Generated plugin (file:line): <full saturation function>
 
 **4a. Routing Policy — CODE PROOF REQUIRED**
 - From sim: `--routing-policy` in run commands or README
-- From real: check `baseline_config.yaml` and `treatment_config.yaml` for picker plugins
+- From real: check `$BASELINE_CONFIG_PATH` and `$CONFIGS_DIR/<treatment>/<treatment>_config.yaml` for picker plugins
 - **From GAIE**: grep for each picker plugin type (e.g., `random-picker`, `fcfs-ordering-policy`, `max-score-picker`) in the `GAIE` and `LLMD` codebases. Show what each plugin does (file:line + brief code snippet or doc comment).
 - Map: sim `round-robin` ~ real `random-picker` (both are non-affinity); sim `weighted-scoring` ~ real `max-score-picker` with scorers
 - Show: sim policy name, real YAML plugin list, GAIE code proof of what each plugin does, whether they're equivalent
 
 **4b. Admission Policy — Baseline**
 - From sim: admission policy for baseline runs (e.g., `gaie-legacy`)
-- From real: `baseline_config.yaml` should have NO admission plugin OR the matching GAIE control plugin
+- From real: `$BASELINE_CONFIG_PATH` should have NO admission plugin OR the matching GAIE control plugin
 - **From GAIE**: if baseline has no admission plugin, grep for GAIE's default/built-in admission behavior. Does GAIE apply any admission by default? Show the code.
-- Show: the relevant YAML section from baseline_config.yaml, plus GAIE default behavior proof
+- Show: the relevant YAML section from `$BASELINE_CONFIG_PATH`, plus GAIE default behavior proof
 
 **4c. Admission Policy — Treatment**
 - From sim: admission algorithm parameters (thresholds, ramps)
-- From real: `treatment_config.yaml` plugin parameters must match exactly
+- From real: the treatment config YAML at `$CONFIGS_DIR/<treatment>/<treatment>_config.yaml` — plugin parameters must match exactly
 - Check: parameter names map correctly to priority tiers (sheddable vs batch — this has been a source of bugs!)
 - Show: side-by-side table of sim params vs YAML params
 
@@ -303,14 +437,14 @@ Verify the generated Go plugin dispatches thresholds to the correct priority val
 
 **From GAIE**: grep for priority constants or InferenceModel priority definitions in `GAIE`/`LLMD`. Show where these priority values (100, 0, -10, -50) are defined or documented.
 
-Cross-check against `<sim>/README.md` transfer instructions.
+Cross-check against `$SIM/README.md` transfer instructions.
 - Show: the Go switch/case block from the generated plugin, annotated with which tier gets which ramp. Show the GAIE priority definitions as proof. Highlight if the mapping is wrong.
 
 ---
 
 ### 5. RUNTIME ANALYSIS
 
-For each workload run (baseline and treatment), analyze the actual execution:
+For each phase in `$PHASES` and each workload in `${WORKLOADS_BY_PHASE[$phase]}`, analyze the actual execution.
 
 **5a. vLLM Config Validation**
 Parse each server log's startup lines. Verify `non-default args` match expected config.
@@ -318,50 +452,50 @@ Extract: model, TP size, max_model_len, gpu_memory_utilization, enable_prefix_ca
 - Show: extracted values from log vs expected
 
 **5b. Instance Health & Request Distribution**
-- Count `/completions` requests per instance by grepping each server log file in `server_logs/` for `/completions` (or `/chat/completions` if chat API). This is the authoritative per-instance request count — `trace_data.csv` does not have an instance identifier column.
+- Count `/completions` requests per instance by grepping each server log file in `$RESULTS_DIR/<phase>/<workload>/server_logs/` for `/completions` (or `/chat/completions` if chat API). This is the authoritative per-instance request count — `trace_data.csv` does not have an instance identifier column.
 - Compute total served requests (sum across instances), per-instance percentage, and spread (max-min as % of average).
-- Compare total served vs total sent (from trace_data.csv row count) — the difference is requests shed by admission before reaching any instance.
+- Compare total served vs total sent (from `trace_data.csv` row count) — the difference is requests shed by admission before reaching any instance.
 - Flag any instance that appears unhealthy (no requests, errors in logs)
 
 **Distribution expectation depends on routing policy:**
 - **Even-distribution routers** (`random-picker`, `round-robin`, or load-aware scorers like `queue-scorer` + `kv-cache-utilization-scorer`): expect roughly uniform distribution. Each instance should get approximately `100%/N` of requests. Spread (max−min as % of average) should be < 20%. WARN if > 20%, FAIL if > 40%.
 - **Affinity routers** (`prefix-cache-affinity`, `session-affinity`, `lora-affinity`): expect skewed distribution aligned with the affinity key. Verify that the skew correlates with the affinity signal (e.g., prefix groups cluster on specific instances) rather than random hot-spotting.
-- **Custom/experimental routers**: infer the expected distribution from the routing policy description in `<sim>/README.md` or config, and check whether the real distribution matches. Document the expectation and rationale.
+- **Custom/experimental routers**: infer the expected distribution from the routing policy description in `$SIM/README.md` or config, and check whether the real distribution matches. Document the expectation and rationale.
 
-**Run this check for ALL variants** (baseline, treatment, control) × ALL workloads. The distribution should be consistent across variants — if routing config is identical (verified in 2c), the distribution pattern should be similar. Flag any variant that shows significantly different distribution from others at the same workload (this would indicate a deployment issue, not an algorithm effect).
+**Run this check for ALL phases in `$PHASES` × ALL workloads in `${WORKLOADS_BY_PHASE[$phase]}`.** The distribution should be consistent across phases — if routing config is identical (verified in 2c), the distribution pattern should be similar. Flag any phase that shows significantly different distribution from others at the same workload (this would indicate a deployment issue, not an algorithm effect).
 
-- Show: table with variant/workload, per-instance request count and percentage, total served, spread %, and verdict. One row per variant×workload combination.
+- Show: table with phase/workload, per-instance request count and percentage, total served, spread %, and verdict. One row per phase×workload combination.
 
 **5c. EPP Runtime Proof — Treatment Active**
 
-Verify from EPP logs (`epp_logs/`) that the configured policy is actually executing at runtime. This is the proof that config translation resulted in correct runtime behavior — not just correct YAML.
+Verify from EPP logs (`$RESULTS_DIR/<phase>/<workload>/epp_logs/`) that the configured policy is actually executing at runtime. This is the proof that config translation resulted in correct runtime behavior — not just correct YAML.
 
-**For each variant, check:**
+**For each phase, check:**
 1. **Flow control is active**: grep EPP logs for flow controller messages (e.g., `flow-controller`, `FlowControlAdmissionController`, `enqueued`, `dispatched`). If absent, the feature gate may not have activated despite being in config.
 2. **Priority bands recognized**: grep for priority values in request processing logs. Confirm both configured priorities appear (e.g., priority:100 and priority:-50 for critical/sheddable). If only one priority appears, the InferenceObjective CRDs may not have been applied.
-3. **Policy-specific behavior**: 
-   - For treatment (e.g., quartic): at high saturation, expect some requests to show gating/queueing delays or shed outcomes. At low saturation, all requests dispatched immediately (dormant behavior is valid).
-   - For baseline/control: all requests should be dispatched (ceiling=1.0 means no gating).
+3. **Policy-specific behavior**:
+   - For treatment phases (e.g., quartic): at high saturation, expect some requests to show gating/queueing delays or shed outcomes. At low saturation, all requests dispatched immediately (dormant behavior is valid).
+   - For baseline/control phases: all requests should be dispatched (ceiling=1.0 means no gating).
 4. **Pod discovery**: confirm the EPP sees all expected pods (extract unique PodNames from scheduling logs). Count should match instance count from 2b.
-5. **Hardware parity**: extract `CacheNumBlocks` and `CacheBlockSize` from EPP endpoint data — must be identical across variants (confirms same GPU memory allocation / model config).
+5. **Hardware parity**: extract `CacheNumBlocks` and `CacheBlockSize` from EPP endpoint data — must be identical across phases (confirms same GPU memory allocation / model config).
 
-**Cross-variant deployment check:**
-- Note whether variants share the same physical deployment (same pod-template-hash) or use separate deployments. If separate, confirm identical hardware config (CacheNumBlocks, CacheBlockSize, GPU type).
-- Flag if variants run in different namespaces — not a problem per se, but document it as it means separate clusters or separate resource quotas.
+**Cross-phase deployment check:**
+- Note whether phases share the same physical deployment (same pod-template-hash) or use separate deployments. If separate, confirm identical hardware config (CacheNumBlocks, CacheBlockSize, GPU type).
+- Flag if phases run in different namespaces — not a problem per se, but document it as it means separate clusters or separate resource quotas.
 
-- Show: table per variant with: flow control active (yes/no), priorities seen, dispatch outcomes (Dispatched/Shed/Timeout counts), pod count, CacheNumBlocks, deployment hash, namespace.
+- Show: table per phase with: flow control active (yes/no), priorities seen, dispatch outcomes (Dispatched/Shed/Timeout counts), pod count, CacheNumBlocks, deployment hash, namespace.
 
 **5c.6. InferenceObjective Resolution at Runtime**
 
 Step 5c.2 (priority bands recognized) is a downstream symptom check — it sees that priorities are missing without saying why. This sub-section pins the runtime cause: it confirms the EPP loaded the configured InferenceObjective CRs and associated them with requests.
 
-**Conditional**: run only if `<real>/generated/baseline_config.yaml` declares at least one `kind: InferenceObjective` in `extraObjects`. Otherwise SKIP with note "no objectives configured."
+**Conditional**: run only if `$BASELINE_CONFIG_PATH` declares at least one `kind: InferenceObjective` in `extraObjects`. Otherwise SKIP with note "no objectives configured."
 
-**Verbosity prerequisite.** This check reads `objectiveKey` and `priority` fields from `Request handled` log lines, attached at `director.go:275` (`logger.WithValues("objectiveKey", ..., "priority", ...)`). These fields are present whenever the EPP is at `-v=3` (`V(logutil.VERBOSE)`) or higher. Before evaluating, grep `epp_logs/*.log` for any line containing `"objectiveKey"`. If absent, this check is INAPPLICABLE — surface that the EPP must be redeployed with `-v=3` or higher.
+**Verbosity prerequisite.** This check reads `objectiveKey` and `priority` fields from `Request handled` log lines, attached at `director.go:275` (`logger.WithValues("objectiveKey", ..., "priority", ...)`). These fields are present whenever the EPP is at `-v=3` (`V(logutil.VERBOSE)`) or higher. Before evaluating, grep `$RESULTS_DIR/<phase>/<workload>/epp_logs/*.log` for any line containing `"objectiveKey"`. If absent, this check is INAPPLICABLE — surface that the EPP must be redeployed with `-v=3` or higher.
 
 **Why a positive resolution check rather than a negative-string grep.** A previous version of this check greped for `"No associated InferenceObjective found, using default"` and FAILed on any occurrence. That doesn't work in production-shaped deployments: k8s readiness/liveness probes from the gateway / Service hit the EPP without the `x-llm-d-objective` header by design, so they always trigger that fallback path. The grep can't distinguish that benign infrastructure traffic from a real workload-resolution bug, and it produces FAILs on every run. The positive check below tests what the bug-grep was *meant* to detect — that workload requests resolve to their configured objectives — without false-positiving on infrastructure traffic.
 
-**Inputs.** Parse every `Request handled` line in `epp_logs/*.log` and extract `(objectiveKey, priority)`. Read the configured set of `(name, spec.priority)` pairs from `<real>/generated/baseline_config.yaml` `extraObjects` filtered to `kind: InferenceObjective`. Read `trace_data.csv` row count per cell.
+**Inputs.** Parse every `Request handled` line in `$RESULTS_DIR/<phase>/<workload>/epp_logs/*.log` and extract `(objectiveKey, priority)`. Read the configured set of `(name, spec.priority)` pairs from `$BASELINE_CONFIG_PATH` `extraObjects` filtered to `kind: InferenceObjective`. Read `trace_data.csv` row count per cell.
 
 **Five criteria — all must PASS for the check to PASS:**
 
@@ -391,8 +525,8 @@ If `enable_prefix_caching=False`, confirm no unexpected prefix hits.
 - Show: prefix caching status and any hit/miss metrics found
 
 **5e. Request Status**
-- Baseline: expect nearly 100% `status=ok` (no admission shedding)
-- Treatment: check `status` column for rejection patterns. Compute shed rate per SLO class.
+- Baseline phase: expect nearly 100% `status=ok` (no admission shedding)
+- Treatment phase: check `status` column for rejection patterns. Compute shed rate per SLO class.
 - Verify shed behavior matches algorithm expectations (sheddable shed most, batch shed less, critical/standard never shed)
 - Show: table with SLO class, total requests, ok count, shed count, shed rate %
 
@@ -411,10 +545,10 @@ From server logs, look for KV cache size info:
 Verify that GPU hardware was operating within nominal range during the workload window — that the metrics being compared are not influenced by thermal or power throttling. A FAIL here invalidates latency-based conclusions for that cell.
 
 **Source data:**
-- `<run>/gpu_logs/<pod>.uuids` — pod ↔ GPU UUID (one line per pod, format `GPU 0: <name> (UUID: GPU-...)`)
-- `<run>/gpu_logs/<node>.gpus.csv` — UUID ↔ host index ↔ bus-id (deterministic per-node map; format `index, uuid, gpu_bus_id` no header)
-- `<run>/gpu_logs/<node>.log` — per-sample temp / power / power_cap / util / mem (sampled `nvidia-smi` table)
-- `<run>/trace_data.csv` — workload window (`min(send_time_us)` to `max(last_chunk_time_us)`, status==ok)
+- `$RESULTS_DIR/<phase>/<workload>/gpu_logs/<pod>.uuids` — pod ↔ GPU UUID (one line per pod, format `GPU 0: <name> (UUID: GPU-...)`)
+- `$RESULTS_DIR/<phase>/<workload>/gpu_logs/<node>.gpus.csv` — UUID ↔ host index ↔ bus-id (deterministic per-node map; format `index, uuid, gpu_bus_id` no header)
+- `$RESULTS_DIR/<phase>/<workload>/gpu_logs/<node>.log` — per-sample temp / power / power_cap / util / mem (sampled `nvidia-smi` table)
+- `$RESULTS_DIR/<phase>/<workload>/trace_data.csv` — workload window (`min(send_time_us)` to `max(last_chunk_time_us)`, status==ok)
 
 **Resolution rule:** pod → UUID (.uuids) → host index (.gpus.csv) → metric rows in `<node>.log`. The `0` in `.uuids` is the **container-local** index and is NOT the host index — use the `.gpus.csv` join. If any artifact is missing for a cell, **SKIP** that cell with `reason: missing <artifact>`. Skipping is not failing — throttle status unknown.
 
@@ -437,10 +571,10 @@ Verify that GPU hardware was operating within nominal range during the workload 
 
 **Cell verdict:** PASS if all checks PASS; FAIL if any check FAILs; WARN otherwise.
 
-**Show:** per `(cell × pod)` row with `variant | workload | pod | node | gpu_index | temp_p95 | temp_max | power_p10 | power_cap_min | throttle_frac | verdict`. Roll up:
+**Show:** per `(cell × pod)` row with `phase | workload | pod | node | gpu_index | temp_p95 | temp_max | power_p10 | power_cap_min | throttle_frac | verdict`. Roll up:
 - PASS / WARN / FAIL counts across all cells
 - Cells excluded from clean-comparison stratum (= any non-PASS); these are tagged `thermal-FAIL` for cross-referencing
-- **Persistent hotspots**: same `(node, host_index)` failing across ≥ 2 distinct (variant, workload) pairs — surfaces hardware-positional thermal issues independent of any single run
+- **Persistent hotspots**: same `(node, host_index)` failing across ≥ 2 distinct (phase, workload) pairs — surfaces hardware-positional thermal issues independent of any single run
 
 **Cross-reference with §5b/§5e:** any cell that FAILs §5h must be flagged `thermal-FAIL` in the §5e/§5b summary tables and excluded from any latency-based parity claim that aggregates across cells. Run §5h first within the runtime-analysis agent so its verdicts are available when §5b/§5e are assembled.
 
@@ -454,8 +588,8 @@ Structure the report as follows. Every section must have evidence tables/snippet
 
 ```markdown
 # Sim2Real Parity Report
-**Real bundle**: <path>
-**Sim reference**: <path>
+**Real bundle**: <RUN=trial-3 or REAL=/path>
+**Sim reference**: <SIM path>
 **Date**: <date>
 
 ## Summary
@@ -471,7 +605,7 @@ Structure the report as follows. Every section must have evidence tables/snippet
 | **Total** | **X** | **Y** | **Z** |
 
 ## 1. Workload Parity
-### Workload: <name>
+### Phase: <phase> / Workload: <name>
 
 **1a. Arrival Rate** — PASS
 Expected 210 req/s (from workloads/w3.yaml:aggregate_rate), measured 210.4 req/s (25200 requests over 119.8s). Difference: 0.2%.
@@ -484,9 +618,9 @@ Expected 210 req/s (from workloads/w3.yaml:aggregate_rate), measured 210.4 req/s
 
 ## 5h. GPU Thermal/Power Health
 
-| variant | workload | pod | node | gpu | temp_p95 | temp_max | pwr_p10 | cap_min | throttle% | verdict |
-|---------|----------|-----|------|-----|----------|----------|---------|---------|-----------|---------|
-| ...     | ...      | ... | ...  | ... | ...      | ...      | ...     | ...     | ...       | ...     |
+| phase | workload | pod | node | gpu | temp_p95 | temp_max | pwr_p10 | cap_min | throttle% | verdict |
+|-------|----------|-----|------|-----|----------|----------|---------|---------|-----------|---------|
+| ...   | ...      | ... | ...  | ... | ...      | ...      | ...     | ...     | ...       | ...     |
 
 **Persistent hotspots:** `<list of (node, host_index) repeated FAILs across runs, e.g. "pokprod-b93r39s2 / GPU 6 — 6/8 cells FAIL, temp_p95 mean 85 °C">`
 
@@ -500,7 +634,7 @@ Expected 210 req/s (from workloads/w3.yaml:aggregate_rate), measured 210.4 req/s
 ## Parallelization
 
 Use the Agent tool to parallelize independent checks:
-- Agent 1: Workload parity (trace_data.csv analysis via python3)
+- Agent 1: Workload parity (`trace_data.csv` analysis via python3)
 - Agent 2: Config + Signal parity (YAML/Go file comparison)
 - Agent 3: Runtime analysis (server log parsing, including §5h GPU thermal/power health). Within Agent 3, run §5h **before** §5b/§5e so the per-cell `thermal-FAIL` flag is available when those subsections build their tables.
 
