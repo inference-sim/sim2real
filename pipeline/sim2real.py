@@ -62,6 +62,60 @@ def _extract_digest_from_ref(image_ref: str) -> str | None:
     return digest
 
 
+def _parse_algorithm_triple(value: str) -> tuple[str, str, str]:
+    """Parse ``<name>=<image-ref>@<config-path>`` into ``(name, image_ref, config_path)``.
+
+    Splits on the first ``=`` (names cannot contain ``=`` by regex) and
+    then on the rightmost ``@`` in the RHS (digest refs contain ``@``;
+    overlay paths must not contain ``@`` — enforced by rejecting image
+    refs with more than one ``@`` after the split). Config paths
+    containing ``=`` are supported.
+
+    Raises ``argparse.ArgumentTypeError`` on any parse failure.
+    """
+    from pipeline.lib import translation_ref
+    eq_idx = value.find("=")
+    if eq_idx < 0:
+        raise argparse.ArgumentTypeError(
+            f"--algorithm value {value!r} missing '=' "
+            "(expected '<name>=<image-ref>@<config-path>')"
+        )
+    name = value[:eq_idx]
+    rhs = value[eq_idx + 1:]
+    at_idx = rhs.rfind("@")
+    if at_idx < 0:
+        raise argparse.ArgumentTypeError(
+            f"--algorithm value {value!r} missing '@' after '=' "
+            "(expected '<name>=<image-ref>@<config-path>')"
+        )
+    image_ref = rhs[:at_idx]
+    config_path = rhs[at_idx + 1:]
+    if not image_ref:
+        raise argparse.ArgumentTypeError(
+            f"--algorithm value {value!r} has empty image-ref"
+        )
+    if not config_path:
+        raise argparse.ArgumentTypeError(
+            f"--algorithm value {value!r} has empty config-path"
+        )
+    # Valid image refs have at most one '@' (the digest suffix). More than
+    # one '@' in the parsed image ref means the config path likely had a
+    # '@' that rightmost-@ split cannot disambiguate — reject.
+    if image_ref.count("@") > 1:
+        raise argparse.ArgumentTypeError(
+            f"--algorithm value {value!r}: overlay path cannot contain '@' "
+            "(parsed image ref has multiple '@'; the rightmost-@ split rule "
+            "cannot distinguish a digest '@' from a path '@')"
+        )
+    try:
+        translation_ref.validate_name(name)
+    except translation_ref.ValidationError as exc:
+        raise argparse.ArgumentTypeError(
+            f"--algorithm value {value!r} has invalid name: {exc}"
+        ) from exc
+    return name, image_ref, config_path
+
+
 def _clear_alias_on(other_hash: str) -> None:
     """Rewrite ``translations/<other_hash>/translation_output.json`` with ``alias=null``.
 

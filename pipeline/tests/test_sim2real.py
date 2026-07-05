@@ -77,6 +77,68 @@ class TestExtractDigest:
         assert sim2real._extract_digest_from_ref("ghcr.io/foo@sha256:" + "z" * 64) is None
 
 
+class TestParseAlgorithmTriple:
+    def test_simple_triple(self):
+        name, image, cfg = sim2real._parse_algorithm_triple("foo=img:v1@algo.yaml")
+        assert name == "foo"
+        assert image == "img:v1"
+        assert cfg == "algo.yaml"
+
+    def test_digest_ref_uses_rightmost_at(self):
+        name, image, cfg = sim2real._parse_algorithm_triple(
+            "foo=registry.io/img@sha256:" + "d" * 64 + "@algorithms/foo/foo_config.yaml"
+        )
+        assert name == "foo"
+        assert image == "registry.io/img@sha256:" + "d" * 64
+        assert cfg == "algorithms/foo/foo_config.yaml"
+
+    def test_config_path_with_equals_supported(self):
+        name, image, cfg = sim2real._parse_algorithm_triple("foo=img:v1@path=weird.yaml")
+        assert name == "foo"
+        assert image == "img:v1"
+        assert cfg == "path=weird.yaml"
+
+    def test_missing_equals_rejected(self):
+        with pytest.raises(argparse.ArgumentTypeError) as ei:
+            sim2real._parse_algorithm_triple("fooimg@algo.yaml")
+        assert "=" in str(ei.value)
+
+    def test_missing_at_rejected(self):
+        with pytest.raises(argparse.ArgumentTypeError) as ei:
+            sim2real._parse_algorithm_triple("foo=img:v1")
+        assert "@" in str(ei.value)
+
+    def test_empty_image_rejected(self):
+        with pytest.raises(argparse.ArgumentTypeError):
+            sim2real._parse_algorithm_triple("foo=@algo.yaml")
+
+    def test_empty_config_rejected(self):
+        with pytest.raises(argparse.ArgumentTypeError):
+            sim2real._parse_algorithm_triple("foo=img:v1@")
+
+    def test_invalid_name_rejected(self):
+        with pytest.raises(argparse.ArgumentTypeError) as ei:
+            sim2real._parse_algorithm_triple("bad name=img@cfg.yaml")
+        # Message should mention the name-regex constraint.
+        assert "name" in str(ei.value).lower()
+
+    def test_at_in_middle_goes_to_image(self):
+        """Rightmost-@ split rule: any earlier '@' stays in the image ref."""
+        name, image, cfg = sim2real._parse_algorithm_triple("foo=a@b@c.yaml")
+        assert name == "foo"
+        assert image == "a@b"
+        assert cfg == "c.yaml"
+
+    def test_multiple_at_in_image_rejected(self):
+        """Reject values whose parsed image ref has more than one '@'.
+
+        Common cause: user tried to put a '@' in the config path.
+        """
+        with pytest.raises(argparse.ArgumentTypeError) as ei:
+            sim2real._parse_algorithm_triple("foo=img:tag@path@with@ats/overlay.yaml")
+        assert "overlay path cannot contain" in str(ei.value)
+
+
 class TestComputeTranslationHash:
     """Batched hash formula (replaces step-1 single-algo formula for all N)."""
 
