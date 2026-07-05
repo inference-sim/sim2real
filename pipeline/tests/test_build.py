@@ -8,6 +8,7 @@ import subprocess
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 from pipeline import sim2real
 from pipeline.lib import build, layout
@@ -768,3 +769,76 @@ class TestSim2realBuildLoop:
         assert rc == 0
         mock_probe.assert_not_called()
         mock_build.assert_not_called()
+
+
+class TestSim2realBuildByoGuard:
+    """Issue #497: `sim2real build` on an all-BYO manifest errors early —
+    BYO images are pre-built, so there is nothing to build."""
+
+    def _write_all_byo_manifest(self, tmp_path):
+        manifest = {
+            "kind": "sim2real-transfer",
+            "version": 3,
+            "scenario": "byo-scenario",
+            "baselines": [{"name": "base", "scenario": "baseline-scenario"}],
+            "algorithms": [
+                {"name": "byoalgo", "defaults": "base", "byo": True},
+            ],
+            "context": {"text": "", "files": []},
+        }
+        (tmp_path / "transfer.yaml").write_text(yaml.safe_dump(manifest))
+
+    def test_all_byo_manifest_errors_without_component(self, tmp_path, capsys):
+        _make_workspace(tmp_path)
+        self._write_all_byo_manifest(tmp_path)
+        with patch("pipeline.lib.build.shutil.which",
+                   return_value="/usr/bin/skopeo"):
+            rc = sim2real.main([
+                "--experiment-root", str(tmp_path),
+                "build", "--translation", "byo-scenario",
+            ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "nothing to build" in err
+        assert "all algorithms are BYO" in err
+
+    def test_manifest_at_config_path_also_triggers_guard(self, tmp_path, capsys):
+        """Discovery falls back to `config/transfer.yaml` — same guard fires."""
+        _make_workspace(tmp_path)
+        (tmp_path / "config").mkdir()
+        manifest = {
+            "kind": "sim2real-transfer",
+            "version": 3,
+            "scenario": "byo-scenario",
+            "baselines": [{"name": "base", "scenario": "baseline-scenario"}],
+            "algorithms": [
+                {"name": "byoalgo", "defaults": "base", "byo": True},
+            ],
+            "context": {"text": "", "files": []},
+        }
+        (tmp_path / "config" / "transfer.yaml").write_text(yaml.safe_dump(manifest))
+        with patch("pipeline.lib.build.shutil.which",
+                   return_value="/usr/bin/skopeo"):
+            rc = sim2real.main([
+                "--experiment-root", str(tmp_path),
+                "build", "--translation", "byo-scenario",
+            ])
+        assert rc == 2
+        assert "nothing to build" in capsys.readouterr().err
+
+    def test_no_manifest_does_not_short_circuit(self, tmp_path, capsys):
+        """No transfer.yaml → guard is a no-op; downstream error wins."""
+        _make_workspace(tmp_path)
+        # No transfer.yaml written; --translation resolves against an empty
+        # translations dir, giving the "no translations" error path.
+        (tmp_path / "workspace" / "translations").mkdir(parents=True, exist_ok=True)
+        with patch("pipeline.lib.build.shutil.which",
+                   return_value="/usr/bin/skopeo"):
+            rc = sim2real.main([
+                "--experiment-root", str(tmp_path),
+                "build", "--translation", "nope",
+            ])
+        assert rc == 2
+        # Downstream translation-resolver message, NOT the BYO guard.
+        err = capsys.readouterr().err
+        assert "nothing to build" not in err
