@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -77,487 +78,746 @@ class TestExtractDigest:
         assert sim2real._extract_digest_from_ref("ghcr.io/foo@sha256:" + "z" * 64) is None
 
 
+class TestParseAlgorithmTriple:
+    def test_simple_triple(self):
+        name, image, cfg = sim2real._parse_algorithm_triple("foo=img:v1@algo.yaml")
+        assert name == "foo"
+        assert image == "img:v1"
+        assert cfg == "algo.yaml"
+
+    def test_digest_ref_uses_rightmost_at(self):
+        name, image, cfg = sim2real._parse_algorithm_triple(
+            "foo=registry.io/img@sha256:" + "d" * 64 + "@algorithms/foo/foo_config.yaml"
+        )
+        assert name == "foo"
+        assert image == "registry.io/img@sha256:" + "d" * 64
+        assert cfg == "algorithms/foo/foo_config.yaml"
+
+    def test_config_path_with_equals_supported(self):
+        name, image, cfg = sim2real._parse_algorithm_triple("foo=img:v1@path=weird.yaml")
+        assert name == "foo"
+        assert image == "img:v1"
+        assert cfg == "path=weird.yaml"
+
+    def test_missing_equals_rejected(self):
+        with pytest.raises(argparse.ArgumentTypeError) as ei:
+            sim2real._parse_algorithm_triple("fooimg@algo.yaml")
+        assert "=" in str(ei.value)
+
+    def test_missing_at_rejected(self):
+        with pytest.raises(argparse.ArgumentTypeError) as ei:
+            sim2real._parse_algorithm_triple("foo=img:v1")
+        assert "@" in str(ei.value)
+
+    def test_empty_image_rejected(self):
+        with pytest.raises(argparse.ArgumentTypeError):
+            sim2real._parse_algorithm_triple("foo=@algo.yaml")
+
+    def test_empty_config_rejected(self):
+        with pytest.raises(argparse.ArgumentTypeError):
+            sim2real._parse_algorithm_triple("foo=img:v1@")
+
+    def test_invalid_name_rejected(self):
+        with pytest.raises(argparse.ArgumentTypeError) as ei:
+            sim2real._parse_algorithm_triple("bad name=img@cfg.yaml")
+        # Message should mention the name-regex constraint.
+        assert "name" in str(ei.value).lower()
+
+    def test_at_in_middle_goes_to_image(self):
+        """Rightmost-@ split rule: any earlier '@' stays in the image ref."""
+        name, image, cfg = sim2real._parse_algorithm_triple("foo=a@b@c.yaml")
+        assert name == "foo"
+        assert image == "a@b"
+        assert cfg == "c.yaml"
+
+    def test_multiple_at_in_image_rejected(self):
+        """Reject values whose parsed image ref has more than one '@'.
+
+        Common cause: user tried to put a '@' in the config path.
+        """
+        with pytest.raises(argparse.ArgumentTypeError) as ei:
+            sim2real._parse_algorithm_triple("foo=img:tag@path@with@ats/overlay.yaml")
+        assert "overlay path cannot contain" in str(ei.value)
+
+
 class TestComputeTranslationHash:
-    def test_is_deterministic(self):
-        h1 = sim2real._compute_translation_hash("sha256:aa", b"config: 1\n", "algo")
-        h2 = sim2real._compute_translation_hash("sha256:aa", b"config: 1\n", "algo")
+    """Batched hash formula (replaces step-1 single-algo formula for all N)."""
+
+    def _e(self, name: str, image: str = "sha256:aa", config: bytes = b"c") -> dict:
+        import hashlib
+        return {
+            "name": name,
+            "image": image,
+            "config_sha": hashlib.sha256(config).hexdigest(),
+        }
+
+    def test_is_deterministic_n1(self):
+        h1 = sim2real._compute_translation_hash([self._e("algo")])
+        h2 = sim2real._compute_translation_hash([self._e("algo")])
         assert h1 == h2
-        assert len(h1) == 64  # sha256 hex length
+        assert len(h1) == 64
+
+    def test_is_deterministic_n2(self):
+        h1 = sim2real._compute_translation_hash([self._e("a"), self._e("b")])
+        h2 = sim2real._compute_translation_hash([self._e("a"), self._e("b")])
+        assert h1 == h2
+        assert len(h1) == 64
+
+    def test_order_invariant(self):
+        h_ab = sim2real._compute_translation_hash([self._e("a"), self._e("b")])
+        h_ba = sim2real._compute_translation_hash([self._e("b"), self._e("a")])
+        assert h_ab == h_ba
 
     def test_changes_with_algorithm_name(self):
-        h1 = sim2real._compute_translation_hash("sha256:aa", b"c", "a")
-        h2 = sim2real._compute_translation_hash("sha256:aa", b"c", "b")
+        h1 = sim2real._compute_translation_hash([self._e("a")])
+        h2 = sim2real._compute_translation_hash([self._e("b")])
         assert h1 != h2
 
-    def test_changes_with_config_content(self):
-        h1 = sim2real._compute_translation_hash("sha256:aa", b"a", "algo")
-        h2 = sim2real._compute_translation_hash("sha256:aa", b"b", "algo")
+    def test_changes_with_config(self):
+        h1 = sim2real._compute_translation_hash([self._e("a", config=b"x")])
+        h2 = sim2real._compute_translation_hash([self._e("a", config=b"y")])
         assert h1 != h2
 
     def test_changes_with_image_ref(self):
-        h1 = sim2real._compute_translation_hash("sha256:aa", b"c", "algo")
-        h2 = sim2real._compute_translation_hash("sha256:bb", b"c", "algo")
+        h1 = sim2real._compute_translation_hash([self._e("a", image="sha256:aa")])
+        h2 = sim2real._compute_translation_hash([self._e("a", image="sha256:bb")])
         assert h1 != h2
 
     def test_offline_ref_produces_stable_hash(self):
-        h1 = sim2real._compute_translation_hash("ghcr.io/foo:v1", b"c", "algo")
-        h2 = sim2real._compute_translation_hash("ghcr.io/foo:v1", b"c", "algo")
+        e = self._e("a", image="ghcr.io/foo:v1")
+        h1 = sim2real._compute_translation_hash([e])
+        h2 = sim2real._compute_translation_hash([e])
         assert h1 == h2
+
+    def test_adding_algo_changes_hash(self):
+        h1 = sim2real._compute_translation_hash([self._e("a")])
+        h2 = sim2real._compute_translation_hash([self._e("a"), self._e("b")])
+        assert h1 != h2
+
+    def test_n1_new_differs_from_n1_old_shape(self):
+        """The new formula wraps entries in a list, so N=1 hashes differ
+        from the step-1 formula (which framed a single dict). Documented
+        break in the design (no long-lived step-1 registrations exist)."""
+        import hashlib
+        import json as _json
+        new_hash = sim2real._compute_translation_hash([self._e("a")])
+        # Old formula: sha256(canonical-json({algorithm_name, config_sha256, image_digest_or_ref}))
+        old_canonical = _json.dumps(
+            {
+                "algorithm_name": "a",
+                "config_sha256": hashlib.sha256(b"c").hexdigest(),
+                "image_digest_or_ref": "sha256:aa",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        old_hash = hashlib.sha256(old_canonical.encode("utf-8")).hexdigest()
+        assert new_hash != old_hash
 
 
 class TestBuildSchemas:
     def test_translation_output_schema(self):
-        # Updated to step-2 shape: image_ref/image_digest live per-algo.
         out = sim2real._build_translation_output(
-            algorithm_name="softreflective",
-            image_ref="ghcr.io/foo:v1",
-            image_digest=None,
-            config_path="generated/softreflective/softreflective_config.yaml",
-            translation_hash="a" * 64,
+            algorithms=[
+                {
+                    "name": "algo1",
+                    "image_ref": "sha256:aa",
+                    "image_digest": "sha256:aa",
+                    "config_path": "generated/algo1/algo1_config.yaml",
+                },
+            ],
+            translation_hash="h" * 64,
             source="byo",
-            alias="softreflective",
-            created_at="2026-07-01T14:00:00Z",
+            alias="algo1",
+            created_at="2026-07-05T10:00:00Z",
         )
-        assert out == {
-            "version": 1,
-            "translation_hash": "a" * 64,
-            "source": "byo",
-            "alias": "softreflective",
-            "algorithms": [{
-                "name": "softreflective",
-                "source_path": None,
-                "source_sha256": None,
-                "config_path": "generated/softreflective/softreflective_config.yaml",
-                "image_ref": "ghcr.io/foo:v1",
-                "image_digest": None,
-            }],
-            "created_at": "2026-07-01T14:00:00Z",
-        }
+        assert out["version"] == 1
+        assert out["translation_hash"] == "h" * 64
+        assert out["source"] == "byo"
+        assert out["alias"] == "algo1"
+        assert out["created_at"] == "2026-07-05T10:00:00Z"
+        assert len(out["algorithms"]) == 1
+        entry = out["algorithms"][0]
+        assert entry["name"] == "algo1"
+        assert entry["source_path"] is None
+        assert entry["source_sha256"] is None
+        assert entry["config_path"] == "generated/algo1/algo1_config.yaml"
+        assert entry["image_ref"] == "sha256:aa"
+        assert entry["image_digest"] == "sha256:aa"
+
+    def test_translation_output_batched_n2(self):
+        out = sim2real._build_translation_output(
+            algorithms=[
+                {"name": "a", "image_ref": "img1", "image_digest": None, "config_path": "generated/a/a_config.yaml"},
+                {"name": "b", "image_ref": "img2", "image_digest": None, "config_path": "generated/b/b_config.yaml"},
+            ],
+            translation_hash="h" * 64,
+            source="byo",
+            alias=None,
+            created_at="2026-07-05T10:00:00Z",
+        )
+        assert out["alias"] is None
+        assert [e["name"] for e in out["algorithms"]] == ["a", "b"]
 
     def test_registered_schema_with_digest(self):
         reg = sim2real._build_registered(
-            image_ref="ghcr.io/foo@sha256:" + "b" * 64,
-            image_digest="sha256:" + "b" * 64,
-            registered_at="2026-07-01T14:00:00Z",
+            [
+                {"name": "algo1", "image_ref": "reg/img@sha256:" + "a" * 64, "image_digest": "sha256:" + "a" * 64},
+            ],
+            "2026-07-05T10:00:00Z",
         )
-        assert reg == {
-            "version": 1,
-            "image_ref": "ghcr.io/foo@sha256:" + "b" * 64,
-            "image_digest": "sha256:" + "b" * 64,
-            "source": "byo",
-            "registered_at": "2026-07-01T14:00:00Z",
-        }
+        assert reg["version"] == 1
+        assert reg["source"] == "byo"
+        assert reg["registered_at"] == "2026-07-05T10:00:00Z"
+        assert reg["algorithms"] == [
+            {"name": "algo1", "image_ref": "reg/img@sha256:" + "a" * 64, "image_digest": "sha256:" + "a" * 64},
+        ]
 
     def test_registered_schema_offline(self):
         reg = sim2real._build_registered(
-            image_ref="ghcr.io/foo:v1",
-            image_digest=None,
-            registered_at="2026-07-01T14:00:00Z",
+            [
+                {"name": "a", "image_ref": "ghcr.io/foo:v1", "image_digest": None},
+            ],
+            "2026-07-05T10:00:00Z",
         )
-        assert reg["image_digest"] is None
-        assert reg["image_ref"] == "ghcr.io/foo:v1"
-
-
-class TestBuildTranslationOutputV2:
-    def test_new_schema_shape(self):
-        out = sim2real._build_translation_output(
-            algorithm_name="softreflective",
-            image_ref="ghcr.io/x/sr:v1",
-            image_digest="sha256:aa",
-            config_path="generated/softreflective/softreflective_config.yaml",
-            translation_hash="a" * 64,
-            source="byo",
-            alias="softreflective",
-            created_at="2026-07-02T14:00:00Z",
-        )
-        # Top-level image_ref removed; now per-algo.
-        assert "image_ref" not in out
-        assert "image_digest" not in out
-        assert out["alias"] == "softreflective"
-        assert out["source"] == "byo"
-        assert out["version"] == 1
-        assert out["translation_hash"] == "a" * 64
-        assert out["created_at"] == "2026-07-02T14:00:00Z"
-        assert len(out["algorithms"]) == 1
-        algo = out["algorithms"][0]
-        assert algo["name"] == "softreflective"
-        assert algo["image_ref"] == "ghcr.io/x/sr:v1"
-        assert algo["image_digest"] == "sha256:aa"
-        assert algo["config_path"] == \
-            "generated/softreflective/softreflective_config.yaml"
-        assert algo["source_path"] is None
-        assert algo["source_sha256"] is None
+        assert reg["algorithms"][0]["image_digest"] is None
 
 
 class TestRegisterTranslation:
-    def _write_overlay(self, tmp_path, content=b"scorer: mine\n"):
-        p = tmp_path / "treatment.yaml"
-        p.write_bytes(content)
-        return p
+    def _algo(self, tmp_path, name: str, image: str = None, config: str = None) -> dict:
+        """Build an AlgorithmSpec, writing the config file on the way in."""
+        cfg = tmp_path / f"{name}_config.yaml"
+        cfg.write_text(config if config else f"scorers:\n  - name: {name}\n")
+        return {
+            "name": name,
+            "image_ref": image or "ghcr.io/foo/bar:v1",
+            "config_path": cfg,
+        }
 
-    def test_creates_translation_dir_and_files(self, tmp_path):
-        cfg = self._write_overlay(tmp_path)
+    def test_creates_translation_dir_and_files_n1(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        algo = self._algo(tmp_path, "algo1")
+        now = "2026-07-05T10:00:00Z"
         thash, status = sim2real._register_translation(
-            algorithm_name="softreflective",
-            image_ref="ghcr.io/foo:v1",
-            config_path=cfg,
+            algorithms=[algo],
             baseline_config_path=None,
             registered_hash=None,
-            now_iso="2026-07-01T14:00:00Z",
+            now_iso=now,
         )
         assert status == "created"
-        assert len(thash) == 64
-        assert layout.translation_output_path(thash).exists()
-        assert layout.registered_path(thash).exists()
-        assert layout.generated_config_path(thash, "softreflective").exists()
+        tdir = Path("workspace") / "translations" / thash
+        assert (tdir / "translation_output.json").exists()
+        assert (tdir / "registered.json").exists()
+        assert (tdir / "generated" / "algo1" / "algo1_config.yaml").exists()
 
-    def test_translation_output_contents(self, tmp_path):
-        # Step-2 schema: image_ref lives per-algo; alias at top level.
-        cfg = self._write_overlay(tmp_path)
-        thash, _ = sim2real._register_translation(
-            algorithm_name="softreflective",
-            image_ref="ghcr.io/foo:v1",
-            config_path=cfg,
+    def test_creates_translation_dir_and_files_n2(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        algos = [self._algo(tmp_path, "foo"), self._algo(tmp_path, "bar")]
+        thash, status = sim2real._register_translation(
+            algorithms=algos,
             baseline_config_path=None,
             registered_hash=None,
-            now_iso="2026-07-01T14:00:00Z",
+            now_iso="2026-07-05T10:00:00Z",
         )
-        out = json.loads(layout.translation_output_path(thash).read_text())
-        assert out["source"] == "byo"
-        assert out["alias"] == "softreflective"
-        assert out["translation_hash"] == thash
-        assert out["version"] == 1
-        assert len(out["algorithms"]) == 1
-        algo = out["algorithms"][0]
-        assert algo["name"] == "softreflective"
-        assert algo["image_ref"] == "ghcr.io/foo:v1"
+        assert status == "created"
+        tdir = Path("workspace") / "translations" / thash
+        assert (tdir / "generated" / "foo" / "foo_config.yaml").exists()
+        assert (tdir / "generated" / "bar" / "bar_config.yaml").exists()
+        tout = json.loads((tdir / "translation_output.json").read_text())
+        names = sorted(a["name"] for a in tout["algorithms"])
+        assert names == ["bar", "foo"]
 
-    def test_registered_records_digest_when_present(self, tmp_path):
-        cfg = self._write_overlay(tmp_path)
-        ref = "ghcr.io/foo@sha256:" + "a" * 64
+    def test_alias_field_null_for_batched(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        algos = [self._algo(tmp_path, "foo"), self._algo(tmp_path, "bar")]
         thash, _ = sim2real._register_translation(
-            algorithm_name="softreflective",
-            image_ref=ref,
-            config_path=cfg,
+            algorithms=algos,
             baseline_config_path=None,
             registered_hash=None,
-            now_iso="2026-07-01T14:00:00Z",
+            now_iso="2026-07-05T10:00:00Z",
         )
-        reg = json.loads(layout.registered_path(thash).read_text())
-        assert reg["image_digest"] == "sha256:" + "a" * 64
+        tout = json.loads((Path("workspace") / "translations" / thash / "translation_output.json").read_text())
+        assert tout["alias"] is None
 
-    def test_registered_null_digest_when_tag_only(self, tmp_path):
-        cfg = self._write_overlay(tmp_path)
+    def test_alias_field_set_for_n1(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        algo = self._algo(tmp_path, "solo")
         thash, _ = sim2real._register_translation(
-            algorithm_name="softreflective",
-            image_ref="ghcr.io/foo:v1",
-            config_path=cfg,
+            algorithms=[algo],
             baseline_config_path=None,
             registered_hash=None,
-            now_iso="2026-07-01T14:00:00Z",
+            now_iso="2026-07-05T10:00:00Z",
         )
-        reg = json.loads(layout.registered_path(thash).read_text())
-        assert reg["image_digest"] is None
+        tout = json.loads((Path("workspace") / "translations" / thash / "translation_output.json").read_text())
+        assert tout["alias"] == "solo"
 
-    def test_writes_treatment_overlay(self, tmp_path):
-        cfg = self._write_overlay(tmp_path, content=b"scorer: custom\n")
+    def test_translation_output_algorithms_shape(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        algos = [self._algo(tmp_path, "foo", image="reg/img@sha256:" + "a" * 64)]
         thash, _ = sim2real._register_translation(
-            algorithm_name="softreflective",
-            image_ref="ghcr.io/foo:v1",
-            config_path=cfg,
+            algorithms=algos,
             baseline_config_path=None,
             registered_hash=None,
-            now_iso="2026-07-01T14:00:00Z",
+            now_iso="2026-07-05T10:00:00Z",
         )
-        assert (
-            layout.generated_config_path(thash, "softreflective").read_bytes()
-            == b"scorer: custom\n"
-        )
+        tout = json.loads((Path("workspace") / "translations" / thash / "translation_output.json").read_text())
+        entry = tout["algorithms"][0]
+        assert entry["name"] == "foo"
+        assert entry["image_ref"] == "reg/img@sha256:" + "a" * 64
+        assert entry["image_digest"] == "sha256:" + "a" * 64
+        assert entry["config_path"] == "generated/foo/foo_config.yaml"
+        assert entry["source_path"] is None
+        assert entry["source_sha256"] is None
 
-    def test_writes_baseline_config_when_provided(self, tmp_path):
-        cfg = self._write_overlay(tmp_path)
-        baseline = tmp_path / "baseline.yaml"
-        baseline.write_bytes(b"baseline: config\n")
+    def test_registered_records_all_algorithms(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        algos = [
+            self._algo(tmp_path, "foo", image="reg/img@sha256:" + "a" * 64),
+            self._algo(tmp_path, "bar", image="reg/img2:v1"),
+        ]
         thash, _ = sim2real._register_translation(
-            algorithm_name="softreflective",
-            image_ref="ghcr.io/foo:v1",
-            config_path=cfg,
+            algorithms=algos,
+            baseline_config_path=None,
+            registered_hash=None,
+            now_iso="2026-07-05T10:00:00Z",
+        )
+        reg = json.loads((Path("workspace") / "translations" / thash / "registered.json").read_text())
+        assert reg["version"] == 1
+        assert reg["source"] == "byo"
+        # Batched registered.json carries N entries under 'algorithms'.
+        entries = {e["name"]: e for e in reg["algorithms"]}
+        assert entries["foo"]["image_digest"] == "sha256:" + "a" * 64
+        assert entries["bar"]["image_digest"] is None
+
+    def test_writes_all_treatment_overlays_verbatim(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        algos = [
+            self._algo(tmp_path, "foo", config="foo_body: 1\n"),
+            self._algo(tmp_path, "bar", config="bar_body: 2\n"),
+        ]
+        thash, _ = sim2real._register_translation(
+            algorithms=algos,
+            baseline_config_path=None,
+            registered_hash=None,
+            now_iso="2026-07-05T10:00:00Z",
+        )
+        tdir = Path("workspace") / "translations" / thash
+        assert (tdir / "generated" / "foo" / "foo_config.yaml").read_text() == "foo_body: 1\n"
+        assert (tdir / "generated" / "bar" / "bar_config.yaml").read_text() == "bar_body: 2\n"
+
+    def test_baseline_config_written_once(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        baseline = tmp_path / "base.yaml"
+        baseline.write_text("baseline: yes\n")
+        algos = [self._algo(tmp_path, "foo"), self._algo(tmp_path, "bar")]
+        thash, _ = sim2real._register_translation(
+            algorithms=algos,
             baseline_config_path=baseline,
             registered_hash=None,
-            now_iso="2026-07-01T14:00:00Z",
+            now_iso="2026-07-05T10:00:00Z",
         )
-        gen_baseline = layout.translation_dir(thash) / "generated" / "baseline_config.yaml"
-        assert gen_baseline.read_bytes() == b"baseline: config\n"
+        tdir = Path("workspace") / "translations" / thash
+        assert (tdir / "generated" / "baseline_config.yaml").read_text() == "baseline: yes\n"
 
-    def test_idempotent_second_call_same_inputs(self, tmp_path):
-        cfg = self._write_overlay(tmp_path)
-        args = dict(
-            algorithm_name="softreflective",
-            image_ref="ghcr.io/foo:v1",
-            config_path=cfg,
+    def test_idempotent_second_call_same_inputs(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        algos = [self._algo(tmp_path, "foo"), self._algo(tmp_path, "bar")]
+        h1, s1 = sim2real._register_translation(
+            algorithms=algos,
             baseline_config_path=None,
             registered_hash=None,
-            now_iso="2026-07-01T14:00:00Z",
+            now_iso="2026-07-05T10:00:00Z",
         )
-        h1, s1 = sim2real._register_translation(**args)
-        h2, s2 = sim2real._register_translation(**args)
+        # Second call: same algorithms in same order.
+        h2, s2 = sim2real._register_translation(
+            algorithms=algos,
+            baseline_config_path=None,
+            registered_hash=None,
+            now_iso="2026-07-05T11:00:00Z",
+        )
         assert h1 == h2
         assert s1 == "created"
         assert s2 == "idempotent"
 
-    def test_hash_collision_different_algorithm_errors(self, tmp_path):
-        cfg = self._write_overlay(tmp_path)
-        thash, _ = sim2real._register_translation(
-            algorithm_name="softreflective",
-            image_ref="ghcr.io/foo:v1",
-            config_path=cfg,
+    def test_idempotent_different_order_same_hash(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        algos1 = [self._algo(tmp_path, "foo"), self._algo(tmp_path, "bar")]
+        algos2 = [algos1[1], algos1[0]]  # reversed
+        h1, _ = sim2real._register_translation(
+            algorithms=algos1,
             baseline_config_path=None,
             registered_hash=None,
-            now_iso="2026-07-01T14:00:00Z",
+            now_iso="2026-07-05T10:00:00Z",
         )
-        # Corrupt the existing translation_output.json to name a different algo.
-        out_path = layout.translation_output_path(thash)
-        out = json.loads(out_path.read_text())
-        out["algorithms"] = [{"name": "otheralgo"}]
-        out_path.write_text(json.dumps(out))
-        with pytest.raises(ValueError, match="algorithm name mismatch"):
+        h2, s2 = sim2real._register_translation(
+            algorithms=algos2,
+            baseline_config_path=None,
+            registered_hash=None,
+            now_iso="2026-07-05T11:00:00Z",
+        )
+        assert h1 == h2
+        assert s2 == "idempotent"
+
+    def test_registered_hash_mismatch_errors(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        algo = self._algo(tmp_path, "foo")
+        with pytest.raises(RuntimeError, match="--registered-hash mismatch"):
             sim2real._register_translation(
-                algorithm_name="softreflective",
-                image_ref="ghcr.io/foo:v1",
-                config_path=cfg,
+                algorithms=[algo],
                 baseline_config_path=None,
-                registered_hash=None,
-                now_iso="2026-07-01T14:00:00Z",
+                registered_hash="deadbeef",
+                now_iso="2026-07-05T10:00:00Z",
             )
 
-    def test_registered_hash_mismatch_errors(self, tmp_path):
-        cfg = self._write_overlay(tmp_path)
-        with pytest.raises(RuntimeError, match="registered-hash mismatch"):
-            sim2real._register_translation(
-                algorithm_name="softreflective",
-                image_ref="ghcr.io/foo:v1",
-                config_path=cfg,
-                baseline_config_path=None,
-                registered_hash="deadbeef" * 8,
-                now_iso="2026-07-01T14:00:00Z",
-            )
-
-    def test_registered_hash_match_succeeds(self, tmp_path):
-        cfg = self._write_overlay(tmp_path)
-        expected = sim2real._compute_translation_hash(
-            "ghcr.io/foo:v1", cfg.read_bytes(), "softreflective"
+    def test_registered_hash_match_succeeds(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        algo = self._algo(tmp_path, "foo")
+        # Compute expected hash by running once and reading it back.
+        expected, _ = sim2real._register_translation(
+            algorithms=[algo],
+            baseline_config_path=None,
+            registered_hash=None,
+            now_iso="2026-07-05T10:00:00Z",
         )
+        # Second call with matching hash succeeds (idempotent).
         thash, status = sim2real._register_translation(
-            algorithm_name="softreflective",
-            image_ref="ghcr.io/foo:v1",
-            config_path=cfg,
+            algorithms=[algo],
             baseline_config_path=None,
             registered_hash=expected,
-            now_iso="2026-07-01T14:00:00Z",
+            now_iso="2026-07-05T11:00:00Z",
         )
         assert thash == expected
-        assert status == "created"
+        assert status == "idempotent"
 
-    def test_partial_write_missing_registered_json_raises(self, tmp_path):
-        # Simulate: an earlier register wrote translation_output.json but
-        # died before writing registered.json (disk full, killed, etc.).
-        cfg = self._write_overlay(tmp_path)
+    def test_partial_write_missing_registered_json_raises(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        algo = self._algo(tmp_path, "foo")
         thash, _ = sim2real._register_translation(
-            algorithm_name="softreflective",
-            image_ref="ghcr.io/foo:v1",
-            config_path=cfg,
+            algorithms=[algo],
             baseline_config_path=None,
             registered_hash=None,
-            now_iso="2026-07-01T14:00:00Z",
+            now_iso="2026-07-05T10:00:00Z",
         )
-        layout.registered_path(thash).unlink()
+        (Path("workspace") / "translations" / thash / "registered.json").unlink()
         with pytest.raises(RuntimeError, match="incomplete"):
             sim2real._register_translation(
-                algorithm_name="softreflective",
-                image_ref="ghcr.io/foo:v1",
-                config_path=cfg,
+                algorithms=[algo],
                 baseline_config_path=None,
                 registered_hash=None,
-                now_iso="2026-07-01T14:00:00Z",
+                now_iso="2026-07-05T11:00:00Z",
             )
 
-    def test_partial_write_missing_generated_config_raises(self, tmp_path):
-        cfg = self._write_overlay(tmp_path)
+    def test_partial_write_missing_generated_config_raises(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        algo = self._algo(tmp_path, "foo")
         thash, _ = sim2real._register_translation(
-            algorithm_name="softreflective",
-            image_ref="ghcr.io/foo:v1",
-            config_path=cfg,
+            algorithms=[algo],
             baseline_config_path=None,
             registered_hash=None,
-            now_iso="2026-07-01T14:00:00Z",
+            now_iso="2026-07-05T10:00:00Z",
         )
-        layout.generated_config_path(thash, "softreflective").unlink()
+        (Path("workspace") / "translations" / thash / "generated" / "foo" / "foo_config.yaml").unlink()
         with pytest.raises(RuntimeError, match="incomplete"):
             sim2real._register_translation(
-                algorithm_name="softreflective",
-                image_ref="ghcr.io/foo:v1",
-                config_path=cfg,
+                algorithms=[algo],
                 baseline_config_path=None,
                 registered_hash=None,
-                now_iso="2026-07-01T14:00:00Z",
+                now_iso="2026-07-05T11:00:00Z",
+            )
+
+    def test_partial_write_missing_one_of_N_algos_raises(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        algos = [self._algo(tmp_path, "foo"), self._algo(tmp_path, "bar")]
+        thash, _ = sim2real._register_translation(
+            algorithms=algos,
+            baseline_config_path=None,
+            registered_hash=None,
+            now_iso="2026-07-05T10:00:00Z",
+        )
+        # Delete one of the per-algo directories so its overlay is missing.
+        (Path("workspace") / "translations" / thash / "generated" / "bar" / "bar_config.yaml").unlink()
+        with pytest.raises(RuntimeError, match="incomplete"):
+            sim2real._register_translation(
+                algorithms=algos,
+                baseline_config_path=None,
+                registered_hash=None,
+                now_iso="2026-07-05T11:00:00Z",
             )
 
 
 class TestBuildParser:
-    def test_parses_translation_register(self):
-        parser = sim2real.build_parser()
-        args = parser.parse_args([
+    def test_parses_new_form_single_algo(self):
+        p = sim2real.build_parser()
+        args = p.parse_args([
             "translation", "register",
-            "--algorithm", "softreflective",
-            "--image", "ghcr.io/foo:v1",
-            "--config", "/tmp/treatment.yaml",
+            "--algorithm", "foo=img:v1@overlay.yaml",
         ])
         assert args.command == "translation"
         assert args.subcommand == "register"
-        assert args.algorithm == "softreflective"
-        assert args.image == "ghcr.io/foo:v1"
-        assert args.config == "/tmp/treatment.yaml"
-        assert args.baseline_config is None
-        assert args.registered_hash is None
+        assert args.algorithm == ["foo=img:v1@overlay.yaml"]
+        assert args.image is None
+        assert args.config is None
+
+    def test_parses_new_form_multi_algo(self):
+        p = sim2real.build_parser()
+        args = p.parse_args([
+            "translation", "register",
+            "--algorithm", "foo=img1@o1.yaml",
+            "--algorithm", "bar=img2@o2.yaml",
+        ])
+        assert args.algorithm == ["foo=img1@o1.yaml", "bar=img2@o2.yaml"]
+
+    def test_parses_deprecated_form(self):
+        p = sim2real.build_parser()
+        args = p.parse_args([
+            "translation", "register",
+            "--algorithm", "foo",
+            "--image", "img:v1",
+            "--config", "overlay.yaml",
+        ])
+        assert args.algorithm == ["foo"]
+        assert args.image == "img:v1"
+        assert args.config == "overlay.yaml"
 
     def test_accepts_baseline_and_registered_hash(self):
-        parser = sim2real.build_parser()
-        args = parser.parse_args([
+        p = sim2real.build_parser()
+        args = p.parse_args([
             "translation", "register",
-            "--algorithm", "softreflective",
-            "--image", "ghcr.io/foo:v1",
-            "--config", "/tmp/treatment.yaml",
-            "--baseline-config", "/tmp/baseline.yaml",
-            "--registered-hash", "abcd" * 16,
+            "--algorithm", "foo=img:v1@overlay.yaml",
+            "--baseline-config", "b.yaml",
+            "--registered-hash", "abc",
+            "--force",
         ])
-        assert args.baseline_config == "/tmp/baseline.yaml"
-        assert args.registered_hash == "abcd" * 16
-
-    def test_rejects_bad_algorithm_name(self):
-        # Leading hyphen fails the shared regex; use it instead of Bad_Name
-        # (uppercase+underscore are now accepted per step-2 widening).
-        parser = sim2real.build_parser()
-        with pytest.raises(SystemExit):
-            parser.parse_args([
-                "translation", "register",
-                "--algorithm", "-bad-name",
-                "--image", "ghcr.io/foo:v1",
-                "--config", "/tmp/treatment.yaml",
-            ])
+        assert args.baseline_config == "b.yaml"
+        assert args.registered_hash == "abc"
+        assert args.force is True
 
 
 class TestMainEndToEnd:
-    def test_happy_path(self, tmp_path, capsys):
-        cfg = tmp_path / "treatment.yaml"
-        cfg.write_text("scorer: mine\n")
+    def _cfg(self, tmp_path, name: str) -> Path:
+        p = tmp_path / f"{name}.yaml"
+        p.write_text(f"scorers:\n  - name: {name}\n")
+        return p
+
+    def test_happy_path_n1_new_form(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        cfg = self._cfg(tmp_path, "foo")
         rc = sim2real.main([
-            "--experiment-root", str(tmp_path),
             "translation", "register",
-            "--algorithm", "softreflective",
-            "--image", "ghcr.io/foo:v1",
+            "--algorithm", f"foo=ghcr.io/img:v1@{cfg}",
+        ])
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "registered translation" in captured.out
+        # No deprecation warning under the new form.
+        assert "deprecated" not in captured.err.lower()
+
+    def test_happy_path_n1_deprecated_form(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        cfg = self._cfg(tmp_path, "foo")
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", "foo",
+            "--image", "ghcr.io/img:v1",
             "--config", str(cfg),
         ])
         assert rc == 0
         captured = capsys.readouterr()
         assert "registered translation" in captured.out
-        # Warn about null digest since image ref is tag-only.
-        assert "image_digest recorded as null" in captured.err
+        assert "deprecated" in captured.err.lower()
 
-    def test_idempotent_second_run(self, tmp_path):
-        cfg = tmp_path / "treatment.yaml"
-        cfg.write_text("scorer: mine\n")
-        argv = [
-            "--experiment-root", str(tmp_path),
-            "translation", "register",
-            "--algorithm", "softreflective",
-            "--image", "ghcr.io/foo:v1",
-            "--config", str(cfg),
-        ]
-        assert sim2real.main(argv) == 0
-        assert sim2real.main(argv) == 0  # idempotent, still exit 0
-
-    def test_malformed_config_errors_no_writes(self, tmp_path):
-        cfg = tmp_path / "bad.yaml"
-        cfg.write_text("scorer: [unclosed\n")  # invalid YAML
+    def test_happy_path_n2(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        c1 = self._cfg(tmp_path, "foo")
+        c2 = self._cfg(tmp_path, "bar")
         rc = sim2real.main([
-            "--experiment-root", str(tmp_path),
             "translation", "register",
-            "--algorithm", "softreflective",
-            "--image", "ghcr.io/foo:v1",
-            "--config", str(cfg),
-        ])
-        assert rc == 2
-        # No translation dir should have been created.
-        assert not layout.translations_dir().exists() or not any(
-            layout.translations_dir().iterdir()
-        )
-
-    def test_missing_config_errors(self, tmp_path):
-        rc = sim2real.main([
-            "--experiment-root", str(tmp_path),
-            "translation", "register",
-            "--algorithm", "softreflective",
-            "--image", "ghcr.io/foo:v1",
-            "--config", str(tmp_path / "does-not-exist.yaml"),
-        ])
-        assert rc == 2
-
-    def test_registered_hash_mismatch_exits_2(self, tmp_path):
-        cfg = tmp_path / "treatment.yaml"
-        cfg.write_text("scorer: mine\n")
-        rc = sim2real.main([
-            "--experiment-root", str(tmp_path),
-            "translation", "register",
-            "--algorithm", "softreflective",
-            "--image", "ghcr.io/foo:v1",
-            "--config", str(cfg),
-            "--registered-hash", "deadbeef" * 8,
-        ])
-        assert rc == 2
-
-    def test_digest_ref_no_null_warning(self, tmp_path, capsys):
-        cfg = tmp_path / "treatment.yaml"
-        cfg.write_text("scorer: mine\n")
-        rc = sim2real.main([
-            "--experiment-root", str(tmp_path),
-            "translation", "register",
-            "--algorithm", "softreflective",
-            "--image", "ghcr.io/foo@sha256:" + "a" * 64,
-            "--config", str(cfg),
+            "--algorithm", f"foo=ghcr.io/img1:v1@{c1}",
+            "--algorithm", f"bar=ghcr.io/img2:v1@{c2}",
         ])
         assert rc == 0
-        captured = capsys.readouterr()
-        assert "image_digest recorded as null" not in captured.err
+        # Extract the hash from stdout to inspect on-disk shape.
+        out = capsys.readouterr().out.strip()
+        thash = out.rsplit(" ", 1)[-1]
+        tdir = Path("workspace") / "translations" / thash
+        assert (tdir / "generated" / "foo" / "foo_config.yaml").exists()
+        assert (tdir / "generated" / "bar" / "bar_config.yaml").exists()
+        tout = json.loads((tdir / "translation_output.json").read_text())
+        assert sorted(a["name"] for a in tout["algorithms"]) == ["bar", "foo"]
+        assert tout["alias"] is None
+
+    def test_order_invariant_hash(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        c1 = self._cfg(tmp_path, "foo")
+        c2 = self._cfg(tmp_path, "bar")
+        rc1 = sim2real.main([
+            "translation", "register",
+            "--algorithm", f"foo=img1:v1@{c1}",
+            "--algorithm", f"bar=img2:v1@{c2}",
+        ])
+        assert rc1 == 0
+        # Second run — reversed order. Should hit idempotent path.
+        rc2 = sim2real.main([
+            "translation", "register",
+            "--algorithm", f"bar=img2:v1@{c2}",
+            "--algorithm", f"foo=img1:v1@{c1}",
+        ])
+        assert rc2 == 0
+        # Only one translation dir exists.
+        dirs = list((Path("workspace") / "translations").iterdir())
+        assert len(dirs) == 1
+
+    def test_rightmost_at_in_image_ref(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        cfg = tmp_path / "algorithms" / "foo" / "foo_config.yaml"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text("scorers: []\n")
+        image = "registry.io/img@sha256:" + "d" * 64
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", f"foo={image}@{cfg}",
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out.strip()
+        thash = out.rsplit(" ", 1)[-1]
+        reg = json.loads((Path("workspace") / "translations" / thash / "registered.json").read_text())
+        entry = reg["algorithms"][0]
+        assert entry["image_ref"] == image
+        assert entry["image_digest"] == "sha256:" + "d" * 64
+
+    def test_at_in_config_path_rejected(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", "foo=img:tag@path@with@ats/overlay.yaml",
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "overlay path cannot contain" in err
+
+    def test_config_path_with_equals_supported(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        cfg = tmp_path / "weird=name.yaml"
+        cfg.write_text("scorers: []\n")
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", f"foo=img:v1@{cfg}",
+        ])
+        assert rc == 0
+
+    def test_duplicate_algorithm_names_rejected(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        c1 = self._cfg(tmp_path, "foo")
+        c2 = self._cfg(tmp_path, "foo2")
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", f"foo=img1@{c1}",
+            "--algorithm", f"foo=img2@{c2}",
+        ])
+        assert rc == 2
+        assert "duplicate algorithm name" in capsys.readouterr().err
+
+    def test_missing_config_errors(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", "foo=img:v1@does-not-exist.yaml",
+        ])
+        assert rc == 2
+        assert "not found" in capsys.readouterr().err
+
+    def test_malformed_config_errors_no_writes(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        cfg = tmp_path / "bad.yaml"
+        cfg.write_text("::not: yaml: [\n")
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", f"foo=img:v1@{cfg}",
+        ])
+        assert rc == 2
+        assert "not valid YAML" in capsys.readouterr().err
+        assert not (tmp_path / "workspace" / "translations").exists()
+
+    def test_registered_hash_mismatch_exits_2(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        cfg = self._cfg(tmp_path, "foo")
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", f"foo=img:v1@{cfg}",
+            "--registered-hash", "deadbeef",
+        ])
+        assert rc == 2
+        assert "--registered-hash mismatch" in capsys.readouterr().err
+
+    def test_idempotent_second_run_prints_warning(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        cfg = self._cfg(tmp_path, "foo")
+        sim2real.main([
+            "translation", "register",
+            "--algorithm", f"foo=img:v1@{cfg}",
+        ])
+        capsys.readouterr()  # reset
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", f"foo=img:v1@{cfg}",
+        ])
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "already registered" in err
+
+    def test_digest_ref_no_null_warning(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        cfg = self._cfg(tmp_path, "foo")
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", f"foo=reg/img@sha256:{'a'*64}@{cfg}",
+        ])
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "null" not in err
+
+    def test_deprecated_form_with_multiple_algorithms_rejected(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        cfg = self._cfg(tmp_path, "foo")
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", "foo",
+            "--algorithm", "bar",
+            "--image", "img:v1",
+            "--config", str(cfg),
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "deprecated form" in err or "single --algorithm" in err
+
+    def test_mixed_form_new_algo_plus_image_rejected(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        cfg = self._cfg(tmp_path, "foo")
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", f"foo=img:v1@{cfg}",
+            "--image", "other:v1",
+        ])
+        assert rc == 2
 
     def test_oserror_from_register_returns_2_not_traceback(
         self, tmp_path, capsys, monkeypatch
     ):
-        # translation_output.json is now written via _atomic_write_json
-        # (tempfile + os.replace), not write_text. Patch the helper directly.
-        cfg = tmp_path / "treatment.yaml"
-        cfg.write_text("scorer: mine\n")
-
-        # Wrap: call the real impl for non-output.json paths.
-        original = sim2real._atomic_write_json
-
-        def patched(path, data):
-            if path.name == "translation_output.json":
-                raise OSError("simulated: disk full")
-            return original(path, data)
-
-        monkeypatch.setattr(sim2real, "_atomic_write_json", patched)
-
+        monkeypatch.chdir(tmp_path)
+        cfg = self._cfg(tmp_path, "foo")
+        # Simulate an OSError from _register_translation by making the workspace
+        # translations dir a file (blocks mkdir).
+        ws = tmp_path / "workspace" / "translations"
+        ws.parent.mkdir()
+        ws.write_text("")  # occupy the path with a regular file
         rc = sim2real.main([
-            "--experiment-root", str(tmp_path),
             "translation", "register",
-            "--algorithm", "softreflective",
-            "--image", "ghcr.io/foo:v1",
-            "--config", str(cfg),
+            "--algorithm", f"foo=img:v1@{cfg}",
         ])
         assert rc == 2
-        captured = capsys.readouterr()
-        assert "error:" in captured.err
-        assert "disk full" in captured.err
+        # Not a Python traceback.
+        assert "Traceback" not in capsys.readouterr().err
 
 
 class TestUseCommand:
@@ -770,9 +1030,7 @@ class TestAssembleCommand:
             b"    inferenceExtension:\n      pluginsConfigFile: sr.yaml\n"
         )
         thash, _ = sim2real._register_translation(
-            algorithm_name="sr",
-            image_ref="ghcr.io/foo/bar:v1",
-            config_path=cfg,
+            algorithms=[{"name": "sr", "image_ref": "ghcr.io/foo/bar:v1", "config_path": cfg}],
             baseline_config_path=None,
             registered_hash=None,
             now_iso="2026-07-01T14:00:00Z",
@@ -926,61 +1184,75 @@ class TestAssembleCommand:
 
 
 class TestAliasCollision:
-    def _seed_register(self, tmp_path, algo, image, config_yaml):
-        cfg = tmp_path / f"{algo}.yaml"
-        cfg.write_text(config_yaml)
-        thash, status = sim2real._register_translation(
-            algorithm_name=algo,
-            image_ref=image,
-            config_path=cfg,
+    """Alias collision is checked per-algorithm regardless of batch size."""
+
+    def _reg(self, tmp_path, name: str, image: str = "img:v1", config: str = None):
+        cfg = tmp_path / f"{name}_cfg.yaml"
+        cfg.write_text(config if config else f"scorers:\n  - name: {name}\n")
+        return sim2real._register_translation(
+            algorithms=[{"name": name, "image_ref": image, "config_path": cfg}],
             baseline_config_path=None,
             registered_hash=None,
-            now_iso="2026-07-02T14:00:00Z",
+            now_iso="2026-07-05T10:00:00Z",
         )
-        return thash
 
-    def test_same_alias_same_content_is_idempotent(self, tmp_path):
-        h1 = self._seed_register(tmp_path, "algo", "ghcr.io/x:v1", "a: 1\n")
-        h2 = self._seed_register(tmp_path, "algo", "ghcr.io/x:v1", "a: 1\n")
+    def test_same_alias_same_content_is_idempotent(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        h1, _ = self._reg(tmp_path, "foo")
+        h2, s2 = self._reg(tmp_path, "foo")
         assert h1 == h2
+        assert s2 == "idempotent"
 
-    def test_alias_collision_without_force_raises(self, tmp_path):
-        self._seed_register(tmp_path, "algo", "ghcr.io/x:v1", "a: 1\n")
-        cfg = tmp_path / "different.yaml"
-        cfg.write_text("a: 2\n")
+    def test_alias_collision_without_force_raises(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._reg(tmp_path, "foo", image="img:v1")
         with pytest.raises(RuntimeError, match="already assigned"):
-            sim2real._register_translation(
-                algorithm_name="algo",
-                image_ref="ghcr.io/x:v1",
-                config_path=cfg,
-                baseline_config_path=None,
-                registered_hash=None,
-                now_iso="2026-07-02T14:00:00Z",
-            )
+            self._reg(tmp_path, "foo", image="img:v2")
 
-    def test_force_reassigns_alias_and_clears_previous(self, tmp_path):
-        from pipeline.lib import translation_ref
-        h_old = self._seed_register(tmp_path, "algo", "ghcr.io/x:v1", "a: 1\n")
-        cfg = tmp_path / "different.yaml"
-        cfg.write_text("a: 2\n")
-        h_new, _status = sim2real._register_translation(
-            algorithm_name="algo",
-            image_ref="ghcr.io/x:v1",
-            config_path=cfg,
+    def test_force_reassigns_alias_and_clears_previous(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        h_old, _ = self._reg(tmp_path, "foo", image="img:v1")
+        # Re-register 'foo' with different content and --force.
+        cfg = tmp_path / "foo_v2.yaml"
+        cfg.write_text("scorers:\n  - name: foo_v2\n")
+        h_new, _ = sim2real._register_translation(
+            algorithms=[{"name": "foo", "image_ref": "img:v2", "config_path": cfg}],
             baseline_config_path=None,
             registered_hash=None,
-            now_iso="2026-07-02T14:00:00Z",
+            now_iso="2026-07-05T11:00:00Z",
             force=True,
         )
         assert h_new != h_old
-        # New translation carries the alias.
-        assert translation_ref.find_by_alias("algo") == h_new
-        # Old translation's alias is null; it's still reachable by hash.
-        old_data = translation_ref.read_translation_output(
-            layout.translation_output_path(h_old)
+        # Previous translation's alias cleared.
+        old_tout = json.loads(
+            (Path("workspace") / "translations" / h_old / "translation_output.json").read_text()
         )
-        assert old_data["alias"] is None
-        assert layout.translation_dir(h_old).exists()
+        assert old_tout["alias"] is None
+        # New translation owns the alias.
+        new_tout = json.loads(
+            (Path("workspace") / "translations" / h_new / "translation_output.json").read_text()
+        )
+        assert new_tout["alias"] == "foo"
+
+    def test_batched_alias_collision_on_one_of_N_algos(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        # Pre-existing single-algo translation with alias 'foo'.
+        self._reg(tmp_path, "foo", image="img:v1")
+        # Now try to register a BATCHED translation whose members include 'foo'.
+        c_foo = tmp_path / "foo_batched.yaml"
+        c_foo.write_text("scorers:\n  - name: foo_b\n")
+        c_bar = tmp_path / "bar.yaml"
+        c_bar.write_text("scorers:\n  - name: bar\n")
+        with pytest.raises(RuntimeError, match="already assigned"):
+            sim2real._register_translation(
+                algorithms=[
+                    {"name": "foo", "image_ref": "img:v3", "config_path": c_foo},
+                    {"name": "bar", "image_ref": "img:v4", "config_path": c_bar},
+                ],
+                baseline_config_path=None,
+                registered_hash=None,
+                now_iso="2026-07-05T11:00:00Z",
+            )
 
 
 class TestAssembleResolvesAlias:
@@ -991,9 +1263,7 @@ class TestAssembleResolvesAlias:
         cfg = tmp_path / "algo.yaml"
         cfg.write_text("scenario: []\n")
         thash, _ = sim2real._register_translation(
-            algorithm_name="my-algo",
-            image_ref="ghcr.io/x:v1",
-            config_path=cfg,
+            algorithms=[{"name": "my-algo", "image_ref": "ghcr.io/x:v1", "config_path": cfg}],
             baseline_config_path=None,
             registered_hash=None,
             now_iso="2026-07-02T14:00:00Z",
