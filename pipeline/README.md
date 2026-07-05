@@ -40,6 +40,15 @@ The experiment repo must contain:
 - `workloads/` directory referenced from `transfer.yaml:workloads`
 - `workspace/` in `.gitignore`
 
+### Per-algorithm `byo:` marker
+
+An algorithm entry may carry `byo: true` to indicate the image is pre-built and the entry has no BLIS-format source. When present:
+
+- `algorithms[i].source:` is optional for that entry (the loader otherwise requires it).
+- Top-level `component:` is optional when *every* algorithm entry carries `byo: true` — BYO manifests have no submodule to pin. Mixed manifests (any non-BYO entry) still require `component:`.
+
+`sim2real translate` refuses to run on a BYO entry (there is no `.go` source for the skill to translate) and `sim2real build` refuses to run on an all-BYO manifest (there is nothing to build). Attach pre-built BYO images with `sim2real translation register` directly. `sim2real assemble` and `sim2real-check` treat BYO entries the same as BLIS entries at the consumption boundary.
+
 `pipeline/pipeline.yaml` is the static Tekton Pipeline definition (applied by `cluster.py provision`; `sim2real assemble` generates PipelineRuns that reference it).
 
 ---
