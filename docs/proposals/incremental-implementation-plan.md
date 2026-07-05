@@ -38,6 +38,7 @@ The work happens on a branch with no backward-compatibility requirement. There i
 | 4 | Start a brand-new experiment from a folder with `algorithms/`, `workloads/`, and a config doc — auto-scaffold the scenario files | Avoid writing `transfer.yaml` by hand |
 | 5 | Run N replicas, see variability, decide to add more without manual file shuffling | Statistical confidence without copy-aside |
 | 6 | Edit `transfer.yaml`, type `deploy.py run`, have the system catch up automatically | Forget the assemble step without consequence |
+| 7 | Run `/sim2real-analyze --run R --analysis <name>` and get a named-standard analysis chart + summary against a step-2 run | Invoke a curated analysis without hand-writing the script every time |
 
 Each row is a coherent end-user demo. Each is a real user need today.
 
@@ -48,7 +49,8 @@ Each row is a coherent end-user demo. Each is a real user need today.
 - **Step 3 (check) right after step 2.** `sim2real-check` validates translation outputs. Landing it immediately after the producer step (2) keeps the producer-consumer chain in order and validates step 2's outputs before step 4/5's more invasive changes pile on. It also pre-dates replicas — landing check first means step 5's replica work grows a pre-replica check rather than being replica-aware from birth.
 - **Step 3 before step 4.** Bootstrap's job is to scaffold inputs for translate. Don't build the scaffolder before the thing it's scaffolding for works. (Check does not consume bootstrap's outputs, so check comes first.)
 - **Step 5 before step 6.** Replicas changes the pair-key schema. Validate/execute is a refactor of how commands compose. Doing the schema change first means the refactor in step 6 is over the final schema, not over a moving target.
-- **Step 6 last.** This is the polish step. Doing it earlier would mean rewriting validators each time a command's shape changes. Let the shapes settle, then formalize the pattern across them.
+- **Step 6 before step 7.** Step 7 refactors the `sim2real-analyze` skill onto the workspace's `sim2real resolve` interface and introduces a standard-analysis library. It's the last skill port and rides on top of every prior step's outputs; landing it after the pipeline commands settle their shapes keeps the analysis library from being rewritten against a moving target.
+- **Step 7 last.** This is the second polish step — analysis surface expansion. Doing it earlier would mean rewriting standard analyses each time the underlying phase model changes (steps 3, 5). Let the phase model settle first.
 
 ## What "working" means concretely at each step
 
@@ -61,6 +63,7 @@ The bar is "I can run a sequence of commands and get a real result on a real clu
 - **End of step 4**: start from a BLIS-output folder, run `/sim2real-bootstrap`, then proceed with step 2's flow without hand-writing `transfer.yaml`.
 - **End of step 5**: `sim2real assemble --replicas 3` then `deploy.py run` produces three independent results subtrees per (workload, phase). Re-assemble with `--replicas 5`, run again, get two more.
 - **End of step 6**: edit `transfer.yaml`, type `deploy.py run --run R`, watch it auto-assemble and dispatch in one breath.
+- **End of step 7**: `/sim2real-analyze --run R --analysis latency-table` prints an N-phase comparison table (baseline + each algorithm); `/sim2real-analyze --run R --analysis ttft-cdf` writes a per-workload CDF chart across all collected phases to `runs/R/results_charts/`.
 
 ## Step-by-step scope guidance
 
@@ -146,6 +149,19 @@ The bar is "I can run a sequence of commands and get a real result on a real clu
 **Don't**:
 - Don't auto-execute `translate` by default. It's expensive and operator-surprising.
 - Don't go back and refactor early commands to also use the formal pattern unless it's a small change. The pattern can spread incrementally over time.
+
+### Step 7 — `sim2real-analyze` port + standard analysis library
+
+**Do**:
+- Port `.claude/skills/sim2real-analyze/SKILL.md` to the three-dimensional workspace via the `sim2real resolve --run R` interface introduced in step 3. Retain the `--run NAME` argument (already present); replace the hardcoded `phase ∈ {baseline, treatment}` scan with dynamic enumeration from resolve's `phases_with_data` and `workloads_by_phase` fields.
+- Rewrite `compute_table.py` (the single baked-in analysis) to iterate the resolved phase list; report per-workload metrics for every collected package, not just a baseline-vs-treatment binary. Multi-algorithm and multi-baseline manifests render as N-column comparisons.
+- Adapt the SKILL.md's example analysis scripts (TTFT distribution, throughput over time, etc.) to the new phase model.
+- Introduce a `.claude/skills/sim2real-analyze/analyses/` directory containing a small library of ready-to-run standard analyses invocable by name from the skill (e.g., `/sim2real-analyze --run R --analysis ttft-cdf`). Analyses land as small Python scripts with a shared runtime shim (input: resolved-run JSON + output-dir; output: chart PNG + JSON summary).
+
+**Don't**:
+- Don't rewrite analysis semantics — TTFT / TPOT / E2E metric definitions stay verbatim; only the phase-iteration and I/O shell change.
+- Don't add cross-run comparison in this step. The skill's interactive loop can still handle it (as it does today), but no standard analysis in the new library takes multiple runs as input. Cross-run is future work.
+- Don't fold in `sim2real-check` work. That's step 3.
 
 ## Risks and what to watch for
 
