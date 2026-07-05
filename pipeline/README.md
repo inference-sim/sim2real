@@ -34,7 +34,7 @@ python pipeline/deploy.py      --experiment-root ../admission-control
 ```
 
 The experiment repo must contain:
-- `transfer.yaml` (or `config/transfer.yaml` for backward compat) — v3 schema with `component`, `baselines`, `algorithms`, `workloads` fields
+- `transfer.yaml` (or `config/transfer.yaml` for backward compat) — v3 schema with `baselines`, `algorithms`, `workloads` fields; `component:` required unless every algorithm carries `byo: true` (see [Per-algorithm `byo:` marker](#per-algorithm-byo-marker) below)
 - `baselines/<name>.yaml` — llmdbenchmark-style scenario file per baseline (referenced from `transfer.yaml:baselines[].scenario`)
 - `baselines/defaults/*.yaml` (optional) — framework workaround fragments merged as an overlay under each baseline (opt out via `defaults.disable`)
 - `workloads/` directory referenced from `transfer.yaml:workloads`
