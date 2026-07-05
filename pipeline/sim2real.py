@@ -446,28 +446,40 @@ def build_parser() -> argparse.ArgumentParser:
     translation = sub.add_parser("translation", help="Manage translations")
     tsub = translation.add_subparsers(dest="subcommand", required=True)
 
-    reg = tsub.add_parser("register", help="Register a BYO (pre-built) translation")
+    reg = tsub.add_parser(
+        "register",
+        help="Register one or more BYO (pre-built) translations into a single translation dir",
+    )
     reg.add_argument(
         "--algorithm",
         required=True,
-        type=_validate_algorithm_name,
+        action="append",
+        metavar="ALG",
         help=(
-            "Algorithm name; also written as the translation's alias. "
-            "Must match [A-Za-z0-9][A-Za-z0-9._-]*, max 128 chars; "
-            "'.' and '..' are rejected."
+            "Algorithm spec — repeatable. Preferred form: "
+            "'<name>=<image-ref>@<config-path>' (all fields inline). "
+            "Deprecated form: '<name>' alone, with --image and --config "
+            "supplied separately (N=1 only; emits deprecation warning). "
+            "Names match [A-Za-z0-9][A-Za-z0-9._-]*, max 128 chars."
         ),
     )
     reg.add_argument(
         "--image",
-        required=True,
+        default=None,
         metavar="REF",
-        help="EPP image reference (e.g. ghcr.io/foo/bar:v1 or ...@sha256:...)",
+        help=(
+            "DEPRECATED: EPP image reference. Use the '<name>=<image>@<config>' "
+            "form of --algorithm instead."
+        ),
     )
     reg.add_argument(
         "--config",
-        required=True,
+        default=None,
         metavar="PATH",
-        help="Path to the treatment overlay YAML",
+        help=(
+            "DEPRECATED: Treatment overlay YAML path. Use the "
+            "'<name>=<image>@<config>' form of --algorithm instead."
+        ),
     )
     reg.add_argument(
         "--baseline-config",
@@ -484,7 +496,7 @@ def build_parser() -> argparse.ArgumentParser:
     reg.add_argument(
         "--force",
         action="store_true",
-        help="Reassign the alias (--algorithm) from a previous translation.",
+        help="Reassign an alias from a previous translation.",
     )
 
     asm = sub.add_parser(
@@ -588,20 +600,88 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_translation_register(args) -> int:
-    config_path = Path(args.config)
+    # Normalize CLI forms into a list of AlgorithmSpec dicts.
+    algo_values: list[str] = args.algorithm  # action='append' guarantees list
+    algorithms: list[dict] = []
+    if args.image is not None or args.config is not None:
+        # Deprecated form: single --algorithm plus separate --image/--config.
+        if len(algo_values) != 1:
+            print(
+                "error: --image/--config are only valid with a single --algorithm "
+                "in the deprecated form; use --algorithm '<name>=<image>@<config>' "
+                "for multiple algorithms",
+                file=sys.stderr,
+            )
+            return 2
+        if args.image is None or args.config is None:
+            print(
+                "error: deprecated form requires BOTH --image and --config",
+                file=sys.stderr,
+            )
+            return 2
+        if "=" in algo_values[0]:
+            print(
+                f"error: --algorithm value {algo_values[0]!r} appears to be an "
+                "inline triple; do not combine with --image/--config",
+                file=sys.stderr,
+            )
+            return 2
+        from pipeline.lib import translation_ref
+        try:
+            name = translation_ref.validate_name(algo_values[0])
+        except translation_ref.ValidationError as exc:
+            print(f"error: --algorithm: {exc}", file=sys.stderr)
+            return 2
+        algorithms.append({
+            "name": name,
+            "image_ref": args.image,
+            "config_path": Path(args.config),
+        })
+        print(
+            "warning: --image/--config are deprecated; use "
+            "--algorithm '<name>=<image-ref>@<config-path>' instead",
+            file=sys.stderr,
+        )
+    else:
+        # New form: each --algorithm value is an inline triple.
+        for val in algo_values:
+            try:
+                name, image_ref, config_path_str = _parse_algorithm_triple(val)
+            except argparse.ArgumentTypeError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            algorithms.append({
+                "name": name,
+                "image_ref": image_ref,
+                "config_path": Path(config_path_str),
+            })
+
+    # Duplicate-name check (either form).
+    seen: dict[str, int] = {}
+    for a in algorithms:
+        seen[a["name"]] = seen.get(a["name"], 0) + 1
+    dupes = sorted(n for n, c in seen.items() if c > 1)
+    if dupes:
+        print(
+            f"error: duplicate algorithm name(s) in one register call: "
+            f"{', '.join(dupes)}",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Existence + YAML validation for every config file (fail-fast, no writes).
+    for a in algorithms:
+        cp: Path = a["config_path"]
+        if not cp.exists():
+            print(f"error: config file not found: {cp}", file=sys.stderr)
+            return 2
+        try:
+            yaml.safe_load(cp.read_text())
+        except yaml.YAMLError as exc:
+            print(f"error: {cp} is not valid YAML: {exc}", file=sys.stderr)
+            return 2
+
     baseline_config_path = Path(args.baseline_config) if args.baseline_config else None
-
-    if not config_path.exists():
-        print(f"error: --config file not found: {config_path}", file=sys.stderr)
-        return 2
-
-    # Fail-fast YAML validation. Malformed overlay → error before any writes.
-    try:
-        yaml.safe_load(config_path.read_text())
-    except yaml.YAMLError as e:
-        print(f"error: --config is not valid YAML: {e}", file=sys.stderr)
-        return 2
-
     if baseline_config_path is not None:
         if not baseline_config_path.exists():
             print(
@@ -611,28 +691,21 @@ def _cmd_translation_register(args) -> int:
             return 2
         try:
             yaml.safe_load(baseline_config_path.read_text())
-        except yaml.YAMLError as e:
-            print(f"error: --baseline-config is not valid YAML: {e}", file=sys.stderr)
+        except yaml.YAMLError as exc:
+            print(f"error: --baseline-config is not valid YAML: {exc}", file=sys.stderr)
             return 2
 
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     try:
         thash, status = _register_translation(
-            algorithm_name=args.algorithm,
-            image_ref=args.image,
-            config_path=config_path,
+            algorithms=algorithms,
             baseline_config_path=baseline_config_path,
             registered_hash=args.registered_hash,
             now_iso=now_iso,
             force=args.force,
         )
     except (RuntimeError, ValueError, OSError) as e:
-        # OSError covers filesystem faults from mkdir/write_text/write_bytes/
-        # read_bytes inside _register_translation (disk full, permission
-        # denied, missing parent unwritable). Surfacing as the same
-        # `error: ...; return 2` shape used elsewhere keeps failures
-        # consistent with the rest of the command.
         print(f"error: {e}", file=sys.stderr)
         return 2
 
@@ -642,13 +715,13 @@ def _cmd_translation_register(args) -> int:
             file=sys.stderr,
         )
     else:
-        digest = _extract_digest_from_ref(args.image)
-        if digest is None:
-            print(
-                "warning: image_digest recorded as null "
-                "(no @sha256: in --image); hash falls back to using image_ref",
-                file=sys.stderr,
-            )
+        for a in algorithms:
+            if _extract_digest_from_ref(a["image_ref"]) is None:
+                print(
+                    f"warning: image_digest for {a['name']!r} recorded as null "
+                    f"(no @sha256: in image); hash falls back to using image_ref",
+                    file=sys.stderr,
+                )
     print(f"registered translation {thash}")
     return 0
 

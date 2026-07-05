@@ -514,46 +514,51 @@ class TestRegisterTranslation:
 
 
 class TestBuildParser:
-    def test_parses_translation_register(self):
-        parser = sim2real.build_parser()
-        args = parser.parse_args([
+    def test_parses_new_form_single_algo(self):
+        p = sim2real.build_parser()
+        args = p.parse_args([
             "translation", "register",
-            "--algorithm", "softreflective",
-            "--image", "ghcr.io/foo:v1",
-            "--config", "/tmp/treatment.yaml",
+            "--algorithm", "foo=img:v1@overlay.yaml",
         ])
         assert args.command == "translation"
         assert args.subcommand == "register"
-        assert args.algorithm == "softreflective"
-        assert args.image == "ghcr.io/foo:v1"
-        assert args.config == "/tmp/treatment.yaml"
-        assert args.baseline_config is None
-        assert args.registered_hash is None
+        assert args.algorithm == ["foo=img:v1@overlay.yaml"]
+        assert args.image is None
+        assert args.config is None
+
+    def test_parses_new_form_multi_algo(self):
+        p = sim2real.build_parser()
+        args = p.parse_args([
+            "translation", "register",
+            "--algorithm", "foo=img1@o1.yaml",
+            "--algorithm", "bar=img2@o2.yaml",
+        ])
+        assert args.algorithm == ["foo=img1@o1.yaml", "bar=img2@o2.yaml"]
+
+    def test_parses_deprecated_form(self):
+        p = sim2real.build_parser()
+        args = p.parse_args([
+            "translation", "register",
+            "--algorithm", "foo",
+            "--image", "img:v1",
+            "--config", "overlay.yaml",
+        ])
+        assert args.algorithm == ["foo"]
+        assert args.image == "img:v1"
+        assert args.config == "overlay.yaml"
 
     def test_accepts_baseline_and_registered_hash(self):
-        parser = sim2real.build_parser()
-        args = parser.parse_args([
+        p = sim2real.build_parser()
+        args = p.parse_args([
             "translation", "register",
-            "--algorithm", "softreflective",
-            "--image", "ghcr.io/foo:v1",
-            "--config", "/tmp/treatment.yaml",
-            "--baseline-config", "/tmp/baseline.yaml",
-            "--registered-hash", "abcd" * 16,
+            "--algorithm", "foo=img:v1@overlay.yaml",
+            "--baseline-config", "b.yaml",
+            "--registered-hash", "abc",
+            "--force",
         ])
-        assert args.baseline_config == "/tmp/baseline.yaml"
-        assert args.registered_hash == "abcd" * 16
-
-    def test_rejects_bad_algorithm_name(self):
-        # Leading hyphen fails the shared regex; use it instead of Bad_Name
-        # (uppercase+underscore are now accepted per step-2 widening).
-        parser = sim2real.build_parser()
-        with pytest.raises(SystemExit):
-            parser.parse_args([
-                "translation", "register",
-                "--algorithm", "-bad-name",
-                "--image", "ghcr.io/foo:v1",
-                "--config", "/tmp/treatment.yaml",
-            ])
+        assert args.baseline_config == "b.yaml"
+        assert args.registered_hash == "abc"
+        assert args.force is True
 
 
 class TestMainEndToEnd:
