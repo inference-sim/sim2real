@@ -1,25 +1,30 @@
 ---
 name: sim2real-bootstrap
 description: |
-  Bootstrap a BLIS-generated experiment folder into a sim2real transfer bundle.
-  Use when an experiment folder has algorithms/, workloads/, and config but lacks
-  transfer.yaml, baselines/, or a component submodule. Derives and assembles all
-  artifacts needed for the sim2real pipeline (transfer.yaml, baseline scenarios,
-  component submodule, workload selection) with user approval at each gate.
-argument-hint: "[experiment-folder-path]"
+  Bootstrap an experiment repo into a sim2real transfer bundle. Two modes:
+  (1) BLIS mode (default) — for BLIS-generated folders with algorithms/,
+      workloads/, and config; derives transfer.yaml, baselines/, and a
+      component submodule with user approval at each gate.
+  (2) --byo mode — for operators arriving with pre-built EPP images plus a
+      full baseline scenario and per-algorithm overlays; scaffolds
+      transfer.yaml with `byo: true` markers and emits a copy-pasteable
+      batched `sim2real translation register` command.
+argument-hint: "[experiment-folder-path] [--byo ...]"
 user-invocable: true
 ---
 
 # sim2real-bootstrap
 
-Turn a BLIS-generated experiment folder into a pipeline-ready sim2real bundle.
+Turn an experiment folder into a pipeline-ready sim2real bundle. This skill has two modes:
 
-> For pre-built EPP images without BLIS-format inputs (no `algorithms/*.go`, no
-> `config.md`), use `--byo` mode instead — the operator supplies a baseline
-> scenario and per-algorithm overlays directly, and bootstrap emits a batched
-> `sim2real translation register` command.
+- **BLIS mode (default)** — the operator has a BLIS-generated experiment folder (with `algorithms/*.go`, `workloads/*.yaml`, and either `config.md` or `top3_selection.json`). Bootstrap parses those inputs, derives a component submodule, generates baseline scenarios, and emits `transfer.yaml`. Documented in Tasks 0-6 below.
+- **`--byo` mode** — the operator has a pre-built EPP image (or several), a full baseline scenario YAML, and per-algorithm overlay YAMLs, but no BLIS artifacts. Bootstrap copies those files into canonical experiment-repo locations, emits `transfer.yaml` with per-algorithm `byo: true` markers, and prints a batched `sim2real translation register` command. Documented in the BYO section below.
 
-## Arguments
+## Dispatch
+
+If any of `--byo`, `--baseline`, `--algorithm`, `--algorithm-image`, `--algorithm-config`, `--scenario`, `--force`, or `--non-interactive` appears in `$ARGUMENTS`, dispatch to the BYO branch (see the `--byo` mode section). Otherwise dispatch to BLIS mode (Tasks 0-6).
+
+## Arguments (BLIS mode)
 
 `$ARGUMENTS` is the path to the experiment folder. Defaults to the current directory if omitted.
 
@@ -432,17 +437,87 @@ to produce the plugin sources, then `sim2real build` compiles them into images):
        /sim2real-check --run <run_name>
 ```
 
-If the operator instead has pre-built EPP images on hand (no skill-driven
-translation), they can skip steps 2-5 and register the images directly with
-the batched register form:
+For pre-built EPP images (no skill-driven translation), see the [`--byo` mode](#--byo-mode) section below — the operator supplies baseline + overlays directly and bootstrap emits a batched `translation register` command that skips steps 2-5 above.
+
+## `--byo` mode
+
+Use `--byo` when the operator has a pre-built EPP image (or several), a full baseline scenario YAML, and per-algorithm overlay YAMLs, but no BLIS artifacts. Bootstrap copies the operator's files into canonical experiment-repo locations, emits `transfer.yaml` with `byo: true` per-algorithm markers (no `component:` — BYO has no submodule), and prints a batched `sim2real translation register` command.
+
+### Invocation
+
+```bash
+python3 "$SKILL_DIR/byo.py" \
+    --byo \
+    --baseline <name>=<scenario-path> \
+    --algorithm <name> [--algorithm <name>]... \
+    --algorithm-image <name>=<image-ref> [--algorithm-image ...]... \
+    --algorithm-config <name>=<overlay-path> [--algorithm-config ...]... \
+    [--scenario <name>] [--force] [--non-interactive]
+```
+
+The BYO branch is implemented in `byo.py` (bundled with this skill). SKILL.md's role is to accept operator input (structured args OR natural-language prose), collect any missing fields, and hand off to `byo.py`.
+
+### Input collection (interactive TTY)
+
+Operators may invoke the skill in either shape:
+
+1. **Structured args** — the invocation above, verbatim.
+2. **Natural language** — e.g., *"bootstrap --byo with baseline at /path/baseline.yaml, algorithm foo image ghcr.io/foo:tag config /path/foo.yaml, algorithm bar image ghcr.io/bar@sha256:... config /path/bar.yaml"*. Parse the description into structured args (algorithm/image/config triples + baseline).
+
+If any required field is missing after parsing, prompt with plain-text numbered prompts (one prompt per missing field). Example prompts:
 
 ```
-python pipeline/sim2real.py translation register \
-    --algorithm <name>=<image-ref>@<config-path>          # repeatable
+Missing algorithm image for 'foo'. Enter the image reference:
+> 
 ```
 
-(The step-1 single-algorithm form `--algorithm NAME --image REF --config PATH`
-still works but emits a deprecation warning — prefer the batched form.)
+Do NOT use `AskUserQuestion` (project preference — see the persistent user memory on this repo).
+
+If stdin is not a TTY OR the operator passed `--non-interactive`, do not prompt — invoke `byo.py` with whatever was supplied and let it fatal-error on missing fields.
+
+### Reserved names
+
+- `default`, `defaults` — reserved for any role.
+- `baseline` — reserved as an algorithm name only (a baseline named `baseline` is the canonical case).
+
+### On-disk layout (produced by `byo.py`)
+
+```
+<experiment-root>/
+  transfer.yaml                                  <- BYO transfer.yaml (byo: true per algo, no component:)
+  baselines/
+    <baseline-name>.yaml                         <- copy of operator's baseline scenario
+    defaults/*.yaml                              <- framework fragments (all listed under defaults.disable)
+  algorithms/
+    <algo-1>/<algo-1>_config.yaml                <- copy of operator's overlay
+    <algo-2>/<algo-2>_config.yaml                <- copy of operator's overlay
+  workloads/*.yaml                               <- pre-existing (operator brought)
+```
+
+Copies are atomic (write-to-temp + rename). Destinations validated to lie inside `<experiment-root>`; symlinks that escape are rejected. YAML inputs are parse-validated (single-doc, mapping root, non-empty) before any writes.
+
+### Emitted register command
+
+At success, `byo.py` prints:
+
+```
+cd '/absolute/path/to/exp-root'
+sim2real translation register \
+    --algorithm '<name1>=<image1>@algorithms/<name1>/<name1>_config.yaml' \
+    --algorithm '<name2>=<image2>@algorithms/<name2>/<name2>_config.yaml'
+```
+
+All paths quoted with `shlex.quote`. Bootstrap does not invoke `register` itself — the operator retains control.
+
+### After BYO bootstrap
+
+```
+1. Run the emitted register command above.
+2. Assemble a run:
+     sim2real assemble --translation <hash> --cluster <cluster_id> --run <run-name>
+3. Deploy:
+     python pipeline/deploy.py run
+```
 
 ## Reference: Bundled Files
 
@@ -450,7 +525,8 @@ This skill ships with supporting files in its directory. Invoke in place — do 
 
 | File | Purpose |
 |------|---------|
-| `generate_from_config.py` | Parses `config.md` markdown tables → scenario YAMLs with provenance comments. Preferred for most experiments. Handles hardware normalization, bare-flag prefix-caching input/output, and unknown model/hardware detection. |
-| `generate_scenarios.py` | Converts JSON config (`top3_selection.json`) → scenario YAMLs. Use when JSON input exists. |
+| `generate_from_config.py` | Parses `config.md` markdown tables → scenario YAMLs with provenance comments. Preferred for most BLIS experiments. Handles hardware normalization, bare-flag prefix-caching input/output, and unknown model/hardware detection. |
+| `generate_scenarios.py` | Converts JSON config (`top3_selection.json`) → scenario YAMLs. Use when JSON input exists (BLIS). |
 | `generate_scenarios.README.md` | Coverage map for the JSON-input path. Documents field mappings, omission rules, and gaps. |
-| `templates/defaults/*.yaml` | Framework-owned baseline workaround fragments (RBAC, request-id, verbosity). Copied into `<experiment-root>/baselines/defaults/` at task-4b so each experiment is self-contained and reproducible. |
+| `byo.py` | Implements the `--byo` branch — argument parsing, YAML validation, path-safe copy operations, `transfer.yaml` emission, batched `sim2real translation register` command generation. Invoked by SKILL.md's dispatch when `--byo` (or any BYO-only flag) is passed. |
+| `templates/defaults/*.yaml` | Framework-owned baseline workaround fragments (RBAC, request-id, verbosity). Copied into `<experiment-root>/baselines/defaults/` at BLIS task-4b and at BYO run time, so every experiment is self-contained and reproducible. |
