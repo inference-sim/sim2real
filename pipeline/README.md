@@ -178,7 +178,7 @@ sha256(canonical-json(sorted-by-name list of {name, image, config}))
 - `--config` file missing or malformed YAML → exit 2, no writes.
 - Existing translation directory records different algorithm names (hash collision) → exit 2, no writes.
 - `--registered-hash` given and does not match computed → exit 2, no writes.
-- Another translation already owns an `--algorithm` alias with a different hash → exit 2, no writes; re-run with `--force` to reassign (N=1 only).
+- Another translation already owns an `--algorithm` alias (an algorithm name from the batch collides with an existing translation's alias, on any N) → exit 2, no writes; re-run with `--force` to clear the previous owners' aliases before proceeding.
 - Duplicate algorithm names within a single invocation → exit 2, no writes.
 
 ---
