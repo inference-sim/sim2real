@@ -163,20 +163,19 @@ def _compute_translation_hash(entries: list[dict]) -> str:
 
 def _build_translation_output(
     *,
-    algorithm_name: str,
-    image_ref: str,
-    image_digest: str | None,
-    config_path: str,
+    algorithms: list[dict],
     translation_hash: str,
     source: str,
     alias: str | None,
     created_at: str,
 ) -> dict:
-    """Build the ``translation_output.json`` body for step-2 schema.
+    """Build the ``translation_output.json`` body — step-2 batched shape.
 
-    Single-algorithm shape (BYO register in this PR). ``image_ref`` and
-    ``image_digest`` live per-algo. ``source_path``/``source_sha256`` are
-    ``None`` for BYO (populated by the skill-driven ``translate`` in PR 3).
+    Each entry in ``algorithms`` is ``{"name", "image_ref", "image_digest",
+    "config_path"}`` (``config_path`` is the relative path
+    ``generated/<name>/<name>_config.yaml``). ``source_path``/``source_sha256``
+    are ``None`` for BYO. ``alias`` is the shared translation-level alias
+    (algorithm name when N==1, ``None`` when N>1).
     """
     return {
         "version": 1,
@@ -185,13 +184,14 @@ def _build_translation_output(
         "alias": alias,
         "algorithms": [
             {
-                "name": algorithm_name,
+                "name": a["name"],
                 "source_path": None,
                 "source_sha256": None,
-                "config_path": config_path,
-                "image_ref": image_ref,
-                "image_digest": image_digest,
+                "config_path": a["config_path"],
+                "image_ref": a["image_ref"],
+                "image_digest": a["image_digest"],
             }
+            for a in algorithms
         ],
         "created_at": created_at,
     }
@@ -316,47 +316,80 @@ def _translate_delete_dir(translation_hash: str) -> None:
 
 
 def _build_registered(
-    image_ref: str,
-    image_digest: str | None,
+    prepared: list[dict],
     registered_at: str,
 ) -> dict:
+    """Build the ``registered.json`` body for a BYO translation.
+
+    Batched shape: N per-algorithm entries under ``algorithms``. For N==1
+    the shape is the same (a list of one). ``prepared`` is the internal
+    per-algorithm record produced by ``_register_translation`` and carries
+    ``name``, ``image_ref``, ``image_digest``.
+    """
     return {
         "version": 1,
-        "image_ref": image_ref,
-        "image_digest": image_digest,
         "source": "byo",
         "registered_at": registered_at,
+        "algorithms": [
+            {
+                "name": p["name"],
+                "image_ref": p["image_ref"],
+                "image_digest": p["image_digest"],
+            }
+            for p in prepared
+        ],
     }
 
 
 def _register_translation(
     *,
-    algorithm_name: str,
-    image_ref: str,
-    config_path: Path,
+    algorithms: list[dict],
     baseline_config_path: Path | None,
     registered_hash: str | None,
     now_iso: str,
     force: bool = False,
 ) -> tuple[str, str]:
-    """Register a BYO translation on disk.
+    """Register a BYO translation on disk (single or batched).
 
-    Returns ``(translation_hash, status)`` where status is either
+    ``algorithms`` is a list of ``AlgorithmSpec`` dicts:
+    ``{"name": str, "image_ref": str, "config_path": Path}``. Caller has
+    already validated names and confirmed each config file exists and
+    parses as YAML — this function does not re-validate.
+
+    Alias policy: when ``len(algorithms) == 1``, the translation's
+    top-level ``alias`` is the sole algorithm's name (matches step-1
+    behavior for N=1). When ``len(algorithms) > 1``, top-level ``alias``
+    is ``None`` — batched translations are referenced by hash. Alias
+    collision is still checked per-algorithm name against
+    ``find_by_alias`` regardless of N (each algo name must not shadow an
+    existing translation's alias unless ``force`` is set, in which case
+    the previous alias is cleared).
+
+    Returns ``(translation_hash, status)`` where ``status`` is
     ``"created"`` (fresh registration) or ``"idempotent"`` (matching
-    translation already existed; no writes performed).
-
-    Raises:
-        RuntimeError: ``--registered-hash`` given and does not match
-            computed; OR alias collision on a different hash without
-            ``force``.
-        ValueError: existing translation dir has the same hash but records
-            a different algorithm name (corrupted state or collision).
+    translation already existed; no writes).
     """
     from pipeline.lib import translation_ref
-    config_bytes = config_path.read_bytes()
-    image_digest = _extract_digest_from_ref(image_ref)
-    digest_or_ref = image_digest if image_digest is not None else image_ref
-    thash = _compute_translation_hash(digest_or_ref, config_bytes, algorithm_name)
+
+    # Prepare per-algorithm derived fields: config bytes, digest, digest_or_ref.
+    prepared: list[dict] = []
+    for a in algorithms:
+        cfg_bytes = a["config_path"].read_bytes()
+        digest = _extract_digest_from_ref(a["image_ref"])
+        prepared.append({
+            "name": a["name"],
+            "image_ref": a["image_ref"],
+            "image_digest": digest,
+            "digest_or_ref": digest if digest is not None else a["image_ref"],
+            "config_bytes": cfg_bytes,
+            "config_sha": hashlib.sha256(cfg_bytes).hexdigest(),
+        })
+
+    # Compute the batched translation hash.
+    thash = _compute_translation_hash([
+        {"name": p["name"], "image": p["digest_or_ref"], "config_sha": p["config_sha"]}
+        for p in prepared
+    ])
 
     if registered_hash is not None and registered_hash != thash:
         raise RuntimeError(
@@ -366,17 +399,21 @@ def _register_translation(
     out_path = layout.translation_output_path(thash)
     if out_path.exists():
         existing = translation_ref.read_translation_output(out_path)
-        existing_algos = [a.get("name") for a in existing.get("algorithms", [])]
-        if algorithm_name not in existing_algos:
+        existing_names = sorted(a.get("name") for a in existing.get("algorithms", []))
+        wanted_names = sorted(p["name"] for p in prepared)
+        if existing_names != wanted_names:
             raise ValueError(
-                f"algorithm name mismatch: translation {thash} records "
-                f"{existing_algos}, refusing to register {algorithm_name!r}"
+                f"algorithm-set mismatch: translation {thash} records "
+                f"{existing_names}, refusing to re-register with {wanted_names} "
+                "(hash collision — investigate)"
             )
-        missing = []
+        # Verify all on-disk artifacts are present; incomplete state → surface.
+        missing: list[str] = []
         if not layout.registered_path(thash).exists():
             missing.append("registered.json")
-        if not layout.generated_config_path(thash, algorithm_name).exists():
-            missing.append(f"generated/{algorithm_name}/{algorithm_name}_config.yaml")
+        for p in prepared:
+            if not layout.generated_config_path(thash, p["name"]).exists():
+                missing.append(f"generated/{p['name']}/{p['name']}_config.yaml")
         if missing:
             raise RuntimeError(
                 f"translation {thash} directory is incomplete (missing: "
@@ -385,39 +422,45 @@ def _register_translation(
             )
         return thash, "idempotent"
 
-    # Alias collision — detect BEFORE creating any new files. Only a
-    # different-hash collision matters; same-hash "collision" fell out
-    # into the idempotent path above.
-    other_hash = translation_ref.find_by_alias(
-        algorithm_name, layout.translations_dir()
-    )
-    if other_hash is not None and other_hash != thash:
-        if not force:
-            raise RuntimeError(
-                f"alias {algorithm_name!r} already assigned to translation "
-                f"{other_hash}; pass --force to reassign"
-            )
-        _clear_alias_on(other_hash)
+    # Alias-collision check per algorithm — must precede any writes.
+    for p in prepared:
+        other = translation_ref.find_by_alias(p["name"], layout.translations_dir())
+        if other is not None and other != thash:
+            if not force:
+                raise RuntimeError(
+                    f"alias {p['name']!r} already assigned to translation "
+                    f"{other}; pass --force to reassign"
+                )
+            _clear_alias_on(other)
 
+    # All checks passed — materialize the translation dir.
     tdir = layout.translation_dir(thash)
-    (tdir / "generated" / algorithm_name).mkdir(parents=True, exist_ok=True)
+    for p in prepared:
+        (tdir / "generated" / p["name"]).mkdir(parents=True, exist_ok=True)
 
-    out = _build_translation_output(
-        algorithm_name=algorithm_name,
-        image_ref=image_ref,
-        image_digest=image_digest,
-        config_path=f"generated/{algorithm_name}/{algorithm_name}_config.yaml",
+    alias = prepared[0]["name"] if len(prepared) == 1 else None
+    tout = _build_translation_output(
+        algorithms=[
+            {
+                "name": p["name"],
+                "image_ref": p["image_ref"],
+                "image_digest": p["image_digest"],
+                "config_path": f"generated/{p['name']}/{p['name']}_config.yaml",
+            }
+            for p in prepared
+        ],
         translation_hash=thash,
         source="byo",
-        alias=algorithm_name,
+        alias=alias,
         created_at=now_iso,
     )
-    _atomic_write_json(out_path, out)
+    _atomic_write_json(out_path, tout)
 
-    reg = _build_registered(image_ref, image_digest, now_iso)
+    reg = _build_registered(prepared, now_iso)
     layout.registered_path(thash).write_text(json.dumps(reg, indent=2) + "\n")
 
-    layout.generated_config_path(thash, algorithm_name).write_bytes(config_bytes)
+    for p in prepared:
+        layout.generated_config_path(thash, p["name"]).write_bytes(p["config_bytes"])
 
     if baseline_config_path is not None:
         (tdir / "generated" / "baseline_config.yaml").write_bytes(
