@@ -130,6 +130,8 @@ Top-level CLI introduced in step-1 of the v2 refactor. Subcommands: `translation
 
 `sim2real.py translation register` imports one or more pre-built EPP images and their treatment overlay YAMLs as a single registered translation. Downstream commands (`assemble`, `deploy.py run`) treat a BYO-registered translation identically to a skill-produced one.
 
+The `/sim2real-bootstrap --byo` skill scaffolds a BYO experiment repo and emits a ready-to-run `translation register` command with all algorithms batched into a single call — see [`.claude/skills/sim2real-bootstrap/SKILL.md`](../.claude/skills/sim2real-bootstrap/SKILL.md#--byo-mode).
+
 #### Preferred form: repeatable `--algorithm NAME=IMAGE@CONFIG`
 
 Pass `--algorithm` once per algorithm. Each value is a single `NAME=IMAGE@CONFIG` triple: first `=` splits the name from the rest; rightmost `@` splits the image ref from the config path. This allows digest refs (`image@sha256:…`) without ambiguity.
