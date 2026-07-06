@@ -715,6 +715,73 @@ def test_defaults_disable_matches_template_stems(bare_exp_root, operator_files):
     assert manifest["defaults"]["disable"] == expected
 
 
+def test_transfer_yaml_carries_available_fragments_comment(bare_exp_root, operator_files):
+    """The emitted transfer.yaml text documents the fragment inventory as a comment
+    block immediately after `defaults.disable`. Stems match sorted templates/defaults/*.yaml
+    (regex-matched, not hardcoded — future additions don't require a test edit)."""
+    code, _ = byo.run_byo(
+        _happy_argv(operator_files), bare_exp_root, _SKILL_DIR, stdin_isatty=False
+    )
+    assert code == 0
+    text = (bare_exp_root / "transfer.yaml").read_text()
+    expected_stems = sorted(
+        p.stem for p in (_SKILL_DIR / "templates" / "defaults").glob("*.yaml")
+    )
+
+    # Header comment appears
+    assert "# Available fragments (filename stems in baselines/defaults/):" in text
+
+    # One `#   - <stem>` line per available stem
+    for stem in expected_stems:
+        assert f"#   - {stem}" in text, f"missing stem comment for {stem}"
+
+    # Header appears AFTER `defaults.disable` list and BEFORE the next
+    # top-level key (`context:`) — protects against a regression that would
+    # place it in the wrong section.
+    lines = text.split("\n")
+    header_idx = next(
+        i for i, ln in enumerate(lines)
+        if "Available fragments" in ln
+    )
+    disable_idx = next(i for i, ln in enumerate(lines) if ln == "  disable:")
+    context_idx = next(i for i, ln in enumerate(lines) if ln == "context:")
+    assert disable_idx < header_idx < context_idx
+
+
+def test_inject_available_fragments_comment_no_op_on_empty(tmp_path):
+    """Empty available_stems list: helper is a no-op (nothing to document)."""
+    yaml_text = "defaults:\n  disable: []\nother: 1\n"
+    result = byo._inject_available_fragments_comment(yaml_text, [])
+    assert result == yaml_text
+
+
+def test_inject_available_fragments_comment_sorts_input():
+    """Even if the caller passes an unsorted list, comment stems come out sorted."""
+    yaml_text = "defaults:\n  disable:\n  - b\n  - a\n  - c\ncontext: {}\n"
+    result = byo._inject_available_fragments_comment(yaml_text, ["c", "a", "b"])
+    # Expected order: a, b, c
+    a_idx = result.index("#   - a")
+    b_idx = result.index("#   - b")
+    c_idx = result.index("#   - c")
+    assert a_idx < b_idx < c_idx
+
+
+def test_inject_available_fragments_comment_does_not_break_yaml_parse():
+    """After injection, yaml.safe_load must still parse the text to the same dict
+    (comments are semantically transparent, but this guards against accidental
+    corruption of the surrounding list)."""
+    original_doc = {
+        "kind": "sim2real-transfer",
+        "version": 3,
+        "defaults": {"disable": ["one", "two"]},
+        "context": {"files": []},
+    }
+    yaml_text = yaml.safe_dump(original_doc, sort_keys=False, default_flow_style=False)
+    injected = byo._inject_available_fragments_comment(yaml_text, ["one", "two"])
+    reparsed = yaml.safe_load(injected)
+    assert reparsed == original_doc
+
+
 # ---------------------------------------------------------------------------
 # Workload enumeration
 # ---------------------------------------------------------------------------
