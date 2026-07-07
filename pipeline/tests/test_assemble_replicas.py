@@ -195,3 +195,23 @@ class TestAssembleReplicas:
             (_run_dir_of(fx) / "manifest.assembly.yaml").read_text()
         )
         assert ma["replicas"] == 1
+
+    def test_missing_manifest_assembly_refuses_without_force(self, tmp_path):
+        """Branch 2: run_dir exists but manifest.assembly.yaml missing → refuse."""
+        fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
+                              algo_names_manifest=["sr"])
+        _assemble(fx, replicas=1)
+        (_run_dir_of(fx) / "manifest.assembly.yaml").unlink()
+        with pytest.raises(assemble_run.AssembleError,
+                           match="missing manifest.assembly.yaml"):
+            _assemble(fx, replicas=1)
+
+    def test_missing_run_metadata_with_force_rebuilds(self, tmp_path):
+        """Branch 2 --force counterpart: rmtree + fresh assemble at N."""
+        fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
+                              algo_names_manifest=["sr"])
+        _assemble(fx, replicas=1)
+        (_run_dir_of(fx) / "run_metadata.json").unlink()
+        _assemble(fx, replicas=3, force=True)
+        names = _pipelinerun_files(_cluster_dir_of(fx))
+        assert "pipelinerun-wl-a|baseline|i3.yaml" in names
