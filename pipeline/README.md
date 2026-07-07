@@ -350,6 +350,8 @@ Example: `wl-chat-mid|baseline|i1`.
 
 The parser accepts a legacy no-suffix form (`wl-<workload>|<package>`) and reads it as `iteration=1`; canonical renderings always include the `|iN` suffix. Metadata keys (`_meta`, `_notes`, anything starting with `_`) are filtered out upstream via `deploy._is_pair_key` and never reach the parser.
 
+**Terminology.** The second segment is called `<package>` here (matching `pairkey.py`) and `<phase>` in the `sim2real-check` output rollup — they refer to the same segment (`baseline`, `<algorithm-name>`, …).
+
 **Pair discovery.** `deploy.py run` discovers `pipelinerun-*.yaml` files at the `cluster/` root. Each file's pair key is derived as `wl-` + filename stem minus the `pipelinerun-` prefix — the assembler names files as `pipelinerun-<workload>|<package>|iN.yaml`, so the pair key falls out directly.
 
 **Scoping flags on filter-aware subcommands** (`run`, `status`, `collect`, `reset`, `wipe`):
