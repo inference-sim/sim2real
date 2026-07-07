@@ -4,7 +4,7 @@
 Subcommands:
   build    Ensure all scenario images exist (pre-flight for run)
   run      Ensure images + submit PipelineRuns
-  status   Show progress of all (workload, package) pairs
+  status   Show progress of all (workload, package, iteration) triples
   collect  Pull results from cluster for completed phases
   stop     Stop the remote orchestrator Job
   reset    Reset all non-pending pairs to pending (with cluster cleanup)
@@ -680,7 +680,7 @@ def _runtime_str(entry: dict) -> str:
 
 def _cmd_status(args, run_dir: Path,
                 cluster_config: dict | None = None) -> None:
-    """Print a snapshot table of all (workload, package) pair statuses."""
+    """Print a snapshot table of all (workload, package, iteration) statuses."""
     from pipeline.lib.progress import ConfigMapProgressStore
     primary_ns = _configmap_namespace(cluster_config)
     if not primary_ns:
@@ -2000,7 +2000,7 @@ def _cmd_collect(args, run_dir: Path, cluster_config: dict):
 # ── Run helpers ─────────────────────────────────────────────────────────────
 
 def _load_pairs(cluster_dir: Path) -> dict:
-    """Discover all (workload, package) pairs from pipelinerun-*.yaml at cluster/ root.
+    """Discover all (workload, package, iteration) pairs from pipelinerun-*.yaml at cluster/ root.
 
     Returns dict keyed by "wl-" + filename stem (minus "pipelinerun-" prefix).
     Thin wrapper over ``_load_pairs_with_errors``; the malformed-key count is
@@ -3595,7 +3595,7 @@ Examples:
     collect_p.add_argument("--skip-logs", action="store_true", dest="skip_logs",
                            help="Skip vLLM and EPP log files, collect only traces")
 
-    status_p = sub.add_parser("status", help="Show progress of all (workload, package) pairs")
+    status_p = sub.add_parser("status", help="Show progress of all (workload, package, iteration) triples")
     status_p.add_argument("--only",     nargs="+", metavar="PAIR",  help="Scope to specific pair keys (comma or space-separated, wl- prefix optional)")
     status_p.add_argument("--workload", nargs="+", metavar="NAME",  help="Scope to pairs matching these workloads (comma or space-separated)")
     status_p.add_argument("--package",  nargs="+", metavar="NAME",  help="Scope to pairs matching these packages (comma or space-separated)")
