@@ -349,11 +349,25 @@ context:
 defaults:
   disable: []
   # Available fragments (filename stems in baselines/defaults/):
+  #   - epp-verbosity
+  #   - externally-managed-gateway
   #   - llm-d-rbac
   #   - preserve-request-id
-  #   - epp-verbosity
-  #   - vllm-logging
   #   - routing-proxy-resources
+  #   - vllm-logging
+```
+
+The `# Available fragments` comment lists every YAML filename stem currently in
+`<experiment-root>/baselines/defaults/` (populated by Task 4b from
+`templates/defaults/`). Regenerate the list from what actually got copied — do
+NOT copy the enumeration above verbatim if `templates/defaults/` has changed
+since this SKILL.md was written:
+
+```bash
+ls "$EXPERIMENT_ROOT/baselines/defaults/"*.yaml \
+    | xargs -n1 basename \
+    | sed 's/\.yaml$//' \
+    | sort
 ```
 
 **Constraints:**

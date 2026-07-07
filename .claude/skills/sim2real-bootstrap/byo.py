@@ -613,11 +613,74 @@ def build_transfer_yaml(
     }
 
 
+def _inject_available_fragments_comment(yaml_text: str, available_stems: list[str]) -> str:
+    """Insert an ``# Available fragments`` comment block after ``defaults.disable``.
+
+    PyYAML's ``safe_dump`` cannot emit comments, but the operator-facing
+    ``transfer.yaml`` should document which filename stems live in
+    ``baselines/defaults/`` so a reader knows what values are legal in the
+    ``defaults.disable`` list. This helper post-processes the serialized YAML
+    text: it locates the ``defaults.disable`` block and inserts one
+    ``# Available fragments…`` comment plus one ``#   - <stem>`` per fragment
+    immediately after the list.
+
+    Idempotent-safe against re-invocation only in the sense that the caller
+    controls ``yaml_text`` — we do not deduplicate an existing comment block.
+    Callers pass freshly-serialized YAML.
+    """
+    if not available_stems:
+        return yaml_text
+    comment_lines = [
+        "  # Available fragments (filename stems in baselines/defaults/):",
+    ] + [f"  #   - {stem}" for stem in sorted(available_stems)]
+
+    lines = yaml_text.split("\n")
+    # Find the ``disable:`` line under a top-level ``defaults:`` key. YAML
+    # emitted by safe_dump with sort_keys=False + default_flow_style=False
+    # produces predictable indentation: top-level keys at column 0, nested
+    # keys at 2-space indent.
+    disable_idx = -1
+    in_defaults = False
+    for i, line in enumerate(lines):
+        if line == "defaults:" or line.startswith("defaults:"):
+            in_defaults = True
+            continue
+        if in_defaults:
+            if line.startswith("  disable:"):
+                disable_idx = i
+                break
+            if line and not line.startswith(" "):
+                # Left the defaults block before finding disable — nothing to do.
+                return yaml_text
+    if disable_idx < 0:
+        return yaml_text
+
+    # Walk forward from disable_idx: the list ends at the first line that is
+    # neither blank nor indented with ``  -`` / ``  `` at 2+ spaces where the
+    # first non-space char is ``-``.
+    list_end = disable_idx
+    for j in range(disable_idx + 1, len(lines)):
+        line = lines[j]
+        if line.startswith("  - "):
+            list_end = j
+            continue
+        # Any other line — top-level key, blank line, or unindented content —
+        # ends the list.
+        break
+    else:
+        list_end = len(lines) - 1
+
+    lines[list_end + 1:list_end + 1] = comment_lines
+    return "\n".join(lines)
+
+
 def write_transfer_yaml(exp_root: Path, doc: dict, force: bool, non_interactive: bool) -> Path:
     """Serialize doc and write atomically to ``<exp-root>/transfer.yaml``."""
     dst = _check_dest_inside(exp_root / "transfer.yaml", exp_root)
     _decide_dest(dst, force, non_interactive)
     text = yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
+    available_stems = list(doc.get("defaults", {}).get("disable") or [])
+    text = _inject_available_fragments_comment(text, available_stems)
     dst.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
         prefix=dst.name + ".", suffix=".tmp", dir=str(dst.parent)
