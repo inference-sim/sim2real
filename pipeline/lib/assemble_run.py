@@ -360,12 +360,14 @@ def generate_pipelineruns(
     submodule_urls: dict,
     iterations: "range | list[int]" = range(1, 2),
 ) -> None:
-    """Emit one PipelineRun YAML per (workload, package, iteration) under ``cluster/``.
+    """Emit one PipelineRun YAML per (workload, package, iteration) tuple
+    under ``cluster/``.
 
-    Filename shape: ``pipelinerun-<workload-safe>|<package>|i<N>.yaml``, where
-    ``<workload-safe>`` is the workload name with ``_`` replaced by ``-`` and
-    N is each element of ``iterations``.
-    Matches the shape that ``deploy.py run``'s pair-discovery expects.
+    Filename shape: ``pipelinerun-<workload-safe>|<package>|i<N>.yaml``,
+    where ``<workload-safe>`` is the workload name with ``_`` replaced by
+    ``-`` and ``N`` is each element of ``iterations``. The ``|`` separators
+    make the derived pair key match the canonical grammar in
+    ``pipeline/lib/pairkey.py``.
     """
     cluster_dir_ = run_dir / "cluster"
     cluster_dir_.mkdir(parents=True, exist_ok=True)
