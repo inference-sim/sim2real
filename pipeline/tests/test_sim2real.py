@@ -1002,7 +1002,7 @@ class TestAssembleResolvesAlias:
         captured = {}
         def fake_assemble(*, translation_hash, translation_ref, cluster_id,
                           run_name, experiment_root, manifest_path,
-                          force, now_iso):
+                          force, replicas, now_iso):
             captured["hash"] = translation_hash
             captured["ref"] = translation_ref
 

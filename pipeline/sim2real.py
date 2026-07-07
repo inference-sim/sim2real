@@ -1158,6 +1158,7 @@ def _cmd_assemble(args) -> int:
             experiment_root=exp_root,
             manifest_path=manifest_path,
             force=args.force,
+            replicas=args.replicas,
             now_iso=now_iso,
         )
     except _assemble_run_lib.AssembleError as exc:

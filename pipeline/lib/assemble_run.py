@@ -445,6 +445,7 @@ def assemble_run(
     experiment_root: Path,
     manifest_path: Path,
     force: bool,
+    replicas: int = 1,
     now_iso: str,
 ) -> None:
     """Materialize ``workspace/runs/<run_name>/`` per the design.
@@ -548,7 +549,7 @@ def assemble_run(
     # 3. Snapshot assembly slice + params_hash ----------------------------
     run_dir.mkdir(parents=True, exist_ok=True)
     manifest_assembly_path = write_manifest_assembly(
-        run_dir, manifest, now_iso=now_iso
+        run_dir, manifest, now_iso=now_iso, replicas=replicas
     )
     params_hash = compute_params_hash(manifest_assembly_path)
 
@@ -650,6 +651,7 @@ def assemble_run(
         model_name=model_name,
         submodule_shas=submodule_shas,
         submodule_urls=submodule_urls,
+        iterations=range(1, replicas + 1),
     )
 
     # 8. Write run_metadata.json ------------------------------------------
@@ -671,6 +673,7 @@ def assemble_run(
             "cluster_id": cluster_id,
             "params_hash": params_hash,
             "image_tag": run_meta_image_tag,
+            "replicas": replicas,
             "assembled_at": now_iso,
         },
     )

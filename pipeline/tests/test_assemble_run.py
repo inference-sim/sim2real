@@ -577,6 +577,40 @@ class TestAssembleRun:
         assert len(meta["params_hash"]) == 64
         assert meta["assembled_at"] == "2026-07-01T14:05:00Z"
 
+    def test_fresh_run_with_replicas_3_produces_three_files_per_pair(self, tmp_path):
+        fx = _make_experiment(
+            tmp_path,
+            algo_names_registered=["sr"],
+            algo_names_manifest=["sr"],
+        )
+        assemble_run.assemble_run(
+            translation_hash=fx["translation_hash"],
+            translation_ref=fx["translation_hash"],
+            cluster_id=fx["cluster_id"],
+            run_name="trial-1",
+            experiment_root=fx["exp_root"],
+            manifest_path=fx["manifest_path"],
+            force=False,
+            replicas=3,
+            now_iso="2026-07-01T14:05:00Z",
+        )
+        cluster = fx["exp_root"] / "workspace" / "runs" / "trial-1" / "cluster"
+        names = sorted(p.name for p in cluster.glob("pipelinerun-*.yaml"))
+        assert names == [
+            "pipelinerun-wl-a|baseline|i1.yaml",
+            "pipelinerun-wl-a|baseline|i2.yaml",
+            "pipelinerun-wl-a|baseline|i3.yaml",
+            "pipelinerun-wl-a|sr|i1.yaml",
+            "pipelinerun-wl-a|sr|i2.yaml",
+            "pipelinerun-wl-a|sr|i3.yaml",
+        ]
+        # manifest.assembly.yaml records replicas
+        manifest_assembly = yaml.safe_load(
+            (fx["exp_root"] / "workspace/runs/trial-1/manifest.assembly.yaml")
+            .read_text()
+        )
+        assert manifest_assembly["replicas"] == 3
+
     def test_pipelinerun_params_include_framework_submodule_state(
         self, tmp_path, monkeypatch
     ):
@@ -1223,6 +1257,7 @@ class TestAssembleResolveContract:
             "cluster_id",
             "params_hash",
             "image_tag",
+            "replicas",
             "assembled_at",
         }
         extra = set(run_meta.keys()) - known_keys
