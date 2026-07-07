@@ -299,3 +299,36 @@ def test_build_results_dir_matches_template_when_params_substituted():
         "$(params.workloadName)", "$(params.replica)",
     )
     assert template == RESULTS_DIR_TEMPLATE
+
+
+# ── Tests for validate_pipelinerun_name ─────────────────────────────────────
+
+import pytest as _pytest
+from pipeline.lib.tekton import validate_pipelinerun_name
+
+
+def test_validate_pipelinerun_name_accepts_short():
+    validate_pipelinerun_name("baseline-wl-r-i1")  # no raise
+
+
+def test_validate_pipelinerun_name_accepts_253_char_limit():
+    """Exactly 253 chars is the DNS subdomain limit — must pass."""
+    name = "a" * 253
+    validate_pipelinerun_name(name)  # no raise
+
+
+def test_validate_pipelinerun_name_rejects_254_chars():
+    name = "a" * 254
+    with _pytest.raises(ValueError, match="253"):
+        validate_pipelinerun_name(name)
+
+
+def test_make_pipelinerun_scenario_rejects_oversized_name():
+    """Long run_name or workload should trip the validator at construction."""
+    long_run = "r" * 240
+    with _pytest.raises(ValueError, match="253"):
+        make_pipelinerun_scenario(
+            phase="baseline", workload={"name": "wl"}, run_name=long_run,
+            namespace="ns", pipeline_name="sim2real",
+            scenario_content="scenario: []",
+        )

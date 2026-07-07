@@ -31,6 +31,22 @@ def build_results_dir(run: str, phase: str, workload: str, replica) -> str:
     return f"{run}/{phase}/{workload}/i{replica}"
 
 
+_DNS_SUBDOMAIN_MAX = 253
+
+
+def validate_pipelinerun_name(name: str) -> None:
+    """Raise ValueError if ``name`` exceeds the RFC 1123 DNS subdomain limit
+    (253 chars). PipelineRun.metadata.name is a DNS subdomain, so Tekton
+    rejects longer names at admission. Called at construction time so
+    assemble surfaces the failure before any dispatch attempt.
+    """
+    if len(name) > _DNS_SUBDOMAIN_MAX:
+        raise ValueError(
+            f"PipelineRun name {name!r} is {len(name)} chars, exceeds the "
+            f"{_DNS_SUBDOMAIN_MAX}-char DNS subdomain limit"
+        )
+
+
 def _default_spec_content(base_dir: str = _SPEC_BASE_DIR,
                           scenario_file: str = _SCENARIO_FILE_PATH) -> str:
     """Return the llmdbenchmark spec content string with PVC paths."""
@@ -88,6 +104,7 @@ def make_pipelinerun_scenario(
     safe_name = wl_name.replace("_", "-")
     safe_phase = phase.replace("_", "-")
     pr_name = f"{safe_phase}-{safe_name}-{run_name}-i{iteration}"
+    validate_pipelinerun_name(pr_name)
 
     wl_spec = {k: v for k, v in workload.items() if k != "workload_name"}
     wl_spec_str = yaml.dump(wl_spec, default_flow_style=True).strip()
