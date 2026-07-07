@@ -311,19 +311,52 @@ class TestGeneratePipelineruns:
         )
         yamls = sorted(p.name for p in cluster_dir.glob("pipelinerun-*.yaml"))
         assert yamls == [
-            "pipelinerun-wl-a-baseline.yaml",
-            "pipelinerun-wl-a-sr.yaml",
-            "pipelinerun-wl-b-baseline.yaml",
-            "pipelinerun-wl-b-sr.yaml",
+            "pipelinerun-wl-a|baseline|i1.yaml",
+            "pipelinerun-wl-a|sr|i1.yaml",
+            "pipelinerun-wl-b|baseline|i1.yaml",
+            "pipelinerun-wl-b|sr|i1.yaml",
         ]
         pr = yaml.safe_load(
-            (cluster_dir / "pipelinerun-wl-a-sr.yaml").read_text()
+            (cluster_dir / "pipelinerun-wl-a|sr|i1.yaml").read_text()
         )
         assert pr["kind"] == "PipelineRun"
         params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
         assert params["phase"] == "sr"
         assert "name: M" in params["scenarioContent"]
         assert params["workloadName"] == "wl_a"
+
+    def test_iterations_range_emits_pipe_shape_filenames(self, tmp_path):
+        """iterations=range(1, 3) → 2 files per (workload, package) with |i1, |i2."""
+        run_dir = tmp_path / "runs" / "trial-1"
+        cluster_dir = run_dir / "cluster"
+        cluster_dir.mkdir(parents=True)
+        packages = [
+            ("baseline", {"scenario": [{"name": "s", "model": {"name": "M"}}]}),
+        ]
+        workloads = [{"name": "wl-a", "num_requests": 10}]
+        cluster_config = {"namespaces": ["ns-0"], "workspaces": {}}
+        assemble_run.generate_pipelineruns(
+            run_dir=run_dir,
+            packages=packages,
+            workloads=workloads,
+            run_name="trial-1",
+            cluster_config=cluster_config,
+            pipeline_name="sim2real",
+            observe={},
+            model_name="M",
+            submodule_shas={},
+            submodule_urls={},
+            iterations=range(1, 3),
+        )
+        yamls = sorted(p.name for p in cluster_dir.glob("pipelinerun-*.yaml"))
+        assert yamls == [
+            "pipelinerun-wl-a|baseline|i1.yaml",
+            "pipelinerun-wl-a|baseline|i2.yaml",
+        ]
+        pr = yaml.safe_load(
+            (cluster_dir / "pipelinerun-wl-a|baseline|i2.yaml").read_text()
+        )
+        assert pr["metadata"]["name"] == "baseline-wl-a-trial-1-i2"
 
 
 def _write_yaml(path: Path, data) -> None:
@@ -468,8 +501,8 @@ class TestAssembleRun:
         assert (run_dir / "run_metadata.json").exists()
         assert (run_dir / "cluster" / "baseline.yaml").exists()
         assert (run_dir / "cluster" / "sr.yaml").exists()
-        assert (run_dir / "cluster" / "pipelinerun-wl-a-baseline.yaml").exists()
-        assert (run_dir / "cluster" / "pipelinerun-wl-a-sr.yaml").exists()
+        assert (run_dir / "cluster" / "pipelinerun-wl-a|baseline|i1.yaml").exists()
+        assert (run_dir / "cluster" / "pipelinerun-wl-a|sr|i1.yaml").exists()
 
         meta = json.loads((run_dir / "run_metadata.json").read_text())
         assert meta["version"] == 1
@@ -520,7 +553,7 @@ class TestAssembleRun:
 
         pr = yaml.safe_load(
             (fx["exp_root"] / "workspace/runs/trial-1/cluster/"
-             "pipelinerun-wl-a-baseline.yaml").read_text()
+             "pipelinerun-wl-a|baseline|i1.yaml").read_text()
         )
         params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
         assert params["benchmarkGitRepoUrl"] == "https://example.com/llm-d-benchmark.git"
@@ -568,7 +601,7 @@ class TestAssembleRun:
 
         pr = yaml.safe_load(
             (fx["exp_root"] / "workspace/runs/trial-1/cluster/"
-             "pipelinerun-wl-a-baseline.yaml").read_text()
+             "pipelinerun-wl-a|baseline|i1.yaml").read_text()
         )
         params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
         assert params["benchmarkGitCommit"] == "unknown"

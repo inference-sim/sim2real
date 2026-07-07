@@ -342,11 +342,13 @@ def generate_pipelineruns(
     model_name: str,
     submodule_shas: dict,
     submodule_urls: dict,
+    iterations: "range | list[int]" = range(1, 2),
 ) -> None:
-    """Emit one PipelineRun YAML per (workload, package) pair under ``cluster/``.
+    """Emit one PipelineRun YAML per (workload, package, iteration) under ``cluster/``.
 
-    Filename shape: ``pipelinerun-<workload-safe>-<package>.yaml``, where
-    ``<workload-safe>`` is the workload name with ``_`` replaced by ``-``.
+    Filename shape: ``pipelinerun-<workload-safe>|<package>|i<N>.yaml``, where
+    ``<workload-safe>`` is the workload name with ``_`` replaced by ``-`` and
+    N is each element of ``iterations``.
     Matches the shape that ``deploy.py run``'s pair-discovery expects.
     """
     cluster_dir_ = run_dir / "cluster"
@@ -363,24 +365,27 @@ def generate_pipelineruns(
         for wl in workloads:
             wl_name = wl.get("name", wl.get("workload_name", "unknown"))
             safe_wl = wl_name.replace("_", "-")
-            pr = make_pipelinerun_scenario(
-                phase=pkg_name,
-                workload=wl,
-                run_name=run_name,
-                namespace=namespace,
-                pipeline_name=pipeline_name,
-                scenario_content=scenario_content,
-                workspace_bindings=ws_bindings if ws_bindings else None,
-                benchmark_git_commit=submodule_shas.get("llm-d-benchmark", ""),
-                benchmark_git_repo_url=submodule_urls.get("llm-d-benchmark", ""),
-                blis_git_commit=submodule_shas.get("inference-sim", ""),
-                blis_git_repo_url=submodule_urls.get("inference-sim", ""),
-                model=model_name,
-                observe=observe,
-            )
-            (cluster_dir_ / f"pipelinerun-{safe_wl}-{pkg_name}.yaml").write_text(
-                yaml.dump(pr, default_flow_style=False, allow_unicode=True)
-            )
+            for iteration in iterations:
+                pr = make_pipelinerun_scenario(
+                    phase=pkg_name,
+                    workload=wl,
+                    run_name=run_name,
+                    namespace=namespace,
+                    pipeline_name=pipeline_name,
+                    scenario_content=scenario_content,
+                    workspace_bindings=ws_bindings if ws_bindings else None,
+                    benchmark_git_commit=submodule_shas.get("llm-d-benchmark", ""),
+                    benchmark_git_repo_url=submodule_urls.get("llm-d-benchmark", ""),
+                    blis_git_commit=submodule_shas.get("inference-sim", ""),
+                    blis_git_repo_url=submodule_urls.get("inference-sim", ""),
+                    model=model_name,
+                    observe=observe,
+                    iteration=iteration,
+                )
+                fname = f"pipelinerun-{safe_wl}|{pkg_name}|i{iteration}.yaml"
+                (cluster_dir_ / fname).write_text(
+                    yaml.dump(pr, default_flow_style=False, allow_unicode=True)
+                )
 
 
 def _load_workload(exp_root: Path, wl_path_str: str) -> dict:

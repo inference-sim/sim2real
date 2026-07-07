@@ -846,8 +846,8 @@ class TestAssembleCommand:
         assert (run_dir / "run_metadata.json").exists()
         assert (run_dir / "cluster" / "baseline.yaml").exists()
         assert (run_dir / "cluster" / "sr.yaml").exists()
-        assert (run_dir / "cluster" / "pipelinerun-w1-baseline.yaml").exists()
-        assert (run_dir / "cluster" / "pipelinerun-w1-sr.yaml").exists()
+        assert (run_dir / "cluster" / "pipelinerun-w1|baseline|i1.yaml").exists()
+        assert (run_dir / "cluster" / "pipelinerun-w1|sr|i1.yaml").exists()
 
     def test_refuses_existing_run_without_force(self, tmp_path, capsys):
         thash = self._make_minimal_registration(tmp_path)

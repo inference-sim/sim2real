@@ -17,7 +17,7 @@ def test_make_pipelinerun_scenario_name():
         scenario_content="scenario: []",
         workspace_bindings=_WORKSPACE_BINDINGS,
     )
-    assert pr["metadata"]["name"] == "baseline-wl-smoke-ac"
+    assert pr["metadata"]["name"] == "baseline-wl-smoke-ac-i1"
     assert pr["metadata"]["namespace"] == "kalantar-0"
 
 
@@ -123,7 +123,7 @@ def test_phase_name_in_pipelinerun():
         pipeline_name="sim2real",
         scenario_content="scenario: []",
     )
-    assert pr["metadata"]["name"] == "b1-wl-smoke-test-run"
+    assert pr["metadata"]["name"] == "b1-wl-smoke-test-run-i1"
     params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
     assert params["phase"] == "b1"
 
@@ -138,7 +138,7 @@ def test_phase_underscore_sanitized_in_name():
         pipeline_name="sim2real",
         scenario_content="scenario: []",
     )
-    assert pr["metadata"]["name"] == "my-phase-wl-smoke-test-run"
+    assert pr["metadata"]["name"] == "my-phase-wl-smoke-test-run-i1"
     params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
     assert params["phase"] == "my_phase"
 
@@ -243,3 +243,24 @@ def test_observe_full_dict_emits_all_keys_as_strings():
     assert params["warmupRequests"] == "25"
     assert params["prewarmDuration"] == "30s"
     assert params["extraArgs"] == "--foo bar"
+
+
+def test_make_pipelinerun_scenario_iteration_default_is_one():
+    """When iteration is not passed, default is 1 and name gets '-i1' suffix."""
+    pr = make_pipelinerun_scenario(
+        phase="baseline", workload={"name": "wl"}, run_name="r",
+        namespace="ns", pipeline_name="sim2real",
+        scenario_content="scenario: []",
+    )
+    assert pr["metadata"]["name"] == "baseline-wl-r-i1"
+
+
+def test_make_pipelinerun_scenario_iteration_explicit():
+    """Explicit iteration=N produces '-i<N>' suffix on metadata.name."""
+    pr = make_pipelinerun_scenario(
+        phase="baseline", workload={"name": "wl"}, run_name="r",
+        namespace="ns", pipeline_name="sim2real",
+        scenario_content="scenario: []",
+        iteration=5,
+    )
+    assert pr["metadata"]["name"] == "baseline-wl-r-i5"
