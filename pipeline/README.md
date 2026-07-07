@@ -386,7 +386,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 | `--status STATE` | Filter by status (e.g. `running`, `done`, `failed`) |
 | `-s`, `--silent` | Suppress the per-pair table and banner; print only the summary line (machine-readable) |
 
-**`deploy.py collect`** — extracts results from the cluster PVC and writes to `workspace/runs/<run>/results/{phase}/<workload>/`. Repeated collects are incremental: each workload's remote `trace_data.csv` mtime is probed and skipped if the local copy is already up to date. If the mtime probe fails (e.g., pod not running), collection falls back to a full copy — this is the expected degradation path. Like `deploy.py run`, the run's cluster is resolved from `workspace/runs/<R>/run_metadata.json:cluster_id`; missing `runs/<R>/` or `runs/<R>/cluster/` exits with `run 'sim2real assemble --run <R>' first`, and a missing / unparseable `run_metadata.json` or missing `cluster_id` exits with `run metadata corrupted; re-assemble`.
+**`deploy.py collect`** — extracts results from the cluster PVC and writes to `workspace/runs/<run>/results/{phase}/<workload>/i<N>/` (one subdirectory per iteration). Repeated collects are incremental: each workload's remote `trace_data.csv` mtime is probed and skipped if the local copy is already up to date. If the mtime probe fails (e.g., pod not running), collection falls back to a full copy — this is the expected degradation path. Like `deploy.py run`, the run's cluster is resolved from `workspace/runs/<R>/run_metadata.json:cluster_id`; missing `runs/<R>/` or `runs/<R>/cluster/` exits with `run 'sim2real assemble --run <R>' first`, and a missing / unparseable `run_metadata.json` or missing `cluster_id` exits with `run metadata corrupted; re-assemble`.
 
 Per phase, the resolved llm-d-benchmark plan YAMLs are also pulled into `workspace/runs/<run>/results/{phase}/plans/{flow}/*.yaml` (top-level numbered manifests + `config.yaml`, no `helm/` subdir). Plans are workload-invariant within a phase, so collect picks one workload's latest `root-*` render to source the phase's plans. Plan extraction is best-effort and non-fatal — failures warn but do not block trace collection.
 
@@ -528,14 +528,14 @@ python pipeline/deploy.py --experiment-root <experiment-root> \
     --run <run-name> collect
 ```
 
-Pulls per-pair `per_request_lifecycle_metrics.json` and GPU logs from the cluster PVC into `workspace/runs/<run-name>/results/<phase>/<workload>/`. This is the epic's success gate — the demo is done when the JSON files exist locally.
+Pulls per-pair `per_request_lifecycle_metrics.json` and GPU logs from the cluster PVC into `workspace/runs/<run-name>/results/<phase>/<workload>/i<N>/`. This is the epic's success gate — the demo is done when the JSON files exist locally.
 
 ### Success criterion
 
-For each `<workload>` in `transfer.yaml:workloads` and each `<phase>` in `{baseline, <algorithm>}`:
+For each `<workload>` in `transfer.yaml:workloads`, each `<phase>` in `{baseline, <algorithm>}`, and each iteration `<N>` in `1..replicas`:
 
 ```
-workspace/runs/<run-name>/results/<phase>/<workload>/per_request_lifecycle_metrics.json
+workspace/runs/<run-name>/results/<phase>/<workload>/i<N>/per_request_lifecycle_metrics.json
 ```
 
 Once these files exist, step-1's BYO demo is complete. Downstream skills (e.g. `/sim2real-analyze`) consume them for latency comparison and report generation.
@@ -585,7 +585,7 @@ For each algorithm: probe the registry, build if absent, record `image_ref`/`ima
 
 ### 7-9. Assemble, deploy, collect (identical to BYO steps 4-6, using the same `--translation` alias)
 
-The same success gate applies — `per_request_lifecycle_metrics.json` under `workspace/runs/<run-name>/results/<phase>/<workload>/`.
+The same success gate applies — `per_request_lifecycle_metrics.json` under `workspace/runs/<run-name>/results/<phase>/<workload>/i<N>/` (one file per iteration).
 
 ---
 
