@@ -303,7 +303,7 @@ Two invariants shape the grow-only path:
 - **Drift check.** The current assembly-slice content hash is compared against the run's recorded `params_hash`. Any mismatch refuses the assemble unless `--force` is passed — with `--force`, the whole run directory is rebuilt from scratch (existing `iN/` files are lost). Without `--force`, matching hashes are required to reach the additive-grow branch.
 - **Legacy-run guard.** A pre-step-5 run has no `replicas` field in its `manifest.assembly.yaml`. Any re-assemble against this shape is refused unless `--force`, whether or not `--replicas` was explicitly passed — the `--replicas` argparse default (`1`) still trips the guard. With `--force`, the run is rebuilt from scratch as a fresh replica-shaped run.
 
-**PipelineRun name length.** `metadata.name` is `{phase}-{workload}-{run}-i{iteration}` (with `_` → `-` normalization). This is a Kubernetes DNS subdomain, so the 253-char RFC 1123 limit applies. `assemble` validates each generated PipelineRun name and exits 2 with `error: PipelineRun name '<name>' is <len> chars, exceeds the 253-char DNS subdomain limit` if any pair (phase × workload × run × iteration) would overflow. Fail-fast at assemble time is preferable to Tekton admission rejection at dispatch time.
+**PipelineRun name length.** `metadata.name` is `{phase}-{workload}-{run}-i{iteration}`. `phase` and `workload` are normalized (`_` → `-`) before assembly; `run` is used verbatim, so a run name containing underscores would produce an invalid DNS subdomain. This is a Kubernetes DNS subdomain, so the 253-char RFC 1123 limit applies. `assemble` validates each generated PipelineRun name and exits 2 with `error: PipelineRun name '<name>' is <len> chars, exceeds the 253-char DNS subdomain limit` if any pair (phase × workload × run × iteration) would overflow. The validator only checks length, not character validity — pick a kebab-case `--run` name to stay within DNS rules. Fail-fast at assemble time is preferable to Tekton admission rejection at dispatch time.
 
 **Algorithm filtering:** algorithms listed in `transfer.yaml:algorithms` but absent from `translation_output.json:algorithms` are skipped with a warning — the run still assembles for the algorithms that are registered. Algorithms that ARE in the translation but whose `image_ref` is still `null` (skill-driven translation before `sim2real build`) fail fast: `assemble` exits 2 with `translation <ref> not built for algorithms: <names> — run 'sim2real build --translation <ref>' first`.
 
@@ -340,7 +340,7 @@ Common flags (all subcommands):
 **Pair keys.** A pair key names a `(workload, package, iteration)` triple in the ConfigMap and on disk. Canonical grammar:
 
 ```
-pair_key := "wl-" workload "|" package "|" iter
+pair_key := "wl-" workload "|" package [ "|" iter ]
 workload := [a-z0-9]([a-z0-9-]*[a-z0-9])?    # kebab-case, no leading/trailing hyphen
 package  := [a-z0-9]([a-z0-9-]*[a-z0-9])?    # same shape as workload
 iter     := "i" [1-9][0-9]*                  # positive decimal, no leading zeros; i0 is invalid
