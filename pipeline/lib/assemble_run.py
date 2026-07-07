@@ -20,6 +20,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from typing import NamedTuple
 
 import yaml
 
@@ -438,6 +439,164 @@ def _resolve_scenario_path(
     return fallback if fallback.exists() else None
 
 
+class _ResolvedPackages(NamedTuple):
+    """Return value of ``_resolve_packages``.
+
+    Holds everything both the fresh-assemble path and the additive-grow path
+    need to build PipelineRun files and update run metadata. The fields
+    match the local names both callers previously computed inline.
+    """
+    packages: list[tuple[str, dict]]
+    resolved_baselines: dict[str, dict]
+    kept_algos: list[dict]
+    skipped_algo_names: list[str]
+    translated_algos: dict[str, dict]
+    workloads: list[dict]
+    model_name: str
+    submodule_shas: dict[str, str]
+    submodule_urls: dict[str, str]
+    missing_submodules: list[str]
+
+
+def _resolve_packages(
+    manifest: dict,
+    *,
+    exp_root: Path,
+    translation_dir: Path,
+    tout_path: Path,
+    cluster_config: dict,
+    translation_ref: str,
+) -> _ResolvedPackages:
+    """Shared resolution pipeline for both fresh assemble and additive grow.
+
+    Loads framework defaults, reads translation output (wrapped so parse
+    errors surface as ``AssembleError``), filters algorithms against the
+    translation, resolves baseline + treatment scenarios (with the
+    ``bundle_path is None`` and ``base_name not in resolved_baselines``
+    guards that the fresh path historically owned), refuses if any kept
+    algorithm is unbuilt, injects image tags + HF secret, loads workloads,
+    derives the model name, and discovers framework submodules.
+
+    Every failure mode raises ``AssembleError``. Callers get a fully
+    populated ``_ResolvedPackages`` on success.
+    """
+    defaults_dir = exp_root / "baselines" / "defaults"
+    framework_defaults = load_defaults_overlay(
+        defaults_dir if defaults_dir.exists() else None,
+        disable=(manifest.get("defaults") or {}).get("disable") or [],
+    )
+
+    try:
+        tout = _translation_ref.read_translation_output(tout_path)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise AssembleError(
+            f"translation_output.json is not valid JSON: {tout_path}: {exc}"
+        ) from exc
+
+    translated_algos = {
+        a.get("name"): a for a in tout.get("algorithms", []) or []
+    }
+    translated_names = set(translated_algos.keys())
+    kept_algos, skipped_algo_names = filter_algorithms(
+        manifest.get("algorithms", []) or [],
+        translated_names=translated_names,
+    )
+
+    # Incomplete-translation check: refuse before we would call
+    # ``inject_image_tag`` with a null image_ref (which would crash the
+    # helper with TypeError, escaping the AssembleError boundary).
+    unbuilt = [
+        a["name"] for a in kept_algos
+        if not translated_algos[a["name"]].get("image_ref")
+    ]
+    if unbuilt:
+        raise AssembleError(
+            f"translation {translation_ref} not built for algorithms: "
+            f"{', '.join(unbuilt)} — run 'sim2real build --translation "
+            f"{translation_ref}' first"
+        )
+
+    generated_root = translation_dir / "generated"
+
+    packages: list[tuple[str, dict]] = []
+    resolved_baselines: dict[str, dict] = {}
+    for bl in manifest.get("baselines", []):
+        bl_name = bl["name"]
+        bundle_path = _resolve_scenario_path(
+            exp_root, bl.get("scenario"), "baseline.yaml"
+        )
+        if bundle_path is None:
+            raise AssembleError(f"baseline '{bl_name}' has no scenario file")
+        overlay_path = generated_root / f"baseline_{bl_name}" / "baseline_config.yaml"
+        if not overlay_path.exists():
+            # BYO ``translation register`` writes the shared step-1
+            # ``generated/baseline_config.yaml`` at the generated root.
+            # Fall back to that layout when the per-baseline dir is
+            # absent so BYO translations remain resolvable.
+            legacy_overlay = generated_root / "baseline_config.yaml"
+            overlay_path = legacy_overlay if legacy_overlay.exists() else None
+        resolved = resolve_baseline(
+            bundle_path=bundle_path,
+            overlay_path=overlay_path,
+            framework_defaults=framework_defaults,
+        )
+        resolved_baselines[bl_name] = resolved
+        packages.append((bl_name, resolved))
+
+    for algo in kept_algos:
+        algo_name = algo["name"]
+        base_name = algo["defaults"]
+        if base_name not in resolved_baselines:
+            raise AssembleError(
+                f"algorithm '{algo_name}' references unknown baseline "
+                f"'{base_name}'; known: {sorted(resolved_baselines)}"
+            )
+        diffs_path = _resolve_scenario_path(
+            exp_root, algo.get("scenario"), "treatment.yaml"
+        )
+        overlay_path = generated_root / algo_name / f"{algo_name}_config.yaml"
+        resolved = resolve_treatment(
+            baseline_resolved=resolved_baselines[base_name],
+            diffs_path=diffs_path,
+            overlay_path=overlay_path,
+        )
+        algo_image_ref = translated_algos[algo_name]["image_ref"]
+        inject_image_tag(resolved, algo_image_ref)
+        packages.append((algo_name, resolved))
+
+    hf_secret = (cluster_config.get("secret_names") or {}).get(
+        "hf_token", "hf-secret"
+    )
+    for _, resolved in packages:
+        inject_hf_secret_name(resolved, hf_secret)
+
+    workloads = [_load_workload(exp_root, wl) for wl in manifest.get("workloads", [])]
+    first_baseline = next(
+        (resolved for name, resolved in packages if name in resolved_baselines),
+        packages[0][1] if packages else {},
+    )
+    scenarios_list = first_baseline.get("scenario", [])
+    model_name = (
+        scenarios_list[0].get("model", {}).get("name", "") if scenarios_list else ""
+    )
+    submodule_shas, submodule_urls, missing_submodules = (
+        discover_framework_submodules(_REPO_ROOT)
+    )
+
+    return _ResolvedPackages(
+        packages=packages,
+        resolved_baselines=resolved_baselines,
+        kept_algos=kept_algos,
+        skipped_algo_names=skipped_algo_names,
+        translated_algos=translated_algos,
+        workloads=workloads,
+        model_name=model_name,
+        submodule_shas=submodule_shas,
+        submodule_urls=submodule_urls,
+        missing_submodules=missing_submodules,
+    )
+
+
 def _additive_grow(
     run_dir: Path,
     manifest: dict,
@@ -447,7 +606,7 @@ def _additive_grow(
     now_iso: str,
     experiment_root: Path,
     translation_hash: str,
-    cluster_id: str,
+    translation_ref: str,
     translation_dir: Path,
     cluster_config: dict,
 ) -> None:
@@ -462,82 +621,34 @@ def _additive_grow(
     (drift check already ran and passed).
     """
     # Re-run scenario resolution to obtain workloads + packages + submodule
-    # discovery. This is safe because the drift check already established
-    # that resolved content is unchanged from the prior assemble.
+    # discovery. Safe because drift check has already established that the
+    # manifest slice is unchanged from the prior assemble; ``_resolve_packages``
+    # still validates every referenced file and refuses cleanly (as
+    # ``AssembleError``) if a scenario file or the translation output has been
+    # deleted or corrupted since.
     layout.set_experiment_root(experiment_root)
     exp_root = layout.experiment_root()
-    defaults_dir = exp_root / "baselines" / "defaults"
-    framework_defaults = load_defaults_overlay(
-        defaults_dir if defaults_dir.exists() else None,
-        disable=(manifest.get("defaults") or {}).get("disable") or [],
-    )
     tout_path = layout.translation_output_path(translation_hash)
-    tout = _translation_ref.read_translation_output(tout_path)
-    translated_algos = {a.get("name"): a for a in tout.get("algorithms", []) or []}
-    translated_names = set(translated_algos.keys())
-    kept_algos, _skipped = filter_algorithms(
-        manifest.get("algorithms", []) or [],
-        translated_names=translated_names,
+    resolved = _resolve_packages(
+        manifest,
+        exp_root=exp_root,
+        translation_dir=translation_dir,
+        tout_path=tout_path,
+        cluster_config=cluster_config,
+        translation_ref=translation_ref,
     )
-    generated_root = translation_dir / "generated"
-
-    packages: list[tuple[str, dict]] = []
-    resolved_baselines: dict[str, dict] = {}
-    for bl in manifest.get("baselines", []):
-        bl_name = bl["name"]
-        bundle_path = _resolve_scenario_path(exp_root, bl.get("scenario"), "baseline.yaml")
-        overlay_path = generated_root / f"baseline_{bl_name}" / "baseline_config.yaml"
-        if not overlay_path.exists():
-            legacy_overlay = generated_root / "baseline_config.yaml"
-            overlay_path = legacy_overlay if legacy_overlay.exists() else None
-        resolved = resolve_baseline(
-            bundle_path=bundle_path, overlay_path=overlay_path,
-            framework_defaults=framework_defaults,
-        )
-        resolved_baselines[bl_name] = resolved
-        packages.append((bl_name, resolved))
-    for algo in kept_algos:
-        algo_name = algo["name"]
-        base_name = algo["defaults"]
-        diffs_path = _resolve_scenario_path(exp_root, algo.get("scenario"), "treatment.yaml")
-        overlay_path = generated_root / algo_name / f"{algo_name}_config.yaml"
-        resolved = resolve_treatment(
-            baseline_resolved=resolved_baselines[base_name],
-            diffs_path=diffs_path,
-            overlay_path=overlay_path,
-        )
-        algo_image_ref = translated_algos[algo_name]["image_ref"]
-        inject_image_tag(resolved, algo_image_ref)
-        packages.append((algo_name, resolved))
-
-    hf_secret = (cluster_config.get("secret_names") or {}).get("hf_token", "hf-secret")
-    for _, resolved in packages:
-        inject_hf_secret_name(resolved, hf_secret)
-
-    workloads = [_load_workload(exp_root, wl) for wl in manifest.get("workloads", [])]
-    pipeline_name = (manifest.get("pipeline") or {}).get("name", "sim2real")
-    observe = manifest.get("blis_observe") or {}
-    first_baseline = next(
-        (resolved for name, resolved in packages if name in resolved_baselines),
-        packages[0][1] if packages else {},
-    )
-    scenarios_list = first_baseline.get("scenario", [])
-    model_name = (
-        scenarios_list[0].get("model", {}).get("name", "") if scenarios_list else ""
-    )
-    submodule_shas, submodule_urls, _missing = discover_framework_submodules(_REPO_ROOT)
 
     generate_pipelineruns(
         run_dir=run_dir,
-        packages=packages,
-        workloads=workloads,
+        packages=resolved.packages,
+        workloads=resolved.workloads,
         run_name=run_dir.name,
         cluster_config=cluster_config,
-        pipeline_name=pipeline_name,
-        observe=observe,
-        model_name=model_name,
-        submodule_shas=submodule_shas,
-        submodule_urls=submodule_urls,
+        pipeline_name=(manifest.get("pipeline") or {}).get("name", "sim2real"),
+        observe=manifest.get("blis_observe") or {},
+        model_name=resolved.model_name,
+        submodule_shas=resolved.submodule_shas,
+        submodule_urls=resolved.submodule_urls,
         iterations=range(prior_replicas + 1, new_replicas + 1),
     )
 
@@ -701,7 +812,7 @@ def assemble_run(
             now_iso=now_iso,
             experiment_root=experiment_root,
             translation_hash=translation_hash,
-            cluster_id=cluster_id,
+            translation_ref=translation_ref,
             translation_dir=layout.translation_dir(translation_hash),
             cluster_config=cluster_config,
         )
@@ -710,36 +821,24 @@ def assemble_run(
         assemble_run.missing_submodules = []  # type: ignore[attr-defined]
         return
 
-    # 4. Load translation index -------------------------------------------
-    try:
-        tout = _translation_ref.read_translation_output(tout_path)
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise AssembleError(
-            f"translation_output.json is not valid JSON: {tout_path}: {exc}"
-        ) from exc
-
-    translated_algos = {
-        a.get("name"): a for a in tout.get("algorithms", []) or []
-    }
-    translated_names = set(translated_algos.keys())
-
-    kept_algos, skipped_algo_names = filter_algorithms(
-        manifest.get("algorithms", []) or [],
-        translated_names=translated_names,
+    # 4. Resolve packages (translation load, algorithm filter, baseline +
+    # treatment resolution, image + HF-secret injection, workload load,
+    # model-name derivation, submodule discovery). Shared with the additive
+    # -grow path via ``_resolve_packages`` so the AssembleError guards stay
+    # in one place.
+    exp_root = layout.experiment_root()
+    resolved = _resolve_packages(
+        manifest,
+        exp_root=exp_root,
+        translation_dir=tdir,
+        tout_path=tout_path,
+        cluster_config=cluster_config,
+        translation_ref=translation_ref,
     )
-
-    # Incomplete-translation check: any kept algo with null image_ref means
-    # the build step has not run yet.
-    unbuilt = [
-        a["name"] for a in kept_algos
-        if not translated_algos[a["name"]].get("image_ref")
-    ]
-    if unbuilt:
-        raise AssembleError(
-            f"translation {translation_ref} not built for algorithms: "
-            f"{', '.join(unbuilt)} — run 'sim2real build --translation "
-            f"{translation_ref}' first"
-        )
+    packages = resolved.packages
+    kept_algos = resolved.kept_algos
+    translated_algos = resolved.translated_algos
+    assemble_run.missing_submodules = resolved.missing_submodules  # type: ignore[attr-defined]
 
     # 5. Snapshot assembly slice + params_hash ----------------------------
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -748,108 +847,25 @@ def assemble_run(
     )
     params_hash = compute_params_hash(manifest_assembly_path)
 
-    # 6. Resolve scenarios ------------------------------------------------
-    exp_root = layout.experiment_root()
-    defaults_dir = exp_root / "baselines" / "defaults"
-    framework_defaults = load_defaults_overlay(
-        defaults_dir if defaults_dir.exists() else None,
-        disable=(manifest.get("defaults") or {}).get("disable") or [],
-    )
-    generated_root = tdir / "generated"
-
-    packages: list[tuple[str, dict]] = []
-    resolved_baselines: dict[str, dict] = {}
-    for bl in manifest.get("baselines", []):
-        bl_name = bl["name"]
-        bundle_path = _resolve_scenario_path(
-            exp_root, bl.get("scenario"), "baseline.yaml"
-        )
-        if bundle_path is None:
-            raise AssembleError(f"baseline '{bl_name}' has no scenario file")
-        overlay_path = generated_root / f"baseline_{bl_name}" / "baseline_config.yaml"
-        if not overlay_path.exists():
-            # BYO ``translation register`` writes the shared step-1
-            # ``generated/baseline_config.yaml`` at the generated root.
-            # Fall back to that layout when the per-baseline dir is
-            # absent so BYO translations remain resolvable.
-            legacy_overlay = generated_root / "baseline_config.yaml"
-            overlay_path = legacy_overlay if legacy_overlay.exists() else None
-        resolved = resolve_baseline(
-            bundle_path=bundle_path,
-            overlay_path=overlay_path,
-            framework_defaults=framework_defaults,
-        )
-        resolved_baselines[bl_name] = resolved
-        packages.append((bl_name, resolved))
-
-    for algo in kept_algos:
-        algo_name = algo["name"]
-        base_name = algo["defaults"]
-        if base_name not in resolved_baselines:
-            raise AssembleError(
-                f"algorithm '{algo_name}' references unknown baseline "
-                f"'{base_name}'; known: {sorted(resolved_baselines)}"
-            )
-        diffs_path = _resolve_scenario_path(
-            exp_root, algo.get("scenario"), "treatment.yaml"
-        )
-        overlay_path = generated_root / algo_name / f"{algo_name}_config.yaml"
-        resolved = resolve_treatment(
-            baseline_resolved=resolved_baselines[base_name],
-            diffs_path=diffs_path,
-            overlay_path=overlay_path,
-        )
-        algo_image_ref = translated_algos[algo_name]["image_ref"]
-        inject_image_tag(resolved, algo_image_ref)
-        packages.append((algo_name, resolved))
-
-    # 7. Inject hf secret on every package --------------------------------
-    hf_secret = (cluster_config.get("secret_names") or {}).get(
-        "hf_token", "hf-secret"
-    )
-    for _, resolved in packages:
-        inject_hf_secret_name(resolved, hf_secret)
-
-    # 8. Write scenario YAMLs ---------------------------------------------
+    # 6. Write scenario YAMLs ---------------------------------------------
     write_resolved_scenarios(run_dir, packages)
 
-    # 9. Generate PipelineRuns --------------------------------------------
-    workloads = [_load_workload(exp_root, wl) for wl in manifest.get("workloads", [])]
-    pipeline_name = (manifest.get("pipeline") or {}).get("name", "sim2real")
-    observe = manifest.get("blis_observe") or {}
-    # Model name derives from the first baseline package (matches prior behavior).
-    first_baseline = next(
-        (resolved for name, resolved in packages if name in resolved_baselines),
-        packages[0][1] if packages else {},
-    )
-    scenarios_list = first_baseline.get("scenario", [])
-    model_name = (
-        scenarios_list[0].get("model", {}).get("name", "") if scenarios_list else ""
-    )
-
-    # Framework submodule discovery — populates the four benchmarkGit*/
-    # blisGit* params on every generated PipelineRun (issue #458). Missing
-    # submodules are recorded on the side-band attr for the CLI wrapper.
-    submodule_shas, submodule_urls, missing_submodules = (
-        discover_framework_submodules(_REPO_ROOT)
-    )
-    assemble_run.missing_submodules = missing_submodules  # type: ignore[attr-defined]
-
+    # 7. Generate PipelineRuns --------------------------------------------
     generate_pipelineruns(
         run_dir=run_dir,
         packages=packages,
-        workloads=workloads,
+        workloads=resolved.workloads,
         run_name=run_name,
         cluster_config=cluster_config,
-        pipeline_name=pipeline_name,
-        observe=observe,
-        model_name=model_name,
-        submodule_shas=submodule_shas,
-        submodule_urls=submodule_urls,
+        pipeline_name=(manifest.get("pipeline") or {}).get("name", "sim2real"),
+        observe=manifest.get("blis_observe") or {},
+        model_name=resolved.model_name,
+        submodule_shas=resolved.submodule_shas,
+        submodule_urls=resolved.submodule_urls,
         iterations=range(1, replicas + 1),
     )
 
-    # 10. Write run_metadata.json -----------------------------------------
+    # 8. Write run_metadata.json ------------------------------------------
     # image_tag is a single-image summary field for backward-compat; use the
     # first *kept* algorithm's image_ref. Reading from kept_algos rather
     # than tout["algorithms"][0] guards against the multi-algo case where
@@ -873,7 +889,7 @@ def assemble_run(
         },
     )
     # Skipped-algorithm list exposed for the CLI wrapper to surface as warnings.
-    assemble_run.skipped_algorithms = skipped_algo_names  # type: ignore[attr-defined]
+    assemble_run.skipped_algorithms = resolved.skipped_algo_names  # type: ignore[attr-defined]
 
 
 # Initialize side-band attributes so `getattr` in the CLI works on first call.

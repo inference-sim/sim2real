@@ -263,3 +263,37 @@ class TestAssembleReplicas:
         _assemble(fx, replicas=2, force=True)
         names = _pipelinerun_files(_cluster_dir_of(fx))
         assert "pipelinerun-wl-a|baseline|i2.yaml" in names
+
+    def test_additive_grow_missing_scenario_file_raises_assemble_error(
+        self, tmp_path,
+    ):
+        """Grow path must raise AssembleError (not AttributeError) if a
+        referenced scenario file has been deleted between prior assemble
+        and the grow call. Verifies scenario-resolution failures inside
+        the shared `_resolve_packages` helper stay in the AssembleError
+        contract on the grow path."""
+        fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
+                              algo_names_manifest=["sr"])
+        _assemble(fx, replicas=3)
+        # Delete the baseline scenario file that transfer.yaml references.
+        (fx["exp_root"] / "baselines" / "base.yaml").unlink()
+        with pytest.raises(assemble_run.AssembleError,
+                           match="baseline scenario not found"):
+            _assemble(fx, replicas=5)
+
+    def test_additive_grow_corrupt_translation_output_raises_assemble_error(
+        self, tmp_path,
+    ):
+        """Grow path must raise AssembleError (not raw ValueError /
+        JSONDecodeError) if translation_output.json has been corrupted
+        between prior assemble and the grow call. Verifies the wrapped
+        `read_translation_output` call lifted into `_resolve_packages`."""
+        fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
+                              algo_names_manifest=["sr"])
+        _assemble(fx, replicas=3)
+        tout = (fx["exp_root"] / "workspace" / "translations"
+                / fx["translation_hash"] / "translation_output.json")
+        tout.write_text("{not-json")
+        with pytest.raises(assemble_run.AssembleError,
+                           match="not valid JSON"):
+            _assemble(fx, replicas=5)
