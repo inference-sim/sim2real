@@ -4,8 +4,9 @@ Reads a registered translation and an experiment repo's ``transfer.yaml``,
 snapshots the assembly-slice into ``runs/<R>/manifest.assembly.yaml``,
 deep-merges baseline + treatment scenarios (framework defaults → baseline
 bundle → per-algorithm overlay), generates one PipelineRun per
-(workload, package), and writes ``run_metadata.json`` with a stable
-``params_hash`` over the assembly-slice bytes.
+(workload, package, iteration) tuple, and writes ``run_metadata.json`` with
+a stable ``params_hash`` over the assembly-slice bytes (with the top-level
+``replicas`` field excluded).
 
 Pure module: no argparse, no print. Callers surface errors via the
 ``AssembleError`` exception.
