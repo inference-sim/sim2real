@@ -461,14 +461,14 @@ When `--only` or `--workload` is given, only matching workload subdirectories ar
 
 **Safety:** Results in `workspace/runs/<run>/results/` are preserved — only cluster resources and ConfigMap status are affected.
 
-**`deploy.py wipe`** — deletes local result files (`results/<package>/<workload>/`) for all pairs in scope. Does **not** modify pair status in the ConfigMap. Pairs with no results on disk are skipped. Empty package directories are cleaned up automatically.
+**`deploy.py wipe`** — deletes local result files for all pairs in scope. Does **not** modify pair status in the ConfigMap. Pairs with no results on disk are skipped. Empty package directories are cleaned up automatically. The delete target is the workload-level directory (`results/<package>/<workload>/`), not the per-iteration subdirectory — see the `--iteration` note below.
 
 | Flag | Description |
 |------|-------------|
 | `--only PAIR…` | Scope wipe to specific pair keys (comma or space-separated, `wl-` prefix optional) |
 | `--workload NAME…` | Scope wipe to pairs matching these workloads (comma or space-separated) |
 | `--package NAME…` | Scope wipe to pairs matching these packages (comma or space-separated) |
-| `--iteration SPEC` | Scope to iteration(s): `'2'`, `'1,3'`, `'1-3'`, `'1,3-5'` |
+| `--iteration SPEC` | Narrows which pair keys are targeted, but the delete still removes the entire `results/<package>/<workload>/` workload tree — sibling iterations for the same workload are removed too. Tracked at #525. |
 | `--dry-run` | Print what would be wiped without acting |
 | `--yes` / `-y` | Skip confirmation prompt |
 
