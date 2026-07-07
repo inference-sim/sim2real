@@ -264,3 +264,38 @@ def test_make_pipelinerun_scenario_iteration_explicit():
         iteration=5,
     )
     assert pr["metadata"]["name"] == "baseline-wl-r-i5"
+
+
+# ── Tests for build_results_dir + RESULTS_DIR_TEMPLATE ──────────────────────
+
+from pipeline.lib.tekton import build_results_dir, RESULTS_DIR_TEMPLATE
+
+
+def test_build_results_dir_returns_slash_joined_path():
+    assert build_results_dir("run1", "baseline", "chatbot-mid", 1) == "run1/baseline/chatbot-mid/i1"
+
+
+def test_build_results_dir_accepts_int_replica():
+    assert build_results_dir("r", "p", "w", 3) == "r/p/w/i3"
+
+
+def test_build_results_dir_accepts_str_replica():
+    """String replica must produce the same output — used for pipeline.yaml templating."""
+    assert build_results_dir("r", "p", "w", "3") == "r/p/w/i3"
+
+
+def test_results_dir_template_shape():
+    """The pipeline.yaml template must be exactly the shape build_results_dir
+    would produce if each segment were a Tekton param reference."""
+    assert RESULTS_DIR_TEMPLATE == "$(params.runName)/$(params.phase)/$(params.workloadName)/i$(params.replica)"
+
+
+def test_build_results_dir_matches_template_when_params_substituted():
+    """build_results_dir with Tekton-param strings reproduces the template
+    verbatim. This is the invariant test_pipeline_yaml.py will assert against
+    every resultsDir value in pipeline.yaml."""
+    template = build_results_dir(
+        "$(params.runName)", "$(params.phase)",
+        "$(params.workloadName)", "$(params.replica)",
+    )
+    assert template == RESULTS_DIR_TEMPLATE

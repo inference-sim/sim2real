@@ -14,6 +14,23 @@ _TASK_TIMEOUTS: dict[str, str] = {
 }
 
 
+# Canonical shape of resultsDir in pipeline.yaml. Every task that writes into
+# resultsDir threads this exact template. build_results_dir() renders it with
+# concrete values for callers that construct the path locally (e.g. tests).
+# Kept in one place so pipeline.yaml drift is caught by test_pipeline_yaml.py.
+RESULTS_DIR_TEMPLATE = (
+    "$(params.runName)/$(params.phase)/$(params.workloadName)/i$(params.replica)"
+)
+
+
+def build_results_dir(run: str, phase: str, workload: str, replica) -> str:
+    """Return the canonical resultsDir path for a (run, phase, workload, replica)
+    tuple. Callers supply either concrete strings/ints or Tekton param
+    references — both round-trip through the same template.
+    """
+    return f"{run}/{phase}/{workload}/i{replica}"
+
+
 def _default_spec_content(base_dir: str = _SPEC_BASE_DIR,
                           scenario_file: str = _SCENARIO_FILE_PATH) -> str:
     """Return the llmdbenchmark spec content string with PVC paths."""
