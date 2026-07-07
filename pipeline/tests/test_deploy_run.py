@@ -115,6 +115,104 @@ def test_status_filter_by_workload(tmp_path, capsys, monkeypatch):
     assert "wl-load-baseline" not in out
 
 
+def test_status_filter_by_iteration_list(tmp_path, capsys, monkeypatch):
+    """--iteration 2,3 shows only i2 and i3 rows (issue #512).
+
+    Integration test named in the issue: on a 3-replica run,
+    ``deploy.py status --iteration 2,3`` returns only i2 and i3 rows.
+    """
+    from pipeline.deploy import _cmd_status
+    _mock_cm(monkeypatch, _ITER_PROGRESS)
+
+    class _Args:
+        only = None
+        workload = None
+        package = None
+        status = None
+        iteration = "2,3"
+        silent = False
+        live = False
+
+    _cmd_status(_Args(), tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
+    out = capsys.readouterr().out
+    # i2 and i3 rows must appear.
+    assert "wl-chat-mid|sim2real-ac|i2" in out
+    assert "wl-chat-mid|sim2real-ac|i3" in out
+    assert "wl-chat-mid|sim2real-routing|i2" in out
+    assert "wl-heavy|sim2real-ac|i2" in out
+    # i1 rows must not.
+    assert "wl-chat-mid|sim2real-ac|i1" not in out
+    assert "wl-chat-mid|sim2real-routing|i1" not in out
+    assert "wl-heavy|sim2real-ac|i1" not in out
+
+
+def test_status_filter_by_iteration_range(tmp_path, capsys, monkeypatch):
+    """--iteration 1-3 shows every replica row (all iterations present)."""
+    from pipeline.deploy import _cmd_status
+    _mock_cm(monkeypatch, _ITER_PROGRESS)
+
+    class _Args:
+        only = None
+        workload = None
+        package = None
+        status = None
+        iteration = "1-3"
+        silent = False
+        live = False
+
+    _cmd_status(_Args(), tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
+    out = capsys.readouterr().out
+    for k in _ITER_PROGRESS:
+        if k.startswith("_"):
+            continue
+        assert k in out, f"expected {k} in status output"
+
+
+def test_status_filter_by_iteration_composes_with_workload(tmp_path, capsys, monkeypatch):
+    """--iteration composes with --workload (AND semantics)."""
+    from pipeline.deploy import _cmd_status
+    _mock_cm(monkeypatch, _ITER_PROGRESS)
+
+    class _Args:
+        only = None
+        workload = "chat-mid"
+        package = None
+        status = None
+        iteration = "1"
+        silent = False
+        live = False
+
+    _cmd_status(_Args(), tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
+    out = capsys.readouterr().out
+    assert "wl-chat-mid|sim2real-ac|i1" in out
+    assert "wl-chat-mid|sim2real-routing|i1" in out
+    assert "wl-heavy|sim2real-ac|i1" not in out    # excluded by --workload
+    assert "wl-chat-mid|sim2real-ac|i2" not in out  # excluded by --iteration
+
+
+def test_status_filter_by_iteration_no_match_aborts(tmp_path, capsys, monkeypatch):
+    """--iteration with no matching pair aborts via _report_filter_mismatch."""
+    import pytest
+    from pipeline.deploy import _cmd_status
+    _mock_cm(monkeypatch, _ITER_PROGRESS)
+
+    class _Args:
+        only = None
+        workload = None
+        package = None
+        status = None
+        iteration = "9"
+        silent = False
+        live = False
+
+    with pytest.raises(SystemExit) as exc_info:
+        _cmd_status(_Args(), tmp_path, cluster_config={"namespaces": ["sim2real-ns"]})
+    assert exc_info.value.code == 1
+    stderr = capsys.readouterr().err
+    assert "--iteration '9'" in stderr
+    assert "Valid --iteration values" in stderr
+
+
 def test_status_filter_by_package(tmp_path, capsys, monkeypatch):
     from pipeline.deploy import _cmd_status
     _mock_cm(monkeypatch, _PROGRESS)
@@ -749,6 +847,208 @@ def test_apply_run_filters_only_empty_string():
 
     result = _apply_run_filters(dict(_PROGRESS), _Args())
     assert result == set()
+
+
+# ── --iteration filter tests (issue #512) ────────────────────────────────
+
+_ITER_PROGRESS = {
+    "wl-chat-mid|sim2real-ac|i1":       {"workload": "chat-mid", "package": "sim2real-ac", "status": "pending"},
+    "wl-chat-mid|sim2real-ac|i2":       {"workload": "chat-mid", "package": "sim2real-ac", "status": "running"},
+    "wl-chat-mid|sim2real-ac|i3":       {"workload": "chat-mid", "package": "sim2real-ac", "status": "done"},
+    "wl-chat-mid|sim2real-routing|i1":  {"workload": "chat-mid", "package": "sim2real-routing", "status": "pending"},
+    "wl-chat-mid|sim2real-routing|i2":  {"workload": "chat-mid", "package": "sim2real-routing", "status": "failed"},
+    "wl-heavy|sim2real-ac|i1":          {"workload": "heavy", "package": "sim2real-ac", "status": "done"},
+    "wl-heavy|sim2real-ac|i2":          {"workload": "heavy", "package": "sim2real-ac", "status": "done"},
+    "_orchestrator":                    {"state": "normal"},
+}
+
+
+def test_apply_run_filters_iteration_single():
+    """--iteration 2 selects only iN=2 pair keys."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = None; package = None; status = None; iteration = "2"
+
+    result = _apply_run_filters(dict(_ITER_PROGRESS), _Args())
+    assert result == {
+        "wl-chat-mid|sim2real-ac|i2",
+        "wl-chat-mid|sim2real-routing|i2",
+        "wl-heavy|sim2real-ac|i2",
+    }
+
+
+def test_apply_run_filters_iteration_list():
+    """--iteration 1,3 selects a discontiguous set."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = None; package = None; status = None; iteration = "1,3"
+
+    result = _apply_run_filters(dict(_ITER_PROGRESS), _Args())
+    assert result == {
+        "wl-chat-mid|sim2real-ac|i1",
+        "wl-chat-mid|sim2real-ac|i3",
+        "wl-chat-mid|sim2real-routing|i1",
+        "wl-heavy|sim2real-ac|i1",
+    }
+
+
+def test_apply_run_filters_iteration_range():
+    """--iteration 1-3 selects the closed range."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = None; package = None; status = None; iteration = "1-3"
+
+    result = _apply_run_filters(dict(_ITER_PROGRESS), _Args())
+    assert result == {
+        "wl-chat-mid|sim2real-ac|i1",
+        "wl-chat-mid|sim2real-ac|i2",
+        "wl-chat-mid|sim2real-ac|i3",
+        "wl-chat-mid|sim2real-routing|i1",
+        "wl-chat-mid|sim2real-routing|i2",
+        "wl-heavy|sim2real-ac|i1",
+        "wl-heavy|sim2real-ac|i2",
+    }
+
+
+def test_apply_run_filters_iteration_mixed():
+    """--iteration 1,3-5 mixes list and range."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = None; package = None; status = None; iteration = "1,3-5"
+
+    # Only i1 and i3 exist in fixture; i4/i5 don't exist so they're just absent.
+    result = _apply_run_filters(dict(_ITER_PROGRESS), _Args())
+    assert result == {
+        "wl-chat-mid|sim2real-ac|i1",
+        "wl-chat-mid|sim2real-ac|i3",
+        "wl-chat-mid|sim2real-routing|i1",
+        "wl-heavy|sim2real-ac|i1",
+    }
+
+
+def test_apply_run_filters_iteration_composes_with_workload():
+    """--iteration composes with --workload (AND semantics)."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = "heavy"; package = None; status = None; iteration = "1,2"
+
+    result = _apply_run_filters(dict(_ITER_PROGRESS), _Args())
+    assert result == {
+        "wl-heavy|sim2real-ac|i1",
+        "wl-heavy|sim2real-ac|i2",
+    }
+
+
+def test_apply_run_filters_iteration_composes_with_package_and_status():
+    """--iteration composes with --package and --status (AND semantics)."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = None; package = "sim2real-ac"; status = "done"; iteration = "2,3"
+
+    result = _apply_run_filters(dict(_ITER_PROGRESS), _Args())
+    assert result == {
+        "wl-chat-mid|sim2real-ac|i3",
+        "wl-heavy|sim2real-ac|i2",
+    }
+
+
+def test_apply_run_filters_iteration_composes_with_only():
+    """--iteration further narrows the --only selection."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = ["wl-chat-mid|sim2real-ac|i1", "wl-chat-mid|sim2real-ac|i2",
+                "wl-chat-mid|sim2real-ac|i3"]
+        workload = None; package = None; status = None; iteration = "1-2"
+
+    result = _apply_run_filters(dict(_ITER_PROGRESS), _Args())
+    assert result == {
+        "wl-chat-mid|sim2real-ac|i1",
+        "wl-chat-mid|sim2real-ac|i2",
+    }
+
+
+def test_apply_run_filters_iteration_malformed_zero_exits(capsys):
+    """--iteration 0 exits with a clear message from parse_iteration_spec."""
+    import pytest
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = None; package = None; status = None; iteration = "0"
+
+    with pytest.raises(SystemExit) as exc_info:
+        _apply_run_filters(dict(_ITER_PROGRESS), _Args())
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "iteration" in (captured.out + captured.err).lower()
+
+
+def test_apply_run_filters_iteration_malformed_reversed_range_exits():
+    """--iteration 5-1 exits (reversed range rejected by parser)."""
+    import pytest
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = None; package = None; status = None; iteration = "5-1"
+
+    with pytest.raises(SystemExit) as exc_info:
+        _apply_run_filters(dict(_ITER_PROGRESS), _Args())
+    assert exc_info.value.code == 1
+
+
+def test_apply_run_filters_iteration_malformed_nonint_exits():
+    """--iteration abc exits (non-integer rejected by parser)."""
+    import pytest
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = None; package = None; status = None; iteration = "abc"
+
+    with pytest.raises(SystemExit) as exc_info:
+        _apply_run_filters(dict(_ITER_PROGRESS), _Args())
+    assert exc_info.value.code == 1
+
+
+def test_apply_run_filters_iteration_alone_no_match_returns_empty():
+    """--iteration alone with no matching pair returns empty set (caller reports)."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = None; package = None; status = None; iteration = "9"
+
+    result = _apply_run_filters(dict(_ITER_PROGRESS), _Args())
+    assert result == set()
+
+
+def test_apply_run_filters_iteration_legacy_dash_shape_treated_as_i1():
+    """Legacy dash-shape pair keys are treated as iteration 1 by the filter.
+
+    This preserves --iteration semantics for the mid-rollout state where PR 2
+    (assemble filename reshape) has not yet landed and legacy dash-shape keys
+    still coexist with canonical grammar keys.
+    """
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = None; package = None; status = None; iteration = "1"
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    # _PROGRESS keys are legacy dash-shape (wl-smoke-baseline etc.); all
+    # non-metadata pair keys collapse to iteration=1 via _key_iteration.
+    expected = {k for k in _PROGRESS if not k.startswith("_")}
+    assert result == expected
+
+    class _ArgsI2:
+        only = None; workload = None; package = None; status = None; iteration = "2"
+
+    result_i2 = _apply_run_filters(dict(_PROGRESS), _ArgsI2())
+    assert result_i2 == set()
 
 
 # ── Multi-value flag tests (issue #212) ────────────────────────────────────

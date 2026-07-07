@@ -2236,3 +2236,100 @@ def test_cmd_collect_empty_namespaces_exits(tmp_path, capsys, monkeypatch):
     with pytest.raises(SystemExit):
         deploy._cmd_collect(Args(), run_dir, {})
     assert "No namespace configured." in capsys.readouterr().err
+
+
+# ── --iteration filter (issue #512) ─────────────────────────────────────────
+
+
+def test_collect_iteration_filter_narrows_scope(tmp_path, monkeypatch):
+    """--iteration 1-3 restricts collect to the matching iteration subset.
+
+    Integration test named in the issue: pairs exist at i1..i5 for the same
+    (workload, package); ``deploy.py collect --iteration 1-3`` must consider
+    only i1..i3. We surface the effect by placing i4 and i5 in a separate
+    completed_namespace and asserting no extract call is made against that
+    namespace when the filter is applied.
+    """
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    data = {
+        "wl-chat-mid|sim2real-ac|i1": {"workload": "chat-mid", "package": "sim2real-ac", "status": "done", "completed_namespace": "ns-a"},
+        "wl-chat-mid|sim2real-ac|i2": {"workload": "chat-mid", "package": "sim2real-ac", "status": "done", "completed_namespace": "ns-a"},
+        "wl-chat-mid|sim2real-ac|i3": {"workload": "chat-mid", "package": "sim2real-ac", "status": "done", "completed_namespace": "ns-a"},
+        "wl-chat-mid|sim2real-ac|i4": {"workload": "chat-mid", "package": "sim2real-ac", "status": "done", "completed_namespace": "ns-b"},
+        "wl-chat-mid|sim2real-ac|i5": {"workload": "chat-mid", "package": "sim2real-ac", "status": "done", "completed_namespace": "ns-b"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        only = None
+        workload = None
+        package = None
+        iteration = "1-3"
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+        extract_calls.append({"namespace": namespace, "phases": sorted(phases)})
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-a"]})
+
+    dispatched_ns = {c["namespace"] for c in extract_calls}
+    assert "ns-a" in dispatched_ns, "expected extract against ns-a (holds i1..i3)"
+    assert "ns-b" not in dispatched_ns, (
+        "ns-b holds only i4..i5 — must be excluded by --iteration 1-3")
+
+
+def test_collect_iteration_filter_no_match_aborts(tmp_path, capsys, monkeypatch):
+    """--iteration with no matching iteration aborts via _report_filter_mismatch."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    data = {
+        "wl-chat-mid|sim2real-ac|i1": {"workload": "chat-mid", "package": "sim2real-ac", "status": "done", "completed_namespace": "ns-a"},
+        "wl-chat-mid|sim2real-ac|i2": {"workload": "chat-mid", "package": "sim2real-ac", "status": "done", "completed_namespace": "ns-a"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        only = None
+        workload = None
+        package = None
+        iteration = "9"
+        skip_logs = False
+
+    with pytest.raises(SystemExit) as exc_info:
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-a"]})
+    assert exc_info.value.code == 1
+    assert "--iteration '9'" in capsys.readouterr().err
+
+
+def test_collect_iteration_malformed_exits(tmp_path, capsys, monkeypatch):
+    """--iteration abc surfaces parse_iteration_spec's error before doing work."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    data = {
+        "wl-chat-mid|sim2real-ac|i1": {"workload": "chat-mid", "package": "sim2real-ac", "status": "done", "completed_namespace": "ns-a"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        only = None
+        workload = None
+        package = None
+        iteration = "abc"
+        skip_logs = False
+
+    with pytest.raises(SystemExit) as exc_info:
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-a"]})
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "iteration" in (captured.out + captured.err).lower()

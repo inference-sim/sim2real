@@ -10,7 +10,7 @@ import pipeline.deploy as mod
 
 
 def _make_run_args(*, remote=False, workload=None, only=None, package=None,
-                   status=None, force=False, skip_build=False,
+                   status=None, iteration=None, force=False, skip_build=False,
                    skip_teardown=False,
                    max_retries=2, poll_interval=30, gpu_resource_type=None,
                    default_gpu_cost=1, pending_threshold=600,
@@ -18,7 +18,7 @@ def _make_run_args(*, remote=False, workload=None, only=None, package=None,
                    shadow_ttl=120):
     return argparse.Namespace(
         remote=remote, workload=workload, only=only, package=package,
-        status=status, force=force, skip_build=skip_build,
+        status=status, iteration=iteration, force=force, skip_build=skip_build,
         skip_teardown=skip_teardown,
         max_retries=max_retries, poll_interval=poll_interval,
         gpu_resource_type=gpu_resource_type, default_gpu_cost=default_gpu_cost,
@@ -83,6 +83,29 @@ def test_collect_run_flags_default_shadow_ttl_not_forwarded():
     args = _make_run_args(shadow_ttl=120)
     flags = mod._collect_run_flags(args)
     assert "--shadow-ttl" not in flags
+
+
+def test_collect_run_flags_iteration_forwarded():
+    """--iteration must reach the in-cluster Job (regression for PR #520 review)."""
+    args = _make_run_args(iteration="2")
+    flags = mod._collect_run_flags(args)
+    assert "--iteration" in flags
+    idx = flags.index("--iteration")
+    assert flags[idx + 1] == "2"
+
+
+def test_collect_run_flags_iteration_range_forwarded():
+    """--iteration '1-3' is forwarded verbatim (parser lives in-cluster too)."""
+    args = _make_run_args(iteration="1-3")
+    flags = mod._collect_run_flags(args)
+    assert "--iteration" in flags
+    idx = flags.index("--iteration")
+    assert flags[idx + 1] == "1-3"
+
+
+def test_collect_run_flags_iteration_absent_by_default():
+    args = _make_run_args()
+    assert "--iteration" not in mod._collect_run_flags(args)
 
 
 # ── skip-teardown parser tests ─────────────────────────────────────────────

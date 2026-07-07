@@ -51,13 +51,31 @@ def _c(code: str, text: str) -> str:
 
 from pipeline.lib import build, cluster_ops, layout
 from pipeline.lib.log import info, ok, warn, err
-from pipeline.lib.pairkey import parse_pair_key
+from pipeline.lib.pairkey import parse_iteration_spec, parse_pair_key
 from pipeline.lib.redact import redact_yaml_file, redact_yaml_tree
 
 
 def _is_pair_key(key: str) -> bool:
     """Return True if key is a real pair entry (not metadata)."""
     return not key.startswith("_")
+
+
+def _key_iteration(key: str) -> int:
+    """Return the iteration number encoded in a pair key.
+
+    Canonical grammar (``wl-<workload>|<package>[|i<N>]``) yields the
+    parsed ``iteration``; keys without an ``|iN`` suffix parse as ``1``.
+    Legacy dash-shape keys that predate the step-5 grammar (e.g.
+    ``wl-smoke-baseline`` from a pre-PR-2 run) do not parse; they map to
+    ``1`` here to match the design's step-5 semantics — the
+    single-replica shape reads as implicit ``i1``. ``--iteration 1``
+    therefore includes legacy pairs and higher values exclude them,
+    which is what the design table specifies for the mid-rollout state.
+    """
+    try:
+        return parse_pair_key(key).iteration
+    except ValueError:
+        return 1
 
 
 def _format_capacity(effective: int, probed: int, reserved: int,
@@ -684,6 +702,7 @@ def _cmd_status(args, run_dir: Path,
             getattr(args, "workload", None) is not None,
             getattr(args, "package", None) is not None,
             getattr(args, "status", None) is not None,
+            getattr(args, "iteration", None) is not None,
         ])
         if filters_given:
             suffix += " — filters ignored"
@@ -1499,14 +1518,16 @@ def _cmd_collect(args, run_dir: Path, cluster_config: dict):
             "cluster.")
         sys.exit(1)
 
-    # ── Pair-level scoping (--only / --workload / --package) ─────────────
+    # ── Pair-level scoping (--only / --workload / --package / --iteration) ─
     scope_only = getattr(args, "only", None)
     scope_workload = getattr(args, "workload", None)
     scope_package = _parse_list(getattr(args, "package", None))
-    scoped = scope_only is not None or scope_workload is not None
+    scope_iteration = getattr(args, "iteration", None)
+    scoped = (scope_only is not None or scope_workload is not None
+              or scope_iteration is not None)
 
     if scoped and not progress:
-        err("--only/--workload require progress data to resolve pairs, but none was found.")
+        err("--only/--workload/--iteration require progress data to resolve pairs, but none was found.")
         sys.exit(1)
 
     if scoped and progress:
@@ -1524,6 +1545,7 @@ def _cmd_collect(args, run_dir: Path, cluster_config: dict):
             workload = scope_workload
             package = _pair_scope_pkg
             status = None
+            iteration = scope_iteration
 
         in_scope = _resolve_scope(progress, _ScopeArgs())
 
@@ -2140,12 +2162,22 @@ def _apply_run_filters(progress: dict, args) -> set:
     """Return the set of pair keys in scope for this invocation.
 
     With no flags: returns empty set (caller interprets as all pairs in scope).
-    With flags: returns only matching pairs.
+    With flags: returns only matching pairs. Filters compose via AND.
     """
     only = _parse_list(getattr(args, "only", None))
     workload = _parse_list(getattr(args, "workload", None))
     package = _parse_list(getattr(args, "package", None))
     status_filter = getattr(args, "status", None)
+    iteration_spec = getattr(args, "iteration", None)
+
+    # Parse --iteration up-front so malformed specs fail before any other work.
+    iteration_set: "set[int] | None" = None
+    if iteration_spec is not None:
+        try:
+            iteration_set = parse_iteration_spec(iteration_spec)
+        except ValueError as exc:
+            err(str(exc))
+            sys.exit(1)
 
     if only:
         result = set()
@@ -2165,9 +2197,11 @@ def _apply_run_filters(progress: dict, args) -> set:
             valid = sorted(k for k in progress.keys() if _is_pair_key(k))
             print(f"  Valid pair keys: {valid}", file=sys.stderr)
             sys.exit(1)
+        if iteration_set is not None:
+            result = {k for k in result if _key_iteration(k) in iteration_set}
         return result
 
-    if not any([workload, package, status_filter]):
+    if not any([workload, package, status_filter, iteration_set]):
         return set()
 
     pair_entries = {k: v for k, v in progress.items() if _is_pair_key(k)}
@@ -2195,6 +2229,8 @@ def _apply_run_filters(progress: dict, args) -> set:
         candidates = {k for k in candidates if pair_entries[k].get("package") in package}
     if status_filter:
         candidates = {k for k in candidates if pair_entries[k].get("status") == status_filter}
+    if iteration_set is not None:
+        candidates = {k for k in candidates if _key_iteration(k) in iteration_set}
     return candidates
 
 
@@ -2209,6 +2245,7 @@ def _resolve_scope(progress: dict, args) -> set:
         getattr(args, "workload", None) is not None,
         getattr(args, "package", None) is not None,
         getattr(args, "status", None) is not None,
+        getattr(args, "iteration", None) is not None,
     ])
     filtered = _apply_run_filters(progress, args)
     if filters_given and not filtered:
@@ -2223,6 +2260,7 @@ def _report_filter_mismatch(progress: dict, args) -> None:
     workload = _parse_list(getattr(args, "workload", None))
     package = _parse_list(getattr(args, "package", None))
     status_filter = getattr(args, "status", None)
+    iteration_spec = getattr(args, "iteration", None)
 
     parts = []
     if only is not None:
@@ -2233,6 +2271,8 @@ def _report_filter_mismatch(progress: dict, args) -> None:
         parts.append(f"--package '{','.join(package)}'")
     if status_filter is not None:
         parts.append(f"--status '{status_filter}'")
+    if iteration_spec is not None:
+        parts.append(f"--iteration '{iteration_spec}'")
 
     err(f"No pairs matched {', '.join(parts)}.\n")
 
@@ -2245,10 +2285,12 @@ def _report_filter_mismatch(progress: dict, args) -> None:
     valid_workloads = sorted({v.get("workload", "") for v in pair_values} - {""})
     valid_packages = sorted({v.get("package", "") for v in pair_values} - {""})
     valid_statuses = sorted({v.get("status", "") for v in pair_values} - {""})
+    valid_iterations = sorted({_key_iteration(k) for k in progress if _is_pair_key(k)})
 
-    print(f"\n  Valid --workload values: {', '.join(valid_workloads)}", file=sys.stderr)
-    print(f"  Valid --package values:  {', '.join(valid_packages)}", file=sys.stderr)
-    print(f"  Valid --status values:   {', '.join(valid_statuses)}", file=sys.stderr)
+    print(f"\n  Valid --workload values:   {', '.join(valid_workloads)}", file=sys.stderr)
+    print(f"  Valid --package values:    {', '.join(valid_packages)}", file=sys.stderr)
+    print(f"  Valid --status values:     {', '.join(valid_statuses)}", file=sys.stderr)
+    print(f"  Valid --iteration values:  {', '.join(str(n) for n in valid_iterations)}", file=sys.stderr)
 
 
 def _check_slot_ready(namespace: str, hf_secret_name: str = "hf-secret") -> tuple[bool, list[str]]:
@@ -3120,8 +3162,8 @@ _FAIL_FAST_REASONS = {
 def _collect_run_flags(args) -> list[str]:
     """Collect run subcommand flags to forward to the in-cluster Job."""
     flags: list[str] = []
-    for name in ("only", "workload", "package", "status"):
-        val = getattr(args, name)
+    for name in ("only", "workload", "package", "status", "iteration"):
+        val = getattr(args, name, None)
         if val is not None:
             if isinstance(val, list):
                 flags.extend([f"--{name}"] + val)
@@ -3438,6 +3480,8 @@ Examples:
                            help="Scope to pairs matching these workloads (comma or space-separated)")
     collect_p.add_argument("--package", nargs="+", metavar="NAME",
                            help="Collect only these packages (comma or space-separated)")
+    collect_p.add_argument("--iteration", metavar="SPEC", dest="iteration",
+                           help="Scope to iteration(s): '2', '1,3', '1-3', '1,3-5'")
     collect_p.add_argument("--skip-logs", action="store_true", dest="skip_logs",
                            help="Skip vLLM and EPP log files, collect only traces")
 
@@ -3446,6 +3490,8 @@ Examples:
     status_p.add_argument("--workload", nargs="+", metavar="NAME",  help="Scope to pairs matching these workloads (comma or space-separated)")
     status_p.add_argument("--package",  nargs="+", metavar="NAME",  help="Scope to pairs matching these packages (comma or space-separated)")
     status_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status (e.g. running, done, failed)")
+    status_p.add_argument("--iteration", metavar="SPEC", dest="iteration",
+                          help="Scope to iteration(s): '2', '1,3', '1-3', '1,3-5'")
     status_p.add_argument("-s", "--silent", action="store_true",
                           help="Suppress the per-pair table; print only the summary line")
 
@@ -3462,6 +3508,8 @@ Examples:
     run_p.add_argument("--workload",     nargs="+", metavar="NAME",  help="Scope execution to pairs matching these workloads (comma or space-separated)")
     run_p.add_argument("--package",      nargs="+", metavar="NAME",  help="Scope execution to pairs matching these packages (comma or space-separated)")
     run_p.add_argument("--status",       metavar="STATE", help="Scope execution to pairs with this status (e.g. failed, timed-out)")
+    run_p.add_argument("--iteration",    metavar="SPEC", dest="iteration",
+                       help="Scope execution to iteration(s): '2', '1,3', '1-3', '1,3-5'")
     run_p.add_argument("--force",        action="store_true",
                        help="Reset non-pending pairs to pending, cleaning cluster resources for pairs with assigned namespaces")
     run_p.add_argument("--skip-teardown", action="store_true", dest="skip_teardown",
@@ -3492,6 +3540,8 @@ Examples:
     reset_p.add_argument("--workload", nargs="+", metavar="NAME",  help="Scope to pairs matching these workloads (comma or space-separated)")
     reset_p.add_argument("--package",  nargs="+", metavar="NAME",  help="Scope to pairs matching these packages (comma or space-separated)")
     reset_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status")
+    reset_p.add_argument("--iteration", metavar="SPEC", dest="iteration",
+                         help="Scope to iteration(s): '2', '1,3', '1-3', '1,3-5'")
     reset_p.add_argument("--preserve-done-status", action="store_true", dest="preserve_done_status",
                          help="Keep done pairs' status unchanged (cluster cleanup only)")
     reset_p.add_argument("--dry-run",  action="store_true", dest="dry_run",
@@ -3501,6 +3551,8 @@ Examples:
     wipe_p.add_argument("--only",     nargs="+", metavar="PAIR",  help="Scope to specific pair keys (comma or space-separated, wl- prefix optional)")
     wipe_p.add_argument("--workload", nargs="+", metavar="NAME",  help="Scope to pairs matching these workloads (comma or space-separated)")
     wipe_p.add_argument("--package",  nargs="+", metavar="NAME",  help="Scope to pairs matching these packages (comma or space-separated)")
+    wipe_p.add_argument("--iteration", metavar="SPEC", dest="iteration",
+                        help="Scope to iteration(s): '2', '1,3', '1-3', '1,3-5'")
     wipe_p.add_argument("--dry-run",  action="store_true", dest="dry_run",
                          help="Print what would be wiped without doing it")
     wipe_p.add_argument("--yes", "-y", action="store_true",
