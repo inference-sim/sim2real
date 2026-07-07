@@ -261,6 +261,36 @@ def write_run_metadata(run_dir: Path, meta: dict) -> Path:
     return out
 
 
+def _align_overlay_name(base: dict, overlay: dict) -> dict:
+    """Realign overlay's ``scenario[0].name`` to match base to prevent list-merge duplication.
+
+    The ``deep_merge`` list strategy in ``pipeline/lib/values.py`` picks ``name``
+    as the merge key when every entry on both sides carries it, then merges list
+    items by identity on that key. Framework-default fragments under
+    ``baselines/defaults/*.yaml`` are authored as ``scenario: - name: defaults``
+    (a placeholder — see each fragment's top-of-file comment "scenario[0].name
+    is realigned to the experiment baseline at merge time"). If the baseline
+    entry is named anything other than ``defaults`` (i.e. every real experiment),
+    a naive merge would append the defaults content as a second, unwanted
+    scenario entry — and llm-d-benchmark's templater would then render it as a
+    separate deployment carrying the framework-default model
+    (``facebook/opt-125m``) instead of the intended model. See issue #516.
+
+    Copies the overlay's first scenario name from the base's first scenario name
+    when both are non-empty and differ. Mutates and returns ``overlay``.
+
+    Ported verbatim from ``pipeline/lib/assemble.py:_align_overlay_name`` on
+    ``main`` — dropped by step-2's ``assemble.py`` → ``assemble_run.py`` rename.
+    """
+    base_scenarios = base.get("scenario", [])
+    overlay_scenarios = overlay.get("scenario", [])
+    if base_scenarios and overlay_scenarios:
+        base_name = base_scenarios[0].get("name", "")
+        if base_name and overlay_scenarios[0].get("name", "") != base_name:
+            overlay_scenarios[0]["name"] = base_name
+    return overlay
+
+
 def resolve_baseline(
     *,
     bundle_path: Path,
@@ -273,6 +303,13 @@ def resolve_baseline(
     ``baselines/defaults/`` directory). ``overlay_path`` may be ``None`` or
     point at a non-existent file (BYO baseline without a baseline overlay).
     Bundle is required — a missing bundle raises AssembleError.
+
+    Before the merge, ``framework_defaults[scenario][0].name`` is realigned
+    to the bundle's ``scenario[0].name`` so both sides collapse into a single
+    scenario entry (see ``_align_overlay_name``). Without this, a defaults
+    overlay named ``defaults`` and a baseline named anything else produce two
+    scenario entries — an intended one plus a phantom one that inherits the
+    llm-d-benchmark framework-default model (issue #516).
     """
     if not bundle_path.exists():
         raise AssembleError(f"baseline scenario not found: {bundle_path}")
@@ -282,7 +319,8 @@ def resolve_baseline(
         if overlay_path is not None and overlay_path.exists()
         else {}
     )
-    resolved = deep_merge(copy.deepcopy(framework_defaults), bundle)
+    aligned_defaults = _align_overlay_name(bundle, copy.deepcopy(framework_defaults))
+    resolved = deep_merge(aligned_defaults, bundle)
     resolved = deep_merge(resolved, overlay)
     return resolved
 
