@@ -35,6 +35,7 @@ jobs:
             pipeline/tests/test_slicer.py \
             pipeline/tests/test_sim2real.py \
             pipeline/tests/test_assemble_run.py \
+            pipeline/tests/test_assemble_replicas.py \
             pipeline/tests/test_translation_ref.py \
             pipeline/tests/test_translate.py \
             pipeline/tests/test_build.py \

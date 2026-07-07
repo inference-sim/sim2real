@@ -29,6 +29,19 @@ from pipeline.lib import layout  # noqa: E402 — must follow sys.path guard
 from pipeline.lib.build import atomic_write_json as _atomic_write_json  # noqa: E402
 
 
+def _positive_int(s: str) -> int:
+    """argparse type= callable — accepts strings parsing to integers >= 1."""
+    try:
+        v = int(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"must be a positive integer, got {s!r}"
+        )
+    if v < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {v}")
+    return v
+
+
 def _validate_algorithm_name(name: str) -> str:
     """Argparse ``type=`` wrapper around ``translation_ref.validate_name``.
 
@@ -457,6 +470,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="overwrite an existing runs/<run>/ directory",
     )
+    asm.add_argument(
+        "--replicas",
+        type=_positive_int,
+        default=1,
+        metavar="N",
+        help="number of replica iterations per (workload, package) pair (default: 1)",
+    )
 
     use = sub.add_parser("use", help="Set the active run in setup_config.json")
     use.add_argument(
@@ -529,6 +549,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     return parser
+
+
+# Private alias used by tests that import _build_parser.
+_build_parser = build_parser
 
 
 def _cmd_translation_register(args) -> int:
@@ -1134,6 +1158,7 @@ def _cmd_assemble(args) -> int:
             experiment_root=exp_root,
             manifest_path=manifest_path,
             force=args.force,
+            replicas=args.replicas,
             now_iso=now_iso,
         )
     except _assemble_run_lib.AssembleError as exc:

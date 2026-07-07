@@ -62,6 +62,7 @@ def make_pipelinerun_scenario(
     blis_git_repo_url: str = "",
     model: str = "",
     observe: dict | None = None,
+    iteration: int = 1,
 ) -> dict:
     """Generate a PipelineRun with resolved scenario content."""
     if spec_content is None:
@@ -69,7 +70,7 @@ def make_pipelinerun_scenario(
     wl_name = workload.get("name", workload.get("workload_name", "unknown"))
     safe_name = wl_name.replace("_", "-")
     safe_phase = phase.replace("_", "-")
-    pr_name = f"{safe_phase}-{safe_name}-{run_name}"
+    pr_name = f"{safe_phase}-{safe_name}-{run_name}-i{iteration}"
 
     wl_spec = {k: v for k, v in workload.items() if k != "workload_name"}
     wl_spec_str = yaml.dump(wl_spec, default_flow_style=True).strip()

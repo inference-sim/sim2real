@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import configparser
-import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -179,12 +178,74 @@ class TestWriteManifestAssembly:
         assert "component" not in parsed
         assert parsed["algorithms"] == [{"name": "sr", "defaults": "baseline"}]
 
-    def test_params_hash_is_sha256_of_bytes(self, tmp_path):
-        p = tmp_path / "manifest.assembly.yaml"
-        p.write_bytes(b"hello\n")
+    def test_writes_replicas_field_when_provided(self, tmp_path):
+        manifest = {
+            "kind": "sim2real-transfer",
+            "version": 3,
+            "scenario": "test",
+            "component": {"repo": "acme/foo"},
+            "context": {"text": "", "files": []},
+            "baselines": [{"name": "baseline", "scenario": "b.yaml"}],
+            "algorithms": [],
+            "workloads": [],
+            "defaults": {"disable": []},
+        }
+        run_dir = tmp_path / "runs" / "r"
+        run_dir.mkdir(parents=True)
+        p = assemble_run.write_manifest_assembly(
+            run_dir, manifest, now_iso="2026-07-01T14:05:00Z", replicas=3
+        )
+        parsed = yaml.safe_load(p.read_text())
+        assert parsed["replicas"] == 3
+
+    def test_writes_replicas_defaults_to_one(self, tmp_path):
+        manifest = {
+            "kind": "sim2real-transfer",
+            "version": 3,
+            "scenario": "test",
+            "component": {"repo": "acme/foo"},
+            "context": {"text": "", "files": []},
+            "baselines": [{"name": "baseline", "scenario": "b.yaml"}],
+            "algorithms": [],
+            "workloads": [],
+            "defaults": {"disable": []},
+        }
+        run_dir = tmp_path / "runs" / "r"
+        run_dir.mkdir(parents=True)
+        p = assemble_run.write_manifest_assembly(
+            run_dir, manifest, now_iso="2026-07-01T14:05:00Z"
+        )
+        parsed = yaml.safe_load(p.read_text())
+        assert parsed["replicas"] == 1
+
+    def test_params_hash_excludes_replicas_field(self, tmp_path):
+        """params_hash is stable when only the `replicas` field changes."""
+        p1 = tmp_path / "a.yaml"
+        p2 = tmp_path / "b.yaml"
+        p1.write_text(
+            "replicas: 3\nworkloads:\n- w1\nbaselines:\n- {name: b, scenario: b.yaml}\n"
+        )
+        p2.write_text(
+            "replicas: 5\nworkloads:\n- w1\nbaselines:\n- {name: b, scenario: b.yaml}\n"
+        )
         assert (
-            assemble_run.compute_params_hash(p)
-            == hashlib.sha256(b"hello\n").hexdigest()
+            assemble_run.compute_params_hash(p1)
+            == assemble_run.compute_params_hash(p2)
+        )
+
+    def test_params_hash_changes_when_content_changes(self, tmp_path):
+        """params_hash differs when non-replicas content changes."""
+        p1 = tmp_path / "a.yaml"
+        p2 = tmp_path / "b.yaml"
+        p1.write_text(
+            "replicas: 3\nworkloads:\n- w1\nbaselines:\n- {name: b, scenario: b.yaml}\n"
+        )
+        p2.write_text(
+            "replicas: 3\nworkloads:\n- w2\nbaselines:\n- {name: b, scenario: b.yaml}\n"
+        )
+        assert (
+            assemble_run.compute_params_hash(p1)
+            != assemble_run.compute_params_hash(p2)
         )
 
     def test_slicer_round_trip(self, tmp_path):
@@ -205,6 +266,9 @@ class TestWriteManifestAssembly:
             run_dir, manifest, now_iso="2026-07-01T14:05:00Z"
         )
         reparsed = yaml.safe_load(p.read_text())
+        # replicas is prepended by write_manifest_assembly; strip before comparing
+        # against the raw assembly slice.
+        assert reparsed.pop("replicas") == 1
         expected = slicer.assembly_slice(manifest)
         assert reparsed == expected
 
@@ -311,19 +375,52 @@ class TestGeneratePipelineruns:
         )
         yamls = sorted(p.name for p in cluster_dir.glob("pipelinerun-*.yaml"))
         assert yamls == [
-            "pipelinerun-wl-a-baseline.yaml",
-            "pipelinerun-wl-a-sr.yaml",
-            "pipelinerun-wl-b-baseline.yaml",
-            "pipelinerun-wl-b-sr.yaml",
+            "pipelinerun-wl-a|baseline|i1.yaml",
+            "pipelinerun-wl-a|sr|i1.yaml",
+            "pipelinerun-wl-b|baseline|i1.yaml",
+            "pipelinerun-wl-b|sr|i1.yaml",
         ]
         pr = yaml.safe_load(
-            (cluster_dir / "pipelinerun-wl-a-sr.yaml").read_text()
+            (cluster_dir / "pipelinerun-wl-a|sr|i1.yaml").read_text()
         )
         assert pr["kind"] == "PipelineRun"
         params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
         assert params["phase"] == "sr"
         assert "name: M" in params["scenarioContent"]
         assert params["workloadName"] == "wl_a"
+
+    def test_iterations_range_emits_pipe_shape_filenames(self, tmp_path):
+        """iterations=range(1, 3) → 2 files per (workload, package) with |i1, |i2."""
+        run_dir = tmp_path / "runs" / "trial-1"
+        cluster_dir = run_dir / "cluster"
+        cluster_dir.mkdir(parents=True)
+        packages = [
+            ("baseline", {"scenario": [{"name": "s", "model": {"name": "M"}}]}),
+        ]
+        workloads = [{"name": "wl-a", "num_requests": 10}]
+        cluster_config = {"namespaces": ["ns-0"], "workspaces": {}}
+        assemble_run.generate_pipelineruns(
+            run_dir=run_dir,
+            packages=packages,
+            workloads=workloads,
+            run_name="trial-1",
+            cluster_config=cluster_config,
+            pipeline_name="sim2real",
+            observe={},
+            model_name="M",
+            submodule_shas={},
+            submodule_urls={},
+            iterations=range(1, 3),
+        )
+        yamls = sorted(p.name for p in cluster_dir.glob("pipelinerun-*.yaml"))
+        assert yamls == [
+            "pipelinerun-wl-a|baseline|i1.yaml",
+            "pipelinerun-wl-a|baseline|i2.yaml",
+        ]
+        pr = yaml.safe_load(
+            (cluster_dir / "pipelinerun-wl-a|baseline|i2.yaml").read_text()
+        )
+        assert pr["metadata"]["name"] == "baseline-wl-a-trial-1-i2"
 
 
 def _write_yaml(path: Path, data) -> None:
@@ -468,8 +565,8 @@ class TestAssembleRun:
         assert (run_dir / "run_metadata.json").exists()
         assert (run_dir / "cluster" / "baseline.yaml").exists()
         assert (run_dir / "cluster" / "sr.yaml").exists()
-        assert (run_dir / "cluster" / "pipelinerun-wl-a-baseline.yaml").exists()
-        assert (run_dir / "cluster" / "pipelinerun-wl-a-sr.yaml").exists()
+        assert (run_dir / "cluster" / "pipelinerun-wl-a|baseline|i1.yaml").exists()
+        assert (run_dir / "cluster" / "pipelinerun-wl-a|sr|i1.yaml").exists()
 
         meta = json.loads((run_dir / "run_metadata.json").read_text())
         assert meta["version"] == 1
@@ -479,6 +576,40 @@ class TestAssembleRun:
         assert meta["image_tag"] == "ghcr.io/foo/bar:v1"
         assert len(meta["params_hash"]) == 64
         assert meta["assembled_at"] == "2026-07-01T14:05:00Z"
+
+    def test_fresh_run_with_replicas_3_produces_three_files_per_pair(self, tmp_path):
+        fx = _make_experiment(
+            tmp_path,
+            algo_names_registered=["sr"],
+            algo_names_manifest=["sr"],
+        )
+        assemble_run.assemble_run(
+            translation_hash=fx["translation_hash"],
+            translation_ref=fx["translation_hash"],
+            cluster_id=fx["cluster_id"],
+            run_name="trial-1",
+            experiment_root=fx["exp_root"],
+            manifest_path=fx["manifest_path"],
+            force=False,
+            replicas=3,
+            now_iso="2026-07-01T14:05:00Z",
+        )
+        cluster = fx["exp_root"] / "workspace" / "runs" / "trial-1" / "cluster"
+        names = sorted(p.name for p in cluster.glob("pipelinerun-*.yaml"))
+        assert names == [
+            "pipelinerun-wl-a|baseline|i1.yaml",
+            "pipelinerun-wl-a|baseline|i2.yaml",
+            "pipelinerun-wl-a|baseline|i3.yaml",
+            "pipelinerun-wl-a|sr|i1.yaml",
+            "pipelinerun-wl-a|sr|i2.yaml",
+            "pipelinerun-wl-a|sr|i3.yaml",
+        ]
+        # manifest.assembly.yaml records replicas
+        manifest_assembly = yaml.safe_load(
+            (fx["exp_root"] / "workspace/runs/trial-1/manifest.assembly.yaml")
+            .read_text()
+        )
+        assert manifest_assembly["replicas"] == 3
 
     def test_pipelinerun_params_include_framework_submodule_state(
         self, tmp_path, monkeypatch
@@ -520,7 +651,7 @@ class TestAssembleRun:
 
         pr = yaml.safe_load(
             (fx["exp_root"] / "workspace/runs/trial-1/cluster/"
-             "pipelinerun-wl-a-baseline.yaml").read_text()
+             "pipelinerun-wl-a|baseline|i1.yaml").read_text()
         )
         params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
         assert params["benchmarkGitRepoUrl"] == "https://example.com/llm-d-benchmark.git"
@@ -568,7 +699,7 @@ class TestAssembleRun:
 
         pr = yaml.safe_load(
             (fx["exp_root"] / "workspace/runs/trial-1/cluster/"
-             "pipelinerun-wl-a-baseline.yaml").read_text()
+             "pipelinerun-wl-a|baseline|i1.yaml").read_text()
         )
         params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
         assert params["benchmarkGitCommit"] == "unknown"
@@ -755,9 +886,9 @@ class TestAssembleRun:
             now_iso="2026-07-01T14:05:00Z",
         )
         run_dir = fx["exp_root"] / "workspace" / "runs" / "trial-1"
-        expected = hashlib.sha256(
-            (run_dir / "manifest.assembly.yaml").read_bytes()
-        ).hexdigest()
+        expected = assemble_run.compute_params_hash(
+            run_dir / "manifest.assembly.yaml"
+        )
         meta = json.loads((run_dir / "run_metadata.json").read_text())
         assert meta["params_hash"] == expected
 
@@ -1126,6 +1257,7 @@ class TestAssembleResolveContract:
             "cluster_id",
             "params_hash",
             "image_tag",
+            "replicas",
             "assembled_at",
         }
         extra = set(run_meta.keys()) - known_keys
