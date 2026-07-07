@@ -2290,7 +2290,7 @@ def _report_filter_mismatch(progress: dict, args) -> None:
     print(f"\n  Valid --workload values:   {', '.join(valid_workloads)}", file=sys.stderr)
     print(f"  Valid --package values:    {', '.join(valid_packages)}", file=sys.stderr)
     print(f"  Valid --status values:     {', '.join(valid_statuses)}", file=sys.stderr)
-    print(f"  Valid --iteration values:  {','.join(str(n) for n in valid_iterations)}", file=sys.stderr)
+    print(f"  Valid --iteration values:  {', '.join(str(n) for n in valid_iterations)}", file=sys.stderr)
 
 
 def _check_slot_ready(namespace: str, hf_secret_name: str = "hf-secret") -> tuple[bool, list[str]]:
@@ -3162,8 +3162,8 @@ _FAIL_FAST_REASONS = {
 def _collect_run_flags(args) -> list[str]:
     """Collect run subcommand flags to forward to the in-cluster Job."""
     flags: list[str] = []
-    for name in ("only", "workload", "package", "status"):
-        val = getattr(args, name)
+    for name in ("only", "workload", "package", "status", "iteration"):
+        val = getattr(args, name, None)
         if val is not None:
             if isinstance(val, list):
                 flags.extend([f"--{name}"] + val)
