@@ -436,6 +436,120 @@ def _resolve_scenario_path(
     return fallback if fallback.exists() else None
 
 
+def _additive_grow(
+    run_dir: Path,
+    manifest: dict,
+    *,
+    prior_replicas: int,
+    new_replicas: int,
+    now_iso: str,
+    experiment_root: Path,
+    translation_hash: str,
+    cluster_id: str,
+    translation_dir: Path,
+    cluster_config: dict,
+) -> None:
+    """Grow an existing run's replica count from ``prior_replicas`` to
+    ``new_replicas`` (``new_replicas > prior_replicas``).
+
+    Preserves existing PipelineRun files (i1..i{prior_replicas}) byte-for-byte
+    and by mtime. Emits new files for i{prior_replicas+1}..i{new_replicas}.
+    Rewrites ``manifest.assembly.yaml`` with the new replica count. Rewrites
+    ``run_metadata.json`` with the new replica count and a new
+    ``assembled_at`` timestamp; ``params_hash`` byte-identical to prior
+    (drift check already ran and passed).
+    """
+    # Re-run scenario resolution to obtain workloads + packages + submodule
+    # discovery. This is safe because the drift check already established
+    # that resolved content is unchanged from the prior assemble.
+    layout.set_experiment_root(experiment_root)
+    exp_root = layout.experiment_root()
+    defaults_dir = exp_root / "baselines" / "defaults"
+    framework_defaults = load_defaults_overlay(
+        defaults_dir if defaults_dir.exists() else None,
+        disable=(manifest.get("defaults") or {}).get("disable") or [],
+    )
+    tout_path = layout.translation_output_path(translation_hash)
+    tout = _translation_ref.read_translation_output(tout_path)
+    translated_algos = {a.get("name"): a for a in tout.get("algorithms", []) or []}
+    translated_names = set(translated_algos.keys())
+    kept_algos, _skipped = filter_algorithms(
+        manifest.get("algorithms", []) or [],
+        translated_names=translated_names,
+    )
+    generated_root = translation_dir / "generated"
+
+    packages: list[tuple[str, dict]] = []
+    resolved_baselines: dict[str, dict] = {}
+    for bl in manifest.get("baselines", []):
+        bl_name = bl["name"]
+        bundle_path = _resolve_scenario_path(exp_root, bl.get("scenario"), "baseline.yaml")
+        overlay_path = generated_root / f"baseline_{bl_name}" / "baseline_config.yaml"
+        if not overlay_path.exists():
+            legacy_overlay = generated_root / "baseline_config.yaml"
+            overlay_path = legacy_overlay if legacy_overlay.exists() else None
+        resolved = resolve_baseline(
+            bundle_path=bundle_path, overlay_path=overlay_path,
+            framework_defaults=framework_defaults,
+        )
+        resolved_baselines[bl_name] = resolved
+        packages.append((bl_name, resolved))
+    for algo in kept_algos:
+        algo_name = algo["name"]
+        base_name = algo["defaults"]
+        diffs_path = _resolve_scenario_path(exp_root, algo.get("scenario"), "treatment.yaml")
+        overlay_path = generated_root / algo_name / f"{algo_name}_config.yaml"
+        resolved = resolve_treatment(
+            baseline_resolved=resolved_baselines[base_name],
+            diffs_path=diffs_path,
+            overlay_path=overlay_path,
+        )
+        algo_image_ref = translated_algos[algo_name]["image_ref"]
+        inject_image_tag(resolved, algo_image_ref)
+        packages.append((algo_name, resolved))
+
+    hf_secret = (cluster_config.get("secret_names") or {}).get("hf_token", "hf-secret")
+    for _, resolved in packages:
+        inject_hf_secret_name(resolved, hf_secret)
+
+    workloads = [_load_workload(exp_root, wl) for wl in manifest.get("workloads", [])]
+    pipeline_name = (manifest.get("pipeline") or {}).get("name", "sim2real")
+    observe = manifest.get("blis_observe") or {}
+    first_baseline = next(
+        (resolved for name, resolved in packages if name in resolved_baselines),
+        packages[0][1] if packages else {},
+    )
+    scenarios_list = first_baseline.get("scenario", [])
+    model_name = (
+        scenarios_list[0].get("model", {}).get("name", "") if scenarios_list else ""
+    )
+    submodule_shas, submodule_urls, _missing = discover_framework_submodules(_REPO_ROOT)
+
+    generate_pipelineruns(
+        run_dir=run_dir,
+        packages=packages,
+        workloads=workloads,
+        run_name=run_dir.name,
+        cluster_config=cluster_config,
+        pipeline_name=pipeline_name,
+        observe=observe,
+        model_name=model_name,
+        submodule_shas=submodule_shas,
+        submodule_urls=submodule_urls,
+        iterations=range(prior_replicas + 1, new_replicas + 1),
+    )
+
+    # Rewrite manifest.assembly.yaml with new replicas count.
+    write_manifest_assembly(run_dir, manifest, now_iso=now_iso, replicas=new_replicas)
+
+    # Rewrite run_metadata.json. params_hash is preserved (drift check passed).
+    rm_path = run_dir / "run_metadata.json"
+    rm = json.loads(rm_path.read_text())
+    rm["replicas"] = new_replicas
+    rm["assembled_at"] = now_iso
+    rm_path.write_text(json.dumps(rm, indent=2, sort_keys=True) + "\n")
+
+
 def assemble_run(
     *,
     translation_hash: str,
@@ -502,20 +616,88 @@ def assemble_run(
             f"{layout.cluster_config_path(cluster_id)}"
         )
 
-    run_dir = layout.runs_dir() / run_name
-    if run_dir.exists():
-        if not force:
-            raise AssembleError(
-                f"run directory already exists: {run_dir} — pass --force to overwrite"
-            )
-        shutil.rmtree(run_dir)
-
-    # 2. Load manifest + translation index --------------------------------
+    # 2. Load manifest early (needed for drift comparison on re-assemble)
     try:
         manifest = load_manifest(manifest_path)
     except ManifestError as exc:
         raise AssembleError(f"cannot load manifest {manifest_path}: {exc}") from exc
 
+    # 3. Existing-run decision tree (uses `manifest` for drift check) ------
+    run_dir = layout.runs_dir() / run_name
+    additive_grow_from: int | None = None
+    if run_dir.exists():
+        prior_ma_path = run_dir / "manifest.assembly.yaml"
+        prior_rm_path = run_dir / "run_metadata.json"
+        if not (prior_ma_path.exists() and prior_rm_path.exists()):
+            if not force:
+                raise AssembleError(
+                    f"run directory '{run_name}' is missing manifest.assembly.yaml or "
+                    f"run_metadata.json — pass --force to rebuild"
+                )
+            shutil.rmtree(run_dir)
+        else:
+            prior_ma = yaml.safe_load(prior_ma_path.read_text()) or {}
+            prior_rm = json.loads(prior_rm_path.read_text())
+            prior_replicas = (
+                prior_ma.get("replicas") if isinstance(prior_ma, dict) else None
+            )
+            if prior_replicas is None:
+                if not force:
+                    raise AssembleError(
+                        f"run '{run_name}' is in legacy single-replica shape "
+                        "(pre-step-5); create a fresh run to use --replicas, "
+                        "or pass --force to rebuild."
+                    )
+                shutil.rmtree(run_dir)
+            else:
+                new_slice = slicer.assembly_slice(manifest)
+                new_canonical = yaml.dump(
+                    new_slice, sort_keys=True, default_flow_style=False,
+                    allow_unicode=True,
+                ).encode("utf-8")
+                new_content_hash = hashlib.sha256(new_canonical).hexdigest()
+                prior_params_hash = prior_rm.get("params_hash", "")
+                if new_content_hash != prior_params_hash:
+                    if not force:
+                        raise AssembleError(
+                            f"manifest content changed since last assemble for "
+                            f"run '{run_name}'; pass --force to overwrite."
+                        )
+                    shutil.rmtree(run_dir)
+                else:
+                    if replicas < prior_replicas:
+                        raise AssembleError(
+                            f"run '{run_name}' already has {prior_replicas} "
+                            f"replicas; refusing to shrink to {replicas}. "
+                            "Replica shrink is tracked in #506."
+                        )
+                    if replicas == prior_replicas:
+                        # True no-op: reset side-band attrs and return.
+                        assemble_run.skipped_algorithms = []  # type: ignore[attr-defined]
+                        assemble_run.missing_submodules = []  # type: ignore[attr-defined]
+                        return
+                    # replicas > prior_replicas: additive grow.
+                    additive_grow_from = prior_replicas
+
+    if additive_grow_from is not None:
+        _additive_grow(
+            run_dir,
+            manifest,
+            prior_replicas=additive_grow_from,
+            new_replicas=replicas,
+            now_iso=now_iso,
+            experiment_root=experiment_root,
+            translation_hash=translation_hash,
+            cluster_id=cluster_id,
+            translation_dir=layout.translation_dir(translation_hash),
+            cluster_config=cluster_config,
+        )
+        # skipped_algorithms/missing_submodules unchanged from prior assemble.
+        assemble_run.skipped_algorithms = []  # type: ignore[attr-defined]
+        assemble_run.missing_submodules = []  # type: ignore[attr-defined]
+        return
+
+    # 4. Load translation index -------------------------------------------
     try:
         tout = _translation_ref.read_translation_output(tout_path)
     except (json.JSONDecodeError, ValueError) as exc:
@@ -546,7 +728,7 @@ def assemble_run(
             f"{translation_ref}' first"
         )
 
-    # 3. Snapshot assembly slice + params_hash ----------------------------
+    # 5. Snapshot assembly slice + params_hash ----------------------------
     run_dir.mkdir(parents=True, exist_ok=True)
     manifest_assembly_path = write_manifest_assembly(
         run_dir, manifest, now_iso=now_iso, replicas=replicas
