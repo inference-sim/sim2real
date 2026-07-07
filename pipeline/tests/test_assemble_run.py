@@ -422,6 +422,67 @@ class TestGeneratePipelineruns:
         )
         assert pr["metadata"]["name"] == "baseline-wl-a-trial-1-i2"
 
+    def test_each_iteration_carries_matching_replica_param(self, tmp_path):
+        """Each generated PipelineRun YAML must carry replica=str(iteration)."""
+        run_dir = tmp_path / "runs" / "trial-1"
+        cluster_dir = run_dir / "cluster"
+        cluster_dir.mkdir(parents=True)
+        packages = [
+            ("baseline", {"scenario": [{"name": "s", "model": {"name": "M"}}]}),
+        ]
+        workloads = [{"name": "wl-a", "num_requests": 10}]
+        cluster_config = {"namespaces": ["ns-0"], "workspaces": {}}
+        assemble_run.generate_pipelineruns(
+            run_dir=run_dir,
+            packages=packages,
+            workloads=workloads,
+            run_name="trial-1",
+            cluster_config=cluster_config,
+            pipeline_name="sim2real",
+            observe={},
+            model_name="M",
+            submodule_shas={},
+            submodule_urls={},
+            iterations=range(1, 4),
+        )
+        for n in (1, 2, 3):
+            pr = yaml.safe_load(
+                (cluster_dir / f"pipelinerun-wl-a|baseline|i{n}.yaml").read_text()
+            )
+            params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
+            assert params["replica"] == str(n), (
+                f"iteration {n}: expected replica='{n}', got {params['replica']!r}"
+            )
+
+    def test_oversized_pipelinerun_name_raises_assemble_error(self, tmp_path):
+        """A run_name that pushes PR name over 253 chars must raise
+        AssembleError from generate_pipelineruns, not a raw ValueError.
+        The assemble CLI boundary catches AssembleError only, so any
+        ValueError leaking through would surface as a raw Python traceback."""
+        run_dir = tmp_path / "runs" / "long"
+        cluster_dir = run_dir / "cluster"
+        cluster_dir.mkdir(parents=True)
+        packages = [
+            ("baseline", {"scenario": [{"name": "s", "model": {"name": "M"}}]}),
+        ]
+        # Push the constructed name (`baseline-wl-a-<run_name>-i1`) over 253 chars.
+        workloads = [{"name": "wl-a", "num_requests": 10}]
+        cluster_config = {"namespaces": ["ns-0"], "workspaces": {}}
+        long_run_name = "r" * 245
+        with pytest.raises(assemble_run.AssembleError, match="253"):
+            assemble_run.generate_pipelineruns(
+                run_dir=run_dir,
+                packages=packages,
+                workloads=workloads,
+                run_name=long_run_name,
+                cluster_config=cluster_config,
+                pipeline_name="sim2real",
+                observe={},
+                model_name="M",
+                submodule_shas={},
+                submodule_urls={},
+            )
+
 
 def _write_yaml(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)

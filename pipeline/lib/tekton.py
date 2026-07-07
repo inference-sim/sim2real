@@ -14,6 +14,39 @@ _TASK_TIMEOUTS: dict[str, str] = {
 }
 
 
+# Canonical shape of resultsDir in pipeline.yaml. Every task that writes into
+# resultsDir threads this exact template. build_results_dir() renders it with
+# concrete values for callers that construct the path locally (e.g. tests).
+# Kept in one place so pipeline.yaml drift is caught by test_pipeline_yaml.py.
+RESULTS_DIR_TEMPLATE = (
+    "$(params.runName)/$(params.phase)/$(params.workloadName)/i$(params.replica)"
+)
+
+
+def build_results_dir(run: str, phase: str, workload: str, replica) -> str:
+    """Return the canonical resultsDir path for a (run, phase, workload, replica)
+    tuple. Callers supply either concrete strings/ints or Tekton param
+    references — both round-trip through the same template.
+    """
+    return f"{run}/{phase}/{workload}/i{replica}"
+
+
+_DNS_SUBDOMAIN_MAX = 253
+
+
+def validate_pipelinerun_name(name: str) -> None:
+    """Raise ValueError if ``name`` exceeds the RFC 1123 DNS subdomain limit
+    (253 chars). PipelineRun.metadata.name is a DNS subdomain, so Tekton
+    rejects longer names at admission. Called at construction time so
+    assemble surfaces the failure before any dispatch attempt.
+    """
+    if len(name) > _DNS_SUBDOMAIN_MAX:
+        raise ValueError(
+            f"PipelineRun name {name!r} is {len(name)} chars, exceeds the "
+            f"{_DNS_SUBDOMAIN_MAX}-char DNS subdomain limit"
+        )
+
+
 def _default_spec_content(base_dir: str = _SPEC_BASE_DIR,
                           scenario_file: str = _SCENARIO_FILE_PATH) -> str:
     """Return the llmdbenchmark spec content string with PVC paths."""
@@ -71,6 +104,7 @@ def make_pipelinerun_scenario(
     safe_name = wl_name.replace("_", "-")
     safe_phase = phase.replace("_", "-")
     pr_name = f"{safe_phase}-{safe_name}-{run_name}-i{iteration}"
+    validate_pipelinerun_name(pr_name)
 
     wl_spec = {k: v for k, v in workload.items() if k != "workload_name"}
     wl_spec_str = yaml.dump(wl_spec, default_flow_style=True).strip()
@@ -89,6 +123,7 @@ def make_pipelinerun_scenario(
         {"name": "blisGitRepoUrl",   "value": blis_git_repo_url},
         {"name": "blisGitCommit",     "value": blis_git_commit},
         {"name": "model",            "value": model},
+        {"name": "replica",          "value": str(iteration)},
     ]
     if observe:
         # Emit only specified keys; omitted ones fall through to Pipeline-level

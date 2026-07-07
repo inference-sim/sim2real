@@ -1043,11 +1043,20 @@ def _fmt_size(b: int) -> str:
 
 
 def _probe_remote_mtimes(pod_name: str, phase_path: str, namespace: str) -> dict[str, float]:
-    """Return {workload_name: mtime_epoch} for workloads that have trace_data.csv.
+    """Return {workload_name: newest_iteration_mtime_epoch} for workloads that
+    have at least one trace_data.csv on the PVC.
 
     Uses a single kubectl exec to stat all trace_data.csv files in the phase
-    directory.  Returns empty dict on probe failure — callers should fall back
-    to full copy in that case.
+    directory. Post step-5, traces live under
+    ``<phase>/<workload>/i<N>/trace_data.csv`` — one per iteration. This
+    function walks two levels up from each trace file to derive the workload
+    name and keeps the newest mtime seen across that workload's iterations.
+    ``_is_workload_up_to_date`` then compares this against the OLDEST local iteration,
+    so an incremental skip requires every local iteration to be at least as
+    new as the newest remote iteration.
+
+    Returns empty dict on probe failure — callers should fall back to full
+    copy in that case.
     """
     result = run(
         ["kubectl", "exec", pod_name, f"-n={namespace}", "--", "sh", "-c",
@@ -1071,20 +1080,60 @@ def _probe_remote_mtimes(pod_name: str, phase_path: str, namespace: str) -> dict
             warn(f"mtime probe: unparseable line: {line!r}")
             continue
         try:
-            mtimes[Path(parts[1]).parent.name] = float(parts[0])
+            mt = float(parts[0])
         except ValueError:
             warn(f"mtime probe: unparseable line: {line!r}")
+            continue
+        # Path shape: <phase_path>/<workload>/i<N>/trace_data.csv
+        # parent.parent is the workload dir.
+        wl = Path(parts[1]).parent.parent.name
+        if wl in mtimes:
+            mtimes[wl] = max(mtimes[wl], mt)
+        else:
+            mtimes[wl] = mt
     return mtimes
 
 
-def _is_up_to_date(local_csv: Path, remote_mtime: "float | None") -> bool:
-    """Return True if local trace_data.csv is at least as new as the remote copy."""
+def _is_up_to_date(local_path: Path, remote_mtime: "float | None") -> bool:
+    """Return True if *local_path* exists and its mtime is at least as new as
+    *remote_mtime*.
+
+    Used by ``_extract_phase_plans`` to decide whether a specific YAML file
+    needs re-downloading. For workload-level trace-directory checks under
+    the step-5 ``i<N>/`` layout, use ``_is_workload_up_to_date`` instead.
+    """
     if remote_mtime is None:
         return False
     try:
-        return local_csv.exists() and local_csv.stat().st_mtime >= remote_mtime
+        return local_path.exists() and local_path.stat().st_mtime >= remote_mtime
     except OSError as exc:
-        warn(f"stat failed for {local_csv}: {exc} — will re-download")
+        warn(f"stat failed for {local_path}: {exc} — will re-download")
+        return False
+
+
+def _is_workload_up_to_date(wl_dir: Path, remote_mtime: "float | None") -> bool:
+    """Return True if every ``i<N>/trace_data.csv`` under *wl_dir* is at least
+    as new as the newest remote copy for that workload.
+
+    Post step-5, a workload's traces live under
+    ``<wl_dir>/i<N>/trace_data.csv``. This function returns True only when
+    the workload has at least one collected iteration locally AND the OLDEST
+    local iteration's mtime is >= ``remote_mtime``. If some iterations are
+    missing locally OR any local iteration is older than remote, returns
+    False so the workload is redone end-to-end (matching the wipe-and-recopy
+    pattern the callers rely on).
+    """
+    if remote_mtime is None:
+        return False
+    if not wl_dir.exists():
+        return False
+    csvs = sorted(wl_dir.glob("i*/trace_data.csv"))
+    if not csvs:
+        return False
+    try:
+        return min(c.stat().st_mtime for c in csvs) >= remote_mtime
+    except OSError as exc:
+        warn(f"stat failed in {wl_dir}: {exc} — will re-download")
         return False
 
 
@@ -1217,51 +1266,112 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                         wl_names = [w for w in wl_names if w in phase_allowed]
                 phase_errors = []
                 for wl_name in wl_names:
-                    if _is_up_to_date(dest_dir / wl_name / "trace_data.csv",
-                                      remote_mtimes.get(wl_name)):
+                    if _is_workload_up_to_date(dest_dir / wl_name,
+                                               remote_mtimes.get(wl_name)):
                         info(f"[{phase}/{wl_name}] up to date — skipping")
                         if on_workload_done:
                             on_workload_done(phase, wl_name, namespace, None)
                         continue
                     wl_dest = dest_dir / wl_name
                     wl_dest.mkdir(parents=True, exist_ok=True)
-                    for log_dir in (wl_dest / "server_logs", wl_dest / "epp_logs", wl_dest / "gpu_logs", wl_dest / "resources"):
-                        if log_dir.exists():
-                            shutil.rmtree(log_dir)
-                    # Copy trace files
+                    # Wipe stale log dirs across every existing local iteration.
+                    for iN_dir in wl_dest.glob("i*"):
+                        for sub in ("server_logs", "epp_logs", "gpu_logs", "resources"):
+                            p = iN_dir / sub
+                            if p.exists():
+                                shutil.rmtree(p)
+                    # Discover iteration subdirs on the PVC (post step-5 layout).
+                    iN_ls = run(
+                        ["kubectl", "exec", pod_name, f"-n={namespace}", "--",
+                         "sh", "-c",
+                         f"ls /data/{run_name}/{phase}/{wl_name}/"],
+                        check=False, capture=True,
+                    )
+                    if iN_ls.returncode != 0:
+                        wl_errors = [
+                            f"{wl_name}: failed to list iterations: "
+                            f"{iN_ls.stderr.strip()}"
+                        ]
+                        phase_errors.extend(wl_errors)
+                        if on_workload_done:
+                            on_workload_done(
+                                phase, wl_name, namespace,
+                                RuntimeError("; ".join(wl_errors)),
+                            )
+                        continue
+                    iN_names = [
+                        n for n in iN_ls.stdout.strip().split()
+                        if n.startswith("i") and n[1:].isdigit()
+                    ]
+                    if not iN_names:
+                        wl_errors = [
+                            f"{wl_name}: no i<N>/ iteration subdirs found on PVC"
+                        ]
+                        phase_errors.extend(wl_errors)
+                        if on_workload_done:
+                            on_workload_done(
+                                phase, wl_name, namespace,
+                                RuntimeError("; ".join(wl_errors)),
+                            )
+                        continue
                     wl_errors = []
-                    for fname in ("trace_data.csv", "trace_header.yaml", "epp_stream_done", "gpu_stream_done"):
-                        src = f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{wl_name}/{fname}"
-                        r = run(["kubectl", "cp", src, str(wl_dest / fname), "--retries=3"],
-                                check=False, capture=True)
+                    for iN in iN_names:
+                        iN_dest = wl_dest / iN
+                        iN_dest.mkdir(parents=True, exist_ok=True)
+                        remote_prefix = (
+                            f"{namespace}/{pod_name}:/data/{run_name}/"
+                            f"{phase}/{wl_name}/{iN}"
+                        )
+                        # Copy trace files
+                        for fname in ("trace_data.csv", "trace_header.yaml",
+                                      "epp_stream_done", "gpu_stream_done"):
+                            r = run(
+                                ["kubectl", "cp", f"{remote_prefix}/{fname}",
+                                 str(iN_dest / fname), "--retries=3"],
+                                check=False, capture=True,
+                            )
+                            if r.returncode != 0 and "no such file" not in r.stderr.lower():
+                                wl_errors.append(
+                                    f"{wl_name}/{iN}/{fname}: {r.stderr.strip()}"
+                                )
+                        # Copy epp_logs directory
+                        epp_dest = iN_dest / "epp_logs"
+                        epp_dest.mkdir(exist_ok=True)
+                        r = run(
+                            ["kubectl", "cp", f"{remote_prefix}/epp_logs/",
+                             str(epp_dest), "--retries=3"],
+                            check=False, capture=True,
+                        )
                         if r.returncode != 0 and "no such file" not in r.stderr.lower():
-                            wl_errors.append(f"{wl_name}/{fname}: {r.stderr.strip()}")
-                    # Copy epp_logs directory
-                    epp_src = f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{wl_name}/epp_logs/"
-                    epp_dest = wl_dest / "epp_logs"
-                    epp_dest.mkdir(exist_ok=True)
-                    r = run(["kubectl", "cp", epp_src, str(epp_dest), "--retries=3"],
-                            check=False, capture=True)
-                    if r.returncode != 0 and "no such file" not in r.stderr.lower():
-                        wl_errors.append(f"{wl_name}/epp_logs: {r.stderr.strip()}")
-                    # Copy gpu_logs directory
-                    gpu_src = f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{wl_name}/gpu_logs/"
-                    gpu_dest = wl_dest / "gpu_logs"
-                    gpu_dest.mkdir(exist_ok=True)
-                    r = run(["kubectl", "cp", gpu_src, str(gpu_dest), "--retries=3"],
-                            check=False, capture=True)
-                    if r.returncode != 0 and "no such file" not in r.stderr.lower():
-                        wl_errors.append(f"{wl_name}/gpu_logs: {r.stderr.strip()}")
-                    # Copy resources directory
-                    res_src = f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{wl_name}/resources/"
-                    res_dest = wl_dest / "resources"
-                    res_dest.mkdir(exist_ok=True)
-                    r = run(["kubectl", "cp", res_src, str(res_dest), "--retries=3"],
-                            check=False, capture=True)
-                    if r.returncode != 0 and "no such file" not in r.stderr.lower():
-                        wl_errors.append(f"{wl_name}/resources: {r.stderr.strip()}")
-                    else:
-                        redact_yaml_tree(res_dest)
+                            wl_errors.append(
+                                f"{wl_name}/{iN}/epp_logs: {r.stderr.strip()}"
+                            )
+                        # Copy gpu_logs directory
+                        gpu_dest = iN_dest / "gpu_logs"
+                        gpu_dest.mkdir(exist_ok=True)
+                        r = run(
+                            ["kubectl", "cp", f"{remote_prefix}/gpu_logs/",
+                             str(gpu_dest), "--retries=3"],
+                            check=False, capture=True,
+                        )
+                        if r.returncode != 0 and "no such file" not in r.stderr.lower():
+                            wl_errors.append(
+                                f"{wl_name}/{iN}/gpu_logs: {r.stderr.strip()}"
+                            )
+                        # Copy resources directory
+                        res_dest = iN_dest / "resources"
+                        res_dest.mkdir(exist_ok=True)
+                        r = run(
+                            ["kubectl", "cp", f"{remote_prefix}/resources/",
+                             str(res_dest), "--retries=3"],
+                            check=False, capture=True,
+                        )
+                        if r.returncode != 0 and "no such file" not in r.stderr.lower():
+                            wl_errors.append(
+                                f"{wl_name}/{iN}/resources: {r.stderr.strip()}"
+                            )
+                        else:
+                            redact_yaml_tree(res_dest)
                     if wl_errors:
                         phase_errors.extend(wl_errors)
                     if on_workload_done:
@@ -1272,8 +1382,8 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                 else:
                     errors[phase] = None
             elif workload:
-                if _is_up_to_date(dest_dir / workload / "trace_data.csv",
-                                  remote_mtimes.get(workload)):
+                if _is_workload_up_to_date(dest_dir / workload,
+                                           remote_mtimes.get(workload)):
                     info(f"[{phase}/{workload}] up to date — skipping")
                     errors[phase] = None
                     if on_workload_done:
@@ -1324,8 +1434,8 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                     continue
                 phase_errors = []
                 for wl_name in wl_names:
-                    if _is_up_to_date(dest_dir / wl_name / "trace_data.csv",
-                                      remote_mtimes.get(wl_name)):
+                    if _is_workload_up_to_date(dest_dir / wl_name,
+                                               remote_mtimes.get(wl_name)):
                         info(f"[{phase}/{wl_name}] up to date — skipping")
                         if on_workload_done:
                             on_workload_done(phase, wl_name, namespace, None)

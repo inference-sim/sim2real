@@ -921,12 +921,17 @@ def test_collect_reads_from_configmap(tmp_path, monkeypatch):
 # ── Incremental collect helpers ──────────────────────────────────────────────
 
 def test_probe_remote_mtimes_parses_output():
-    """_probe_remote_mtimes parses stat output into {workload: mtime} dict."""
+    """_probe_remote_mtimes parses stat output into {workload: mtime} dict.
+
+    Post step-5, traces live under ``<phase>/<workload>/i<N>/trace_data.csv``.
+    Keys are derived by walking two levels up from the trace file, so the
+    workload name (not the iteration directory) is the dict key.
+    """
     from pipeline.deploy import _probe_remote_mtimes
 
     stat_output = (
-        "1715800000 /data/run1/baseline/wl-smoke/trace_data.csv\n"
-        "1715800100 /data/run1/baseline/wl-load/trace_data.csv\n"
+        "1715800000 /data/run1/baseline/wl-smoke/i1/trace_data.csv\n"
+        "1715800100 /data/run1/baseline/wl-load/i1/trace_data.csv\n"
     )
 
     with patch("subprocess.run") as mock_run:
@@ -970,13 +975,13 @@ def test_probe_remote_mtimes_warns_on_stderr():
     from pipeline import deploy
     from pipeline.deploy import _probe_remote_mtimes
 
-    stat_output = "1715800000 /data/run1/baseline/wl-smoke/trace_data.csv\n"
+    stat_output = "1715800000 /data/run1/baseline/wl-smoke/i1/trace_data.csv\n"
 
     with patch("subprocess.run") as mock_run, \
          patch.object(deploy, "warn") as mock_warn:
         mock_run.return_value = MagicMock(
             returncode=0, stdout=stat_output,
-            stderr="stat: /data/run1/baseline/wl-broken/trace_data.csv: No such file")
+            stderr="stat: /data/run1/baseline/wl-broken/i1/trace_data.csv: No such file")
         result = _probe_remote_mtimes("pod", "/data/run1/baseline", "ns-0")
 
     assert result == {"wl-smoke": 1715800000.0}
@@ -988,7 +993,7 @@ def test_probe_remote_mtimes_warns_on_unparseable_line():
     from pipeline import deploy
     from pipeline.deploy import _probe_remote_mtimes
 
-    stat_output = "garbage /data/run1/baseline/wl-bad/trace_data.csv\n1715800000 /data/run1/baseline/wl-smoke/trace_data.csv\n"
+    stat_output = "garbage /data/run1/baseline/wl-bad/i1/trace_data.csv\n1715800000 /data/run1/baseline/wl-smoke/i1/trace_data.csv\n"
 
     with patch("subprocess.run") as mock_run, \
          patch.object(deploy, "warn") as mock_warn:
@@ -1005,7 +1010,7 @@ def test_probe_remote_mtimes_warns_on_single_token_line():
     from pipeline import deploy
     from pipeline.deploy import _probe_remote_mtimes
 
-    stat_output = "onlyone\n1715800000 /data/run1/baseline/wl-smoke/trace_data.csv\n"
+    stat_output = "onlyone\n1715800000 /data/run1/baseline/wl-smoke/i1/trace_data.csv\n"
 
     with patch("subprocess.run") as mock_run, \
          patch.object(deploy, "warn") as mock_warn:
@@ -1018,7 +1023,12 @@ def test_probe_remote_mtimes_warns_on_single_token_line():
 
 
 def test_is_up_to_date_true_when_local_newer(tmp_path):
-    """_is_up_to_date returns True when local file is at least as new as remote."""
+    """_is_up_to_date returns True when local file is at least as new as remote.
+
+    This is the plans-YAML use case: a single-file freshness check kept intact
+    for ``_extract_phase_plans``. The workload-directory / iN-scan variant is
+    ``_is_workload_up_to_date`` (covered in test_collect_internals.py).
+    """
     from pipeline.deploy import _is_up_to_date
 
     local_csv = tmp_path / "trace_data.csv"
@@ -1514,24 +1524,30 @@ def test_collect_per_workload_clears_stale_files(tmp_path, monkeypatch):
 
 
 def test_collect_skip_logs_clears_stale_log_dirs(tmp_path, monkeypatch):
-    """--skip-logs path removes stale server_logs/, epp_logs/, and gpu_logs/ before copying."""
+    """--skip-logs path removes stale server_logs/, epp_logs/, and gpu_logs/
+    inside every existing local iteration subtree before copying.
+
+    Post step-5, log subdirs live under ``<wl>/i<N>/{server_logs,epp_logs,gpu_logs}``.
+    The wipe walks each ``i*/`` under the workload dir.
+    """
     from pipeline import deploy
     import subprocess
 
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     (run_dir / "cluster").mkdir(parents=True)
     results_dir = run_dir / "results" / "baseline" / "wl-smoke"
-    results_dir.mkdir(parents=True)
+    iter_dir = results_dir / "i1"
+    iter_dir.mkdir(parents=True)
 
-    stale_server = results_dir / "server_logs" / "stale.log"
+    stale_server = iter_dir / "server_logs" / "stale.log"
     stale_server.parent.mkdir(parents=True)
     stale_server.write_text("stale server log")
 
-    stale_epp = results_dir / "epp_logs" / "stale.log"
+    stale_epp = iter_dir / "epp_logs" / "stale.log"
     stale_epp.parent.mkdir(parents=True)
     stale_epp.write_text("stale epp log")
 
-    stale_gpu = results_dir / "gpu_logs" / "stale.log"
+    stale_gpu = iter_dir / "gpu_logs" / "stale.log"
     stale_gpu.parent.mkdir(parents=True)
     stale_gpu.write_text("stale gpu log")
 
@@ -1543,7 +1559,11 @@ def test_collect_skip_logs_clears_stale_log_dirs(tmp_path, monkeypatch):
     def mock_run(cmd, **kwargs):
         mock = MagicMock(returncode=0, stdout="", stderr="")
         cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
-        if "exec" in cmd_str and "ls" in cmd_str:
+        if "exec" in cmd_str and "ls " in cmd_str and "/wl-smoke/" in cmd_str:
+            # Second-level ls: list iteration subdirs under the workload
+            mock.stdout = "i1"
+        elif "exec" in cmd_str and "ls" in cmd_str:
+            # First-level ls: list workload subdirs under the phase
             mock.stdout = "wl-smoke"
         if "exec" in cmd_str and "stat" in cmd_str:
             mock.stdout = ""
@@ -1555,13 +1575,14 @@ def test_collect_skip_logs_clears_stale_log_dirs(tmp_path, monkeypatch):
         ["baseline"], "test-run", "ns-0", run_dir, skip_logs=True)
 
     assert not stale_server.exists()
-    assert not (results_dir / "server_logs").exists()
+    assert not (iter_dir / "server_logs").exists()
     assert not stale_epp.exists()
     assert not stale_gpu.exists()
 
 
 def test_collect_skip_logs_invokes_gpu_logs_copy(tmp_path, monkeypatch):
-    """--skip-logs path issues a kubectl cp for gpu_logs/ alongside epp_logs/."""
+    """--skip-logs path issues a kubectl cp for gpu_logs/ alongside epp_logs/,
+    scoped to each iteration subdirectory (post step-5 layout)."""
     from pipeline import deploy
     import subprocess
 
@@ -1579,7 +1600,9 @@ def test_collect_skip_logs_invokes_gpu_logs_copy(tmp_path, monkeypatch):
         mock = MagicMock(returncode=0, stdout="", stderr="")
         cmd_list = cmd if isinstance(cmd, list) else cmd.split()
         cmd_str = " ".join(cmd_list)
-        if "exec" in cmd_str and "ls" in cmd_str:
+        if "exec" in cmd_str and "ls " in cmd_str and "/wl-smoke/" in cmd_str:
+            mock.stdout = "i1"
+        elif "exec" in cmd_str and "ls" in cmd_str:
             mock.stdout = "wl-smoke"
         if "exec" in cmd_str and "stat" in cmd_str:
             mock.stdout = ""
@@ -1593,9 +1616,9 @@ def test_collect_skip_logs_invokes_gpu_logs_copy(tmp_path, monkeypatch):
         ["baseline"], "test-run", "ns-0", run_dir, skip_logs=True)
 
     sources = " ".join(cp_targets)
-    assert "/wl-smoke/gpu_logs/" in sources, f"no gpu_logs/ copy issued; saw: {cp_targets}"
-    assert "/wl-smoke/epp_logs/" in sources, f"sanity: epp_logs/ copy still issued; saw: {cp_targets}"
-    assert "/wl-smoke/gpu_stream_done" in sources, f"no gpu_stream_done sentinel copy; saw: {cp_targets}"
+    assert "/wl-smoke/i1/gpu_logs/" in sources, f"no i1/gpu_logs/ copy issued; saw: {cp_targets}"
+    assert "/wl-smoke/i1/epp_logs/" in sources, f"sanity: i1/epp_logs/ copy still issued; saw: {cp_targets}"
+    assert "/wl-smoke/i1/gpu_stream_done" in sources, f"no i1/gpu_stream_done sentinel copy; saw: {cp_targets}"
 
 
 def test_collect_idempotent_no_stale_accumulation(tmp_path, monkeypatch):
@@ -1826,7 +1849,13 @@ def test_extract_phases_filters_by_allowed_workloads_skip_logs(tmp_path, monkeyp
     def mock_run(cmd, **kwargs):
         mock = MagicMock(returncode=0, stdout="", stderr="")
         cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
-        if "exec" in cmd_str and "ls" in cmd_str:
+        if "exec" in cmd_str and "ls " in cmd_str and any(
+            f"/{w}/" in cmd_str for w in ("wl-smoke", "wl-load", "wl-heavy")
+        ):
+            # Second-level ls: list iteration subdirs under the workload
+            mock.stdout = "i1"
+        elif "exec" in cmd_str and "ls" in cmd_str:
+            # First-level ls: workload subdirs under the phase
             mock.stdout = "wl-smoke\nwl-load\nwl-heavy"
         elif "exec" in cmd_str and "stat" in cmd_str:
             mock.stdout = ""
@@ -1834,7 +1863,7 @@ def test_extract_phases_filters_by_allowed_workloads_skip_logs(tmp_path, monkeyp
             for wl in ("wl-smoke", "wl-load", "wl-heavy"):
                 if wl in cmd_str:
                     copied_workloads.append(wl)
-                    dest = run_dir / "results" / "baseline" / wl
+                    dest = run_dir / "results" / "baseline" / wl / "i1"
                     dest.mkdir(parents=True, exist_ok=True)
                     break
         return mock

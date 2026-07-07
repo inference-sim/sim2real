@@ -385,22 +385,25 @@ def generate_pipelineruns(
             wl_name = wl.get("name", wl.get("workload_name", "unknown"))
             safe_wl = wl_name.replace("_", "-")
             for iteration in iterations:
-                pr = make_pipelinerun_scenario(
-                    phase=pkg_name,
-                    workload=wl,
-                    run_name=run_name,
-                    namespace=namespace,
-                    pipeline_name=pipeline_name,
-                    scenario_content=scenario_content,
-                    workspace_bindings=ws_bindings if ws_bindings else None,
-                    benchmark_git_commit=submodule_shas.get("llm-d-benchmark", ""),
-                    benchmark_git_repo_url=submodule_urls.get("llm-d-benchmark", ""),
-                    blis_git_commit=submodule_shas.get("inference-sim", ""),
-                    blis_git_repo_url=submodule_urls.get("inference-sim", ""),
-                    model=model_name,
-                    observe=observe,
-                    iteration=iteration,
-                )
+                try:
+                    pr = make_pipelinerun_scenario(
+                        phase=pkg_name,
+                        workload=wl,
+                        run_name=run_name,
+                        namespace=namespace,
+                        pipeline_name=pipeline_name,
+                        scenario_content=scenario_content,
+                        workspace_bindings=ws_bindings if ws_bindings else None,
+                        benchmark_git_commit=submodule_shas.get("llm-d-benchmark", ""),
+                        benchmark_git_repo_url=submodule_urls.get("llm-d-benchmark", ""),
+                        blis_git_commit=submodule_shas.get("inference-sim", ""),
+                        blis_git_repo_url=submodule_urls.get("inference-sim", ""),
+                        model=model_name,
+                        observe=observe,
+                        iteration=iteration,
+                    )
+                except ValueError as exc:
+                    raise AssembleError(str(exc)) from exc
                 fname = f"pipelinerun-{safe_wl}|{pkg_name}|i{iteration}.yaml"
                 (cluster_dir_ / fname).write_text(
                     yaml.dump(pr, default_flow_style=False, allow_unicode=True)
