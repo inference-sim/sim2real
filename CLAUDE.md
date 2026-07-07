@@ -149,6 +149,7 @@ python -m pytest pipeline/ \
   .claude/skills/sim2real-analyze/tests/ \
   .claude/skills/sim2real-bootstrap/tests/ \
   .claude/skills/sim2real-translate/tests/ \
+  .claude/skills/sim2real-check/tests/ \
   -v
 ```
 
