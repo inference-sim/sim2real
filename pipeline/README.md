@@ -251,6 +251,7 @@ python pipeline/sim2real.py assemble \
     --translation REF \
     --cluster CLUSTER_ID \
     --run RUN_NAME \
+    [--replicas N] \
     [--force]
 ```
 
@@ -272,11 +273,11 @@ python pipeline/sim2real.py assemble \
 
 | File | Purpose |
 |------|---------|
-| `manifest.assembly.yaml` | Verbatim snapshot of the assembly slice from `transfer.yaml` (produced by `pipeline/lib/slicer.py`). |
-| `run_metadata.json` | `{version, run_name, translation_hash, cluster_id, params_hash, image_tag, assembled_at}` — pinned schema, `version: 1`. |
+| `manifest.assembly.yaml` | Verbatim snapshot of the assembly slice from `transfer.yaml` (produced by `pipeline/lib/slicer.py`), preceded by a top-level `replicas: N` field. |
+| `run_metadata.json` | `{version, run_name, translation_hash, cluster_id, params_hash, image_tag, replicas, assembled_at}` — pinned schema, `version: 1`. |
 | `cluster/baseline.yaml` | Resolved baseline scenario (framework defaults → bundle → baseline overlay). |
 | `cluster/<algo>.yaml` | Resolved treatment scenario per registered algorithm (baseline_resolved → treatment bundle diffs → algo overlay → injected image_tag). |
-| `cluster/pipelinerun-<workload>-<package>.yaml` | One PipelineRun per (workload, package). Consumed by `deploy.py run`. |
+| `cluster/pipelinerun-<workload>\|<package>\|iN.yaml` | One PipelineRun per (workload, package, iteration) tuple. Consumed by `deploy.py run`. |
 
 **Assembly formula** (deep-merged via `pipeline/lib/values.py:deep_merge`):
 
@@ -287,7 +288,22 @@ treatment_resolved = deep_merge(baseline_resolved, treatment_bundle_diffs, algo_
 
 Then each treatment scenario has `images.inferenceScheduler` set from that algorithm's own `translation_output.json:algorithms[i].image_ref`, and every scenario has `huggingface.secretName` set from `cluster_config.json:secret_names.hf_token`.
 
-**`params_hash`** is SHA-256 over the bytes of `manifest.assembly.yaml`. Recorded in `run_metadata.json` for later drift detection (step-5 of the epic).
+**`params_hash`** is SHA-256 over the canonical bytes of `manifest.assembly.yaml` with the top-level `replicas` field excluded — bumping `--replicas N` must not change the hash. Recorded in `run_metadata.json` for drift detection on re-assemble.
+
+**Replicas.** `--replicas N` (default 1) is the number of iterations per (workload, package) pair. Each iteration gets its own PipelineRun (`{phase}-{workload}-{run}-iN`, with `_` → `-` normalization) and its own results subdirectory (`results/<phase>/<workload>/iN/`). `manifest.assembly.yaml` carries a top-level `replicas: N`, and `run_metadata.json` carries the same value as a schema field. Both are set on every assemble.
+
+**Additive-merge (grow-only).** Re-assembling an existing run with `--replicas` interacts with the prior state as follows:
+
+- `N == prior_replicas` — true no-op. No files rewritten; the assemble returns silently.
+- `N > prior_replicas` — additive grow. Existing PipelineRun files (`i1..i{prior}`) are preserved byte-for-byte and by mtime; new files are emitted for `i{prior+1}..iN`. `manifest.assembly.yaml` and `run_metadata.json` are rewritten with the new `replicas` count; `params_hash` is preserved (drift check passed).
+- `N < prior_replicas` — refused with `run '<name>' already has <prior> replicas; refusing to shrink to <N>. Replica shrink is tracked in #506.` This guard runs BEFORE the drift check, so `--force` does NOT bypass it.
+
+Two invariants shape the grow-only path:
+
+- **Drift check.** The current assembly-slice content hash is compared against the run's recorded `params_hash`. Any mismatch refuses the assemble unless `--force` is passed — with `--force`, the whole run directory is rebuilt from scratch (existing `iN/` files are lost). Without `--force`, matching hashes are required to reach the additive-grow branch.
+- **Legacy-run guard.** A pre-step-5 run has no `replicas` field in its `manifest.assembly.yaml`. Assembling with `--replicas` refuses this shape unless `--force`. With `--force`, the run is rebuilt from scratch as a fresh replica-shaped run.
+
+**PipelineRun name length.** `metadata.name` is `{phase}-{workload}-{run}-i{iteration}` (with `_` → `-` normalization). This is a Kubernetes DNS subdomain, so the 253-char RFC 1123 limit applies. `assemble` validates each generated PipelineRun name and exits 2 with `error: PipelineRun name '<name>' is <len> chars, exceeds the 253-char DNS subdomain limit` if any pair (phase × workload × run × iteration) would overflow. Fail-fast at assemble time is preferable to Tekton admission rejection at dispatch time.
 
 **Algorithm filtering:** algorithms listed in `transfer.yaml:algorithms` but absent from `translation_output.json:algorithms` are skipped with a warning — the run still assembles for the algorithms that are registered. Algorithms that ARE in the translation but whose `image_ref` is still `null` (skill-driven translation before `sim2real build`) fail fast: `assemble` exits 2 with `translation <ref> not built for algorithms: <names> — run 'sim2real build --translation <ref>' first`.
 
@@ -321,7 +337,34 @@ Common flags (all subcommands):
 
 **Image build** — `deploy.py build` (called implicitly as pre-flight by `deploy.py run`) iterates over all resolved scenarios in `cluster/`, collects unique `images.inferenceScheduler` refs, and builds any that are stale. Baseline images are tagged by the component directory's HEAD SHA (8 chars); algorithm images are tagged `{run_name}-{algo_name}` (per-algorithm). For each algorithm build, the component working tree is reset to baseline and only that algorithm's files are applied before building. Source hash comparison skips builds when the image is already current.
 
-**Pair discovery** — `deploy.py run` discovers `pipelinerun-*.yaml` files at the `cluster/` root. Each file's pair key is derived as `wl-` + filename stem minus the `pipelinerun-` prefix.
+**Pair keys.** A pair key names a `(workload, package, iteration)` triple in the ConfigMap and on disk. Canonical grammar:
+
+```
+pair_key := "wl-" workload "|" package "|" iter
+workload := [a-z0-9]([a-z0-9-]*[a-z0-9])?    # kebab-case, no leading/trailing hyphen
+package  := [a-z0-9]([a-z0-9-]*[a-z0-9])?    # same shape as workload
+iter     := "i" [1-9][0-9]*                  # positive decimal, no leading zeros; i0 is invalid
+```
+
+Example: `wl-chat-mid|baseline|i1`.
+
+The parser accepts a legacy no-suffix form (`wl-<workload>|<package>`) and reads it as `iteration=1`; canonical renderings always include the `|iN` suffix. Metadata keys (`_meta`, `_notes`, anything starting with `_`) are filtered out upstream via `deploy._is_pair_key` and never reach the parser.
+
+**Pair discovery.** `deploy.py run` discovers `pipelinerun-*.yaml` files at the `cluster/` root. Each file's pair key is derived as `wl-` + filename stem minus the `pipelinerun-` prefix — the assembler names files as `pipelinerun-<workload>|<package>|iN.yaml`, so the pair key falls out directly.
+
+**Scoping flags on filter-aware subcommands** (`run`, `status`, `collect`, `reset`, `wipe`):
+
+| Flag | Scope | Notes |
+|------|-------|-------|
+| `--only PAIR…` | Full pair keys (with or without `wl-` prefix) | Narrows both workload and package. Takes precedence over `--workload`. |
+| `--workload NAME…` | Workload dimension | Multiple values are OR'd within the flag. |
+| `--package NAME…` | Package dimension | Multiple values are OR'd within the flag. |
+| `--iteration SPEC` | Iteration dimension | Grammar below. |
+| `--status STATE` | Progress state (`pending` / `running` / `done` / `failed` / `timed-out` / `stalled`) | Not available on every subcommand — see per-subcommand tables. |
+
+Different flags compose as AND: `--workload X --package baseline --iteration 1,3` narrows to iterations 1 and 3 of workload X's baseline package.
+
+**Iteration filter spec.** The `--iteration` value is a comma-separated list of tokens; each token is either a positive integer (`3`) or an inclusive range (`1-3`). Whitespace around commas and hyphens is tolerated. Rejected: `0`, negatives, reversed ranges (`5-1`), non-integer tokens (`abc`), leading zeros (`01`), empty spec, empty token. Malformed specs fail with `malformed iteration spec '<spec>': <reason>` before any pair discovery runs. Legacy pair keys (no `|iN` suffix) parse as iteration `1`, so `--iteration 1` matches them.
 
 **Collection phases** — `deploy.py collect` derives valid phases dynamically from progress data (packages with status `done`). Falls back to `[baseline, treatment]` when no progress exists. Use `--package` to filter, or `--package experiment` to collect all known phases.
 
@@ -348,6 +391,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 | `--only PAIR…` | — | Scope execution to specific pair keys (comma or space-separated, `wl-` prefix optional) |
 | `--workload NAME…` | — | Scope execution to pairs matching these workloads (comma or space-separated) |
 | `--package NAME…` | — | Scope execution to pairs matching these packages (comma or space-separated) |
+| `--iteration SPEC` | — | Scope to iteration(s): `'2'`, `'1,3'`, `'1-3'`, `'1,3-5'` |
 | `--status STATE` | — | Scope execution to pairs with this status (e.g. `failed`, `timed-out`) |
 | `--skip-teardown` | — | Skip the Tekton teardown task, leaving namespace resources intact for debugging |
 | `--preserve-pipelineruns` | — | Do not delete PipelineRun objects after completion (keeps TaskRun logs for debugging) |
@@ -383,6 +427,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 | `--only PAIR…` | Scope to specific pair keys (comma or space-separated, `wl-` prefix optional) |
 | `--workload NAME…` | Filter by workload names (comma or space-separated) |
 | `--package NAME…` | Filter by package names (comma or space-separated) |
+| `--iteration SPEC` | Scope to iteration(s): `'2'`, `'1,3'`, `'1-3'`, `'1,3-5'` |
 | `--status STATE` | Filter by status (e.g. `running`, `done`, `failed`) |
 | `-s`, `--silent` | Suppress the per-pair table and banner; print only the summary line (machine-readable) |
 
@@ -395,6 +440,7 @@ Per phase, the resolved llm-d-benchmark plan YAMLs are also pulled into `workspa
 | `--only PAIR…` | Scope to specific pair keys — narrows both workload and package (comma or space-separated, `wl-` prefix optional; takes precedence over `--workload`) |
 | `--workload NAME…` | Scope to pairs matching these workloads (comma or space-separated) |
 | `--package NAME…` | Scope to pairs matching these packages (comma or space-separated). Pass the synthetic value `experiment` to collect every package directory of the scoped pairs. |
+| `--iteration SPEC` | Scope to iteration(s): `'2'`, `'1,3'`, `'1-3'`, `'1,3-5'` |
 | `--skip-logs` | Skip vLLM and EPP log files, collect only traces |
 
 When `--only` or `--workload` is given, only matching workload subdirectories are pulled from the PVC (instead of entire phase directories). Multiple values within a flag use OR (union): `--workload X Y` matches pairs for workload X or Y. Different flags compose as AND: `--workload X Y --package baseline` scopes to baseline pairs whose workload is X or Y, and pulls those workloads from the baseline phase only — pairs of other packages are not in scope and do not trigger "skipping" warnings. The synthetic `--package experiment` value is the carve-out: it does not narrow the pair set, so it preserves today's "every package of the scoped pairs" behavior. Requires progress data to resolve pairs.
@@ -408,6 +454,7 @@ When `--only` or `--workload` is given, only matching workload subdirectories ar
 | `--only PAIR…` | Scope reset to specific pair keys (comma or space-separated, `wl-` prefix optional) |
 | `--workload NAME…` | Scope reset to pairs matching these workloads (comma or space-separated) |
 | `--package NAME…` | Scope reset to pairs matching these packages (comma or space-separated) |
+| `--iteration SPEC` | Scope to iteration(s): `'2'`, `'1,3'`, `'1-3'`, `'1,3-5'` |
 | `--status STATE` | Scope reset to pairs with this status |
 | `--preserve-done-status` | Keep done pairs' status unchanged (cluster cleanup only) |
 | `--dry-run` | Print what would be reset without acting |
@@ -421,6 +468,7 @@ When `--only` or `--workload` is given, only matching workload subdirectories ar
 | `--only PAIR…` | Scope wipe to specific pair keys (comma or space-separated, `wl-` prefix optional) |
 | `--workload NAME…` | Scope wipe to pairs matching these workloads (comma or space-separated) |
 | `--package NAME…` | Scope wipe to pairs matching these packages (comma or space-separated) |
+| `--iteration SPEC` | Scope to iteration(s): `'2'`, `'1,3'`, `'1-3'`, `'1,3-5'` |
 | `--dry-run` | Print what would be wiped without acting |
 | `--yes` / `-y` | Skip confirmation prompt |
 
@@ -703,7 +751,7 @@ All paths are relative to the experiment root and validated by `sim2real assembl
 
 ## Parallel Pool Execution
 
-`cluster.py provision <cluster_id> --namespaces NS1,NS2,...` provisions N namespace slots, each bootstrapped identically. `sim2real assemble` generates one PipelineRun per `(workload, package)` pair (the shared Tekton Pipeline itself is applied by `cluster.py provision`). `deploy.py run` orchestrates execution by assigning pairs to free slots, polling for completion, and retrying on timeout. Use `deploy.py collect` to pull results off-cluster. `deploy.py status` reads progress from the ConfigMap.
+`cluster.py provision <cluster_id> --namespaces NS1,NS2,...` provisions N namespace slots, each bootstrapped identically. `sim2real assemble` generates one PipelineRun per `(workload, package, iteration)` tuple (the shared Tekton Pipeline itself is applied by `cluster.py provision`). `deploy.py run` orchestrates execution by assigning pairs to free slots, polling for completion, and retrying on timeout. Use `deploy.py collect` to pull results off-cluster. `deploy.py status` reads progress from the ConfigMap.
 
 | Artifact | Written by | Read by |
 |----------|-----------|---------|
