@@ -123,6 +123,7 @@ def make_pipelinerun_scenario(
         {"name": "blisGitRepoUrl",   "value": blis_git_repo_url},
         {"name": "blisGitCommit",     "value": blis_git_commit},
         {"name": "model",            "value": model},
+        {"name": "replica",          "value": str(iteration)},
     ]
     if observe:
         # Emit only specified keys; omitted ones fall through to Pipeline-level

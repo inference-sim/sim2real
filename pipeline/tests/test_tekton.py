@@ -332,3 +332,30 @@ def test_make_pipelinerun_scenario_rejects_oversized_name():
             namespace="ns", pipeline_name="sim2real",
             scenario_content="scenario: []",
         )
+
+
+# ── Tests for the replica PipelineRun param ─────────────────────────────────
+
+
+def test_make_pipelinerun_scenario_emits_replica_param_default():
+    """Default iteration=1 → replica='1' in params (string, per Tekton API)."""
+    pr = make_pipelinerun_scenario(
+        phase="baseline", workload={"name": "wl"}, run_name="r",
+        namespace="ns", pipeline_name="sim2real",
+        scenario_content="scenario: []",
+    )
+    params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
+    assert params["replica"] == "1"
+    assert isinstance(params["replica"], str)
+
+
+def test_make_pipelinerun_scenario_emits_replica_param_explicit():
+    """iteration=5 → replica='5'."""
+    pr = make_pipelinerun_scenario(
+        phase="baseline", workload={"name": "wl"}, run_name="r",
+        namespace="ns", pipeline_name="sim2real",
+        scenario_content="scenario: []",
+        iteration=5,
+    )
+    params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
+    assert params["replica"] == "5"
