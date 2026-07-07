@@ -237,7 +237,7 @@ def _build_cluster_scenarios_section(
     (currently singular) baseline scenario file; ``treatment_yamls``
     maps each algorithm name to its resolved treatment scenario file;
     ``pipelinerun_yamls`` is the sorted list of ``pipelinerun-*.yaml``
-    files (one per (workload, package) pair).
+    files (one per (workload, package, iteration) pair).
     """
     cluster_dir = run_dir / "cluster"
     baseline_yaml: str | None = None

@@ -301,7 +301,7 @@ Then each treatment scenario has `images.inferenceScheduler` set from that algor
 Two invariants shape the grow-only path:
 
 - **Drift check.** The current assembly-slice content hash is compared against the run's recorded `params_hash`. Any mismatch refuses the assemble unless `--force` is passed — with `--force`, the whole run directory is rebuilt from scratch (existing `iN/` files are lost). Without `--force`, matching hashes are required to reach the additive-grow branch.
-- **Legacy-run guard.** A pre-step-5 run has no `replicas` field in its `manifest.assembly.yaml`. Assembling with `--replicas` refuses this shape unless `--force`. With `--force`, the run is rebuilt from scratch as a fresh replica-shaped run.
+- **Legacy-run guard.** A pre-step-5 run has no `replicas` field in its `manifest.assembly.yaml`. Any re-assemble against this shape is refused unless `--force`, whether or not `--replicas` was explicitly passed — the `--replicas` argparse default (`1`) still trips the guard. With `--force`, the run is rebuilt from scratch as a fresh replica-shaped run.
 
 **PipelineRun name length.** `metadata.name` is `{phase}-{workload}-{run}-i{iteration}` (with `_` → `-` normalization). This is a Kubernetes DNS subdomain, so the 253-char RFC 1123 limit applies. `assemble` validates each generated PipelineRun name and exits 2 with `error: PipelineRun name '<name>' is <len> chars, exceeds the 253-char DNS subdomain limit` if any pair (phase × workload × run × iteration) would overflow. Fail-fast at assemble time is preferable to Tekton admission rejection at dispatch time.
 
@@ -375,7 +375,7 @@ Different flags compose as AND: `--workload X --package baseline --iteration 1,3
 ```bash
 python pipeline/deploy.py build   [flags]   # ensure all scenario images exist (pre-flight for run)
 python pipeline/deploy.py run     [flags]   # ensure images + orchestrate parallel pool execution
-python pipeline/deploy.py status            # show progress snapshot of all (workload, package) pairs
+python pipeline/deploy.py status            # show progress snapshot of all (workload, package, iteration) triples
 python pipeline/deploy.py collect [flags]     # pull results from the cluster PVC
 python pipeline/deploy.py stop               # stop the remote orchestrator Job
 python pipeline/deploy.py reset [flags]     # reset all non-pending pairs to pending (with cluster cleanup)
@@ -383,7 +383,7 @@ python pipeline/deploy.py wipe  [flags]     # delete local result files for pair
 python pipeline/deploy.py pairs   [flags]   # list available pair keys, workloads, and packages
 ```
 
-**`deploy.py run`** — assigns `(workload, package)` pairs to free namespace slots, polls for completion, and retries pairs that time out. Reads progress from the run-scoped `sim2real-progress-{run}` ConfigMap to resume interrupted runs. Requires a configured namespace. Use `deploy.py collect` to pull results off-cluster after runs complete. The run's cluster is resolved from `workspace/runs/<R>/run_metadata.json:cluster_id`; if the run directory or its `cluster/` subdirectory does not exist, `deploy.py run --run <R>` exits with `run 'sim2real assemble --run <R>' first`, and if `run_metadata.json` is missing, unparseable, or lacks a non-empty `cluster_id`, it exits with `run metadata corrupted; re-assemble`.
+**`deploy.py run`** — assigns `(workload, package, iteration)` triples to free namespace slots, polls for completion, and retries pairs that time out. Reads progress from the run-scoped `sim2real-progress-{run}` ConfigMap to resume interrupted runs. Requires a configured namespace. Use `deploy.py collect` to pull results off-cluster after runs complete. The run's cluster is resolved from `workspace/runs/<R>/run_metadata.json:cluster_id`; if the run directory or its `cluster/` subdirectory does not exist, `deploy.py run --run <R>` exits with `run 'sim2real assemble --run <R>' first`, and if `run_metadata.json` is missing, unparseable, or lacks a non-empty `cluster_id`, it exits with `run metadata corrupted; re-assemble`.
 
 | Flag | Default | Description |
 |------|---------|-------------|

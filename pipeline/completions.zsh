@@ -56,7 +56,7 @@ _sim2real_deploy() {
         subcmd)
             local -a subcommands=(
                 'run:Orchestrate parallel pool execution'
-                'status:Show progress of all (workload, package) pairs'
+                'status:Show progress of all (workload, package, iteration) triples'
                 'collect:Pull results for completed packages'
                 'stop:Stop the remote orchestrator Job'
                 'reset:Tear down cluster resources for all non-pending pairs'
