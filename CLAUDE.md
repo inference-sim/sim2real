@@ -144,6 +144,8 @@ python -m pytest pipeline/ \
   pipeline/tests/test_translation_ref.py \
   pipeline/tests/test_translate.py \
   pipeline/tests/test_build.py \
+  pipeline/tests/test_pairkey.py \
+  pipeline/tests/test_load_pairs.py \
   .claude/skills/sim2real-analyze/tests/ \
   .claude/skills/sim2real-bootstrap/tests/ \
   .claude/skills/sim2real-translate/tests/ \

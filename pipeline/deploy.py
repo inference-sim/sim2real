@@ -51,6 +51,7 @@ def _c(code: str, text: str) -> str:
 
 from pipeline.lib import build, cluster_ops, layout
 from pipeline.lib.log import info, ok, warn, err
+from pipeline.lib.pairkey import parse_pair_key
 from pipeline.lib.redact import redact_yaml_file, redact_yaml_tree
 
 
@@ -1870,10 +1871,41 @@ def _load_pairs(cluster_dir: Path) -> dict:
     """Discover all (workload, package) pairs from pipelinerun-*.yaml at cluster/ root.
 
     Returns dict keyed by "wl-" + filename stem (minus "pipelinerun-" prefix).
+    Thin wrapper over ``_load_pairs_with_errors``; the malformed-key count is
+    discarded here. Callers that need the count should call
+    ``_load_pairs_with_errors`` directly.
     """
-    pairs = {}
+    pairs, _ = _load_pairs_with_errors(cluster_dir)
+    return pairs
+
+
+def _load_pairs_with_errors(cluster_dir: Path) -> tuple[dict, int]:
+    """Discover pairs and report how many keys did not match the new grammar.
+
+    Returns ``(pairs, malformed_count)``. ``pairs`` has the same dict shape as
+    ``_load_pairs`` returns. ``malformed_count`` counts pair keys whose
+    filename-derived string does not parse under the canonical grammar
+    (see ``pipeline/lib/pairkey.py``).
+
+    Entries whose key parses gain an ``iteration`` field (int, >= 1).
+    Legacy keys without an ``|iN`` suffix parse as ``iteration=1``.
+
+    Deviation from the design's literal loader-layer policy (drop with
+    WARN): during the step-5 rollout, PR 2 (``assemble`` filename
+    reshape) has not yet landed, so on-disk filenames still produce
+    keys that fail the new grammar (e.g. ``wl-smoke-baseline``
+    from ``pipelinerun-smoke-baseline.yaml``). Dropping them here would
+    break every downstream command until PR 2 lands and existing runs
+    are re-assembled. Instead this loader keeps the entry (without an
+    ``iteration`` field) and reports the count so operators — and, in a
+    later PR, ``_cmd_status`` — can surface it. Once PR 2 lands and
+    runs are re-assembled, ``malformed_count`` should trend to zero and
+    the WARN/drop semantics can be tightened without behavior change.
+    """
+    pairs: dict = {}
+    malformed_count = 0
     if not cluster_dir.exists():
-        return pairs
+        return pairs, malformed_count
     for pr_path in sorted(cluster_dir.glob("pipelinerun-*.yaml")):
         try:
             pr_data = yaml.safe_load(pr_path.read_text())
@@ -1882,7 +1914,7 @@ def _load_pairs(cluster_dir: Path) -> dict:
             workload = params.get("workloadName", "")
             package = params.get("phase", "")
             key = "wl-" + pr_path.stem.removeprefix("pipelinerun-")
-            pairs[key] = {
+            entry: dict = {
                 "workload": workload,
                 "package": package,
                 "pr_name": pr_name,
@@ -1890,10 +1922,17 @@ def _load_pairs(cluster_dir: Path) -> dict:
                 "namespace": pr_data.get("metadata", {}).get("namespace", ""),
                 "scenario_content": params.get("scenarioContent"),
             }
+            try:
+                parts = parse_pair_key(key)
+            except ValueError:
+                malformed_count += 1
+            else:
+                entry["iteration"] = parts.iteration
+            pairs[key] = entry
         except Exception as e:
             warn(f"Skipping {pr_path.name}: {e}")
             continue
-    return pairs
+    return pairs, malformed_count
 
 
 def _uninstall_orphaned_helm(key: str, namespace: str) -> None:
