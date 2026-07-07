@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import configparser
-import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -179,12 +178,74 @@ class TestWriteManifestAssembly:
         assert "component" not in parsed
         assert parsed["algorithms"] == [{"name": "sr", "defaults": "baseline"}]
 
-    def test_params_hash_is_sha256_of_bytes(self, tmp_path):
-        p = tmp_path / "manifest.assembly.yaml"
-        p.write_bytes(b"hello\n")
+    def test_writes_replicas_field_when_provided(self, tmp_path):
+        manifest = {
+            "kind": "sim2real-transfer",
+            "version": 3,
+            "scenario": "test",
+            "component": {"repo": "acme/foo"},
+            "context": {"text": "", "files": []},
+            "baselines": [{"name": "baseline", "scenario": "b.yaml"}],
+            "algorithms": [],
+            "workloads": [],
+            "defaults": {"disable": []},
+        }
+        run_dir = tmp_path / "runs" / "r"
+        run_dir.mkdir(parents=True)
+        p = assemble_run.write_manifest_assembly(
+            run_dir, manifest, now_iso="2026-07-01T14:05:00Z", replicas=3
+        )
+        parsed = yaml.safe_load(p.read_text())
+        assert parsed["replicas"] == 3
+
+    def test_writes_replicas_defaults_to_one(self, tmp_path):
+        manifest = {
+            "kind": "sim2real-transfer",
+            "version": 3,
+            "scenario": "test",
+            "component": {"repo": "acme/foo"},
+            "context": {"text": "", "files": []},
+            "baselines": [{"name": "baseline", "scenario": "b.yaml"}],
+            "algorithms": [],
+            "workloads": [],
+            "defaults": {"disable": []},
+        }
+        run_dir = tmp_path / "runs" / "r"
+        run_dir.mkdir(parents=True)
+        p = assemble_run.write_manifest_assembly(
+            run_dir, manifest, now_iso="2026-07-01T14:05:00Z"
+        )
+        parsed = yaml.safe_load(p.read_text())
+        assert parsed["replicas"] == 1
+
+    def test_params_hash_excludes_replicas_field(self, tmp_path):
+        """params_hash is stable when only the `replicas` field changes."""
+        p1 = tmp_path / "a.yaml"
+        p2 = tmp_path / "b.yaml"
+        p1.write_text(
+            "replicas: 3\nworkloads:\n- w1\nbaselines:\n- {name: b, scenario: b.yaml}\n"
+        )
+        p2.write_text(
+            "replicas: 5\nworkloads:\n- w1\nbaselines:\n- {name: b, scenario: b.yaml}\n"
+        )
         assert (
-            assemble_run.compute_params_hash(p)
-            == hashlib.sha256(b"hello\n").hexdigest()
+            assemble_run.compute_params_hash(p1)
+            == assemble_run.compute_params_hash(p2)
+        )
+
+    def test_params_hash_changes_when_content_changes(self, tmp_path):
+        """params_hash differs when non-replicas content changes."""
+        p1 = tmp_path / "a.yaml"
+        p2 = tmp_path / "b.yaml"
+        p1.write_text(
+            "replicas: 3\nworkloads:\n- w1\nbaselines:\n- {name: b, scenario: b.yaml}\n"
+        )
+        p2.write_text(
+            "replicas: 3\nworkloads:\n- w2\nbaselines:\n- {name: b, scenario: b.yaml}\n"
+        )
+        assert (
+            assemble_run.compute_params_hash(p1)
+            != assemble_run.compute_params_hash(p2)
         )
 
     def test_slicer_round_trip(self, tmp_path):
@@ -205,6 +266,9 @@ class TestWriteManifestAssembly:
             run_dir, manifest, now_iso="2026-07-01T14:05:00Z"
         )
         reparsed = yaml.safe_load(p.read_text())
+        # replicas is prepended by write_manifest_assembly; strip before comparing
+        # against the raw assembly slice.
+        assert reparsed.pop("replicas") == 1
         expected = slicer.assembly_slice(manifest)
         assert reparsed == expected
 
@@ -788,9 +852,9 @@ class TestAssembleRun:
             now_iso="2026-07-01T14:05:00Z",
         )
         run_dir = fx["exp_root"] / "workspace" / "runs" / "trial-1"
-        expected = hashlib.sha256(
-            (run_dir / "manifest.assembly.yaml").read_bytes()
-        ).hexdigest()
+        expected = assemble_run.compute_params_hash(
+            run_dir / "manifest.assembly.yaml"
+        )
         meta = json.loads((run_dir / "run_metadata.json").read_text())
         assert meta["params_hash"] == expected
 
