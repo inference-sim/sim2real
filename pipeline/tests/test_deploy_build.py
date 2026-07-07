@@ -54,12 +54,12 @@ class TestCmdBuildScenarioIteration:
         from pipeline.lib.ensure_image import collect_scenario_images
 
         cluster_dir = self._make_cluster(tmp_path, {
-            "base1": {"scenario": [{"name": "s", "images": {
-                "inferenceScheduler": {"repository": "ghcr.io/org/sched", "tag": "abc12345"}
-            }}]},
-            "algo1": {"scenario": [{"name": "s", "images": {
-                "inferenceScheduler": {"repository": "ghcr.io/org/sched", "tag": "r1"}
-            }}]},
+            "base1": {"scenario": [{"name": "s", "router": {"epp": {"image": {
+                "registry": "ghcr.io/org", "repository": "sched", "tag": "abc12345"
+            }}}}]},
+            "algo1": {"scenario": [{"name": "s", "router": {"epp": {"image": {
+                "registry": "ghcr.io/org", "repository": "sched", "tag": "r1"
+            }}}}]},
         })
         images = collect_scenario_images(cluster_dir)
         refs = {i["image_ref"] for i in images}
@@ -72,12 +72,12 @@ class TestCmdBuildScenarioIteration:
         from pipeline.lib.ensure_image import collect_scenario_images
 
         cluster_dir = self._make_cluster(tmp_path, {
-            "base1": {"scenario": [{"name": "s", "images": {
-                "inferenceScheduler": {"repository": "ghcr.io/org/sched", "tag": "abc12345"}
-            }}]},
-            "base2": {"scenario": [{"name": "s", "images": {
-                "inferenceScheduler": {"repository": "ghcr.io/org/sched", "tag": "abc12345"}
-            }}]},
+            "base1": {"scenario": [{"name": "s", "router": {"epp": {"image": {
+                "registry": "ghcr.io/org", "repository": "sched", "tag": "abc12345"
+            }}}}]},
+            "base2": {"scenario": [{"name": "s", "router": {"epp": {"image": {
+                "registry": "ghcr.io/org", "repository": "sched", "tag": "abc12345"
+            }}}}]},
         })
         images = collect_scenario_images(cluster_dir)
         assert len(images) == 1
@@ -133,9 +133,9 @@ class TestCmdBuildScenarioIteration:
         assert treatment_ref == "ghcr.io/org/sched:r1"
 
         cluster_dir = self._make_cluster(tmp_path, {
-            "algo1": {"scenario": [{"name": "s", "images": {
-                "inferenceScheduler": {"repository": "ghcr.io/org/sched", "tag": "r1"}
-            }}]},
+            "algo1": {"scenario": [{"name": "s", "router": {"epp": {"image": {
+                "registry": "ghcr.io/org", "repository": "sched", "tag": "r1"
+            }}}}]},
         })
         images = collect_scenario_images(cluster_dir)
         assert images[0]["image_ref"] == treatment_ref

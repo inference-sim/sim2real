@@ -109,9 +109,10 @@ class TestInjectImageTag:
         scenario = {"scenario": [{"name": "s"}, {"name": "s2"}]}
         assemble_run.inject_image_tag(scenario, "ghcr.io/foo/bar:v1")
         for entry in scenario["scenario"]:
-            img = entry["images"]["inferenceScheduler"]
+            img = entry["router"]["epp"]["image"]
             assert img == {
-                "repository": "ghcr.io/foo/bar",
+                "registry": "ghcr.io/foo",
+                "repository": "bar",
                 "tag": "v1",
                 "pullPolicy": "Always",
             }
@@ -120,8 +121,10 @@ class TestInjectImageTag:
         scenario = {"scenario": [{"name": "s"}]}
         digest_ref = "ghcr.io/foo/bar@sha256:" + "a" * 64
         assemble_run.inject_image_tag(scenario, digest_ref)
-        img = scenario["scenario"][0]["images"]["inferenceScheduler"]
-        assert img["repository"] == digest_ref
+        img = scenario["scenario"][0]["router"]["epp"]["image"]
+        # Digest ref: last "/" segment becomes bare repo (includes the @sha256 suffix)
+        assert img["registry"] == "ghcr.io/foo"
+        assert img["repository"] == "bar@sha256:" + "a" * 64
         assert img["tag"] == ""
 
     def test_no_scenario_entries_raises(self):
@@ -132,20 +135,21 @@ class TestInjectImageTag:
         with pytest.raises(assemble_run.AssembleError):
             assemble_run.inject_image_tag({}, "ghcr.io/foo/bar:v1")
 
-    def test_overwrites_existing_inference_scheduler(self):
+    def test_overwrites_existing_epp_image(self):
         scenario = {
             "scenario": [
                 {
                     "name": "s",
-                    "images": {
-                        "inferenceScheduler": {"repository": "old", "tag": "old"}
-                    },
+                    "router": {"epp": {"image": {
+                        "registry": "old", "repository": "old", "tag": "old"
+                    }}},
                 }
             ]
         }
         assemble_run.inject_image_tag(scenario, "ghcr.io/foo/bar:v1")
-        img = scenario["scenario"][0]["images"]["inferenceScheduler"]
-        assert img["repository"] == "ghcr.io/foo/bar"
+        img = scenario["scenario"][0]["router"]["epp"]["image"]
+        assert img["registry"] == "ghcr.io/foo"
+        assert img["repository"] == "bar"
         assert img["tag"] == "v1"
 
 
@@ -819,8 +823,9 @@ class TestAssembleRun:
                 / "sr.yaml"
             ).read_text()
         )
-        img = sr_yaml["scenario"][0]["images"]["inferenceScheduler"]
-        assert img["repository"] == "ghcr.io/foo/bar"
+        img = sr_yaml["scenario"][0]["router"]["epp"]["image"]
+        assert img["registry"] == "ghcr.io/foo"
+        assert img["repository"] == "bar"
         assert img["tag"] == "v1"
         baseline_yaml = yaml.safe_load(
             (
@@ -832,9 +837,9 @@ class TestAssembleRun:
                 / "baseline.yaml"
             ).read_text()
         )
-        assert "inferenceScheduler" not in (
-            baseline_yaml["scenario"][0].get("images") or {}
-        )
+        baseline_router = baseline_yaml["scenario"][0].get("router") or {}
+        baseline_epp = baseline_router.get("epp") or {}
+        assert "image" not in baseline_epp
 
     def test_params_hash_matches_manifest_assembly_bytes(self, tmp_path):
         fx = _make_experiment(

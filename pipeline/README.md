@@ -318,7 +318,7 @@ baseline_resolved  = deep_merge(framework_defaults, baseline_bundle, baseline_ov
 treatment_resolved = deep_merge(baseline_resolved, treatment_bundle_diffs, algo_overlay)
 ```
 
-Then each treatment scenario has `images.inferenceScheduler` set from that algorithm's own `translation_output.json:algorithms[i].image_ref`, and every scenario has `huggingface.secretName` set from `cluster_config.json:secret_names.hf_token`.
+Then each treatment scenario has `router.epp.image` set from that algorithm's own `translation_output.json:algorithms[i].image_ref` (split into `registry` + bare `repository` fields for the routerlib chart's expected shape), and every scenario has `huggingface.secretName` set from `cluster_config.json:secret_names.hf_token`.
 
 **`params_hash`** is SHA-256 over the bytes of `manifest.assembly.yaml`. Recorded in `run_metadata.json` for later drift detection (step-5 of the epic).
 
@@ -352,7 +352,7 @@ Common flags (all subcommands):
 | `--experiment-root PATH` | cwd | path to experiment repo |
 | `--skip-build` | false | skip image build pre-flight |
 
-**Image build** — `deploy.py build` (called implicitly as pre-flight by `deploy.py run`) iterates over all resolved scenarios in `cluster/`, collects unique `images.inferenceScheduler` refs, and builds any that are stale. Baseline images are tagged by the component directory's HEAD SHA (8 chars); algorithm images are tagged `{run_name}-{algo_name}` (per-algorithm). For each algorithm build, the component working tree is reset to baseline and only that algorithm's files are applied before building. Source hash comparison skips builds when the image is already current.
+**Image build** — `deploy.py build` (called implicitly as pre-flight by `deploy.py run`) iterates over all resolved scenarios in `cluster/`, collects unique `router.epp.image` refs, and builds any that are stale. Baseline images are tagged by the component directory's HEAD SHA (8 chars); algorithm images are tagged `{run_name}-{algo_name}` (per-algorithm). For each algorithm build, the component working tree is reset to baseline and only that algorithm's files are applied before building. Source hash comparison skips builds when the image is already current.
 
 **Pair discovery** — `deploy.py run` discovers `pipelinerun-*.yaml` files at the `cluster/` root. Each file's pair key is derived as `wl-` + filename stem minus the `pipelinerun-` prefix.
 
@@ -828,12 +828,12 @@ inferenceExtension:
 ### Typical overlay content
 
 **Baseline overlay** — adds InferenceObjectives and the baseline EPP plugin config:
-- `extraObjects` (InferenceObjectives with `poolRef`)
-- `inferenceExtension.pluginsCustomConfig` (baseline scorer config)
+- `router.inferenceObjectives` (list of `{name, priority}` — the routerlib chart renders each as an `InferenceObjective` CR)
+- `router.epp.pluginsCustomConfig` (baseline scorer config)
 
 **Treatment overlay** — only the delta from baseline:
-- `inferenceExtension.pluginsCustomConfig` (evolved scorer config)
-- `images.inferenceScheduler` (custom EPP image — injected by `sim2real assemble` from `translation_output.json:algorithms[i].image_ref` for the matching algorithm)
+- `router.epp.pluginsCustomConfig` (evolved scorer config)
+- `router.epp.image` (custom EPP image — injected by `sim2real assemble` from `translation_output.json:algorithms[i].image_ref` for the matching algorithm; registry and bare repository written as separate fields)
 
 If treatment uses the same InferenceObjectives as baseline, do NOT repeat them — they propagate from `baseline_resolved`.
 
