@@ -638,48 +638,59 @@ def assemble_run(
                 )
             shutil.rmtree(run_dir)
         else:
-            prior_ma = yaml.safe_load(prior_ma_path.read_text()) or {}
-            prior_rm = json.loads(prior_rm_path.read_text())
-            prior_replicas = (
-                prior_ma.get("replicas") if isinstance(prior_ma, dict) else None
-            )
-            if prior_replicas is None:
+            try:
+                prior_ma = yaml.safe_load(prior_ma_path.read_text()) or {}
+                prior_rm = json.loads(prior_rm_path.read_text())
+            except (yaml.YAMLError, json.JSONDecodeError, OSError) as exc:
                 if not force:
                     raise AssembleError(
-                        f"run '{run_name}' is in legacy single-replica shape "
-                        "(pre-step-5); create a fresh run to use --replicas, "
-                        "or pass --force to rebuild."
-                    )
+                        f"run '{run_name}' has a corrupt manifest.assembly.yaml "
+                        f"or run_metadata.json: {exc} — pass --force to rebuild"
+                    ) from exc
                 shutil.rmtree(run_dir)
             else:
-                new_slice = slicer.assembly_slice(manifest)
-                new_canonical = yaml.dump(
-                    new_slice, sort_keys=True, default_flow_style=False,
-                    allow_unicode=True,
-                ).encode("utf-8")
-                new_content_hash = hashlib.sha256(new_canonical).hexdigest()
-                prior_params_hash = prior_rm.get("params_hash", "")
-                if new_content_hash != prior_params_hash:
+                prior_replicas = (
+                    prior_ma.get("replicas") if isinstance(prior_ma, dict) else None
+                )
+                if prior_replicas is None:
                     if not force:
                         raise AssembleError(
-                            f"manifest content changed since last assemble for "
-                            f"run '{run_name}'; pass --force to overwrite."
+                            f"run '{run_name}' is in legacy single-replica shape "
+                            "(pre-step-5); create a fresh run to use --replicas, "
+                            "or pass --force to rebuild."
                         )
                     shutil.rmtree(run_dir)
                 else:
+                    # Grow-only guard runs BEFORE the drift check because
+                    # --force bypasses drift but does NOT bypass grow-only.
                     if replicas < prior_replicas:
                         raise AssembleError(
                             f"run '{run_name}' already has {prior_replicas} "
                             f"replicas; refusing to shrink to {replicas}. "
                             "Replica shrink is tracked in #506."
                         )
-                    if replicas == prior_replicas:
-                        # True no-op: reset side-band attrs and return.
-                        assemble_run.skipped_algorithms = []  # type: ignore[attr-defined]
-                        assemble_run.missing_submodules = []  # type: ignore[attr-defined]
-                        return
-                    # replicas > prior_replicas: additive grow.
-                    additive_grow_from = prior_replicas
+                    new_slice = slicer.assembly_slice(manifest)
+                    new_canonical = yaml.dump(
+                        new_slice, sort_keys=True, default_flow_style=False,
+                        allow_unicode=True,
+                    ).encode("utf-8")
+                    new_content_hash = hashlib.sha256(new_canonical).hexdigest()
+                    prior_params_hash = prior_rm.get("params_hash", "")
+                    if new_content_hash != prior_params_hash:
+                        if not force:
+                            raise AssembleError(
+                                f"manifest content changed since last assemble for "
+                                f"run '{run_name}'; pass --force to overwrite."
+                            )
+                        shutil.rmtree(run_dir)
+                    else:
+                        if replicas == prior_replicas:
+                            # True no-op: reset side-band attrs and return.
+                            assemble_run.skipped_algorithms = []  # type: ignore[attr-defined]
+                            assemble_run.missing_submodules = []  # type: ignore[attr-defined]
+                            return
+                        # replicas > prior_replicas: additive grow.
+                        additive_grow_from = prior_replicas
 
     if additive_grow_from is not None:
         _additive_grow(
@@ -737,7 +748,7 @@ def assemble_run(
     )
     params_hash = compute_params_hash(manifest_assembly_path)
 
-    # 4. Resolve scenarios ------------------------------------------------
+    # 6. Resolve scenarios ------------------------------------------------
     exp_root = layout.experiment_root()
     defaults_dir = exp_root / "baselines" / "defaults"
     framework_defaults = load_defaults_overlay(
@@ -792,17 +803,17 @@ def assemble_run(
         inject_image_tag(resolved, algo_image_ref)
         packages.append((algo_name, resolved))
 
-    # 5. Inject hf secret on every package --------------------------------
+    # 7. Inject hf secret on every package --------------------------------
     hf_secret = (cluster_config.get("secret_names") or {}).get(
         "hf_token", "hf-secret"
     )
     for _, resolved in packages:
         inject_hf_secret_name(resolved, hf_secret)
 
-    # 6. Write scenario YAMLs ---------------------------------------------
+    # 8. Write scenario YAMLs ---------------------------------------------
     write_resolved_scenarios(run_dir, packages)
 
-    # 7. Generate PipelineRuns --------------------------------------------
+    # 9. Generate PipelineRuns --------------------------------------------
     workloads = [_load_workload(exp_root, wl) for wl in manifest.get("workloads", [])]
     pipeline_name = (manifest.get("pipeline") or {}).get("name", "sim2real")
     observe = manifest.get("blis_observe") or {}
@@ -838,7 +849,7 @@ def assemble_run(
         iterations=range(1, replicas + 1),
     )
 
-    # 8. Write run_metadata.json ------------------------------------------
+    # 10. Write run_metadata.json -----------------------------------------
     # image_tag is a single-image summary field for backward-compat; use the
     # first *kept* algorithm's image_ref. Reading from kept_algos rather
     # than tout["algorithms"][0] guards against the multi-algo case where

@@ -215,3 +215,51 @@ class TestAssembleReplicas:
         _assemble(fx, replicas=3, force=True)
         names = _pipelinerun_files(_cluster_dir_of(fx))
         assert "pipelinerun-wl-a|baseline|i3.yaml" in names
+
+    def test_shrink_with_force_and_drift_still_refuses(self, tmp_path):
+        """Grow-only invariant: --force does NOT bypass the shrink guard,
+        even when combined with content drift that --force would normally
+        override. Regression guard for a review finding on the ordering of
+        the drift + shrink checks."""
+        import json
+        fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
+                              algo_names_manifest=["sr"])
+        _assemble(fx, replicas=3)
+        # Poison params_hash to simulate content drift.
+        rm_path = _run_dir_of(fx) / "run_metadata.json"
+        rm = json.loads(rm_path.read_text())
+        rm["params_hash"] = "0" * 64
+        rm_path.write_text(json.dumps(rm))
+        with pytest.raises(assemble_run.AssembleError) as exc:
+            _assemble(fx, replicas=2, force=True)
+        assert "#506" in str(exc.value)
+        assert "3" in str(exc.value)
+
+    def test_corrupt_manifest_assembly_refuses_without_force(self, tmp_path):
+        """Bare yaml.safe_load must not escape as raw YAMLError. Verifies
+        the parse guard around the decision-tree state-file reads."""
+        fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
+                              algo_names_manifest=["sr"])
+        _assemble(fx, replicas=1)
+        (_run_dir_of(fx) / "manifest.assembly.yaml").write_text("not: yaml: : :")
+        with pytest.raises(assemble_run.AssembleError, match="corrupt"):
+            _assemble(fx, replicas=1)
+
+    def test_corrupt_run_metadata_refuses_without_force(self, tmp_path):
+        """Bare json.loads must not escape as raw JSONDecodeError."""
+        fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
+                              algo_names_manifest=["sr"])
+        _assemble(fx, replicas=1)
+        (_run_dir_of(fx) / "run_metadata.json").write_text("{not-json")
+        with pytest.raises(assemble_run.AssembleError, match="corrupt"):
+            _assemble(fx, replicas=1)
+
+    def test_corrupt_state_with_force_rebuilds(self, tmp_path):
+        """--force lets the operator recover from a corrupt state file."""
+        fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
+                              algo_names_manifest=["sr"])
+        _assemble(fx, replicas=1)
+        (_run_dir_of(fx) / "manifest.assembly.yaml").write_text("not: yaml: : :")
+        _assemble(fx, replicas=2, force=True)
+        names = _pipelinerun_files(_cluster_dir_of(fx))
+        assert "pipelinerun-wl-a|baseline|i2.yaml" in names
