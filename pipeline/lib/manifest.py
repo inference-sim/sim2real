@@ -80,7 +80,18 @@ def load_manifest(path: "Path | str") -> dict:
         for i, entry in enumerate(algos):
             if not isinstance(entry, dict):
                 raise ManifestError(f"algorithms[{i}] must be a mapping")
-            for f in ("name", "source", "defaults"):
+            # `byo: true` marker (v3 schema addition). Bool type; if True,
+            # `source:` becomes optional for this entry. Non-BYO entries
+            # still require `source:` — per-command validation in
+            # sim2real.py rejects BYO manifests where downstream needs it.
+            byo = entry.get("byo", False)
+            if "byo" in entry and not isinstance(byo, bool):
+                raise ManifestError(
+                    f"algorithms[{i}].byo must be a bool, "
+                    f"got {type(byo).__name__}"
+                )
+            required = ("name", "defaults") if byo else ("name", "source", "defaults")
+            for f in required:
                 if f not in entry:
                     raise ManifestError(f"algorithms[{i}] missing required field: {f}")
             _validate_package_name(entry["name"], f"algorithms[{i}]")
@@ -157,14 +168,16 @@ def load_manifest(path: "Path | str") -> dict:
 def _validate_v3_fields(data: dict) -> None:
     """Validate and apply defaults for v3-specific fields."""
 
-    # component (required only when algorithms are present)
+    # component (required only when at least one algorithm is BLIS-shape;
+    # all-BYO manifests may omit component: since BYO images are pre-built).
     component = data.get("component")
-    has_algorithms = bool(data.get("algorithms"))
+    algos = data.get("algorithms") or []
+    has_blis_algorithm = any(algo.get("byo") is not True for algo in algos)
 
     if component is None:
-        if has_algorithms:
+        if has_blis_algorithm:
             raise ManifestError(
-                "component is required when algorithms are specified"
+                "component is required when non-BYO algorithms are specified"
             )
         # Remove explicit null so downstream .get("component", {}) returns {} not None
         data.pop("component", None)

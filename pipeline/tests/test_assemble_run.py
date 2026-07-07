@@ -265,6 +265,104 @@ class TestResolveScenarios:
                 framework_defaults={},
             )
 
+    def test_framework_defaults_named_defaults_merge_into_baseline_entry(self, tmp_path):
+        """Regression test for issue #516.
+
+        Framework-default fragments under ``baselines/defaults/*.yaml`` are
+        authored with a placeholder ``scenario[0].name = "defaults"``. When the
+        experiment's baseline entry is named anything else (i.e. every real
+        experiment), the two must still merge into a SINGLE scenario entry —
+        otherwise llm-d-benchmark templates the placeholder as an independent
+        deployment inheriting the framework-default model (facebook/opt-125m).
+
+        Before the fix, ``resolve_baseline`` produced two scenario entries
+        (``[{name: defaults, ...}, {name: <baseline>, ...}]``) and a phantom
+        facebook/opt-125m deployment materialized alongside the intended one.
+        """
+        bundle = {
+            "scenario": [{
+                "name": "sr",
+                "model": {"name": "Qwen/Qwen3-14B", "path": "models/Qwen"},
+                "decode": {"replicas": 2},
+            }],
+        }
+        framework_defaults = {
+            "scenario": [{
+                "name": "defaults",  # placeholder; realigned at merge time
+                "gateway": {"externallyManaged": True},
+                "inferenceExtension": {"verbosity": "5"},
+                "extraObjects": [{"apiVersion": "v1", "kind": "Role",
+                                  "metadata": {"name": "epp-role"}}],
+            }],
+        }
+        bundle_path = tmp_path / "sr.yaml"
+        self._write(bundle_path, bundle)
+
+        resolved = assemble_run.resolve_baseline(
+            bundle_path=bundle_path,
+            overlay_path=None,
+            framework_defaults=framework_defaults,
+        )
+
+        # 1) Single scenario entry, carrying the baseline's name (not "defaults").
+        assert len(resolved["scenario"]) == 1
+        entry = resolved["scenario"][0]
+        assert entry["name"] == "sr"
+
+        # 2) Baseline content preserved (model + decode).
+        assert entry["model"]["name"] == "Qwen/Qwen3-14B"
+        assert entry["decode"]["replicas"] == 2
+
+        # 3) Framework-defaults content merged in.
+        assert entry["gateway"]["externallyManaged"] is True
+        assert entry["inferenceExtension"]["verbosity"] == "5"
+        assert entry["extraObjects"] == [
+            {"apiVersion": "v1", "kind": "Role",
+             "metadata": {"name": "epp-role"}}
+        ]
+
+    def test_framework_defaults_no_op_when_names_already_match(self, tmp_path):
+        """When both sides already have matching names, no realignment needed."""
+        bundle = {"scenario": [{"name": "same", "a": 1}]}
+        framework_defaults = {"scenario": [{"name": "same", "b": 2}]}
+        bundle_path = tmp_path / "b.yaml"
+        self._write(bundle_path, bundle)
+        resolved = assemble_run.resolve_baseline(
+            bundle_path=bundle_path,
+            overlay_path=None,
+            framework_defaults=framework_defaults,
+        )
+        assert resolved == {"scenario": [{"name": "same", "a": 1, "b": 2}]}
+
+    def test_framework_defaults_empty_scenario_no_op(self, tmp_path):
+        """Empty framework_defaults must not corrupt the bundle."""
+        bundle = {"scenario": [{"name": "sr", "a": 1}]}
+        bundle_path = tmp_path / "b.yaml"
+        self._write(bundle_path, bundle)
+        resolved = assemble_run.resolve_baseline(
+            bundle_path=bundle_path,
+            overlay_path=None,
+            framework_defaults={},
+        )
+        assert resolved == bundle
+
+    def test_align_overlay_name_does_not_mutate_caller_state(self, tmp_path):
+        """resolve_baseline must not mutate the caller's framework_defaults dict."""
+        bundle = {"scenario": [{"name": "sr"}]}
+        framework_defaults = {"scenario": [{"name": "defaults", "x": 1}]}
+        original_snapshot = {
+            "scenario": [{"name": "defaults", "x": 1}],
+        }
+        bundle_path = tmp_path / "b.yaml"
+        self._write(bundle_path, bundle)
+        assemble_run.resolve_baseline(
+            bundle_path=bundle_path,
+            overlay_path=None,
+            framework_defaults=framework_defaults,
+        )
+        # Caller's dict is untouched — the helper deep-copies before renaming.
+        assert framework_defaults == original_snapshot
+
 
 class TestInjectHfSecret:
     def test_sets_secret_name_on_each_entry(self):
