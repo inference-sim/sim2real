@@ -160,15 +160,11 @@ def enumerate_run(experiment_root: Path, run_name: str) -> EnumResult:
                         )
                     )
                 elif shape == "legacy":
-                    rows.append(
-                        Row(
-                            phase=phase,
-                            workload=workload,
-                            iteration=it,
-                            status="MISSING",
-                            note=f"no {disk_dir} directory",
-                        )
-                    )
+                    # Per spec: MISSING does not apply to legacy runs.
+                    # A workload with no trace_data.csv simply has no
+                    # data yet — emit no row. The SKILL.md --real mode
+                    # synth path does the same ( `[ -f … ] || continue` ).
+                    continue
                 else:
                     rows.append(
                         Row(

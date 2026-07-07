@@ -229,6 +229,42 @@ def test_legacy_shape_implicit_i1(tmp_path):
         assert r.status == "PRESENT"
 
 
+def test_legacy_shape_uncollected_workload_is_silent(tmp_path):
+    """Legacy run with a workload that has no trace_data.csv yet ->
+    no MISSING row, no PRESENT row, exit 0.
+
+    Per the spec, MISSING does not apply to legacy runs — an
+    un-collected workload simply produces no row (mirrors the
+    SKILL.md --real synth path, which does `[ -f … ] || continue`).
+    """
+    _make_run(
+        tmp_path,
+        run_name="trial",
+        replicas=1,
+        algorithms=["sim2real-ac"],
+        baselines=["baseline"],
+        workloads=["wl-chat", "wl-code"],
+        disk_layout={
+            # wl-chat has data (legacy shape); wl-code was never collected.
+            ("baseline", "wl-chat"): "legacy",
+            ("sim2real-ac", "wl-chat"): "legacy",
+            ("baseline", "wl-code"): [],       # empty dir, no trace_data.csv
+            ("sim2real-ac", "wl-code"): [],
+        },
+    )
+    result = ei.enumerate_run(tmp_path, "trial")
+
+    assert result.shape == "legacy"
+    assert result.exit_code == 0
+    assert result.counts == {"PRESENT": 2, "MISSING": 0, "SKIP": 0}
+
+    # Only the collected pairs appear in rows; the uncollected ones
+    # are silent (no MISSING, no PRESENT).
+    workloads_seen = {r.workload for r in result.rows}
+    assert workloads_seen == {"wl-chat"}
+    assert all(r.status == "PRESENT" for r in result.rows)
+
+
 def test_mixed_shape_divergence_warning(tmp_path):
     """Mixed run (some legacy, some iN/) -> warning + partial report; exit 1."""
     _make_run(
