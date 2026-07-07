@@ -146,6 +146,17 @@ def test_replica_all_present(tmp_path):
     iters_seen = sorted({r.iteration for r in result.rows})
     assert iters_seen == [1, 2, 3]
 
+    # results_dir on PRESENT rows carries the iN/ segment in replica
+    # shape — every downstream SKILL.md subsection consumes this path.
+    # A regression that dropped or duplicated the iN/ segment would
+    # silently misdirect every subsequent check.
+    r_i2 = next(
+        r for r in result.rows
+        if r.phase == "sim2real-ac" and r.workload == "wl-chat" and r.iteration == 2
+    )
+    assert r_i2.results_dir is not None
+    assert r_i2.results_dir.endswith("results/sim2real-ac/wl-chat/i2")
+
 
 def test_replica_missing_i2(tmp_path):
     """3-replica run with i2/ absent -> MISSING row for i2, exit 1."""
@@ -227,6 +238,14 @@ def test_legacy_shape_implicit_i1(tmp_path):
     for r in result.rows:
         assert r.iteration == 1
         assert r.status == "PRESENT"
+
+    # results_dir on legacy-shape PRESENT rows points at the direct
+    # workload dir (no iN/ segment). Guards against a regression that
+    # accidentally appended an implicit /i1 in legacy shape.
+    r = next(r for r in result.rows if r.phase == "baseline")
+    assert r.results_dir is not None
+    assert r.results_dir.endswith("results/baseline/wl-chat")
+    assert not r.results_dir.rstrip("/").endswith("/i1")
 
 
 def test_legacy_shape_uncollected_workload_is_silent(tmp_path):

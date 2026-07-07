@@ -22,8 +22,9 @@ Exit codes:
     0 — all rows PRESENT or SKIP.
     1 — at least one MISSING. (FAIL is signal-derived at the
         SKILL.md rollup layer; not this enumerator's business.)
-    2 — invocation error (missing run, unreadable ConfigMap, malformed
-        inputs).
+    2 — invocation error (missing run; unreadable workspace files —
+        run_metadata.json, manifest.assembly.yaml, translation_output.json;
+        malformed inputs).
 
 Usage:
     python enumerate_iterations.py --run <name> [--experiment-root <path>]
@@ -209,7 +210,11 @@ def _detect_shape(
         "mixed"   — some workload dirs have ``iN/`` subdirs, others have
                     direct ``trace_data.csv``. Emit a divergence warning
                     and enumerate against the declared range for every
-                    pair (legacy pairs then report MISSING for i2..iN).
+                    pair. In this mode the iteration path is replica-
+                    shaped for every pair, so a legacy pair (with only
+                    a direct ``trace_data.csv`` and no ``iN/`` subdirs)
+                    reports MISSING for the *entire* declared range —
+                    every iteration ``i1..iN``, not just ``i2..iN``.
 
     Malformed iN dir names (e.g. ``i0``, ``iabc``) are counted but do
     not contribute to shape detection.

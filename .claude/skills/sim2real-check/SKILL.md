@@ -236,18 +236,20 @@ SIM2REAL_ROOT=$(python -c 'from pipeline.lib import layout; import pathlib, sys;
 ENUM_JSON=$(mktemp -t sim2real_check_enum.XXXXXX.json)
 # Chain onto RESOLVED_JSON's trap so both temp files are cleaned up.
 trap 'rm -f "$RESOLVED_JSON" "$ENUM_JSON"' EXIT
-if ! python "$SIM2REAL_ROOT/.claude/skills/sim2real-check/scripts/enumerate_iterations.py" \
-        --run "$RUN" --experiment-root "$EXPERIMENT_ROOT" > "$ENUM_JSON"; then
-    ENUM_EXIT=$?
-    if [ "$ENUM_EXIT" -eq 2 ]; then
-        # Invocation error — enumerator already wrote a specific message
-        # to stderr. Bail so the operator can fix the input.
-        exit 2
-    fi
-    # Exit 1 means "MISSING rows present" — that's a real-run diagnostic,
-    # not an invocation error. Keep going and let the final rollup
-    # surface the MISSING rows in the summary table.
+# Capture the enumerator's exit code directly (not inside `if !`, where
+# `$?` inside the then-block would always be 0 — the negation flattens
+# the underlying exit code).
+python "$SIM2REAL_ROOT/.claude/skills/sim2real-check/scripts/enumerate_iterations.py" \
+    --run "$RUN" --experiment-root "$EXPERIMENT_ROOT" > "$ENUM_JSON"
+ENUM_EXIT=$?
+if [ "$ENUM_EXIT" -eq 2 ]; then
+    # Invocation error — enumerator already wrote a specific message
+    # to stderr. Bail so the operator can fix the input.
+    exit 2
 fi
+# Exit 1 means "MISSING rows present" — that's a real-run diagnostic,
+# not an invocation error. Keep going and let the final rollup surface
+# the MISSING rows in the summary table.
 SHAPE=$(jq -r '.shape' "$ENUM_JSON")
 DECLARED_REPLICAS=$(jq -r '.declared_replicas' "$ENUM_JSON")
 DIVERGENCE_WARNINGS=$(jq -r '.divergence_warnings | join("\n  ")' "$ENUM_JSON")
@@ -318,9 +320,11 @@ fi
      "note": "algorithm not in translation"}
   ],
   "counts": {"PRESENT": N, "MISSING": M, "SKIP": S},
-  "exit_code": 0
+  "exit_code": 1
 }
 ```
+
+(The example carries a MISSING row, so `exit_code` is `1`. Contract: `0` when all rows are PRESENT or SKIP; `1` when any MISSING is present; `2` for invocation error caught by the enumerator.)
 
 Each check subsection below iterates over the `PRESENT` rows in `$ENUM_JSON`. Use each row's `results_dir` as the working path — it already carries the `iN/` segment in replica shape and points at the direct workload dir in legacy shape. `MISSING` and `SKIP` rows do not run subsections; they land in the final rollup with their enumerator-assigned status verbatim.
 
@@ -779,7 +783,7 @@ wl-<workload>|<phase>|i<N>  <verdict> [<reason>]
 
 - `0` — all rows are PASS or SKIP.
 - `1` — any FAIL or MISSING.
-- `2` — invocation error caught in Step 0.5 (missing run, unreadable ConfigMap / manifest, malformed inputs). Never emitted from the rollup step itself.
+- `2` — invocation error caught in Step 0.5 (missing run; unreadable workspace files — `run_metadata.json`, `manifest.assembly.yaml`, `translation_output.json`; malformed inputs). Never emitted from the rollup step itself.
 
 Consumers (CI, dashboards) rely on this contract — do not fold FAIL or MISSING into `0` under any rollup rule.
 
