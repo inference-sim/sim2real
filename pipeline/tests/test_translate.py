@@ -473,8 +473,11 @@ class TestTranslateComplete:
         out = capsys.readouterr().out
         # Resume-on-complete uses "complete" (validation passed) rather than
         # "already complete" (which is the plain-on-complete idempotent case);
-        # see issue #483 for the deliberate wording split.
+        # see issue #483 for the deliberate wording split. The negative
+        # assertion guards against a silent regression to "already complete"
+        # that the substring-only `"complete" in out` check would miss.
         assert "complete" in out
+        assert "already complete" not in out
         assert "(alias: softreflective-v1)" in out
         assert "sim2real build --translation softreflective-v1" in out
 
