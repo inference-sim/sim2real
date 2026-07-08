@@ -313,6 +313,13 @@ Assemble transfer manifest from all prior task outputs.
 8. `context.files`: files in experiment root with deployment config or signal
    mapping (README.md, config.md, etc.)
 9. `context.text`: summary of target interface and placement from algorithm source
+10. `blis_observe`: obtained by invoking
+    `python3 "$SKILL_DIR/generate_from_config.py" "$EXPERIMENT_ROOT/config.md" --emit-observe-yaml`
+    and pasting its stdout verbatim between `workloads:` and `context:`. The
+    script parses the `blis observe \ ... \` block in config.md and emits all
+    5 keys with per-key `# source:` provenance comments; if `config.md` is
+    absent or the block is missing, an all-defaults fragment is emitted. Do
+    NOT hand-edit the fragment — regenerate by re-running the script.
 
 **Output schema:**
 ```yaml
@@ -341,6 +348,17 @@ baselines:
     scenario: <path to baseline YAML>
 
 workloads: <list from task-4>
+
+blis_observe:
+  # Populated by `generate_from_config.py --emit-observe-yaml` (see Derivation
+  # step 10 below). Each key carries a `# source:` comment indicating whether
+  # it came from the `blis observe \ ... \` block in config.md or from the
+  # sim2real-bootstrap default (which matches pipeline/pipeline.yaml).
+  maxConcurrency: <value>  # source: config.md | sim2real-bootstrap default
+  timeout: <value>         # source: config.md | sim2real-bootstrap default
+  warmupRequests: <value>  # source: config.md | sim2real-bootstrap default
+  prewarmDuration: <value> # source: config.md | sim2real-bootstrap default
+  extraArgs: <value>       # source: config.md | sim2real-bootstrap default
 
 context:
   text: <derived summary>
@@ -375,6 +393,10 @@ ls "$EXPERIMENT_ROOT/baselines/defaults/"*.yaml \
 - All names (baselines, algorithms) must be lowercase alphanumeric only, 1-20 chars
 - `context.files` paths resolved relative to experiment root
 - `component` required when `algorithms` is non-empty
+- `blis_observe` keys must match the schema in `pipeline/lib/manifest.py`:
+  exactly the 5 keys `maxConcurrency`, `timeout`, `warmupRequests`,
+  `prewarmDuration`, `extraArgs`. Values must be scalars (string or number,
+  not bool). Do not add other keys — the manifest validator rejects them.
 
 **Present to user:** Show summary (scenario, component@ref, algorithm count,
 baseline count, workload count, context files) and ask for approval.
