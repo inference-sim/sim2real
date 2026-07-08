@@ -211,7 +211,7 @@ Two-phase state machine — the operator picks the lane explicitly (plain vs `--
 |---|---|---|---|
 | Absent | Create dir, write `skill_input.json` + `translation_output.json` with `image_ref: null`. Print checkpoint. Exit 0. | Error: `no translation to resume`. Exit 2. | Same as plain. |
 | Partial (checkpoint files present, some `generated/<algo>/<algo>_output.json` missing) | Error: `translation incomplete — run '/sim2real-translate' then 'translate --resume'`. Exit 2. Never mutates. | Reports missing algorithms by name. Exit 2. Never mutates. | Delete + recreate as if absent. |
-| Complete (all `<algo>_output.json` present) | Print `translation already complete — run 'sim2real build' next` and exit 0. | Same. | Delete + recreate; operator re-runs the skill. |
+| Complete (all `<algo>_output.json` present) | Print `translation <hash> (alias: <alias>) already complete — run 'sim2real build --translation <alias>' next` and exit 0. | Print `translation <hash> (alias: <alias>) complete — run 'sim2real build --translation <alias>' next` and exit 0. | Delete + recreate; operator re-runs the skill. |
 
 The translation hash is derived from `transfer.yaml`'s translation slice (scenario, component, context, per-algorithm sources) plus the SHA-256 of each `algorithms[i].source` file's bytes (see `pipeline/lib/slicer.py:translation_hash_with_sources`). Two runs of `translate` with the same `transfer.yaml` and the same source files produce the same hash and reuse the same `translations/<hash>/` directory.
 

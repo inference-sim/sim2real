@@ -379,6 +379,9 @@ class TestTranslateEmpty:
         _run_translate([])
         out = capsys.readouterr().out
         assert "/sim2real-translate" in out
+        assert "(alias: softreflective-v1)" in out
+        assert "checkpoint written" in out
+        assert "sim2real translate --resume" in out
 
     def test_force_behaves_like_plain(self, tmp_path):
         _write_manifest(tmp_path)
@@ -460,13 +463,20 @@ class TestTranslateComplete:
         assert _run_translate([]) == 0
         out = capsys.readouterr().out
         assert "already complete" in out
+        assert "(alias: softreflective-v1)" in out
+        assert "sim2real build --translation softreflective-v1" in out
 
     def test_resume_prints_already_complete(self, tmp_path, capsys):
         self._setup_complete(tmp_path)
         capsys.readouterr()
         assert _run_translate(["--resume"]) == 0
         out = capsys.readouterr().out
-        assert "already complete" in out
+        # Resume-on-complete uses "complete" (validation passed) rather than
+        # "already complete" (which is the plain-on-complete idempotent case);
+        # see issue #483 for the deliberate wording split.
+        assert "complete" in out
+        assert "(alias: softreflective-v1)" in out
+        assert "sim2real build --translation softreflective-v1" in out
 
     def test_force_recreates_and_clears_algo_outputs(self, tmp_path):
         thash = self._setup_complete(tmp_path)
