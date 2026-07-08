@@ -849,6 +849,137 @@ def test_apply_run_filters_only_empty_string():
     assert result == set()
 
 
+# ── --workload / --package glob tests (issue #518) ───────────────────────
+
+
+def test_apply_run_filters_workload_glob_star():
+    """--workload 'wl-s*' expands to all workloads starting with wl-s."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = ["wl-s*"]; package = None; status = None
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    assert result == {"wl-smoke-baseline", "wl-smoke-treatment", "wl-stale-baseline"}
+
+
+def test_apply_run_filters_workload_glob_multi_union():
+    """Multiple globs in --workload compose as OR (union)."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None
+        workload = ["wl-s*", "wl-l*"]
+        package = None
+        status = None
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    assert result == {
+        "wl-smoke-baseline", "wl-smoke-treatment",
+        "wl-stale-baseline",
+        "wl-load-baseline", "wl-load-treatment",
+    }
+
+
+def test_apply_run_filters_workload_literal_and_glob_mix():
+    """Mixing a literal and a glob within --workload keeps both selections."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None
+        workload = ["wl-heavy", "wl-l*"]
+        package = None
+        status = None
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    assert result == {
+        "wl-heavy-baseline",
+        "wl-load-baseline", "wl-load-treatment",
+    }
+
+
+def test_apply_run_filters_workload_literal_backwards_compat():
+    """Existing literal --workload invocations still work verbatim."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None
+        workload = ["wl-smoke"]
+        package = None
+        status = None
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    assert result == {"wl-smoke-baseline", "wl-smoke-treatment"}
+
+
+def test_apply_run_filters_workload_glob_zero_match_exits(capsys):
+    """A pattern that matches nothing fatals with the same unrecognized-values error
+    as a literal-not-in-valid, and prints the valid list."""
+    import pytest as _pytest
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None
+        workload = ["nonexistent_*"]
+        package = None
+        status = None
+
+    with _pytest.raises(SystemExit) as exc_info:
+        _apply_run_filters(dict(_PROGRESS), _Args())
+    assert exc_info.value.code == 1
+    stderr = capsys.readouterr().err
+    assert "--workload: unrecognized values ['nonexistent_*']" in stderr
+    # The valid-values line must include real workload names so the operator can correct.
+    assert "wl-smoke" in stderr
+
+
+def test_apply_run_filters_package_glob():
+    """Glob support applies to --package the same way as --workload."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None
+        workload = None
+        package = ["base*"]
+        status = None
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    assert result == {
+        "wl-smoke-baseline", "wl-load-baseline",
+        "wl-heavy-baseline", "wl-stale-baseline",
+    }
+
+
+def test_apply_run_filters_package_glob_zero_match_exits(capsys):
+    """--package pattern with zero matches exits with unrecognized-values error."""
+    import pytest as _pytest
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None
+        workload = None
+        package = ["missing_*"]
+        status = None
+
+    with _pytest.raises(SystemExit):
+        _apply_run_filters(dict(_PROGRESS), _Args())
+    assert "--package: unrecognized values ['missing_*']" in capsys.readouterr().err
+
+
+def test_apply_run_filters_workload_glob_composes_with_status():
+    """Glob expansion for --workload composes with --status (AND)."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None
+        workload = ["wl-*"]  # matches everything
+        package = None
+        status = "failed"
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    assert result == {"wl-heavy-baseline"}
+
+
 # ── --iteration filter tests (issue #512) ────────────────────────────────
 
 _ITER_PROGRESS = {

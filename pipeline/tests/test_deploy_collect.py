@@ -129,6 +129,191 @@ def test_collect_experiment_expands_to_all_progress_phases(tmp_path, monkeypatch
     assert collected_phases == ["baseline", "canary", "treatment"]
 
 
+# ── --package glob tests (issue #518) ───────────────────────────────────────
+
+
+def test_collect_package_glob_matches_family(tmp_path, monkeypatch):
+    """--package 'base*' expands via fnmatch to matching real packages
+    (unscoped path — no --only/--workload)."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    data = {
+        "wl-smoke-baseline":     {"workload": "wl-smoke", "package": "baseline",     "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-baseline-alt": {"workload": "wl-smoke", "package": "baseline-alt", "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment":    {"workload": "wl-smoke", "package": "treatment",    "status": "done", "completed_namespace": "ns-0"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        package = ["base*"]
+        skip_logs = False
+
+    collected_phases = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+        collected_phases.extend(phases)
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
+
+    assert sorted(collected_phases) == ["baseline", "baseline-alt"]
+
+
+def test_collect_package_glob_does_not_match_experiment(tmp_path, monkeypatch):
+    """A pattern like '*' matches every real package but must NOT match the
+    synthetic 'experiment' magic token (which is literal-only)."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    data = {
+        "wl-smoke-baseline":  {"workload": "wl-smoke", "package": "baseline",  "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment": {"workload": "wl-smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        package = ["*"]
+        skip_logs = False
+
+    collected_phases = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+        collected_phases.extend(phases)
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
+
+    # Real packages only; the magic 'experiment' token does not appear.
+    assert sorted(collected_phases) == ["baseline", "treatment"]
+    assert "experiment" not in collected_phases
+
+
+def test_collect_package_glob_pattern_matching_only_experiment_fatals(tmp_path, monkeypatch):
+    """A pattern like 'exp*' does not match the 'experiment' magic literal — even
+    though 'experiment' is in the valid set for --package on collect, patterns
+    are excluded from matching it. With no real packages matching the pattern,
+    collect exits fatally."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    data = {
+        "wl-smoke-baseline":  {"workload": "wl-smoke", "package": "baseline",  "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment": {"workload": "wl-smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        package = ["exp*"]
+        skip_logs = False
+
+    with pytest.raises(SystemExit):
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
+
+
+def test_collect_package_experiment_literal_still_expands(tmp_path, monkeypatch):
+    """Backwards compat: literal --package experiment continues to expand to
+    every known phase after glob support is added."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    data = {
+        "wl-smoke-baseline":  {"workload": "wl-smoke", "package": "baseline",  "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment": {"workload": "wl-smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-canary":    {"workload": "wl-smoke", "package": "canary",    "status": "done", "completed_namespace": "ns-0"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        package = ["experiment"]
+        skip_logs = False
+
+    collected_phases = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+        collected_phases.extend(phases)
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
+
+    assert sorted(collected_phases) == ["baseline", "canary", "treatment"]
+
+
+def test_collect_package_glob_scoped_path(tmp_path, monkeypatch):
+    """Glob expansion also applies in the scoped path (with --workload)."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    data = {
+        "wl-smoke-baseline":     {"workload": "smoke", "package": "baseline",     "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-baseline-alt": {"workload": "smoke", "package": "baseline-alt", "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment":    {"workload": "smoke", "package": "treatment",    "status": "done", "completed_namespace": "ns-0"},
+        "wl-load-baseline":      {"workload": "load",  "package": "baseline",     "status": "done", "completed_namespace": "ns-0"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        only = None
+        workload = "smoke"
+        package = ["base*"]
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+        extract_calls.append({"phases": sorted(phases), "allowed_workloads": allowed_workloads})
+        if on_workload_done and allowed_workloads:
+            for phase in phases:
+                for wl in allowed_workloads.get(phase, set()):
+                    on_workload_done(phase, wl, namespace, None)
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
+
+    assert len(extract_calls) == 1
+    assert extract_calls[0]["phases"] == ["baseline", "baseline-alt"]
+    # smoke's pairs match; load-baseline is excluded because workload filter drops it
+    assert extract_calls[0]["allowed_workloads"] == {"baseline": {"smoke"}, "baseline-alt": {"smoke"}}
+
+
+def test_collect_package_literal_and_glob_mix(tmp_path, monkeypatch):
+    """Literal + glob in the same --package value list unions correctly."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    data = {
+        "wl-smoke-baseline":  {"workload": "wl-smoke", "package": "baseline",  "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-treatment": {"workload": "wl-smoke", "package": "treatment", "status": "done", "completed_namespace": "ns-0"},
+        "wl-smoke-canary":    {"workload": "wl-smoke", "package": "canary",    "status": "done", "completed_namespace": "ns-0"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        package = ["canary", "treat*"]
+        skip_logs = False
+
+    collected_phases = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+        collected_phases.extend(phases)
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
+
+    assert sorted(collected_phases) == ["canary", "treatment"]
+
+
 def test_collect_unknown_package_exits(tmp_path, monkeypatch):
     """With --package foo (not in progress), collect exits with error."""
     from pipeline import deploy
