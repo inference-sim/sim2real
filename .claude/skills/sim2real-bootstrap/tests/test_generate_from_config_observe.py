@@ -13,7 +13,6 @@ Covers acceptance criteria from issue #403:
 import sys
 from pathlib import Path
 
-import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
@@ -288,3 +287,60 @@ def test_cli_emit_observe_absent_config_all_defaults(tmp_path):
         "maxConcurrency": 10000, "timeout": 1800, "warmupRequests": 50,
         "prewarmDuration": "60s", "extraArgs": "",
     }}
+
+
+# ---------------------------------------------------------------------------
+# End-to-end acceptance: emitted fragment loads through manifest.py
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).parents[4]  # …/sim2real
+sys.path.insert(0, str(REPO_ROOT / "pipeline" / "lib"))
+
+
+def test_emitted_fragment_loads_through_manifest_validator(tmp_path):
+    """The whole point of the bootstrap change: a transfer.yaml with the
+    emitted blis_observe: block must validate cleanly through
+    pipeline/lib/manifest.py:load_manifest."""
+    import manifest as pipeline_manifest  # noqa: E402
+
+    # Emit the fragment.
+    fragment = gfc.render_blis_observe_yaml(gfc.parse_observe_block(SAMPLE_FULL_BLOCK))
+
+    # Assemble a minimal transfer.yaml that includes it.
+    transfer_yaml = f"""kind: sim2real-transfer
+version: 3
+scenario: test
+component:
+  repo: dummy
+  kind: EndpointPickerConfig
+  base_image:
+    hub: ghcr.io/example
+    name: dummy
+  build:
+    commands: []
+algorithms:
+  - name: a1
+    source: algo.go
+    defaults: baseline
+baselines:
+  - name: baseline
+    scenario: baselines/baseline.yaml
+workloads:
+  - workloads/w1.yaml
+{fragment}context:
+  text: "test"
+  files: []
+defaults:
+  disable: []
+"""
+    manifest_path = tmp_path / "transfer.yaml"
+    manifest_path.write_text(transfer_yaml)
+
+    loaded = pipeline_manifest.load_manifest(str(manifest_path))
+    assert loaded["blis_observe"] == {
+        "maxConcurrency": 10000,
+        "timeout": 1800,
+        "warmupRequests": 50,
+        "prewarmDuration": "60s",
+        "extraArgs": "",
+    }
