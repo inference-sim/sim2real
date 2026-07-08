@@ -919,7 +919,10 @@ def _cmd_translate(args) -> int:
                 file=sys.stderr,
             )
             return 2
-        print(f"translation {thash} already complete — run 'sim2real build' next")
+        print(
+            f"translation {thash} (alias: {scenario}) complete — "
+            f"run 'sim2real build --translation {scenario}' next"
+        )
         return 0
 
     if args.force:
@@ -940,7 +943,10 @@ def _cmd_translate(args) -> int:
         )
         return 2
     if state == "complete":
-        print(f"translation {thash} already complete — run 'sim2real build' next")
+        print(
+            f"translation {thash} (alias: {scenario}) already complete — "
+            f"run 'sim2real build --translation {scenario}' next"
+        )
         return 0
     return _translate_write_checkpoint(
         thash=thash,
@@ -1040,7 +1046,7 @@ def _translate_write_checkpoint(
     _atomic_write_json(tdir / "skill_input.json", skin)
 
     print(
-        f"translation {thash} checkpoint written — "
+        f"translation {thash} (alias: {scenario}) checkpoint written — "
         f"run '/sim2real-translate' then 'sim2real translate --resume'"
     )
     return 0
