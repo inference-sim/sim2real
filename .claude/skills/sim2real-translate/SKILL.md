@@ -13,12 +13,11 @@ argument-hint: "[--experiment-root PATH] [--rounds N]"
 user-invocable: true
 allowed-tools:
   - Agent
-  - TeamCreate
-  - TeamDelete
   - SendMessage
   - TaskCreate
   - TaskUpdate
   - TaskList
+  - TaskStop
   - Bash(python3 *)
   - Bash(.venv/bin/python *)
   - Bash(cd * && *)
@@ -310,25 +309,19 @@ variable:
 - `{CONTEXT_TEXT}` → `$CONTEXT_TEXT`
 - `{CONTEXT_FILE_PATHS}` → `$CONTEXT_FILE_PATHS` (newline-separated absolute paths — one path per line)
 - `{EXPERT_AGENT_NAME}` → `"expert"`
-- `{MAIN_SESSION_NAME}` → `"main-session"`
-
-Create the team:
-```
-TeamCreate(team_name="translate-${TRANSLATION_HASH:0:12}-$ALGO_NAME",
-           description="sim2real expert+writer+reviewer for $ALGO_NAME")
-```
+- `{MAIN_SESSION_NAME}` → `"main"`
 
 **Spawn all three agents in a single tool-call message** so they start in
 parallel. Issue three Agent tool calls at once — do not wait between them:
 
-1. Agent(name="expert", team_name="translate-<prefix>-<algo>",
+1. Agent(name="expert",
          run_in_background=true, subagent_type=general-purpose, model="opus",
          prompt=<substituted agent-expert.md>)
-2. Agent(name="reviewer", team_name="translate-<prefix>-<algo>",
+2. Agent(name="reviewer",
          run_in_background=true, subagent_type=general-purpose, model="opus",
          prompt=<substituted agent-reviewer.md>)
-3. Agent(name="writer", team_name="translate-<prefix>-<algo>",
-         subagent_type=general-purpose, model="opus",
+3. Agent(name="writer",
+         run_in_background=true, subagent_type=general-purpose, model="opus",
          prompt=<substituted agent-writer.md>)
 
 All three start simultaneously. Expert and Reviewer initialize in the
@@ -416,16 +409,18 @@ Options:
   [q] Quit and investigate — reply with: quit
 ```
 
-- If `continue N`: bump `REVIEW_ROUNDS=$((REVIEW_ROUNDS + N))`, then spawn a
-  NEW writer agent with the updated value substituted. The reviewer is still
-  idle — it does not need to be restarted.
+- If `continue N`: bump `REVIEW_ROUNDS=$((REVIEW_ROUNDS + N))`, then stop the
+  current writer with `TaskStop(task_id="writer")` before spawning a NEW
+  writer agent with the updated value substituted (the harness silently
+  renames a second live `writer` to `writer-2`, and the reviewer would then
+  message the wrong one). The reviewer is still idle — it does not need to
+  be restarted.
 - If `accept`: proceed to Step 4 with `consensus='accepted_without_consensus'`.
 - If `quit`:
   ```
-  SendMessage("writer", "shutdown")
-  SendMessage("reviewer", "shutdown")
-  SendMessage("expert", "shutdown")
-  TeamDelete()
+  TaskStop(task_id="writer")
+  TaskStop(task_id="reviewer")
+  TaskStop(task_id="expert")
   ```
   Skip to the next algorithm in the loop (or exit if none remain).
 
@@ -481,12 +476,12 @@ print(f"Verified {algo}: plugin_type={o['plugin_type']}, "
 PY
 ```
 
-Shut down the team:
+Shut down the team so the agent names are freed before the next algorithm's
+spawn:
 ```
-SendMessage("writer", "shutdown")
-SendMessage("reviewer", "shutdown")
-SendMessage("expert", "shutdown")
-TeamDelete()
+TaskStop(task_id="writer")
+TaskStop(task_id="reviewer")
+TaskStop(task_id="expert")
 ```
 
 Loop to the next algorithm in `$INCOMPLETE_ALGOS`.
