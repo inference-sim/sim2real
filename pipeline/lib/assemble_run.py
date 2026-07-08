@@ -184,11 +184,14 @@ def inject_image_tag(scenario_dict: dict, image_ref: str) -> None:
     full-path repository and tag, then splits the repository at the
     last ``/`` into ``registry`` and bare-repository fields so the
     llm-d-router chart can render ``{registry}/{repository}:{tag}``
-    directly. Digest refs (``registry/repo@sha256:...``) keep the
-    whole ref in the repository field with ``tag=""``. ``pullPolicy``
-    is always set to ``Always`` — mirrors the semantics of
-    ``pipeline/lib/epp.py:inject_epp_image`` so downstream benchmark
-    charts see a familiar shape.
+    directly. Digest refs (``registry/repo@sha256:...``) are split at
+    the last ``/`` the same way as tag refs — the ``@sha256:...``
+    suffix stays attached to the bare repository component — but
+    ``tag`` is always ``""`` for digests. Refs with no ``/`` (bare
+    image names) yield ``registry=""`` and ``repository=<full-ref>``.
+    ``pullPolicy`` is always set to ``Always`` — mirrors the
+    semantics of ``pipeline/lib/epp.py:inject_epp_image`` so
+    downstream benchmark charts see a familiar shape.
     """
     scenario_list = scenario_dict.get("scenario")
     if not scenario_list:

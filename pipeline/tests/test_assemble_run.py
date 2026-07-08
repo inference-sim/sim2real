@@ -135,6 +135,17 @@ class TestInjectImageTag:
         with pytest.raises(assemble_run.AssembleError):
             assemble_run.inject_image_tag({}, "ghcr.io/foo/bar:v1")
 
+    def test_bare_image_no_registry(self):
+        """A ref with no '/' becomes bare-repo + empty registry (mirrors
+        epp.inject_image_ref's test_bare_repository_no_registry)."""
+        scenario = {"scenario": [{"name": "s"}]}
+        assemble_run.inject_image_tag(scenario, "myimage:v1")
+        img = scenario["scenario"][0]["router"]["epp"]["image"]
+        assert img["registry"] == ""
+        assert img["repository"] == "myimage"
+        assert img["tag"] == "v1"
+        assert img["pullPolicy"] == "Always"
+
     def test_overwrites_existing_epp_image(self):
         scenario = {
             "scenario": [

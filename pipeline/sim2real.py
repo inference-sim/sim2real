@@ -1314,7 +1314,11 @@ def _cmd_build(args) -> int:
             # Restore baseline for the next iteration regardless of build
             # outcome. Any per-algo files the overlay copied are removed and
             # modified files are reverted, so subsequent iterations start
-            # from a clean tree.
+            # from a clean tree. If this cleanup fails partway (files_created
+            # partially deleted, git checkout not yet run) the tree is in an
+            # unknown state and subsequent iterations would silently upload
+            # the wrong sources — fail loud, set any_failure, and break so
+            # the caller sees exit 2 instead of a false success.
             print(
                 f"[sim2real build] restoring baseline after {algo_name} build",
                 flush=True,
@@ -1323,10 +1327,12 @@ def _cmd_build(args) -> int:
                 restore_baseline(source_dir, algo_output)
             except (subprocess.CalledProcessError, OSError) as exc:
                 print(
-                    f"warning: failed to restore baseline after build for "
+                    f"error: failed to restore baseline after build for "
                     f"{algo_name}: {exc}",
                     file=sys.stderr,
                 )
+                any_failure = True
+                break
 
     return 2 if any_failure else 0
 
