@@ -1228,49 +1228,111 @@ def _cmd_build(args) -> int:
                 print(f"probe hit: {image_ref} ({digest})")
                 continue
 
-        # Build via buildkit.
-        build_id = f"sim2real-build-{translation_hash[:8]}-{algo_name}"
-        try:
-            rc = build.dispatch_buildkit_build(
-                image_ref=image_ref,
-                build_id=build_id,
-                namespace=build_namespace,
-                source_dir=source_dir,
-                run_dir=tdir,
-                repo_root=_REPO_ROOT,
-                registry_secret_name=registry_secret_name,
-            )
-        except build.BuildError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
-        if rc != 0:
-            print(
-                f"error: build failed for {algo_name} (image_ref={image_ref})",
-                file=sys.stderr,
-            )
-            any_failure = True
-            break
+        # About to build: apply this algorithm's source overlay to source_dir
+        # so buildkit uploads the correct plugin implementation + runner.go
+        # registration. Mirrors the pattern in deploy.py:_cmd_build on main.
+        import subprocess
+        from pipeline.lib.source_toggle import restore_baseline, restore_treatment
 
-        # Post-build probe. The image has been pushed successfully at this
-        # point; a filesystem fault here means we can't record the digest,
-        # not that the build failed. The image_ref is still worth surfacing.
-        digest = build.probe_image_digest(image_ref)
-        algo["image_ref"] = image_ref
-        algo["image_digest"] = digest
+        algo_output_path = (
+            tdir / "generated" / algo_name / f"{algo_name}_output.json"
+        )
         try:
-            build.atomic_write_json(tout_path, tout)
-        except OSError as exc:
+            algo_output = json.loads(algo_output_path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
             print(
-                f"error: built {image_ref} but failed to record digest in "
-                f"translation_output.json: {exc} — re-run 'sim2real build' "
-                f"to record it",
+                f"error: failed to read {algo_output_path}: {exc}",
                 file=sys.stderr,
             )
             return 2
-        if digest is None:
-            print(f"built {image_ref}; digest not recorded (probe failed)")
-        else:
-            print(f"built {image_ref} ({digest})")
+        generated_dir = tdir / "generated"
+
+        print(
+            f"[sim2real build] applying overlay for {algo_name}: "
+            f"files_created={len(algo_output.get('files_created', []))} "
+            f"files_modified={len(algo_output.get('files_modified', []))} "
+            f"source_dir={source_dir}",
+            flush=True,
+        )
+        try:
+            restore_baseline(source_dir, algo_output)
+            restore_treatment(
+                source_dir, generated_dir, algo_output, algo_name=algo_name
+            )
+        except (subprocess.CalledProcessError, OSError, FileNotFoundError) as exc:
+            print(
+                f"error: failed to apply source overlay for {algo_name}: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+
+        try:
+            # Build via buildkit.
+            build_id = f"sim2real-build-{translation_hash[:8]}-{algo_name}"
+            try:
+                rc = build.dispatch_buildkit_build(
+                    image_ref=image_ref,
+                    build_id=build_id,
+                    namespace=build_namespace,
+                    source_dir=source_dir,
+                    run_dir=tdir,
+                    repo_root=_REPO_ROOT,
+                    registry_secret_name=registry_secret_name,
+                )
+            except build.BuildError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            if rc != 0:
+                print(
+                    f"error: build failed for {algo_name} (image_ref={image_ref})",
+                    file=sys.stderr,
+                )
+                any_failure = True
+                break
+
+            # Post-build probe. The image has been pushed successfully at this
+            # point; a filesystem fault here means we can't record the digest,
+            # not that the build failed. The image_ref is still worth surfacing.
+            digest = build.probe_image_digest(image_ref)
+            algo["image_ref"] = image_ref
+            algo["image_digest"] = digest
+            try:
+                build.atomic_write_json(tout_path, tout)
+            except OSError as exc:
+                print(
+                    f"error: built {image_ref} but failed to record digest in "
+                    f"translation_output.json: {exc} — re-run 'sim2real build' "
+                    f"to record it",
+                    file=sys.stderr,
+                )
+                return 2
+            if digest is None:
+                print(f"built {image_ref}; digest not recorded (probe failed)")
+            else:
+                print(f"built {image_ref} ({digest})")
+        finally:
+            # Restore baseline for the next iteration regardless of build
+            # outcome. Any per-algo files the overlay copied are removed and
+            # modified files are reverted, so subsequent iterations start
+            # from a clean tree. If this cleanup fails partway (files_created
+            # partially deleted, git checkout not yet run) the tree is in an
+            # unknown state and subsequent iterations would silently upload
+            # the wrong sources — fail loud, set any_failure, and break so
+            # the caller sees exit 2 instead of a false success.
+            print(
+                f"[sim2real build] restoring baseline after {algo_name} build",
+                flush=True,
+            )
+            try:
+                restore_baseline(source_dir, algo_output)
+            except (subprocess.CalledProcessError, OSError) as exc:
+                print(
+                    f"error: failed to restore baseline after build for "
+                    f"{algo_name}: {exc}",
+                    file=sys.stderr,
+                )
+                any_failure = True
+                break
 
     return 2 if any_failure else 0
 

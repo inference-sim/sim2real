@@ -3,5 +3,6 @@
 # scenario[0].name is realigned to the experiment baseline at merge time.
 scenario:
 - name: defaults
-  inferenceExtension:
-    verbosity: "5"
+  router:
+    epp:
+      verbosity: "5"

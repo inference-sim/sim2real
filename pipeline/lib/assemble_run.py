@@ -178,14 +178,20 @@ def load_defaults_overlay(defaults_dir: Path | None, *, disable: list[str]) -> d
 
 
 def inject_image_tag(scenario_dict: dict, image_ref: str) -> None:
-    """Inject BYO image into every scenario entry's ``images.inferenceScheduler``.
+    """Inject BYO image into every scenario entry's ``router.epp.image``.
 
-    Splits a ``registry/repo:tag`` ref on the last colon into ``repository``
-    and ``tag``; digest refs (``registry/repo@sha256:...``) keep the whole
-    ref as ``repository`` with ``tag=""``. ``pullPolicy`` is always set to
-    ``Always`` — mirrors the semantics of
-    ``pipeline/lib/epp.py:inject_epp_image`` so downstream benchmark
-    charts see a familiar shape.
+    Splits a ``registry/repo:tag`` ref on the last colon into a
+    full-path repository and tag, then splits the repository at the
+    last ``/`` into ``registry`` and bare-repository fields so the
+    llm-d-router chart can render ``{registry}/{repository}:{tag}``
+    directly. Digest refs (``registry/repo@sha256:...``) are split at
+    the last ``/`` the same way as tag refs — the ``@sha256:...``
+    suffix stays attached to the bare repository component — but
+    ``tag`` is always ``""`` for digests. Refs with no ``/`` (bare
+    image names) yield ``registry=""`` and ``repository=<full-ref>``.
+    ``pullPolicy`` is always set to ``Always`` — mirrors the
+    semantics of ``pipeline/lib/epp.py:inject_epp_image`` so
+    downstream benchmark charts see a familiar shape.
     """
     scenario_list = scenario_dict.get("scenario")
     if not scenario_list:
@@ -193,18 +199,22 @@ def inject_image_tag(scenario_dict: dict, image_ref: str) -> None:
             "cannot inject image_tag: scenario dict has no 'scenario' entries"
         )
     if "@sha256:" in image_ref:
-        repository, tag = image_ref, ""
+        full_repository, tag = image_ref, ""
     else:
         # rsplit on the last "/" isolates the registry:port/path portion so
         # only a trailing "repo:tag" colon splits — never a registry-port colon.
         if ":" in image_ref.rsplit("/", 1)[-1]:
-            repository, tag = image_ref.rsplit(":", 1)
+            full_repository, tag = image_ref.rsplit(":", 1)
         else:
-            repository, tag = image_ref, ""
+            full_repository, tag = image_ref, ""
+    if "/" in full_repository:
+        registry, bare_repository = full_repository.rsplit("/", 1)
+    else:
+        registry, bare_repository = "", full_repository
     for entry in scenario_list:
-        entry["images"] = entry.get("images") or {}
-        entry["images"]["inferenceScheduler"] = {
-            "repository": repository,
+        entry.setdefault("router", {}).setdefault("epp", {})["image"] = {
+            "registry": registry,
+            "repository": bare_repository,
             "tag": tag,
             "pullPolicy": "Always",
         }

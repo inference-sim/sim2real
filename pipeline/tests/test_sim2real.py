@@ -1473,3 +1473,232 @@ class TestAssembleIncompleteTranslationCheck:
         # reach assemble_run, which is mocked so it returns None → rc=0.
         assert rc == 0
         mock_assemble.assert_called_once()
+
+
+class TestCmdBuildOverlayLifecycle:
+    """Overlay lifecycle tests for sim2real._cmd_build (issue #530).
+
+    _cmd_build must apply each algorithm's source overlay to source_dir
+    BEFORE dispatching buildkit, and restore the baseline AFTER — both on
+    success and on failure. Regression to any earlier state (upload the
+    same source for every algo → same binary compiled → all images
+    contain the same plugin) produces silent A/A results.
+    """
+
+    def _make_fixture(self, tmp_path, monkeypatch):
+        """Build a minimal working translation with two algos.
+
+        Layout:
+          exp_root/workspace/setup_config.json
+          exp_root/workspace/clusters/<cid>/cluster_config.json
+          exp_root/workspace/translations/<hash>/translation_output.json
+          exp_root/workspace/translations/<hash>/generated/<algo>/<algo>_output.json
+          exp_root/workspace/translations/<hash>/generated/<algo>/<overlay files>
+          exp_root/myrepo/  (git repo, source_dir)
+        """
+        import subprocess
+        exp_root = tmp_path / "exp"
+        exp_root.mkdir()
+
+        # Component git repo (source_dir).
+        src = exp_root / "myrepo"
+        src.mkdir()
+        subprocess.run(["git", "init", str(src)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(src), "config", "user.email", "t@t"],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(src), "config", "user.name", "T"],
+                       check=True, capture_output=True)
+        (src / "cmd").mkdir()
+        (src / "cmd" / "runner.go").write_text("package main\n// baseline\nfunc main() {}\n")
+        subprocess.run(["git", "-C", str(src), "add", "."],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(src), "commit", "-m", "init"],
+                       check=True, capture_output=True)
+
+        # workspace/setup_config.json
+        ws = exp_root / "workspace"
+        ws.mkdir()
+        (ws / "setup_config.json").write_text(json.dumps({
+            "registry": "ghcr.io/org",
+            "repo_name": "myrepo",
+        }))
+
+        # cluster config
+        cid = "test-cluster"
+        cluster_dir = ws / "clusters" / cid
+        cluster_dir.mkdir(parents=True)
+        (cluster_dir / "cluster_config.json").write_text(json.dumps({
+            "namespaces": ["test-ns"],
+            "secret_names": {"registry_creds": "creds"},
+        }))
+
+        # translation dir with two algos
+        thash = "a" * 64
+        tdir = ws / "translations" / thash
+        gen = tdir / "generated"
+        for algo in ["algo1", "algo2"]:
+            algo_gen = gen / algo
+            (algo_gen / "cmd").mkdir(parents=True)
+            (algo_gen / "cmd" / "runner.go").write_text(
+                f"package main\n// overlay:{algo}\nfunc main() {{}}\n"
+            )
+            (algo_gen / "pkg" / algo).mkdir(parents=True)
+            (algo_gen / "pkg" / algo / "policy.go").write_text(f"package {algo}\n")
+            (algo_gen / f"{algo}_output.json").write_text(json.dumps({
+                "plugin_type": f"{algo}-type",
+                "package": algo,
+                "files_created": [f"pkg/{algo}/policy.go"],
+                "files_modified": ["cmd/runner.go"],
+            }))
+
+        (tdir / "translation_output.json").write_text(json.dumps({
+            "version": 1,
+            "translation_hash": thash,
+            "source": "skill",
+            "alias": None,
+            "algorithms": [
+                {"name": "algo1", "image_ref": None, "image_digest": None},
+                {"name": "algo2", "image_ref": None, "image_digest": None},
+            ],
+            "created_at": "2026-07-08T00:00:00Z",
+        }))
+
+        monkeypatch.chdir(exp_root)
+        # Stub cluster-side and buildkit-precondition primitives.
+        monkeypatch.setattr("pipeline.lib.build.check_skopeo", lambda: None)
+        return exp_root, src, thash
+
+    def test_overlay_applied_per_algo_before_dispatch(self, tmp_path, monkeypatch):
+        """Each algo's overlay must be on disk when dispatch_buildkit_build runs.
+
+        Regression guard for #530: previously the same source tree was
+        uploaded for every algo → identical binaries → A/A images.
+        """
+        exp_root, src, thash = self._make_fixture(tmp_path, monkeypatch)
+
+        captured = []
+
+        def fake_dispatch(*, image_ref, source_dir, **_kw):
+            state = {}
+            for f in Path(source_dir).rglob("*"):
+                if f.is_file() and ".git" not in f.parts:
+                    state[str(f.relative_to(source_dir))] = f.read_text()
+            captured.append({"image_ref": image_ref, "state": state})
+            return 0
+
+        monkeypatch.setattr("pipeline.lib.build.probe_image_digest", lambda *a, **k: "sha256:x")
+        monkeypatch.setattr("pipeline.lib.build.dispatch_buildkit_build", fake_dispatch)
+
+        rc = sim2real.main(["build", "--translation", thash, "--force-rebuild"])
+        assert rc == 0
+        assert len(captured) == 2
+
+        # First dispatch has algo1 overlay only.
+        s1 = captured[0]["state"]
+        assert "algo1" in captured[0]["image_ref"]
+        assert "pkg/algo1/policy.go" in s1
+        assert "overlay:algo1" in s1["cmd/runner.go"]
+        assert "pkg/algo2/policy.go" not in s1
+
+        # Second dispatch has algo2 overlay only (algo1 cleaned up in between).
+        s2 = captured[1]["state"]
+        assert "algo2" in captured[1]["image_ref"]
+        assert "pkg/algo2/policy.go" in s2
+        assert "overlay:algo2" in s2["cmd/runner.go"]
+        assert "pkg/algo1/policy.go" not in s2
+
+    def test_post_build_cleanup_after_buildkit_failure(self, tmp_path, monkeypatch, capsys):
+        """buildkit non-zero rc must still trigger finally-block restore.
+
+        Reviewer's suggested test (1): finally block runs even when
+        buildkit returns non-zero.
+        """
+        exp_root, src, thash = self._make_fixture(tmp_path, monkeypatch)
+
+        monkeypatch.setattr("pipeline.lib.build.probe_image_digest", lambda *a, **k: None)
+        monkeypatch.setattr(
+            "pipeline.lib.build.dispatch_buildkit_build", lambda **_kw: 1
+        )
+
+        rc = sim2real.main(["build", "--translation", thash, "--force-rebuild"])
+        assert rc == 2  # any_failure -> 2
+
+        # Post-build restore ran for algo1: overlay files gone, runner.go baseline.
+        assert not (src / "pkg" / "algo1" / "policy.go").exists()
+        assert "// baseline" in (src / "cmd" / "runner.go").read_text()
+        assert "overlay:algo1" not in (src / "cmd" / "runner.go").read_text()
+
+    def test_finally_restore_baseline_failure_fails_loud(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A failure in the finally-block restore_baseline must set
+        any_failure and break, so the run exits 2 and does NOT proceed
+        to the next algorithm on an unknown tree state.
+
+        Reviewer's suggested test: inject a CalledProcessError from
+        the finally-block restore_baseline; assert error emitted,
+        subsequent iteration is NOT executed, and return code is 2.
+        """
+        import subprocess as _sub
+        exp_root, src, thash = self._make_fixture(tmp_path, monkeypatch)
+
+        dispatched = []
+        monkeypatch.setattr("pipeline.lib.build.probe_image_digest", lambda *a, **k: "sha256:x")
+
+        def fake_dispatch(*, image_ref, **_kw):
+            dispatched.append(image_ref)
+            return 0
+
+        monkeypatch.setattr("pipeline.lib.build.dispatch_buildkit_build", fake_dispatch)
+
+        # Patch restore_baseline to raise the second time it's called
+        # (the first is pre-build for algo1, second is post-build finally
+        # for algo1).
+        import pipeline.lib.source_toggle as st
+        real_restore = st.restore_baseline
+        call_count = {"n": 0}
+
+        def flaky_restore(component_dir, translation_output):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise _sub.CalledProcessError(
+                    1, ["git", "checkout"], output=b"", stderr=b"simulated"
+                )
+            real_restore(component_dir, translation_output)
+
+        monkeypatch.setattr("pipeline.lib.source_toggle.restore_baseline", flaky_restore)
+        # sim2real.py imports the symbol locally inside _cmd_build, but the
+        # local `from pipeline.lib.source_toggle import restore_baseline`
+        # inside the function resolves the name from the module at call
+        # time (fresh import binding) — monkeypatch on the module attribute
+        # covers both local and module-level use.
+
+        rc = sim2real.main(["build", "--translation", thash, "--force-rebuild"])
+        assert rc == 2
+
+        # algo1 dispatched, but algo2 must NOT have been dispatched after
+        # the finally failure — break should exit the loop.
+        assert len(dispatched) == 1
+        assert "algo1" in dispatched[0]
+
+        err = capsys.readouterr().err
+        assert "failed to restore baseline after build for algo1" in err
+
+    def test_read_algo_output_failure_returns_2(self, tmp_path, monkeypatch, capsys):
+        """OSError reading algo_output.json returns exit code 2.
+
+        Reviewer's suggested test (2).
+        """
+        exp_root, src, thash = self._make_fixture(tmp_path, monkeypatch)
+
+        monkeypatch.setattr("pipeline.lib.build.probe_image_digest", lambda *a, **k: None)
+        # Delete algo1's _output.json so the read fails.
+        tdir = exp_root / "workspace" / "translations" / thash
+        (tdir / "generated" / "algo1" / "algo1_output.json").unlink()
+
+        rc = sim2real.main(["build", "--translation", thash, "--force-rebuild"])
+        # Completeness check should catch it first with code 2 and a
+        # message about missing outputs.
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "algo1" in err
