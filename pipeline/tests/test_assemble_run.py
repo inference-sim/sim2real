@@ -884,9 +884,10 @@ class TestAssembleRun:
 
     def test_skill_driven_per_baseline_overlay_is_applied(self, tmp_path):
         """The PR's headline contract: assemble reads the per-baseline
-        overlay at ``generated/baseline_<name>/baseline_config.yaml``
-        (skill-driven layout) and applies it to that baseline. If the
-        primary path in ``assemble_run.py`` regressed to the wrong
+        overlay at ``generated/baselines/<name>/baseline_config.yaml``
+        (skill-driven layout, issue #544) and applies it to that
+        baseline. If the primary path in ``assemble_run.py`` regressed
+        to the wrong
         subpath — or reverted to the shared root — this test would
         fail.
         """
@@ -896,12 +897,12 @@ class TestAssembleRun:
             algo_names_manifest=["sr"],
         )
         # Simulate a skill-driven translation: write ONLY the
-        # per-baseline overlay under generated/baseline_<name>/. No
+        # per-baseline overlay under generated/baselines/<name>/. No
         # legacy top-level file — ensures the primary branch is under
-        # test, not the fallback.
+        # test, not the fallback. Layout matches issue #544.
         tdir = fx["exp_root"] / "workspace" / "translations" / fx["translation_hash"]
         per_baseline_overlay = (
-            tdir / "generated" / "baseline_baseline" / "baseline_config.yaml"
+            tdir / "generated" / "baselines" / "baseline" / "baseline_config.yaml"
         )
         marker_extra_object = {
             "kind": "InferenceObjective",
@@ -945,7 +946,7 @@ class TestAssembleRun:
             algo_names_manifest=["sr"],
         )
         # Simulate BYO translation register: write ONLY the legacy shared
-        # overlay path — no ``generated/baseline_<name>/`` subdirectory.
+        # overlay path — no ``generated/baselines/<name>/`` subdirectory.
         tdir = fx["exp_root"] / "workspace" / "translations" / fx["translation_hash"]
         legacy_overlay = tdir / "generated" / "baseline_config.yaml"
         marker_extra_object = {"kind": "InferenceObjective", "metadata": {"name": "byo-marker"}}
@@ -955,7 +956,7 @@ class TestAssembleRun:
         )
         # Guard the precondition: per-baseline dir must NOT exist so the
         # code path under test is the legacy-fallback branch.
-        assert not (tdir / "generated" / "baseline_baseline" / "baseline_config.yaml").exists()
+        assert not (tdir / "generated" / "baselines" / "baseline" / "baseline_config.yaml").exists()
 
         assemble_run.assemble_run(
             translation_hash=fx["translation_hash"],
@@ -1363,7 +1364,7 @@ class TestAssembleResolveContract:
         baseline_overlay = (
             fx["exp_root"] / "workspace" / "translations"
             / fx["translation_hash"] / "generated"
-            / "baseline_baseline" / "baseline_config.yaml"
+            / "baselines" / "baseline" / "baseline_config.yaml"
         )
         baseline_overlay.parent.mkdir(parents=True, exist_ok=True)
         baseline_overlay.write_text("{}\n")

@@ -1020,7 +1020,11 @@ def _translate_write_checkpoint(
     skin_baselines: list[dict] = [
         {
             "name": bl["name"],
-            "generated_overlay_path": f"generated/baseline_{bl['name']}/baseline_config.yaml",
+            # Nested per-baseline layout under a ``baselines/`` umbrella
+            # (issue #544); assemble reads from the same path.
+            "generated_overlay_path": (
+                f"generated/baselines/{bl['name']}/baseline_config.yaml"
+            ),
         }
         for bl in manifest_baselines
         if bl["name"] in referenced

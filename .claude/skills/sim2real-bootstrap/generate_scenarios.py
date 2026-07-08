@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Generate llm-d-benchmark scenario (baseline.yaml) files from top3_selection.json."""
+"""Generate llm-d-benchmark scenario candidates from top3_selection.json.
+
+Writes one file per candidate (``<group>-<i>.yaml``, e.g. ``top3-1.yaml``).
+The operator or bootstrap skill picks one candidate and renames it to
+``baseline.yaml`` before ``transfer.yaml`` is written (issue #544 — the
+baseline identifier in transfer.yaml is always ``baseline`` and the file
+lives at ``baselines/baseline.yaml``).
+"""
 
 import json
 import os

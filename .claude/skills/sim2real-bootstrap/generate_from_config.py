@@ -5,8 +5,14 @@ Parses the vLLM configuration table in config.md, applies lookup tables and
 default rules, and writes a scenario YAML with provenance comments showing
 where each value originated.
 
+The output filename is always ``baseline.yaml`` (issue #544 — the baseline
+identifier in transfer.yaml is the literal string ``baseline`` regardless of
+project). The ``-n/--name`` flag overrides only the *inner* ``scenario: -
+name:`` label inside the emitted YAML, which is a separate concept used by
+the benchmark harness.
+
 Usage:
-    python3 generate_from_config.py [config.md] [-o baselines/] [-n name] [--dry-run]
+    python3 generate_from_config.py [config.md] [-o baselines/] [-n label] [--dry-run]
 """
 
 import argparse
@@ -746,7 +752,12 @@ def main():
         "-o", "--output-dir", default="./baselines", help="Output directory"
     )
     parser.add_argument(
-        "-n", "--name", help="Override scenario name (default: derived from folder)"
+        "-n", "--name",
+        help=(
+            "Override the inner scenario `- name:` label inside the emitted "
+            "YAML (default: derived from folder). The output filename is "
+            "always baseline.yaml — see issue #544."
+        ),
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="Print YAML to stdout, don't write file"
@@ -807,15 +818,19 @@ def main():
 
     print(f"  extracted {len(fields)} field(s): {list(fields.keys())}")
 
-    # Derive scenario name
+    # Derive the inner scenario `- name:` label (used inside the YAML doc,
+    # not as the filename — see issue #544).
     scenario_name = derive_scenario_name(config_path, args.name)
-    print(f"  scenario name: {scenario_name}")
+    print(f"  scenario label: {scenario_name}")
 
     # Build scenario
     scenario, provenance = build_scenario(fields, scenario_name)
 
-    # Write output
-    out_path = os.path.join(args.output_dir, f"{scenario_name}.yaml")
+    # Write output. The filename is always ``baseline.yaml`` — the baseline
+    # identifier in transfer.yaml is hardcoded to the literal string
+    # ``baseline`` (issue #544), so downstream filenames stay consistent
+    # across experiments.
+    out_path = os.path.join(args.output_dir, "baseline.yaml")
     write_provenance_yaml(scenario, provenance, out_path, dry_run=args.dry_run)
 
     # Validate output parses as YAML

@@ -215,7 +215,7 @@ class TestResolveRunHappyPath:
         assert len(baselines) == 1
         assert baselines[0]["name"] == "baseline"
         assert baselines[0]["generated_overlay_path"].endswith(
-            "generated/baseline_baseline/baseline_config.yaml"
+            "generated/baselines/baseline/baseline_config.yaml"
         )
 
     def test_populates_results_section(self, tmp_path):

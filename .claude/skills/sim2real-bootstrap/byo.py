@@ -41,10 +41,16 @@ import yaml
 NAME_REGEX = re.compile(r"^[a-z0-9]([-a-z0-9]{0,18}[a-z0-9])?$")
 
 # Algorithm/baseline names that would collide with framework concepts.
-# `baseline` is only reserved as an *algorithm* name — a *baseline* named
-# `baseline` is the canonical case in the BYO shape.
+# `baseline` and `baselines` are reserved as *algorithm* names. `baseline`
+# is the canonical baseline identifier (see BASELINE_IDENTIFIER below);
+# `baselines` names the per-baseline overlay umbrella under
+# `translations/<hash>/generated/baselines/` (see pipeline/lib/assemble_run.py).
 RESERVED_ANY_ROLE = frozenset({"default", "defaults"})
-RESERVED_ALGORITHM_NAMES = RESERVED_ANY_ROLE | frozenset({"baseline"})
+RESERVED_ALGORITHM_NAMES = RESERVED_ANY_ROLE | frozenset({"baseline", "baselines"})
+
+# The canonical baseline identifier used everywhere in the pipeline. Kept as
+# a module-level constant so bootstrap and tests share one source of truth.
+BASELINE_IDENTIFIER = "baseline"
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +75,6 @@ class BYOArgs:
     is asserted on the shape of the parsed dict).
     """
     byo: bool
-    baseline_name: str | None
     baseline_path: str | None
     algorithms: list[str]  # order preserved for register command
     algorithm_images: dict[str, str]
@@ -89,7 +94,6 @@ class ResolvedInputs:
     """
     exp_root: Path
     scenario: str
-    baseline_name: str
     baseline_src: Path
     algorithms: list["ResolvedAlgorithm"] = field(default_factory=list)
     workloads: list[Path] = field(default_factory=list)
@@ -140,9 +144,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--baseline",
-        type=_kv_pair,
-        metavar="<name>=<scenario-path>",
-        help="Baseline name and path to the full baseline scenario YAML.",
+        metavar="<scenario-path>",
+        help=(
+            "Path to the full baseline scenario YAML. The baseline "
+            f"identifier in transfer.yaml is always {BASELINE_IDENTIFIER!r} "
+            "(hardcoded — see docs/pipeline/README.md for the rationale)."
+        ),
     )
     p.add_argument(
         "--algorithm",
@@ -198,7 +205,7 @@ def parse_args_dict(argv: list[str]) -> dict:
     ns = build_parser().parse_args(argv)
     return {
         "byo": bool(ns.byo),
-        "baseline": (ns.baseline[0], ns.baseline[1]) if ns.baseline else None,
+        "baseline": ns.baseline,
         "algorithms": list(ns.algorithm),
         "algorithm_images": dict(ns.algorithm_image),
         "algorithm_configs": dict(ns.algorithm_config),
@@ -210,13 +217,9 @@ def parse_args_dict(argv: list[str]) -> dict:
 
 def parse_args(argv: list[str]) -> BYOArgs:
     d = parse_args_dict(argv)
-    baseline_name, baseline_path = (
-        (d["baseline"][0], d["baseline"][1]) if d["baseline"] else (None, None)
-    )
     return BYOArgs(
         byo=d["byo"],
-        baseline_name=baseline_name,
-        baseline_path=baseline_path,
+        baseline_path=d["baseline"],
         algorithms=d["algorithms"],
         algorithm_images=d["algorithm_images"],
         algorithm_configs=d["algorithm_configs"],
@@ -231,25 +234,24 @@ def parse_args(argv: list[str]) -> BYOArgs:
 # ---------------------------------------------------------------------------
 
 def _validate_name(name: str, role: str) -> None:
-    """Enforce the DNS-label subset and reserved-name check."""
+    """Enforce the DNS-label subset and reserved-name check.
+
+    Only ``role == "algorithm"`` is used today — the baseline identifier is
+    hardcoded (see BASELINE_IDENTIFIER). The role parameter is retained for
+    error-message specificity in case a future call site needs a different
+    role label.
+    """
     if not NAME_REGEX.match(name):
         raise BYOError(
             f"{role} name {name!r} is invalid: must match "
             f"[a-z0-9]([-a-z0-9]{{0,18}}[a-z0-9])? (1-20 chars, "
             "lowercase alphanumeric with internal hyphens)"
         )
-    if role == "algorithm":
-        if name in RESERVED_ALGORITHM_NAMES:
-            raise BYOError(
-                f"algorithm name {name!r} is reserved "
-                f"(reserved: {', '.join(sorted(RESERVED_ALGORITHM_NAMES))})"
-            )
-    else:
-        if name in RESERVED_ANY_ROLE:
-            raise BYOError(
-                f"{role} name {name!r} is reserved "
-                f"(reserved: {', '.join(sorted(RESERVED_ANY_ROLE))})"
-            )
+    if role == "algorithm" and name in RESERVED_ALGORITHM_NAMES:
+        raise BYOError(
+            f"algorithm name {name!r} is reserved "
+            f"(reserved: {', '.join(sorted(RESERVED_ALGORITHM_NAMES))})"
+        )
 
 
 def _validate_image_ref(ref: str, algo_name: str) -> None:
@@ -509,7 +511,7 @@ def copy_operator_files(
     """
     # baseline
     baseline_dst = _check_dest_inside(
-        inputs.exp_root / "baselines" / f"{inputs.baseline_name}.yaml",
+        inputs.exp_root / "baselines" / f"{BASELINE_IDENTIFIER}.yaml",
         inputs.exp_root,
     )
     _decide_dest(baseline_dst, inputs.force, non_interactive)
@@ -574,7 +576,6 @@ def copy_framework_defaults(
 def build_transfer_yaml(
     *,
     scenario: str,
-    baseline_name: str,
     algorithms: list[ResolvedAlgorithm],
     workloads: Iterable[Path],
     exp_root: Path,
@@ -587,16 +588,21 @@ def build_transfer_yaml(
     - ``workloads`` paths are expressed relative to ``exp_root``.
     - ``defaults.disable`` matches the stems of files copied to
       ``<exp>/baselines/defaults/``.
+    - The baseline identifier is always ``BASELINE_IDENTIFIER`` and the file
+      lives at ``baselines/baseline.yaml`` (issue #544).
     """
     return {
         "kind": "sim2real-transfer",
         "version": 3,
         "scenario": scenario,
         "baselines": [
-            {"name": baseline_name, "scenario": f"baselines/{baseline_name}.yaml"},
+            {
+                "name": BASELINE_IDENTIFIER,
+                "scenario": f"baselines/{BASELINE_IDENTIFIER}.yaml",
+            },
         ],
         "algorithms": [
-            {"name": a.name, "defaults": baseline_name, "byo": True}
+            {"name": a.name, "defaults": BASELINE_IDENTIFIER, "byo": True}
             for a in algorithms
         ],
         "workloads": [
@@ -749,13 +755,12 @@ def _collect(args: BYOArgs, exp_root: Path) -> ResolvedInputs:
         raise BYOError("--byo required (this entry point is BYO-only)")
 
     # baseline
-    if not args.baseline_name:
-        raise BYOError("missing required field: --baseline <name>=<scenario-path>")
-    _validate_name(args.baseline_name, role="baseline")
+    if not args.baseline_path:
+        raise BYOError("missing required field: --baseline <scenario-path>")
     baseline_src = _resolve_inside(
-        Path(args.baseline_path), exp_root, role=f"--baseline {args.baseline_name!r}"
+        Path(args.baseline_path), exp_root, role="--baseline"
     )
-    _validate_yaml_file(baseline_src, role=f"baseline {args.baseline_name!r}")
+    _validate_yaml_file(baseline_src, role="baseline")
 
     # algorithms
     if not args.algorithms:
@@ -817,7 +822,6 @@ def _collect(args: BYOArgs, exp_root: Path) -> ResolvedInputs:
     return ResolvedInputs(
         exp_root=exp_root,
         scenario=scenario,
-        baseline_name=args.baseline_name,
         baseline_src=baseline_src,
         algorithms=resolved_algos,
         workloads=workloads,
@@ -849,7 +853,6 @@ def run_byo(
         )
         doc = build_transfer_yaml(
             scenario=inputs.scenario,
-            baseline_name=inputs.baseline_name,
             algorithms=inputs.algorithms,
             workloads=inputs.workloads,
             exp_root=inputs.exp_root,

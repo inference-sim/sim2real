@@ -77,9 +77,9 @@ if [ -n "$RUN" ]; then
     MANIFEST_ASSEMBLY_PATH=$(jq -r '.manifest_assembly.path // ""' "$RESOLVED_JSON")
     CLUSTER_CONFIG_PATH=$(jq -r '.cluster_config_path // ""' "$RESOLVED_JSON")
     # BASELINE_CONFIG_PATH resolves the first baseline overlay in the
-    # workspace's nested-under-baseline_<name>/ shape. Empty if the run has
-    # no baseline. Downstream check subsections that need the baseline
-    # EPP config reference this variable.
+    # workspace's nested-under-baselines/<name>/ shape (issue #544). Empty
+    # if the run has no baseline. Downstream check subsections that need
+    # the baseline EPP config reference this variable.
     BASELINE_CONFIG_PATH=$(jq -r '.translation.baselines[0].generated_overlay_path // ""' "$RESOLVED_JSON")
     # WORKLOADS_DIR points at the experiment repo's workload YAML directory.
     # In resolve-mode, workload paths in manifest.assembly.yaml are resolved
