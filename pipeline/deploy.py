@@ -13,6 +13,7 @@ Subcommands:
 """
 
 import argparse
+import fnmatch
 import json
 import os
 import random
@@ -1678,12 +1679,13 @@ def _cmd_collect(args, run_dir: Path, cluster_config: dict):
             phases_to_collect: list[str] = []
         elif (pkg_filter := scope_package):
             valid = set(scoped_phases) | {"experiment"}
-            unknown = set(pkg_filter) - valid
+            expanded, unknown = _expand_glob_values(
+                pkg_filter, valid, exclude_from_pattern={"experiment"})
             if unknown:
                 err(f"Unknown packages: {sorted(unknown)}. Valid: {sorted(valid)}")
                 sys.exit(1)
             phases_to_collect = []
-            for p in pkg_filter:
+            for p in expanded:
                 if p == "experiment":
                     phases_to_collect.extend(scoped_phases)
                 else:
@@ -1825,12 +1827,13 @@ def _cmd_collect(args, run_dir: Path, cluster_config: dict):
         pkg_filter = _parse_list(args.package)
         if pkg_filter:
             valid = set(known_phases) | {"experiment"}
-            unknown = set(pkg_filter) - valid
+            expanded, unknown = _expand_glob_values(
+                pkg_filter, valid, exclude_from_pattern={"experiment"})
             if unknown:
                 err(f"Unknown packages: {sorted(unknown)}. Valid: {sorted(valid)}")
                 sys.exit(1)
             phases_to_collect = []
-            for p in pkg_filter:
+            for p in expanded:
                 if p == "experiment":
                     phases_to_collect.extend(known_phases)
                 else:
@@ -2268,6 +2271,55 @@ def _parse_list(value) -> "list[str] | None":
     return result if result else None
 
 
+# Any of these in a value makes it a shell-glob pattern; otherwise the value is a literal.
+_GLOB_METACHARS = ("*", "?", "[")
+
+
+def _is_glob(value: str) -> bool:
+    return any(c in value for c in _GLOB_METACHARS)
+
+
+def _expand_glob_values(
+    values,
+    valid,
+    *,
+    exclude_from_pattern=frozenset(),
+) -> "tuple[list[str], list[str]]":
+    """Expand a mixed list of literals and shell-glob patterns against *valid*.
+
+    A value containing ``*``, ``?``, or ``[`` is treated as an ``fnmatch`` pattern;
+    otherwise it must be a literal member of *valid*. Patterns match against
+    ``valid - exclude_from_pattern`` so magic tokens (e.g. ``experiment``) remain
+    literal-only and are never surfaced by a pattern like ``exp*``.
+
+    Returns ``(expanded, unknown)`` where *expanded* preserves the order of the
+    user's input (first occurrence wins) and *unknown* lists literals not in
+    *valid* plus patterns that matched zero names.
+    """
+    pattern_pool = sorted(set(valid) - set(exclude_from_pattern))
+    valid_set = set(valid)
+    expanded: list[str] = []
+    seen: set[str] = set()
+    unknown: list[str] = []
+    for v in values:
+        if _is_glob(v):
+            matches = [n for n in pattern_pool if fnmatch.fnmatchcase(n, v)]
+            if not matches:
+                unknown.append(v)
+                continue
+            for m in matches:
+                if m not in seen:
+                    seen.add(m)
+                    expanded.append(m)
+        elif v in valid_set:
+            if v not in seen:
+                seen.add(v)
+                expanded.append(v)
+        else:
+            unknown.append(v)
+    return expanded, unknown
+
+
 def _apply_run_filters(progress: dict, args) -> set:
     """Return the set of pair keys in scope for this invocation.
 
@@ -2318,7 +2370,7 @@ def _apply_run_filters(progress: dict, args) -> set:
 
     if workload:
         valid_workloads = {v.get("workload", "") for v in pair_entries.values()} - {""}
-        unknown = set(workload) - valid_workloads
+        workload, unknown = _expand_glob_values(workload, valid_workloads)
         if unknown:
             err(f"--workload: unrecognized values {sorted(unknown)}")
             print(f"  Valid --workload values: {', '.join(sorted(valid_workloads))}", file=sys.stderr)
@@ -2326,7 +2378,7 @@ def _apply_run_filters(progress: dict, args) -> set:
 
     if package:
         valid_packages = {v.get("package", "") for v in pair_entries.values()} - {""}
-        unknown = set(package) - valid_packages
+        package, unknown = _expand_glob_values(package, valid_packages)
         if unknown:
             err(f"--package: unrecognized values {sorted(unknown)}")
             print(f"  Valid --package values: {', '.join(sorted(valid_packages))}", file=sys.stderr)
@@ -2334,9 +2386,11 @@ def _apply_run_filters(progress: dict, args) -> set:
 
     candidates = set(pair_entries.keys())
     if workload:
-        candidates = {k for k in candidates if pair_entries[k].get("workload") in workload}
+        workload_set = set(workload)
+        candidates = {k for k in candidates if pair_entries[k].get("workload") in workload_set}
     if package:
-        candidates = {k for k in candidates if pair_entries[k].get("package") in package}
+        package_set = set(package)
+        candidates = {k for k in candidates if pair_entries[k].get("package") in package_set}
     if status_filter:
         candidates = {k for k in candidates if pair_entries[k].get("status") == status_filter}
     if iteration_set is not None:

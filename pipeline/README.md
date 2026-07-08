@@ -394,16 +394,18 @@ The parser accepts a legacy no-suffix form (`wl-<workload>|<package>`) and reads
 | Flag | Scope | Notes |
 |------|-------|-------|
 | `--only PAIR…` | Full pair keys (with or without `wl-` prefix) | Narrows both workload and package. Takes precedence over `--workload`. |
-| `--workload NAME…` | Workload dimension | Multiple values are OR'd within the flag. |
-| `--package NAME…` | Package dimension | Multiple values are OR'd within the flag. |
+| `--workload NAME…` | Workload dimension | Multiple values are OR'd within the flag. Glob patterns supported (see below). |
+| `--package NAME…` | Package dimension | Multiple values are OR'd within the flag. Glob patterns supported (see below). |
 | `--iteration SPEC` | Iteration dimension | Grammar below. |
 | `--status STATE` | Progress state (`pending` / `running` / `done` / `failed` / `timed-out` / `stalled`) | Not available on every subcommand — see per-subcommand tables. |
 
 Different flags compose as AND: `--workload X --package baseline --iteration 1,3` narrows to iterations 1 and 3 of workload X's baseline package.
 
+**Glob patterns in `--workload` and `--package`** (issue #518). Values containing `*`, `?`, or `[` are matched against the valid set with Python's `fnmatch` (standard shell-glob, no regex). Values without those metacharacters are literals (backwards-compatible). Examples: `--workload 'code_generation_*'`, `--workload 'code*'`, `--workload code_generation_4 'reasoning_0_*'` (literal + glob). A pattern matching zero valid names fails fatally with the same "unrecognized values" error as an unknown literal. For `collect --package`, the synthetic `experiment` value remains literal-only — a pattern like `exp*` will NOT match it (pass `experiment` verbatim to keep today's expand-to-all-known-phases behavior).
+
 **Iteration filter spec.** The `--iteration` value is a comma-separated list of tokens; each token is either a positive integer (`3`) or an inclusive range (`1-3`). Whitespace around commas and hyphens is tolerated. Rejected: `0`, negatives, reversed ranges (`5-1`), non-integer tokens (`abc`), leading zeros (`01`), empty spec, empty token. Malformed specs fail with `malformed iteration spec '<spec>': <reason>` before any pair discovery runs. Legacy pair keys (no `|iN` suffix) parse as iteration `1`, so `--iteration 1` matches them.
 
-**Collection phases** — `deploy.py collect` derives valid phases dynamically from progress data (packages with status `done`). Falls back to `[baseline, treatment]` when no progress exists. Use `--package` to filter, or `--package experiment` to collect all known phases.
+**Collection phases** — `deploy.py collect` derives valid phases dynamically from progress data (packages with status `done`). Falls back to `[baseline, treatment]` when no progress exists. Use `--package` (literals or globs) to filter, or `--package experiment` to collect all known phases. Note: globs (`base*`, `*`) never match the `experiment` magic token; pass it as a literal.
 
 **`--skip-build`** — skips the image build; use when resubmitting after a failed PipelineRun without changing the scorer.
 
@@ -426,8 +428,8 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 |------|---------|-------------|
 | `--remote` | — | Submit orchestrator as in-cluster Job instead of running locally |
 | `--only PAIR…` | — | Scope execution to specific pair keys (comma or space-separated, `wl-` prefix optional) |
-| `--workload NAME…` | — | Scope execution to pairs matching these workloads (comma or space-separated) |
-| `--package NAME…` | — | Scope execution to pairs matching these packages (comma or space-separated) |
+| `--workload NAME…` | — | Scope execution to pairs matching these workloads (comma or space-separated; globs OK) |
+| `--package NAME…` | — | Scope execution to pairs matching these packages (comma or space-separated; globs OK) |
 | `--iteration SPEC` | — | Scope to iteration(s): `'2'`, `'1,3'`, `'1-3'`, `'1,3-5'` |
 | `--status STATE` | — | Scope execution to pairs with this status (e.g. `failed`, `timed-out`) |
 | `--skip-teardown` | — | Skip the Tekton teardown task, leaving namespace resources intact for debugging |
@@ -462,8 +464,8 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 | Flag | Description |
 |------|-------------|
 | `--only PAIR…` | Scope to specific pair keys (comma or space-separated, `wl-` prefix optional) |
-| `--workload NAME…` | Filter by workload names (comma or space-separated) |
-| `--package NAME…` | Filter by package names (comma or space-separated) |
+| `--workload NAME…` | Filter by workload names (comma or space-separated; globs OK) |
+| `--package NAME…` | Filter by package names (comma or space-separated; globs OK) |
 | `--iteration SPEC` | Scope to iteration(s): `'2'`, `'1,3'`, `'1-3'`, `'1,3-5'` |
 | `--status STATE` | Filter by status (e.g. `running`, `done`, `failed`) |
 | `-s`, `--silent` | Suppress the per-pair table and banner; print only the summary line (machine-readable) |
@@ -475,8 +477,8 @@ Per phase, the resolved llm-d-benchmark plan YAMLs are also pulled into `workspa
 | Flag | Description |
 |------|-------------|
 | `--only PAIR…` | Scope to specific pair keys — narrows both workload and package (comma or space-separated, `wl-` prefix optional; takes precedence over `--workload`) |
-| `--workload NAME…` | Scope to pairs matching these workloads (comma or space-separated) |
-| `--package NAME…` | Scope to pairs matching these packages (comma or space-separated). Pass the synthetic value `experiment` to collect every package directory of the scoped pairs. |
+| `--workload NAME…` | Scope to pairs matching these workloads (comma or space-separated; globs OK) |
+| `--package NAME…` | Scope to pairs matching these packages (comma or space-separated; globs OK, but never against `experiment`). Pass the synthetic value `experiment` as a literal to collect every package directory of the scoped pairs. |
 | `--iteration SPEC` | Scope to iteration(s): `'2'`, `'1,3'`, `'1-3'`, `'1,3-5'` |
 | `--skip-logs` | Skip vLLM and EPP log files, collect only traces |
 
@@ -489,8 +491,8 @@ When `--only` or `--workload` is given, only matching workload subdirectories ar
 | Flag | Description |
 |------|-------------|
 | `--only PAIR…` | Scope reset to specific pair keys (comma or space-separated, `wl-` prefix optional) |
-| `--workload NAME…` | Scope reset to pairs matching these workloads (comma or space-separated) |
-| `--package NAME…` | Scope reset to pairs matching these packages (comma or space-separated) |
+| `--workload NAME…` | Scope reset to pairs matching these workloads (comma or space-separated; globs OK) |
+| `--package NAME…` | Scope reset to pairs matching these packages (comma or space-separated; globs OK) |
 | `--iteration SPEC` | Scope to iteration(s): `'2'`, `'1,3'`, `'1-3'`, `'1,3-5'` |
 | `--status STATE` | Scope reset to pairs with this status |
 | `--preserve-done-status` | Keep done pairs' status unchanged (cluster cleanup only) |
@@ -503,8 +505,8 @@ When `--only` or `--workload` is given, only matching workload subdirectories ar
 | Flag | Description |
 |------|-------------|
 | `--only PAIR…` | Scope wipe to specific pair keys (comma or space-separated, `wl-` prefix optional) |
-| `--workload NAME…` | Scope wipe to pairs matching these workloads (comma or space-separated) |
-| `--package NAME…` | Scope wipe to pairs matching these packages (comma or space-separated) |
+| `--workload NAME…` | Scope wipe to pairs matching these workloads (comma or space-separated; globs OK) |
+| `--package NAME…` | Scope wipe to pairs matching these packages (comma or space-separated; globs OK) |
 | `--iteration SPEC` | Narrows which pair keys are targeted, but the delete still removes the entire `results/<package>/<workload>/` workload tree — sibling iterations for the same workload are removed too. Tracked at #525. |
 | `--dry-run` | Print what would be wiped without acting |
 | `--yes` / `-y` | Skip confirmation prompt |
