@@ -672,7 +672,7 @@ Step 5c.2 (priority bands recognized) is a downstream symptom check — it sees 
 
 **Five criteria — all must PASS for the check to PASS:**
 
-1. **Coverage.** Every configured `InferenceObjective` name appears at least once in the `Request handled` lines, resolving to its configured `spec.priority`. *Every configured objective receives traffic.*
+1. **Coverage.** Every configured `InferenceObjective` name appears at least once in the `Request handled` lines, resolving to its configured priority (`priority` from `router.inferenceObjectives` on chart-native shape, or `spec.priority` from `extraObjects` on legacy shape — see Inputs above). *Every configured objective receives traffic.*
 2. **Determinism.** Each distinct `objectiveKey` value resolves to a singleton `priority`. No `objectiveKey` fans out to multiple priorities. *No mis-mapping mid-run.*
 3. **Workload resolution rate.** `count(Request handled lines with objectiveKey != "")` ≥ `count(rows in trace_data.csv)` per cell. *Every workload request carried the header and resolved to a configured objective.*
 4. **Priority value set.** The set of `priority` values seen across all `Request handled` lines is a subset of `{configured priorities} ∪ {0}`. The 0 is the documented `defaultPriority` fallback at `director.go:222`. *No stray priorities, e.g. from a misloaded CR.*
