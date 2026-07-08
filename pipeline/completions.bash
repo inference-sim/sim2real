@@ -73,19 +73,19 @@ _sim2real_deploy() {
     if [[ "$cur" == -* ]]; then
         case "$subcmd" in
             run)
-                COMPREPLY=($(compgen -W "--remote --only --workload --package --status --force --skip-build-epp --max-retries --poll-interval --gpu-resource-type --default-gpu-cost --pending-threshold --max-pending-stalls --max-backoff" -- "$cur"))
+                COMPREPLY=($(compgen -W "--remote --only --workload --package --iteration --status --force --skip-build-epp --max-retries --poll-interval --gpu-resource-type --default-gpu-cost --pending-threshold --max-pending-stalls --max-backoff" -- "$cur"))
                 ;;
             status)
-                COMPREPLY=($(compgen -W "--only --workload --package --status" -- "$cur"))
+                COMPREPLY=($(compgen -W "--only --workload --package --iteration --status" -- "$cur"))
                 ;;
             reset)
-                COMPREPLY=($(compgen -W "--only --workload --package --status --dry-run" -- "$cur"))
+                COMPREPLY=($(compgen -W "--only --workload --package --iteration --status --dry-run" -- "$cur"))
                 ;;
             wipe)
-                COMPREPLY=($(compgen -W "--only --workload --package --dry-run --yes" -- "$cur"))
+                COMPREPLY=($(compgen -W "--only --workload --package --iteration --dry-run --yes" -- "$cur"))
                 ;;
             collect)
-                COMPREPLY=($(compgen -W "--only --workload --package --skip-logs" -- "$cur"))
+                COMPREPLY=($(compgen -W "--only --workload --package --iteration --skip-logs" -- "$cur"))
                 ;;
             pairs)
                 COMPREPLY=($(compgen -W "--keys-only --workloads-only --packages-only" -- "$cur"))

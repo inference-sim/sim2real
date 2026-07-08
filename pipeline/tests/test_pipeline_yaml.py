@@ -244,3 +244,48 @@ class TestPrepareResultsDirTask:
             "prepare-results-dir must have no runAfter so it runs as early as possible "
             "in the DAG and the wipe-and-create invariant holds before any writer starts."
         )
+
+
+class TestReplicaParamThreading:
+    """pipeline.yaml declares and threads the replica param through every
+    resultsDir writer, per step-5 (issue #511).
+    """
+
+    def _pipeline(self):
+        return yaml.safe_load(PIPELINE_YAML.read_text())
+
+    def test_declares_replica_param(self):
+        """Pipeline must declare a top-level 'replica' param, string, default '1'."""
+        pipeline = self._pipeline()
+        params = {p["name"]: p for p in pipeline["spec"]["params"]}
+        assert "replica" in params, "pipeline.yaml missing 'replica' param declaration"
+        assert params["replica"].get("type", "string") == "string"
+        assert params["replica"].get("default") == "1"
+
+    def test_every_results_dir_matches_canonical_template(self):
+        """Every resultsDir occurrence in pipeline.yaml must equal
+        tekton.RESULTS_DIR_TEMPLATE. This is the grep-audit-in-code that
+        catches a task quietly writing to the wrong (unversioned) path."""
+        from pipeline.lib.tekton import RESULTS_DIR_TEMPLATE
+        pipeline = self._pipeline()
+        for task in pipeline["spec"]["tasks"]:
+            for param in task.get("params", []):
+                if param["name"] == "resultsDir":
+                    assert param["value"] == RESULTS_DIR_TEMPLATE, (
+                        f"task {task['name']}.resultsDir = {param['value']!r} "
+                        f"but canonical is {RESULTS_DIR_TEMPLATE!r}"
+                    )
+
+    def test_results_dir_includes_replica_segment(self):
+        """Every resultsDir must reference $(params.replica) — a bare
+        assertion complementary to the template match, so a future edit
+        that changes the template shape without dropping the replica
+        segment still passes; a change that drops the segment fails
+        with a clearer message."""
+        pipeline = self._pipeline()
+        for task in pipeline["spec"]["tasks"]:
+            for param in task.get("params", []):
+                if param["name"] == "resultsDir":
+                    assert "$(params.replica)" in param["value"], (
+                        f"task {task['name']}.resultsDir does not thread replica"
+                    )

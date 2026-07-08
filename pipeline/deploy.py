@@ -4,7 +4,7 @@
 Subcommands:
   build    Ensure all scenario images exist (pre-flight for run)
   run      Ensure images + submit PipelineRuns
-  status   Show progress of all (workload, package) pairs
+  status   Show progress of all (workload, package, iteration) triples
   collect  Pull results from cluster for completed phases
   stop     Stop the remote orchestrator Job
   reset    Reset all non-pending pairs to pending (with cluster cleanup)
@@ -51,12 +51,31 @@ def _c(code: str, text: str) -> str:
 
 from pipeline.lib import build, cluster_ops, layout
 from pipeline.lib.log import info, ok, warn, err
+from pipeline.lib.pairkey import parse_iteration_spec, parse_pair_key
 from pipeline.lib.redact import redact_yaml_file, redact_yaml_tree
 
 
 def _is_pair_key(key: str) -> bool:
     """Return True if key is a real pair entry (not metadata)."""
     return not key.startswith("_")
+
+
+def _key_iteration(key: str) -> int:
+    """Return the iteration number encoded in a pair key.
+
+    Canonical grammar (``wl-<workload>|<package>[|i<N>]``) yields the
+    parsed ``iteration``; keys without an ``|iN`` suffix parse as ``1``.
+    Legacy dash-shape keys that predate the step-5 grammar (e.g.
+    ``wl-smoke-baseline`` from a pre-PR-2 run) do not parse; they map to
+    ``1`` here to match the design's step-5 semantics — the
+    single-replica shape reads as implicit ``i1``. ``--iteration 1``
+    therefore includes legacy pairs and higher values exclude them,
+    which is what the design table specifies for the mid-rollout state.
+    """
+    try:
+        return parse_pair_key(key).iteration
+    except ValueError:
+        return 1
 
 
 def _format_capacity(effective: int, probed: int, reserved: int,
@@ -661,7 +680,7 @@ def _runtime_str(entry: dict) -> str:
 
 def _cmd_status(args, run_dir: Path,
                 cluster_config: dict | None = None) -> None:
-    """Print a snapshot table of all (workload, package) pair statuses."""
+    """Print a snapshot table of all (workload, package, iteration) statuses."""
     from pipeline.lib.progress import ConfigMapProgressStore
     primary_ns = _configmap_namespace(cluster_config)
     if not primary_ns:
@@ -683,6 +702,7 @@ def _cmd_status(args, run_dir: Path,
             getattr(args, "workload", None) is not None,
             getattr(args, "package", None) is not None,
             getattr(args, "status", None) is not None,
+            getattr(args, "iteration", None) is not None,
         ])
         if filters_given:
             suffix += " — filters ignored"
@@ -1023,11 +1043,20 @@ def _fmt_size(b: int) -> str:
 
 
 def _probe_remote_mtimes(pod_name: str, phase_path: str, namespace: str) -> dict[str, float]:
-    """Return {workload_name: mtime_epoch} for workloads that have trace_data.csv.
+    """Return {workload_name: newest_iteration_mtime_epoch} for workloads that
+    have at least one trace_data.csv on the PVC.
 
     Uses a single kubectl exec to stat all trace_data.csv files in the phase
-    directory.  Returns empty dict on probe failure — callers should fall back
-    to full copy in that case.
+    directory. Post step-5, traces live under
+    ``<phase>/<workload>/i<N>/trace_data.csv`` — one per iteration. This
+    function walks two levels up from each trace file to derive the workload
+    name and keeps the newest mtime seen across that workload's iterations.
+    ``_is_workload_up_to_date`` then compares this against the OLDEST local iteration,
+    so an incremental skip requires every local iteration to be at least as
+    new as the newest remote iteration.
+
+    Returns empty dict on probe failure — callers should fall back to full
+    copy in that case.
     """
     result = run(
         ["kubectl", "exec", pod_name, f"-n={namespace}", "--", "sh", "-c",
@@ -1051,20 +1080,60 @@ def _probe_remote_mtimes(pod_name: str, phase_path: str, namespace: str) -> dict
             warn(f"mtime probe: unparseable line: {line!r}")
             continue
         try:
-            mtimes[Path(parts[1]).parent.name] = float(parts[0])
+            mt = float(parts[0])
         except ValueError:
             warn(f"mtime probe: unparseable line: {line!r}")
+            continue
+        # Path shape: <phase_path>/<workload>/i<N>/trace_data.csv
+        # parent.parent is the workload dir.
+        wl = Path(parts[1]).parent.parent.name
+        if wl in mtimes:
+            mtimes[wl] = max(mtimes[wl], mt)
+        else:
+            mtimes[wl] = mt
     return mtimes
 
 
-def _is_up_to_date(local_csv: Path, remote_mtime: "float | None") -> bool:
-    """Return True if local trace_data.csv is at least as new as the remote copy."""
+def _is_up_to_date(local_path: Path, remote_mtime: "float | None") -> bool:
+    """Return True if *local_path* exists and its mtime is at least as new as
+    *remote_mtime*.
+
+    Used by ``_extract_phase_plans`` to decide whether a specific YAML file
+    needs re-downloading. For workload-level trace-directory checks under
+    the step-5 ``i<N>/`` layout, use ``_is_workload_up_to_date`` instead.
+    """
     if remote_mtime is None:
         return False
     try:
-        return local_csv.exists() and local_csv.stat().st_mtime >= remote_mtime
+        return local_path.exists() and local_path.stat().st_mtime >= remote_mtime
     except OSError as exc:
-        warn(f"stat failed for {local_csv}: {exc} — will re-download")
+        warn(f"stat failed for {local_path}: {exc} — will re-download")
+        return False
+
+
+def _is_workload_up_to_date(wl_dir: Path, remote_mtime: "float | None") -> bool:
+    """Return True if every ``i<N>/trace_data.csv`` under *wl_dir* is at least
+    as new as the newest remote copy for that workload.
+
+    Post step-5, a workload's traces live under
+    ``<wl_dir>/i<N>/trace_data.csv``. This function returns True only when
+    the workload has at least one collected iteration locally AND the OLDEST
+    local iteration's mtime is >= ``remote_mtime``. If some iterations are
+    missing locally OR any local iteration is older than remote, returns
+    False so the workload is redone end-to-end (matching the wipe-and-recopy
+    pattern the callers rely on).
+    """
+    if remote_mtime is None:
+        return False
+    if not wl_dir.exists():
+        return False
+    csvs = sorted(wl_dir.glob("i*/trace_data.csv"))
+    if not csvs:
+        return False
+    try:
+        return min(c.stat().st_mtime for c in csvs) >= remote_mtime
+    except OSError as exc:
+        warn(f"stat failed in {wl_dir}: {exc} — will re-download")
         return False
 
 
@@ -1197,51 +1266,112 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                         wl_names = [w for w in wl_names if w in phase_allowed]
                 phase_errors = []
                 for wl_name in wl_names:
-                    if _is_up_to_date(dest_dir / wl_name / "trace_data.csv",
-                                      remote_mtimes.get(wl_name)):
+                    if _is_workload_up_to_date(dest_dir / wl_name,
+                                               remote_mtimes.get(wl_name)):
                         info(f"[{phase}/{wl_name}] up to date — skipping")
                         if on_workload_done:
                             on_workload_done(phase, wl_name, namespace, None)
                         continue
                     wl_dest = dest_dir / wl_name
                     wl_dest.mkdir(parents=True, exist_ok=True)
-                    for log_dir in (wl_dest / "server_logs", wl_dest / "epp_logs", wl_dest / "gpu_logs", wl_dest / "resources"):
-                        if log_dir.exists():
-                            shutil.rmtree(log_dir)
-                    # Copy trace files
+                    # Wipe stale log dirs across every existing local iteration.
+                    for iN_dir in wl_dest.glob("i*"):
+                        for sub in ("server_logs", "epp_logs", "gpu_logs", "resources"):
+                            p = iN_dir / sub
+                            if p.exists():
+                                shutil.rmtree(p)
+                    # Discover iteration subdirs on the PVC (post step-5 layout).
+                    iN_ls = run(
+                        ["kubectl", "exec", pod_name, f"-n={namespace}", "--",
+                         "sh", "-c",
+                         f"ls /data/{run_name}/{phase}/{wl_name}/"],
+                        check=False, capture=True,
+                    )
+                    if iN_ls.returncode != 0:
+                        wl_errors = [
+                            f"{wl_name}: failed to list iterations: "
+                            f"{iN_ls.stderr.strip()}"
+                        ]
+                        phase_errors.extend(wl_errors)
+                        if on_workload_done:
+                            on_workload_done(
+                                phase, wl_name, namespace,
+                                RuntimeError("; ".join(wl_errors)),
+                            )
+                        continue
+                    iN_names = [
+                        n for n in iN_ls.stdout.strip().split()
+                        if n.startswith("i") and n[1:].isdigit()
+                    ]
+                    if not iN_names:
+                        wl_errors = [
+                            f"{wl_name}: no i<N>/ iteration subdirs found on PVC"
+                        ]
+                        phase_errors.extend(wl_errors)
+                        if on_workload_done:
+                            on_workload_done(
+                                phase, wl_name, namespace,
+                                RuntimeError("; ".join(wl_errors)),
+                            )
+                        continue
                     wl_errors = []
-                    for fname in ("trace_data.csv", "trace_header.yaml", "epp_stream_done", "gpu_stream_done"):
-                        src = f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{wl_name}/{fname}"
-                        r = run(["kubectl", "cp", src, str(wl_dest / fname), "--retries=3"],
-                                check=False, capture=True)
+                    for iN in iN_names:
+                        iN_dest = wl_dest / iN
+                        iN_dest.mkdir(parents=True, exist_ok=True)
+                        remote_prefix = (
+                            f"{namespace}/{pod_name}:/data/{run_name}/"
+                            f"{phase}/{wl_name}/{iN}"
+                        )
+                        # Copy trace files
+                        for fname in ("trace_data.csv", "trace_header.yaml",
+                                      "epp_stream_done", "gpu_stream_done"):
+                            r = run(
+                                ["kubectl", "cp", f"{remote_prefix}/{fname}",
+                                 str(iN_dest / fname), "--retries=3"],
+                                check=False, capture=True,
+                            )
+                            if r.returncode != 0 and "no such file" not in r.stderr.lower():
+                                wl_errors.append(
+                                    f"{wl_name}/{iN}/{fname}: {r.stderr.strip()}"
+                                )
+                        # Copy epp_logs directory
+                        epp_dest = iN_dest / "epp_logs"
+                        epp_dest.mkdir(exist_ok=True)
+                        r = run(
+                            ["kubectl", "cp", f"{remote_prefix}/epp_logs/",
+                             str(epp_dest), "--retries=3"],
+                            check=False, capture=True,
+                        )
                         if r.returncode != 0 and "no such file" not in r.stderr.lower():
-                            wl_errors.append(f"{wl_name}/{fname}: {r.stderr.strip()}")
-                    # Copy epp_logs directory
-                    epp_src = f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{wl_name}/epp_logs/"
-                    epp_dest = wl_dest / "epp_logs"
-                    epp_dest.mkdir(exist_ok=True)
-                    r = run(["kubectl", "cp", epp_src, str(epp_dest), "--retries=3"],
-                            check=False, capture=True)
-                    if r.returncode != 0 and "no such file" not in r.stderr.lower():
-                        wl_errors.append(f"{wl_name}/epp_logs: {r.stderr.strip()}")
-                    # Copy gpu_logs directory
-                    gpu_src = f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{wl_name}/gpu_logs/"
-                    gpu_dest = wl_dest / "gpu_logs"
-                    gpu_dest.mkdir(exist_ok=True)
-                    r = run(["kubectl", "cp", gpu_src, str(gpu_dest), "--retries=3"],
-                            check=False, capture=True)
-                    if r.returncode != 0 and "no such file" not in r.stderr.lower():
-                        wl_errors.append(f"{wl_name}/gpu_logs: {r.stderr.strip()}")
-                    # Copy resources directory
-                    res_src = f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{wl_name}/resources/"
-                    res_dest = wl_dest / "resources"
-                    res_dest.mkdir(exist_ok=True)
-                    r = run(["kubectl", "cp", res_src, str(res_dest), "--retries=3"],
-                            check=False, capture=True)
-                    if r.returncode != 0 and "no such file" not in r.stderr.lower():
-                        wl_errors.append(f"{wl_name}/resources: {r.stderr.strip()}")
-                    else:
-                        redact_yaml_tree(res_dest)
+                            wl_errors.append(
+                                f"{wl_name}/{iN}/epp_logs: {r.stderr.strip()}"
+                            )
+                        # Copy gpu_logs directory
+                        gpu_dest = iN_dest / "gpu_logs"
+                        gpu_dest.mkdir(exist_ok=True)
+                        r = run(
+                            ["kubectl", "cp", f"{remote_prefix}/gpu_logs/",
+                             str(gpu_dest), "--retries=3"],
+                            check=False, capture=True,
+                        )
+                        if r.returncode != 0 and "no such file" not in r.stderr.lower():
+                            wl_errors.append(
+                                f"{wl_name}/{iN}/gpu_logs: {r.stderr.strip()}"
+                            )
+                        # Copy resources directory
+                        res_dest = iN_dest / "resources"
+                        res_dest.mkdir(exist_ok=True)
+                        r = run(
+                            ["kubectl", "cp", f"{remote_prefix}/resources/",
+                             str(res_dest), "--retries=3"],
+                            check=False, capture=True,
+                        )
+                        if r.returncode != 0 and "no such file" not in r.stderr.lower():
+                            wl_errors.append(
+                                f"{wl_name}/{iN}/resources: {r.stderr.strip()}"
+                            )
+                        else:
+                            redact_yaml_tree(res_dest)
                     if wl_errors:
                         phase_errors.extend(wl_errors)
                     if on_workload_done:
@@ -1252,8 +1382,8 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                 else:
                     errors[phase] = None
             elif workload:
-                if _is_up_to_date(dest_dir / workload / "trace_data.csv",
-                                  remote_mtimes.get(workload)):
+                if _is_workload_up_to_date(dest_dir / workload,
+                                           remote_mtimes.get(workload)):
                     info(f"[{phase}/{workload}] up to date — skipping")
                     errors[phase] = None
                     if on_workload_done:
@@ -1304,8 +1434,8 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                     continue
                 phase_errors = []
                 for wl_name in wl_names:
-                    if _is_up_to_date(dest_dir / wl_name / "trace_data.csv",
-                                      remote_mtimes.get(wl_name)):
+                    if _is_workload_up_to_date(dest_dir / wl_name,
+                                               remote_mtimes.get(wl_name)):
                         info(f"[{phase}/{wl_name}] up to date — skipping")
                         if on_workload_done:
                             on_workload_done(phase, wl_name, namespace, None)
@@ -1498,14 +1628,16 @@ def _cmd_collect(args, run_dir: Path, cluster_config: dict):
             "cluster.")
         sys.exit(1)
 
-    # ── Pair-level scoping (--only / --workload / --package) ─────────────
+    # ── Pair-level scoping (--only / --workload / --package / --iteration) ─
     scope_only = getattr(args, "only", None)
     scope_workload = getattr(args, "workload", None)
     scope_package = _parse_list(getattr(args, "package", None))
-    scoped = scope_only is not None or scope_workload is not None
+    scope_iteration = getattr(args, "iteration", None)
+    scoped = (scope_only is not None or scope_workload is not None
+              or scope_iteration is not None)
 
     if scoped and not progress:
-        err("--only/--workload require progress data to resolve pairs, but none was found.")
+        err("--only/--workload/--iteration require progress data to resolve pairs, but none was found.")
         sys.exit(1)
 
     if scoped and progress:
@@ -1523,6 +1655,7 @@ def _cmd_collect(args, run_dir: Path, cluster_config: dict):
             workload = scope_workload
             package = _pair_scope_pkg
             status = None
+            iteration = scope_iteration
 
         in_scope = _resolve_scope(progress, _ScopeArgs())
 
@@ -1867,13 +2000,44 @@ def _cmd_collect(args, run_dir: Path, cluster_config: dict):
 # ── Run helpers ─────────────────────────────────────────────────────────────
 
 def _load_pairs(cluster_dir: Path) -> dict:
-    """Discover all (workload, package) pairs from pipelinerun-*.yaml at cluster/ root.
+    """Discover all (workload, package, iteration) pairs from pipelinerun-*.yaml at cluster/ root.
 
     Returns dict keyed by "wl-" + filename stem (minus "pipelinerun-" prefix).
+    Thin wrapper over ``_load_pairs_with_errors``; the malformed-key count is
+    discarded here. Callers that need the count should call
+    ``_load_pairs_with_errors`` directly.
     """
-    pairs = {}
+    pairs, _ = _load_pairs_with_errors(cluster_dir)
+    return pairs
+
+
+def _load_pairs_with_errors(cluster_dir: Path) -> tuple[dict, int]:
+    """Discover pairs and report how many keys did not match the new grammar.
+
+    Returns ``(pairs, malformed_count)``. ``pairs`` has the same dict shape as
+    ``_load_pairs`` returns. ``malformed_count`` counts pair keys whose
+    filename-derived string does not parse under the canonical grammar
+    (see ``pipeline/lib/pairkey.py``).
+
+    Entries whose key parses gain an ``iteration`` field (int, >= 1).
+    Legacy keys without an ``|iN`` suffix parse as ``iteration=1``.
+
+    Deviation from the design's literal loader-layer policy (drop with
+    WARN): during the step-5 rollout, PR 2 (``assemble`` filename
+    reshape) has not yet landed, so on-disk filenames still produce
+    keys that fail the new grammar (e.g. ``wl-smoke-baseline``
+    from ``pipelinerun-smoke-baseline.yaml``). Dropping them here would
+    break every downstream command until PR 2 lands and existing runs
+    are re-assembled. Instead this loader keeps the entry (without an
+    ``iteration`` field) and reports the count so operators — and, in a
+    later PR, ``_cmd_status`` — can surface it. Once PR 2 lands and
+    runs are re-assembled, ``malformed_count`` should trend to zero and
+    the WARN/drop semantics can be tightened without behavior change.
+    """
+    pairs: dict = {}
+    malformed_count = 0
     if not cluster_dir.exists():
-        return pairs
+        return pairs, malformed_count
     for pr_path in sorted(cluster_dir.glob("pipelinerun-*.yaml")):
         try:
             pr_data = yaml.safe_load(pr_path.read_text())
@@ -1882,7 +2046,7 @@ def _load_pairs(cluster_dir: Path) -> dict:
             workload = params.get("workloadName", "")
             package = params.get("phase", "")
             key = "wl-" + pr_path.stem.removeprefix("pipelinerun-")
-            pairs[key] = {
+            entry: dict = {
                 "workload": workload,
                 "package": package,
                 "pr_name": pr_name,
@@ -1890,10 +2054,17 @@ def _load_pairs(cluster_dir: Path) -> dict:
                 "namespace": pr_data.get("metadata", {}).get("namespace", ""),
                 "scenario_content": params.get("scenarioContent"),
             }
+            try:
+                parts = parse_pair_key(key)
+            except ValueError:
+                malformed_count += 1
+            else:
+                entry["iteration"] = parts.iteration
+            pairs[key] = entry
         except Exception as e:
             warn(f"Skipping {pr_path.name}: {e}")
             continue
-    return pairs
+    return pairs, malformed_count
 
 
 def _uninstall_orphaned_helm(key: str, namespace: str) -> None:
@@ -2101,12 +2272,22 @@ def _apply_run_filters(progress: dict, args) -> set:
     """Return the set of pair keys in scope for this invocation.
 
     With no flags: returns empty set (caller interprets as all pairs in scope).
-    With flags: returns only matching pairs.
+    With flags: returns only matching pairs. Filters compose via AND.
     """
     only = _parse_list(getattr(args, "only", None))
     workload = _parse_list(getattr(args, "workload", None))
     package = _parse_list(getattr(args, "package", None))
     status_filter = getattr(args, "status", None)
+    iteration_spec = getattr(args, "iteration", None)
+
+    # Parse --iteration up-front so malformed specs fail before any other work.
+    iteration_set: "set[int] | None" = None
+    if iteration_spec is not None:
+        try:
+            iteration_set = parse_iteration_spec(iteration_spec)
+        except ValueError as exc:
+            err(str(exc))
+            sys.exit(1)
 
     if only:
         result = set()
@@ -2126,9 +2307,11 @@ def _apply_run_filters(progress: dict, args) -> set:
             valid = sorted(k for k in progress.keys() if _is_pair_key(k))
             print(f"  Valid pair keys: {valid}", file=sys.stderr)
             sys.exit(1)
+        if iteration_set is not None:
+            result = {k for k in result if _key_iteration(k) in iteration_set}
         return result
 
-    if not any([workload, package, status_filter]):
+    if not any([workload, package, status_filter, iteration_set]):
         return set()
 
     pair_entries = {k: v for k, v in progress.items() if _is_pair_key(k)}
@@ -2156,6 +2339,8 @@ def _apply_run_filters(progress: dict, args) -> set:
         candidates = {k for k in candidates if pair_entries[k].get("package") in package}
     if status_filter:
         candidates = {k for k in candidates if pair_entries[k].get("status") == status_filter}
+    if iteration_set is not None:
+        candidates = {k for k in candidates if _key_iteration(k) in iteration_set}
     return candidates
 
 
@@ -2170,6 +2355,7 @@ def _resolve_scope(progress: dict, args) -> set:
         getattr(args, "workload", None) is not None,
         getattr(args, "package", None) is not None,
         getattr(args, "status", None) is not None,
+        getattr(args, "iteration", None) is not None,
     ])
     filtered = _apply_run_filters(progress, args)
     if filters_given and not filtered:
@@ -2184,6 +2370,7 @@ def _report_filter_mismatch(progress: dict, args) -> None:
     workload = _parse_list(getattr(args, "workload", None))
     package = _parse_list(getattr(args, "package", None))
     status_filter = getattr(args, "status", None)
+    iteration_spec = getattr(args, "iteration", None)
 
     parts = []
     if only is not None:
@@ -2194,6 +2381,8 @@ def _report_filter_mismatch(progress: dict, args) -> None:
         parts.append(f"--package '{','.join(package)}'")
     if status_filter is not None:
         parts.append(f"--status '{status_filter}'")
+    if iteration_spec is not None:
+        parts.append(f"--iteration '{iteration_spec}'")
 
     err(f"No pairs matched {', '.join(parts)}.\n")
 
@@ -2206,10 +2395,12 @@ def _report_filter_mismatch(progress: dict, args) -> None:
     valid_workloads = sorted({v.get("workload", "") for v in pair_values} - {""})
     valid_packages = sorted({v.get("package", "") for v in pair_values} - {""})
     valid_statuses = sorted({v.get("status", "") for v in pair_values} - {""})
+    valid_iterations = sorted({_key_iteration(k) for k in progress if _is_pair_key(k)})
 
-    print(f"\n  Valid --workload values: {', '.join(valid_workloads)}", file=sys.stderr)
-    print(f"  Valid --package values:  {', '.join(valid_packages)}", file=sys.stderr)
-    print(f"  Valid --status values:   {', '.join(valid_statuses)}", file=sys.stderr)
+    print(f"\n  Valid --workload values:   {', '.join(valid_workloads)}", file=sys.stderr)
+    print(f"  Valid --package values:    {', '.join(valid_packages)}", file=sys.stderr)
+    print(f"  Valid --status values:     {', '.join(valid_statuses)}", file=sys.stderr)
+    print(f"  Valid --iteration values:  {', '.join(str(n) for n in valid_iterations)}", file=sys.stderr)
 
 
 def _check_slot_ready(namespace: str, hf_secret_name: str = "hf-secret") -> tuple[bool, list[str]]:
@@ -3081,8 +3272,8 @@ _FAIL_FAST_REASONS = {
 def _collect_run_flags(args) -> list[str]:
     """Collect run subcommand flags to forward to the in-cluster Job."""
     flags: list[str] = []
-    for name in ("only", "workload", "package", "status"):
-        val = getattr(args, name)
+    for name in ("only", "workload", "package", "status", "iteration"):
+        val = getattr(args, name, None)
         if val is not None:
             if isinstance(val, list):
                 flags.extend([f"--{name}"] + val)
@@ -3399,14 +3590,18 @@ Examples:
                            help="Scope to pairs matching these workloads (comma or space-separated)")
     collect_p.add_argument("--package", nargs="+", metavar="NAME",
                            help="Collect only these packages (comma or space-separated)")
+    collect_p.add_argument("--iteration", metavar="SPEC", dest="iteration",
+                           help="Scope to iteration(s): '2', '1,3', '1-3', '1,3-5'")
     collect_p.add_argument("--skip-logs", action="store_true", dest="skip_logs",
                            help="Skip vLLM and EPP log files, collect only traces")
 
-    status_p = sub.add_parser("status", help="Show progress of all (workload, package) pairs")
+    status_p = sub.add_parser("status", help="Show progress of all (workload, package, iteration) triples")
     status_p.add_argument("--only",     nargs="+", metavar="PAIR",  help="Scope to specific pair keys (comma or space-separated, wl- prefix optional)")
     status_p.add_argument("--workload", nargs="+", metavar="NAME",  help="Scope to pairs matching these workloads (comma or space-separated)")
     status_p.add_argument("--package",  nargs="+", metavar="NAME",  help="Scope to pairs matching these packages (comma or space-separated)")
     status_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status (e.g. running, done, failed)")
+    status_p.add_argument("--iteration", metavar="SPEC", dest="iteration",
+                          help="Scope to iteration(s): '2', '1,3', '1-3', '1,3-5'")
     status_p.add_argument("-s", "--silent", action="store_true",
                           help="Suppress the per-pair table; print only the summary line")
 
@@ -3423,6 +3618,8 @@ Examples:
     run_p.add_argument("--workload",     nargs="+", metavar="NAME",  help="Scope execution to pairs matching these workloads (comma or space-separated)")
     run_p.add_argument("--package",      nargs="+", metavar="NAME",  help="Scope execution to pairs matching these packages (comma or space-separated)")
     run_p.add_argument("--status",       metavar="STATE", help="Scope execution to pairs with this status (e.g. failed, timed-out)")
+    run_p.add_argument("--iteration",    metavar="SPEC", dest="iteration",
+                       help="Scope execution to iteration(s): '2', '1,3', '1-3', '1,3-5'")
     run_p.add_argument("--force",        action="store_true",
                        help="Reset non-pending pairs to pending, cleaning cluster resources for pairs with assigned namespaces")
     run_p.add_argument("--skip-teardown", action="store_true", dest="skip_teardown",
@@ -3453,6 +3650,8 @@ Examples:
     reset_p.add_argument("--workload", nargs="+", metavar="NAME",  help="Scope to pairs matching these workloads (comma or space-separated)")
     reset_p.add_argument("--package",  nargs="+", metavar="NAME",  help="Scope to pairs matching these packages (comma or space-separated)")
     reset_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status")
+    reset_p.add_argument("--iteration", metavar="SPEC", dest="iteration",
+                         help="Scope to iteration(s): '2', '1,3', '1-3', '1,3-5'")
     reset_p.add_argument("--preserve-done-status", action="store_true", dest="preserve_done_status",
                          help="Keep done pairs' status unchanged (cluster cleanup only)")
     reset_p.add_argument("--dry-run",  action="store_true", dest="dry_run",
@@ -3462,6 +3661,8 @@ Examples:
     wipe_p.add_argument("--only",     nargs="+", metavar="PAIR",  help="Scope to specific pair keys (comma or space-separated, wl- prefix optional)")
     wipe_p.add_argument("--workload", nargs="+", metavar="NAME",  help="Scope to pairs matching these workloads (comma or space-separated)")
     wipe_p.add_argument("--package",  nargs="+", metavar="NAME",  help="Scope to pairs matching these packages (comma or space-separated)")
+    wipe_p.add_argument("--iteration", metavar="SPEC", dest="iteration",
+                        help="Scope to iteration(s): '2', '1,3', '1-3', '1,3-5'")
     wipe_p.add_argument("--dry-run",  action="store_true", dest="dry_run",
                          help="Print what would be wiped without doing it")
     wipe_p.add_argument("--yes", "-y", action="store_true",

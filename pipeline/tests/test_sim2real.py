@@ -1104,8 +1104,8 @@ class TestAssembleCommand:
         assert (run_dir / "run_metadata.json").exists()
         assert (run_dir / "cluster" / "baseline.yaml").exists()
         assert (run_dir / "cluster" / "sr.yaml").exists()
-        assert (run_dir / "cluster" / "pipelinerun-w1-baseline.yaml").exists()
-        assert (run_dir / "cluster" / "pipelinerun-w1-sr.yaml").exists()
+        assert (run_dir / "cluster" / "pipelinerun-w1|baseline|i1.yaml").exists()
+        assert (run_dir / "cluster" / "pipelinerun-w1|sr|i1.yaml").exists()
 
     def test_refuses_existing_run_without_force(self, tmp_path, capsys):
         thash = self._make_minimal_registration(tmp_path)
@@ -1272,7 +1272,7 @@ class TestAssembleResolvesAlias:
         captured = {}
         def fake_assemble(*, translation_hash, translation_ref, cluster_id,
                           run_name, experiment_root, manifest_path,
-                          force, now_iso):
+                          force, replicas, now_iso):
             captured["hash"] = translation_hash
             captured["ref"] = translation_ref
 
@@ -1473,6 +1473,56 @@ class TestAssembleIncompleteTranslationCheck:
         # reach assemble_run, which is mocked so it returns None → rc=0.
         assert rc == 0
         mock_assemble.assert_called_once()
+
+
+class TestPositiveInt:
+    def test_accepts_positive_integer(self):
+        from pipeline.sim2real import _positive_int
+        assert _positive_int("1") == 1
+        assert _positive_int("42") == 42
+
+    def test_rejects_zero(self):
+        from pipeline.sim2real import _positive_int
+        with pytest.raises(argparse.ArgumentTypeError, match=">= 1"):
+            _positive_int("0")
+
+    def test_rejects_negative(self):
+        from pipeline.sim2real import _positive_int
+        with pytest.raises(argparse.ArgumentTypeError, match=">= 1"):
+            _positive_int("-1")
+
+    def test_rejects_non_integer(self):
+        from pipeline.sim2real import _positive_int
+        with pytest.raises(argparse.ArgumentTypeError, match="positive integer"):
+            _positive_int("abc")
+
+
+class TestAssembleReplicasArg:
+    def test_replicas_defaults_to_one(self):
+        from pipeline.sim2real import _build_parser
+        parser = _build_parser()
+        args = parser.parse_args([
+            "assemble", "--translation", "h", "--cluster", "c", "--run", "r",
+        ])
+        assert args.replicas == 1
+
+    def test_replicas_accepts_positive_int(self):
+        from pipeline.sim2real import _build_parser
+        parser = _build_parser()
+        args = parser.parse_args([
+            "assemble", "--translation", "h", "--cluster", "c", "--run", "r",
+            "--replicas", "3",
+        ])
+        assert args.replicas == 3
+
+    def test_replicas_rejects_zero(self):
+        from pipeline.sim2real import _build_parser
+        parser = _build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args([
+                "assemble", "--translation", "h", "--cluster", "c", "--run", "r",
+                "--replicas", "0",
+            ])
 
 
 class TestCmdBuildOverlayLifecycle:

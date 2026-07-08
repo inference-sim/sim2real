@@ -17,7 +17,7 @@ def test_make_pipelinerun_scenario_name():
         scenario_content="scenario: []",
         workspace_bindings=_WORKSPACE_BINDINGS,
     )
-    assert pr["metadata"]["name"] == "baseline-wl-smoke-ac"
+    assert pr["metadata"]["name"] == "baseline-wl-smoke-ac-i1"
     assert pr["metadata"]["namespace"] == "kalantar-0"
 
 
@@ -123,7 +123,7 @@ def test_phase_name_in_pipelinerun():
         pipeline_name="sim2real",
         scenario_content="scenario: []",
     )
-    assert pr["metadata"]["name"] == "b1-wl-smoke-test-run"
+    assert pr["metadata"]["name"] == "b1-wl-smoke-test-run-i1"
     params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
     assert params["phase"] == "b1"
 
@@ -138,7 +138,7 @@ def test_phase_underscore_sanitized_in_name():
         pipeline_name="sim2real",
         scenario_content="scenario: []",
     )
-    assert pr["metadata"]["name"] == "my-phase-wl-smoke-test-run"
+    assert pr["metadata"]["name"] == "my-phase-wl-smoke-test-run-i1"
     params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
     assert params["phase"] == "my_phase"
 
@@ -243,3 +243,119 @@ def test_observe_full_dict_emits_all_keys_as_strings():
     assert params["warmupRequests"] == "25"
     assert params["prewarmDuration"] == "30s"
     assert params["extraArgs"] == "--foo bar"
+
+
+def test_make_pipelinerun_scenario_iteration_default_is_one():
+    """When iteration is not passed, default is 1 and name gets '-i1' suffix."""
+    pr = make_pipelinerun_scenario(
+        phase="baseline", workload={"name": "wl"}, run_name="r",
+        namespace="ns", pipeline_name="sim2real",
+        scenario_content="scenario: []",
+    )
+    assert pr["metadata"]["name"] == "baseline-wl-r-i1"
+
+
+def test_make_pipelinerun_scenario_iteration_explicit():
+    """Explicit iteration=N produces '-i<N>' suffix on metadata.name."""
+    pr = make_pipelinerun_scenario(
+        phase="baseline", workload={"name": "wl"}, run_name="r",
+        namespace="ns", pipeline_name="sim2real",
+        scenario_content="scenario: []",
+        iteration=5,
+    )
+    assert pr["metadata"]["name"] == "baseline-wl-r-i5"
+
+
+# ── Tests for build_results_dir + RESULTS_DIR_TEMPLATE ──────────────────────
+
+from pipeline.lib.tekton import build_results_dir, RESULTS_DIR_TEMPLATE
+
+
+def test_build_results_dir_returns_slash_joined_path():
+    assert build_results_dir("run1", "baseline", "chatbot-mid", 1) == "run1/baseline/chatbot-mid/i1"
+
+
+def test_build_results_dir_accepts_int_replica():
+    assert build_results_dir("r", "p", "w", 3) == "r/p/w/i3"
+
+
+def test_build_results_dir_accepts_str_replica():
+    """String replica must produce the same output — used for pipeline.yaml templating."""
+    assert build_results_dir("r", "p", "w", "3") == "r/p/w/i3"
+
+
+def test_results_dir_template_shape():
+    """The pipeline.yaml template must be exactly the shape build_results_dir
+    would produce if each segment were a Tekton param reference."""
+    assert RESULTS_DIR_TEMPLATE == "$(params.runName)/$(params.phase)/$(params.workloadName)/i$(params.replica)"
+
+
+def test_build_results_dir_matches_template_when_params_substituted():
+    """build_results_dir with Tekton-param strings reproduces the template
+    verbatim. This is the invariant test_pipeline_yaml.py will assert against
+    every resultsDir value in pipeline.yaml."""
+    template = build_results_dir(
+        "$(params.runName)", "$(params.phase)",
+        "$(params.workloadName)", "$(params.replica)",
+    )
+    assert template == RESULTS_DIR_TEMPLATE
+
+
+# ── Tests for validate_pipelinerun_name ─────────────────────────────────────
+
+import pytest as _pytest
+from pipeline.lib.tekton import validate_pipelinerun_name
+
+
+def test_validate_pipelinerun_name_accepts_short():
+    validate_pipelinerun_name("baseline-wl-r-i1")  # no raise
+
+
+def test_validate_pipelinerun_name_accepts_253_char_limit():
+    """Exactly 253 chars is the DNS subdomain limit — must pass."""
+    name = "a" * 253
+    validate_pipelinerun_name(name)  # no raise
+
+
+def test_validate_pipelinerun_name_rejects_254_chars():
+    name = "a" * 254
+    with _pytest.raises(ValueError, match="253"):
+        validate_pipelinerun_name(name)
+
+
+def test_make_pipelinerun_scenario_rejects_oversized_name():
+    """Long run_name or workload should trip the validator at construction."""
+    long_run = "r" * 240
+    with _pytest.raises(ValueError, match="253"):
+        make_pipelinerun_scenario(
+            phase="baseline", workload={"name": "wl"}, run_name=long_run,
+            namespace="ns", pipeline_name="sim2real",
+            scenario_content="scenario: []",
+        )
+
+
+# ── Tests for the replica PipelineRun param ─────────────────────────────────
+
+
+def test_make_pipelinerun_scenario_emits_replica_param_default():
+    """Default iteration=1 → replica='1' in params (string, per Tekton API)."""
+    pr = make_pipelinerun_scenario(
+        phase="baseline", workload={"name": "wl"}, run_name="r",
+        namespace="ns", pipeline_name="sim2real",
+        scenario_content="scenario: []",
+    )
+    params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
+    assert params["replica"] == "1"
+    assert isinstance(params["replica"], str)
+
+
+def test_make_pipelinerun_scenario_emits_replica_param_explicit():
+    """iteration=5 → replica='5'."""
+    pr = make_pipelinerun_scenario(
+        phase="baseline", workload={"name": "wl"}, run_name="r",
+        namespace="ns", pipeline_name="sim2real",
+        scenario_content="scenario: []",
+        iteration=5,
+    )
+    params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
+    assert params["replica"] == "5"

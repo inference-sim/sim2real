@@ -107,6 +107,7 @@ def resolve_run(experiment_root: Path, run_name: str) -> dict:
         ),
         "params_hash": run_meta.get("params_hash") or "",
         "image_tag": run_meta.get("image_tag") or "",
+        "replicas": run_meta.get("replicas") or 1,
         "assembled_at": run_meta.get("assembled_at") or "",
         "experiment_root": str(experiment_root),
         "translation": _build_translation_section(
@@ -236,7 +237,7 @@ def _build_cluster_scenarios_section(
     (currently singular) baseline scenario file; ``treatment_yamls``
     maps each algorithm name to its resolved treatment scenario file;
     ``pipelinerun_yamls`` is the sorted list of ``pipelinerun-*.yaml``
-    files (one per (workload, package) pair).
+    files (one per (workload, package, iteration) pair).
     """
     cluster_dir = run_dir / "cluster"
     baseline_yaml: str | None = None

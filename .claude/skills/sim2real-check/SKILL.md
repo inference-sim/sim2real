@@ -220,6 +220,122 @@ Workload filter (WORKLOAD):      <name or "(all)">
 
 Do NOT proceed until the user replies `ok` (or equivalent). Additionally, do NOT proceed if `SIM` is unset — every check subsection dereferences it. If auto-detect failed to find a sim bundle and the operator did not pass `--sim`, block on `SIM=<path>` at the prompt.
 
+### Step 0.5: Enumerate declared iterations (both modes)
+
+Once the confirmation prompt has been answered `ok`, enumerate the run's declared iteration range and cross-reference with disk state. This step must run **before** any check subsection — every subsection below iterates over the resulting `PRESENT` rows.
+
+**Resolve-mode (`--run`):** invoke the enumerator against the workspace-registered run:
+
+```bash
+# $SIM2REAL_ROOT is the framework repo root (the directory that contains
+# pipeline/ and .claude/). Derive it from the sim2real CLI's own path;
+# fall back to the current working directory if the derivation is
+# ambiguous (edge case for operators running from a repo checkout).
+SIM2REAL_ROOT=$(python -c 'from pipeline.lib import layout; import pathlib, sys; print(pathlib.Path(layout.__file__).resolve().parents[2])' 2>/dev/null || pwd)
+
+ENUM_JSON=$(mktemp -t sim2real_check_enum.XXXXXX.json)
+# Chain onto RESOLVED_JSON's trap so both temp files are cleaned up.
+trap 'rm -f "$RESOLVED_JSON" "$ENUM_JSON"' EXIT
+# Capture the enumerator's exit code directly (not inside `if !`, where
+# `$?` inside the then-block would always be 0 — the negation flattens
+# the underlying exit code).
+python "$SIM2REAL_ROOT/.claude/skills/sim2real-check/scripts/enumerate_iterations.py" \
+    --run "$RUN" --experiment-root "$EXPERIMENT_ROOT" > "$ENUM_JSON"
+ENUM_EXIT=$?
+if [ "$ENUM_EXIT" -eq 2 ]; then
+    # Invocation error — enumerator already wrote a specific message
+    # to stderr. Bail so the operator can fix the input.
+    exit 2
+fi
+# Exit 1 means "MISSING rows present" — that's a real-run diagnostic,
+# not an invocation error. Keep going and let the final rollup surface
+# the MISSING rows in the summary table.
+SHAPE=$(jq -r '.shape' "$ENUM_JSON")
+DECLARED_REPLICAS=$(jq -r '.declared_replicas' "$ENUM_JSON")
+DIVERGENCE_WARNINGS=$(jq -r '.divergence_warnings | join("\n  ")' "$ENUM_JSON")
+MALFORMED_ITER_COUNT=$(jq -r '.malformed_iter_dir_count' "$ENUM_JSON")
+```
+
+**Legacy-mode (`--real`):** the enumerator is `--run`-only (it reads `workspace/runs/<name>/`). In legacy mode, synthesize the enumeration in-shell: every `(phase, workload)` under `$RESULTS_DIR` becomes a single row with `iteration=1`, `status=PRESENT` if `$RESULTS_DIR/<phase>/<workload>/trace_data.csv` exists. Do not emit `MISSING` for legacy bundles.
+
+```bash
+# Legacy-mode synthesis: build a JSON payload with the same schema as
+# the enumerator's output so downstream steps can consume $ENUM_JSON
+# uniformly across both modes.
+ENUM_JSON=$(mktemp -t sim2real_check_enum.XXXXXX.json)
+{
+    echo '{"run":"'"$REAL"'","shape":"legacy","declared_replicas":1,'
+    echo '"divergence_warnings":[],"malformed_iter_dir_count":0,"rows":['
+    first=1
+    for phase in $PHASES; do
+        for wl in ${WORKLOADS_BY_PHASE[$phase]}; do
+            [ -f "$RESULTS_DIR/$phase/$wl/trace_data.csv" ] || continue
+            [ $first -eq 0 ] && echo ','
+            first=0
+            printf '{"phase":"%s","workload":"%s","iteration":1,"status":"PRESENT","results_dir":"%s","note":null}' \
+                "$phase" "$wl" "$RESULTS_DIR/$phase/$wl"
+        done
+    done
+    echo '],"counts":{"PRESENT":0,"MISSING":0,"SKIP":0},"exit_code":0}'
+} > "$ENUM_JSON"
+SHAPE=legacy
+DECLARED_REPLICAS=1
+DIVERGENCE_WARNINGS=""
+MALFORMED_ITER_COUNT=0
+```
+
+**Diagnostic header** — print immediately (before any check subsection runs) so the operator sees mixed/corrupt state up front:
+
+```bash
+if [ -n "$DIVERGENCE_WARNINGS" ] || [ "$MALFORMED_ITER_COUNT" -gt 0 ]; then
+    echo "── Run shape diagnostic ─────────────────────────────────────"
+    echo "  shape:                    $SHAPE"
+    echo "  declared_replicas:        $DECLARED_REPLICAS"
+    echo "  malformed_iter_dir_count: $MALFORMED_ITER_COUNT"
+    if [ -n "$DIVERGENCE_WARNINGS" ]; then
+        echo "  divergence_warnings:"
+        echo "    $DIVERGENCE_WARNINGS"
+    fi
+    echo "─────────────────────────────────────────────────────────────"
+fi
+```
+
+**`$ENUM_JSON` schema (v1):**
+
+```json
+{
+  "run": "trial",
+  "shape": "replica" | "legacy" | "mixed",
+  "declared_replicas": 3,
+  "divergence_warnings": ["..."],
+  "malformed_iter_dir_count": 0,
+  "rows": [
+    {"phase": "baseline", "workload": "wl-chat", "iteration": 1,
+     "status": "PRESENT", "results_dir": "<abs path>", "note": null},
+    {"phase": "sim2real-ac", "workload": "wl-chat", "iteration": 2,
+     "status": "MISSING", "results_dir": null,
+     "note": "no results/i2/ directory"},
+    {"phase": "sim2real-routing", "workload": "wl-chat", "iteration": 1,
+     "status": "SKIP", "results_dir": null,
+     "note": "algorithm not in translation"}
+  ],
+  "counts": {"PRESENT": N, "MISSING": M, "SKIP": S},
+  "exit_code": 1
+}
+```
+
+(The example carries a MISSING row, so `exit_code` is `1`. Contract: `0` when all rows are PRESENT or SKIP; `1` when any MISSING is present; `2` for invocation error caught by the enumerator.)
+
+Each check subsection below iterates over the `PRESENT` rows in `$ENUM_JSON`. Use each row's `results_dir` as the working path — it already carries the `iN/` segment in replica shape and points at the direct workload dir in legacy shape. `MISSING` and `SKIP` rows do not run subsections; they land in the final rollup with their enumerator-assigned status verbatim.
+
+**Iterate PRESENT rows:**
+
+```bash
+# Emit one line per PRESENT row: "<phase>\t<workload>\t<iteration>\t<results_dir>"
+jq -r '.rows[] | select(.status == "PRESENT") |
+       [.phase, .workload, .iteration, .results_dir] | @tsv' "$ENUM_JSON"
+```
+
 ## Goal
 
 Perform a comprehensive parity check between a BLIS simulation bundle and its real llm-d deployment results. Produce a structured **evidence-based** report.
@@ -246,13 +362,19 @@ For numerical checks, always show a comparison table. For code/config checks, sh
 - **llm-d scheduler** (`LLMD`): confirmed by user
 - **Sim bundle** (`SIM`): `$SIM/README.md`, `$SIM/config.md`, `$SIM/algorithm/`, `$SIM/workloads/`, `$SIM/results/`
 - **Configs directory** (`CONFIGS_DIR`): Go plugins + YAML configs. In resolve-mode this is the translation's `generated/` dir under `workspace/translations/<hash>/`; in legacy-mode it's `$REAL/generated/`.
-- **Results directory** (`RESULTS_DIR`): per-phase workload data. Iterate `$PHASES` × `${WORKLOADS_BY_PHASE[$phase]}` and reference `$RESULTS_DIR/<phase>/<workload>/` (each with `trace_header.yaml`, `trace_data.csv`, `server_logs/`, `epp_stream_done`).
+- **Results directory** (`RESULTS_DIR`): per-phase workload data. **Do not iterate `$PHASES` × `${WORKLOADS_BY_PHASE[$phase]}` directly** — iterate the `PRESENT` rows in `$ENUM_JSON` (see Step 0.5) and use each row's `results_dir` field as the working path. In replica-shape runs (`SHAPE=replica`) `results_dir` is `$RESULTS_DIR/<phase>/<workload>/i<N>/`; in legacy-shape runs (`SHAPE=legacy`) it is `$RESULTS_DIR/<phase>/<workload>/`. Each `results_dir` contains `trace_header.yaml`, `trace_data.csv`, `server_logs/`, `epp_logs/`, `gpu_logs/`, `epp_stream_done`.
 - **Baseline config path** (`BASELINE_CONFIG_PATH`): specific baseline EPP config YAML. Empty when no baseline is configured; check subsections that reference it should skip in that case.
 - **Workloads directory** (`WORKLOADS_DIR`): source workload YAMLs. Resolve-mode: `<experiment-root>/workloads/`. Legacy-mode: `$REAL/workloads/`.
 
 ## Checklist
 
 Run ALL checks below.
+
+### Path substitution contract (post-Step 0.5)
+
+Every check subsection below quotes paths of the form `$RESULTS_DIR/<phase>/<workload>/…`. Read these as an implicit `<row.results_dir>/…` where `<row>` is the current `PRESENT` row from `$ENUM_JSON`. In replica shape (`SHAPE=replica`) `<row.results_dir>` already carries the `iN/` segment; in legacy shape it does not. The subsection paths otherwise stay verbatim.
+
+Every subsection's verdict (PASS / WARN / FAIL) is therefore per **(phase, workload, iteration)** — one triple per `PRESENT` row. The "Per-iteration verdict rollup" section below folds these per-triple verdicts and the enumerator's `MISSING` / `SKIP` rows into the final summary table plus the automation-facing exit code.
 
 ---
 
@@ -632,6 +754,54 @@ Verify that GPU hardware was operating within nominal range during the workload 
 **Inferential limit (note in report):** the table-format `nvidia-smi` capture does not include `clocks_throttle_reasons.*` or `clocks.current.sm/mem`, so throttle detection is inferred from temp/power coupling rather than read directly. If those fields are added to per-sample collection in a future revision of the data pipeline, the WARN/FAIL temperature thresholds can tighten by ~10 °C.
 
 ---
+
+## Per-iteration verdict rollup (final step)
+
+After every check subsection has emitted its per-(phase, workload, iteration) PASS/WARN/FAIL, roll up the results into a single summary table. Fold WARN into PASS for the rollup — WARN rows still surface their reason in the per-subsection detail, but do not fail the run-level verdict.
+
+**Row shape** (one row per `(phase, workload, iteration)` triple in `$ENUM_JSON`):
+
+```
+wl-<workload>|<phase>|i<N>  <verdict> [<reason>]
+```
+
+**Verdict per row:**
+
+| Enumerator `status` | Signal check outcome | Row verdict |
+|---|---|---|
+| `PRESENT` | all signals PASS/WARN | `PASS` |
+| `PRESENT` | any signal FAIL | `FAIL (<K signals failed: names>)` |
+| `MISSING` | (skipped — no data) | `MISSING (no results/iN/ directory)` |
+| `SKIP` | (skipped — no data) | `SKIP (algorithm not in translation)` |
+
+**Rollup aggregates** (printed under the row table):
+
+- PASS / FAIL / SKIP / MISSING counts across all rows.
+- If `SHAPE=mixed` or `MALFORMED_ITER_COUNT > 0`, restate the divergence warnings from Step 0.5 for operator visibility.
+
+**Exit code contract** (returned as the skill's overall status; matches `sim2real-check`'s automation surface):
+
+- `0` — all rows are PASS or SKIP.
+- `1` — any FAIL or MISSING.
+- `2` — invocation error caught in Step 0.5 (missing run; unreadable workspace files — `run_metadata.json`, `manifest.assembly.yaml`, `translation_output.json`; malformed inputs). Never emitted from the rollup step itself.
+
+Consumers (CI, dashboards) rely on this contract — do not fold FAIL or MISSING into `0` under any rollup rule.
+
+**Example rollup:**
+
+```
+── Per-iteration verdicts ────────────────────────────────────────
+  wl-chat-mid|baseline|i1         PASS
+  wl-chat-mid|baseline|i2         PASS
+  wl-chat-mid|baseline|i3         PASS
+  wl-chat-mid|sim2real-ac|i1      PASS
+  wl-chat-mid|sim2real-ac|i2      FAIL (2 signals failed: TTFT_p95, e2e_p50)
+  wl-chat-mid|sim2real-ac|i3      MISSING (no results/i3/ directory)
+  wl-chat-mid|sim2real-routing|i1 SKIP (algorithm not in translation)
+──────────────────────────────────────────────────────────────────
+Aggregates: 4 PASS  1 FAIL  1 MISSING  1 SKIP
+Exit code:  1 (FAIL and MISSING present)
+```
 
 ## Output Format
 
