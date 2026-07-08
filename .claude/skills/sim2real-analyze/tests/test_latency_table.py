@@ -1,4 +1,4 @@
-"""Tests for compute_table.py — sim2real-analyze comparison table script."""
+"""Tests for latency_table.py — sim2real-analyze comparison table analysis."""
 import csv
 import json
 import sys
@@ -6,9 +6,8 @@ from pathlib import Path
 
 import pytest
 
-# Add scripts dir to path so we can import compute_table
-sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-import compute_table
+sys.path.insert(0, str(Path(__file__).parent.parent / "analyses"))
+import latency_table as compute_table
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

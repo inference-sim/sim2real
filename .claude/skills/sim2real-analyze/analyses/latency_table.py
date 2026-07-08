@@ -2,7 +2,7 @@
 """Compute per-workload comparison table from sim2real trace CSVs.
 
 Invocation:
-    python .claude/skills/sim2real-analyze/scripts/compute_table.py --run <name>
+    python .claude/skills/sim2real-analyze/analyses/latency_table.py --run <name>
     # --run defaults to current_run from workspace/setup_config.json if omitted
 """
 import argparse
@@ -12,7 +12,7 @@ import statistics
 import sys
 from pathlib import Path
 
-# Repo root: script is at {repo}/.claude/skills/sim2real-analyze/scripts/compute_table.py
+# Repo root: script is at {repo}/.claude/skills/sim2real-analyze/analyses/latency_table.py
 REPO_ROOT = Path(__file__).resolve().parents[4]
 WORKSPACE_DIR = REPO_ROOT / "workspace"
 

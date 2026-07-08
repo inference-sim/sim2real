@@ -1,9 +1,9 @@
 ---
 name: sim2real-analyze
 description: |
-  Analyze sim2real pipeline run results. Shows per-workload latency comparison tables
-  (TTFT/TPOT/E2E baseline vs treatment) and handles any user analysis request: charts,
-  distributions, HTML reports, cross-run comparisons.
+  Analyze sim2real pipeline run results. Offers a catalog of standard analyses
+  (per-workload latency comparison, per-request scatter) plus a free-form loop
+  for custom charts, distributions, HTML reports, and cross-run comparisons.
 argument-hint: "[--run NAME]"
 user-invocable: true
 allowed-tools:
@@ -58,8 +58,10 @@ If the user describes a specific analysis → skip to Step 4 with that request.
 
 ## Step 3 — Compute and print comparison table
 
+Run the default catalog entry (`latency-table`):
+
 ```bash
-python .claude/skills/sim2real-analyze/scripts/compute_table.py --run <name>
+python .claude/skills/sim2real-analyze/analyses/latency_table.py --run <name>
 ```
 
 Print the full output to the user. If the script exits with code 1, surface the error and stop.
@@ -73,56 +75,88 @@ Then go to Step 4.
 
 ## Step 4 — Interactive analysis loop
 
-Ask:
+Enumerate the catalog of standard analyses:
+
+```bash
+python .claude/skills/sim2real-analyze/scripts/list_analyses.py
 ```
-What would you like to analyze next? (or 'done' to exit)
+
+Parse the resulting JSON. Each entry has `name`, `title`, `when-to-use`,
+`inputs`, `output`, `runner`, `path`, and (for `runner: script`) `script`.
+
+Present the catalog as a numbered menu, excluding the `latency-table` entry
+(already run in Step 3):
+
+```
+Analyses available for run '<name>':
+  1. <title> — <when-to-use>
+  2. <title> — <when-to-use>
+  ...
+
+Choose a number, an analysis name, describe what you'd like, or 'done' to exit.
 ```
 
 For each user request:
 
-1. Before the first user analysis request, check if pandas and matplotlib are importable:
-   ```bash
-   python -c "import pandas, matplotlib" 2>/dev/null
-   ```
-   If exit code ≠ 0, print once:
-   ```
-   Some analysis features require pandas and matplotlib. Install with:
-     pip install pandas matplotlib seaborn
-   ```
-   and fall back to stdlib-only analysis (tables and statistics, no charts). Do not attempt to write chart scripts for requests that require matplotlib.
+1. **Numbered / named catalog entry.** Look up the matching entry and invoke it by `runner`:
+   - `runner: script` — invoke:
+     ```bash
+     python .claude/skills/sim2real-analyze/analyses/<script> --run <name>
+     ```
+     Print the output. Ask the user for any additional parameters the script requires.
+   - `runner: prompt` — read the entry's file at `path` and follow the prompt block in its body as instructions. The prompt itself specifies required parameters, defaults, and the output path convention.
 
-2. Create `workspace/runs/<name>/results_charts/` if it doesn't exist:
-   ```bash
-   mkdir -p workspace/runs/<name>/results_charts/
-   ```
-   If this fails, tell the user and continue the loop.
+2. **Free-text.** Match the user's phrasing against each entry's `when-to-use`.
+   - Exactly one strong match → confirm briefly ("Sounds like `<name>` — run it?") and invoke.
+   - Multiple plausible matches → list the candidates and ask.
+   - No match → fall back to the one-off-script flow (step 3 below).
 
-3. Write a self-contained Python script to a temp file. Generate the filename with:
-   ```python
-   import os; name = f"/tmp/sim2real_analyze_{os.urandom(4).hex()}.py"
-   ```
-   The script must:
-   - Import pandas, matplotlib, seaborn as needed
-   - Load CSVs from `workspace/runs/<name>/results/baseline/{workload}/trace_data.csv` and `results/treatment/`
-   - All timestamps are in **microseconds** — divide by 1000 for milliseconds
-   - Filter to `status == "ok"` rows before computing any metrics
-   - Save charts to `workspace/runs/<name>/results_charts/<descriptive-name>.png` or `.html`
-   - Print any tabular results to stdout
+3. **One-off-script fallback.** For requests with no catalog match:
 
-4. Execute the script:
-   ```bash
-   python /tmp/sim2real_analyze_<hex>.py
-   ```
+   a. Before the first fallback in this session, check pandas and matplotlib are importable:
+      ```bash
+      python -c "import pandas, matplotlib" 2>/dev/null
+      ```
+      If exit code ≠ 0, print once:
+      ```
+      Some analyses require pandas and matplotlib. Install with:
+        pip install pandas matplotlib seaborn
+      ```
+      and fall back to stdlib-only analysis (tables and statistics, no charts).
 
-5. Delete the temp file after execution:
-   ```bash
-   rm /tmp/sim2real_analyze_<hex>.py
-   ```
+   b. Ensure the charts directory exists:
+      ```bash
+      mkdir -p workspace/runs/<name>/results_charts/
+      ```
 
-6. Report results:
-   - For PNG outputs: `Saved: workspace/runs/<name>/results_charts/<name>.png`
-   - For HTML outputs: report path and open it: `open workspace/runs/<name>/results_charts/<name>.html`
-   - For stdout tables: print them directly
+   c. Write a self-contained Python script to a temp file:
+      ```python
+      import os; name = f"/tmp/sim2real_analyze_{os.urandom(4).hex()}.py"
+      ```
+      The script must:
+      - Import pandas, matplotlib, seaborn as needed
+      - Load CSVs from `workspace/runs/<name>/results/baseline/{workload}/trace_data.csv` and `results/treatment/`
+      - All timestamps are in **microseconds** — divide by 1000 for milliseconds
+      - Filter to `status == "ok"` rows before computing any metrics
+      - Save charts to `workspace/runs/<name>/results_charts/<descriptive-name>.png` or `.html`
+      - Print any tabular results to stdout
+
+   d. Execute the script:
+      ```bash
+      python /tmp/sim2real_analyze_<hex>.py
+      ```
+
+   e. Delete the temp file:
+      ```bash
+      rm /tmp/sim2real_analyze_<hex>.py
+      ```
+
+   f. Report results:
+      - PNG outputs: `Saved: workspace/runs/<name>/results_charts/<name>.png`
+      - HTML outputs: report the path and open it: `open workspace/runs/<name>/results_charts/<name>.html`
+      - Stdout tables: print them directly
+
+   Recurring one-off analyses are candidates for the standard catalog — note them for follow-up ("this pattern would be worth adding to `analyses/` as a `runner: prompt` entry").
 
 **Session memory:** Remember what has been generated so far. "Show me that last chart again" → re-run or re-open the chart at its saved path.
 
@@ -149,9 +183,40 @@ workspace/runs/<name>/
       workload_<name>/
         trace_data.csv
         trace_header.yaml
-  deploy_comparison_table.txt  # written by compute_table.py
+  deploy_comparison_table.txt  # written by analyses/latency_table.py
   results_charts/              # your analysis outputs go here
 ```
+
+## Standard analyses catalog
+
+The skill ships a curated catalog under `analyses/`, discovered at runtime
+via `scripts/list_analyses.py`. Each entry is a `.md` file with YAML
+front-matter:
+
+```yaml
+---
+name: <slug>
+title: <human title>
+when-to-use: <one-line trigger>
+inputs: run
+output: html | png | table
+runner: script | prompt
+script: <filename>   # required when runner == script
+---
+```
+
+The skill enumerates the catalog on entry to the interactive loop and
+offers each entry as a menu choice. Free-text is matched against each
+entry's `when-to-use`; on a strong match the skill invokes the entry, on
+no match it falls back to the one-off-script flow.
+
+To add a standard analysis:
+
+- Create a new `.md` file under `analyses/` with valid front-matter.
+- For `runner: script`, add the co-located script alongside — the skill
+  invokes `python .claude/skills/sim2real-analyze/analyses/<script> --run <name>`.
+- For `runner: prompt`, put the prompt in the `.md` body — the skill
+  follows the prompt block verbatim when the entry is selected.
 
 All timestamps are **microseconds**. Metrics:
 - TTFT = (first_chunk_time_us - send_time_us) / 1000 ms
