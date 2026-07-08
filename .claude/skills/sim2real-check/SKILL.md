@@ -154,9 +154,11 @@ fi
 Regardless of which mode-dispatch branch ran, the checks below need four additional variables — `SIM` (the simulation bundle), `BLIS` (the simulator codebase), `GAIE` (the gateway-api-inference-extension codebase), and `LLMD` (the llm-d-router codebase). The mode-dispatch block does not populate them. Run this detection *after* the mode dispatch completes, in every mode, using the same predicates as the pre-refactor skill:
 
 - **Sim bundle** (`SIM`): if `--sim` was passed, use it verbatim. Otherwise scan `$EXPERIMENT_ROOT/experiments/*/` for directories containing `README.md` + `algorithm/` + `workloads/`. First match wins. Common patterns: `sim2real_bundle*`, `sim2real_*bundle*`. Leave unset if no candidate is found.
-- **BLIS codebase** (`BLIS`): first try `$SIM2REAL_ROOT/inference-sim` — the framework repo's own BLIS submodule (`.gitmodules`) — if `$SIM2REAL_ROOT` is set and that directory contains `sim/` + `go.mod`. Fall back to the current working directory if it contains `sim/` + `go.mod`, otherwise search `../` and `tmp/` for a directory with the same shape.
-- **GAIE codebase** (`GAIE`): look for `gateway-api-inference-extension` under `tmp/`, `../`, or nearby. If not found and `LLMD` (below) resolves to an `llm-d-router` checkout, set `GAIE` to that same path — `gateway-api-inference-extension` has been merged into `llm-d-router`, so the router codebase serves both roles.
+- **BLIS codebase** (`BLIS`): first derive `$SIM2REAL_ROOT` inline via the same discovery Step 0.5 uses (`python -c 'from pipeline.lib import layout; import pathlib; print(pathlib.Path(layout.__file__).resolve().parents[2])'`); then try `$SIM2REAL_ROOT/inference-sim` — the framework repo's own BLIS submodule (`.gitmodules`) — if that directory contains `sim/` + `go.mod`. Fall back to the current working directory if it contains `sim/` + `go.mod`, otherwise search `../` and `tmp/` for a directory with the same shape.
+- **GAIE codebase** (`GAIE`): look for `gateway-api-inference-extension` under `tmp/`, `../`, or nearby.
 - **llm-d router** (`LLMD`): look for `llm-d-router` under `tmp/`, `../`, or nearby. (Legacy `llm-d-inference-scheduler` checkouts are no longer detected — that project has been sunset in favor of `llm-d-router`.)
+
+After all four variables have been resolved, apply this GAIE alias: **if `GAIE` is unset and `LLMD` points at an `llm-d-router` checkout, set `GAIE=$LLMD`**. `gateway-api-inference-extension` has been merged into `llm-d-router`, so the router codebase serves both roles when no standalone `gateway-api-inference-extension` checkout is on disk.
 
 **Required vs. optional at check time:**
 
