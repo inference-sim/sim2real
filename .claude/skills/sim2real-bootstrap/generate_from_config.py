@@ -77,6 +77,40 @@ VLLM_SECTION_KEYWORDS = [
 # Fields whose presence in a table signals it's the vLLM config table
 VLLM_INDICATOR_FIELDS = {"model", "max_num_seqs", "hardware", "replicas", "gpu_memory_utilization"}
 
+# ---------------------------------------------------------------------------
+# blis observe → blis_observe:  (issue #403)
+# ---------------------------------------------------------------------------
+
+OBSERVE_TUNING_FLAGS = {
+    "--max-concurrency": "maxConcurrency",
+    "--timeout": "timeout",
+    "--warmup-requests": "warmupRequests",
+    "--prewarm-duration": "prewarmDuration",
+}
+
+# Hardcoded by tekton/tasks/run-workload-blis-observe-binary.yaml — the block
+# in config.md typically lists them for readability but the Tekton task
+# supplies them at runtime, so they must NOT leak into extraArgs.
+OBSERVE_PIPELINE_INJECTED_FLAGS = {
+    "--server-url",
+    "--model",
+    "--workload-spec",
+    "--trace-header",
+    "--trace-data",
+    "--saturation-report",
+    "--post-hoc-detector",
+}
+
+# Match pipeline/pipeline.yaml:36-50. Update in lockstep if those defaults
+# ever change.
+OBSERVE_DEFAULTS = {
+    "maxConcurrency": "10000",
+    "timeout": "1800",
+    "warmupRequests": "50",
+    "prewarmDuration": "60s",
+    "extraArgs": "",
+}
+
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -586,6 +620,118 @@ def write_provenance_yaml(
 
 
 # ---------------------------------------------------------------------------
+# blis observe parsing and rendering (issue #403)
+# ---------------------------------------------------------------------------
+
+def parse_observe_block(config_md_text: str) -> dict[str, str]:
+    """Extract flags from the `blis observe \\ ... \\` command in config.md.
+
+    Returns a dict keyed by transfer.yaml key. Keys are present only when the
+    block contained the corresponding flag. `extraArgs` collects any unknown
+    non-injected flags (whitespace-joined, source order). Absent block → {}.
+    """
+    # Locate the first line that starts a `blis observe` invocation. We accept
+    # optional leading whitespace so the block can live inside a code fence.
+    lines = config_md_text.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*blis\s+observe\b", line):
+            start = i
+            break
+    if start is None:
+        return {}
+
+    # Collect the invocation line plus continuation lines. A continuation is
+    # any line whose predecessor's stripped form ends with '\'. Stop at the
+    # first line without a trailing continuation.
+    collected = [lines[start]]
+    idx = start
+    while collected[-1].rstrip().endswith("\\"):
+        idx += 1
+        if idx >= len(lines):
+            break
+        collected.append(lines[idx])
+
+    # Flatten to a single string, strip trailing backslashes and code-fence
+    # boundaries, then tokenize on whitespace.
+    joined = " ".join(ln.rstrip("\\").strip() for ln in collected)
+    # Drop leading "blis observe" tokens.
+    tokens = joined.split()
+    # Skip until we see the first token starting with '--'.
+    flag_tokens = []
+    seen_flag = False
+    for tok in tokens:
+        if tok.startswith("--"):
+            seen_flag = True
+        if seen_flag:
+            flag_tokens.append(tok)
+
+    parsed: dict[str, str] = {}
+    extra_pieces: list[str] = []
+    i = 0
+    while i < len(flag_tokens):
+        tok = flag_tokens[i]
+        if not tok.startswith("--"):
+            # Stray value with no preceding flag — skip.
+            i += 1
+            continue
+        # Peek at next token; it's a value if it exists and is not a flag.
+        has_value = i + 1 < len(flag_tokens) and not flag_tokens[i + 1].startswith("--")
+        value = flag_tokens[i + 1] if has_value else None
+
+        if tok in OBSERVE_TUNING_FLAGS:
+            if value is not None:
+                parsed[OBSERVE_TUNING_FLAGS[tok]] = value
+                i += 2
+            else:
+                # Tuning flag with no value is malformed; skip.
+                i += 1
+        elif tok in OBSERVE_PIPELINE_INJECTED_FLAGS:
+            # Drop entirely — the Tekton task supplies these.
+            i += 2 if has_value else 1
+        else:
+            # Unknown → extraArgs.
+            if has_value:
+                extra_pieces.extend([tok, value])
+                i += 2
+            else:
+                extra_pieces.append(tok)
+                i += 1
+
+    if extra_pieces:
+        parsed["extraArgs"] = " ".join(extra_pieces)
+    return parsed
+
+
+def render_blis_observe_yaml(parsed: dict[str, str]) -> str:
+    """Render a `blis_observe:` YAML block with provenance comments.
+
+    Emits all 5 keys in canonical order. Keys present in `parsed` are marked
+    `# source: config.md`; keys absent are defaulted from OBSERVE_DEFAULTS
+    and marked `# source: sim2real-bootstrap default`. Numeric-string values
+    (all-digit) emit as bare YAML integers; other values emit as double-
+    quoted YAML strings so a bare `60s` round-trips cleanly.
+    """
+    lines = ["blis_observe:"]
+    for key, default in OBSERVE_DEFAULTS.items():
+        if key in parsed:
+            value = parsed[key]
+            source = "config.md"
+        else:
+            value = default
+            source = "sim2real-bootstrap default"
+        # Emit as bare int when the value is purely digits (no leading zero
+        # edge case: '0' is fine as int, '007' would still parse fine).
+        if value.isdigit():
+            rendered = value
+        else:
+            # Escape embedded double quotes.
+            rendered = '"' + value.replace('"', '\\"') + '"'
+        lines.append(f"  {key}: {rendered}  # source: {source}")
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -605,7 +751,28 @@ def main():
     parser.add_argument(
         "--dry-run", action="store_true", help="Print YAML to stdout, don't write file"
     )
+    parser.add_argument(
+        "--emit-observe-yaml",
+        action="store_true",
+        help=(
+            "Emit only a `blis_observe:` YAML fragment (parsed from the "
+            "`blis observe \\ ... \\` block in config.md) to stdout, then "
+            "exit 0. Skips scenario YAML generation. If config.md is "
+            "missing, emits an all-defaults fragment."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.emit_observe_yaml:
+        config_path = args.config
+        if os.path.isfile(config_path):
+            with open(config_path) as f:
+                text = f.read()
+            parsed = parse_observe_block(text)
+        else:
+            parsed = {}
+        sys.stdout.write(render_blis_observe_yaml(parsed))
+        return
 
     config_path = args.config
     if not os.path.isfile(config_path):
