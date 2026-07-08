@@ -848,12 +848,27 @@ def assemble_run(
                         shutil.rmtree(run_dir)
                     else:
                         if replicas == prior_replicas:
-                            # True no-op: reset side-band attrs and return.
-                            assemble_run.skipped_algorithms = []  # type: ignore[attr-defined]
-                            assemble_run.missing_submodules = []  # type: ignore[attr-defined]
-                            return
-                        # replicas > prior_replicas: additive grow.
-                        additive_grow_from = prior_replicas
+                            if force:
+                                # --force overrides the true-no-op path so
+                                # operators can rebuild when the assembler
+                                # code has changed even though inputs did not.
+                                shutil.rmtree(run_dir)
+                            else:
+                                # True no-op: reset side-band attrs and return.
+                                assemble_run.skipped_algorithms = []  # type: ignore[attr-defined]
+                                assemble_run.missing_submodules = []  # type: ignore[attr-defined]
+                                return
+                        elif force:
+                            # replicas > prior_replicas with --force: full
+                            # rebuild rather than additive-grow. --force is
+                            # the "nuke and start over" escape hatch and
+                            # applies uniformly to every branch inside the
+                            # existing-run decision tree except shrink,
+                            # which is guarded above.
+                            shutil.rmtree(run_dir)
+                        else:
+                            # replicas > prior_replicas: additive grow.
+                            additive_grow_from = prior_replicas
 
     if additive_grow_from is not None:
         _additive_grow(

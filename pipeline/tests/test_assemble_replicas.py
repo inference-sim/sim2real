@@ -119,6 +119,60 @@ class TestAssembleReplicas:
         mtimes_after = _mtimes([p for p in all_paths if p.is_file()])
         assert mtimes_before == mtimes_after
 
+    def test_reassemble_at_same_replica_count_with_force_rebuilds(self, tmp_path):
+        """Issue #532: --force must rebuild even when the manifest hash and
+        --replicas match the prior assemble. Counterpart to
+        test_reassemble_at_same_replica_count_is_noop — same setup, +force,
+        opposite mtime expectation."""
+        fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
+                              algo_names_manifest=["sr"])
+        _assemble(fx, replicas=3, now_iso="2026-07-01T00:00:00Z")
+        run_dir = _run_dir_of(fx)
+        # Seed a sentinel to prove rmtree happened (bytes are byte-identical
+        # across the two calls when inputs match, so mtime is the only other
+        # signal we can rely on).
+        (run_dir / "sentinel").write_text("leftover")
+        time.sleep(0.01)
+        _assemble(fx, replicas=3, force=True,
+                  now_iso="2026-07-02T00:00:00Z")
+        assert not (run_dir / "sentinel").exists()
+        # Cluster/pipelinerun files present after rebuild.
+        names = _pipelinerun_files(_cluster_dir_of(fx))
+        assert "pipelinerun-wl-a|baseline|i3.yaml" in names
+        assert "pipelinerun-wl-a|sr|i3.yaml" in names
+        # manifest.assembly.yaml still records replicas=3.
+        ma = yaml.safe_load(
+            (run_dir / "manifest.assembly.yaml").read_text()
+        )
+        assert ma["replicas"] == 3
+
+    def test_grow_with_force_rebuilds_instead_of_additive_grow(self, tmp_path):
+        """Issue #532: --force with replicas > prior_replicas should do a
+        full rebuild, NOT additive-grow. Counterpart to
+        test_grow_from_3_to_5_preserves_i1_i3_and_adds_i4_i5 — same setup,
+        +force, opposite expectation for the pre-existing iterations."""
+        fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
+                              algo_names_manifest=["sr"])
+        _assemble(fx, replicas=3, now_iso="2026-07-01T00:00:00Z")
+        run_dir = _run_dir_of(fx)
+        # Seed a sentinel to prove full rebuild (rmtree) rather than
+        # additive-grow (which would leave the sentinel in place).
+        (run_dir / "sentinel").write_text("leftover")
+        time.sleep(0.01)
+        _assemble(fx, replicas=5, force=True,
+                  now_iso="2026-07-02T00:00:00Z")
+        assert not (run_dir / "sentinel").exists()
+        # All five iterations present.
+        names = _pipelinerun_files(_cluster_dir_of(fx))
+        for i in (1, 2, 3, 4, 5):
+            assert f"pipelinerun-wl-a|baseline|i{i}.yaml" in names
+            assert f"pipelinerun-wl-a|sr|i{i}.yaml" in names
+        # manifest.assembly.yaml records new replicas.
+        ma = yaml.safe_load(
+            (run_dir / "manifest.assembly.yaml").read_text()
+        )
+        assert ma["replicas"] == 5
+
     def test_legacy_run_with_replicas_gt_1_refuses(self, tmp_path):
         """Existing run with no `replicas` field in manifest.assembly.yaml."""
         fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
