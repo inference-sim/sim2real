@@ -325,11 +325,13 @@ Then each treatment scenario has `router.epp.image` set from that algorithm's ow
 
 **Replicas.** `--replicas N` (default 1) is the number of iterations per (workload, package) pair. Each iteration gets its own PipelineRun (`{phase}-{workload}-{run}-iN`, with `_` → `-` normalization) and its own results subdirectory (`results/<phase>/<workload>/iN/`). `manifest.assembly.yaml` carries a top-level `replicas: N`, and `run_metadata.json` carries the same value as a schema field. Both are set on every assemble.
 
-**Additive-merge (grow-only).** Re-assembling an existing run with `--replicas` interacts with the prior state as follows:
+**Additive-merge (grow-only).** Re-assembling an existing run with `--replicas` interacts with the prior state as follows (without `--force`):
 
 - `N == prior_replicas` — true no-op. No files rewritten; the assemble returns silently.
 - `N > prior_replicas` — additive grow. Existing PipelineRun files (`i1..i{prior}`) are preserved byte-for-byte and by mtime; new files are emitted for `i{prior+1}..iN`. `manifest.assembly.yaml` and `run_metadata.json` are rewritten with the new `replicas` count; `params_hash` is preserved (drift check passed).
-- `N < prior_replicas` — refused with `run '<name>' already has <prior> replicas; refusing to shrink to <N>. Replica shrink is tracked in #506.` This guard runs BEFORE the drift check, so `--force` does NOT bypass it.
+- `N < prior_replicas` — refused with `run '<name>' already has <prior> replicas; refusing to shrink to <N>. Replica shrink is tracked in #506.` This guard runs BEFORE every other check, so `--force` does NOT bypass it.
+
+**`--force` behavior.** With `--force`, the run directory is rebuilt from scratch (`shutil.rmtree` followed by a fresh assemble) in every branch of the decision tree above except shrink. Specifically, `--force` bypasses the no-op path (`N == prior_replicas`) AND the additive-grow path (`N > prior_replicas`) — both do a full rebuild. Use `--force` when the assembler code itself has changed and the on-disk yamls need to be regenerated even though `transfer.yaml` and `--replicas` are unchanged. Shrink is still refused (tracked in #506).
 
 Two invariants shape the grow-only path:
 
