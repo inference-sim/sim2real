@@ -203,3 +203,88 @@ def test_render_key_order_is_canonical():
         "maxConcurrency", "timeout", "warmupRequests",
         "prewarmDuration", "extraArgs",
     ]
+
+
+# ---------------------------------------------------------------------------
+# --emit-observe-yaml CLI mode
+# ---------------------------------------------------------------------------
+
+import subprocess
+
+SCRIPT = str(Path(__file__).parents[1] / "generate_from_config.py")
+
+
+def _run_emit_observe(tmp_path, config_text: str | None):
+    """Invoke `generate_from_config.py --emit-observe-yaml` and return (stdout, stderr, rc).
+
+    If config_text is None, do not create the file (test config-absent case).
+    Otherwise, write it to tmp_path/config.md and pass that path.
+    """
+    if config_text is None:
+        config_path = tmp_path / "nonexistent.md"
+    else:
+        config_path = tmp_path / "config.md"
+        config_path.write_text(config_text)
+    result = subprocess.run(
+        ["python3", SCRIPT, str(config_path), "--emit-observe-yaml"],
+        capture_output=True, text=True,
+    )
+    return result.stdout, result.stderr, result.returncode
+
+
+def test_cli_emit_observe_full_block(tmp_path):
+    stdout, stderr, rc = _run_emit_observe(tmp_path, SAMPLE_FULL_BLOCK)
+    assert rc == 0, stderr
+    loaded = yaml.safe_load(stdout)
+    assert loaded == {
+        "blis_observe": {
+            "maxConcurrency": 10000,
+            "timeout": 1800,
+            "warmupRequests": 50,
+            "prewarmDuration": "60s",
+            "extraArgs": "",
+        }
+    }
+    # 4 keys from config.md, extraArgs defaulted.
+    assert stdout.count("# source: config.md") == 4
+    assert stdout.count("# source: sim2real-bootstrap default") == 1
+
+
+def test_cli_emit_observe_partial_block(tmp_path):
+    text = """\
+```bash
+blis observe \\
+  --max-concurrency 500 \\
+  --timeout 60
+```
+"""
+    stdout, stderr, rc = _run_emit_observe(tmp_path, text)
+    assert rc == 0, stderr
+    loaded = yaml.safe_load(stdout)
+    assert loaded["blis_observe"]["maxConcurrency"] == 500
+    assert loaded["blis_observe"]["timeout"] == 60
+    # warmupRequests + prewarmDuration + extraArgs defaulted.
+    assert stdout.count("# source: config.md") == 2
+    assert stdout.count("# source: sim2real-bootstrap default") == 3
+
+
+def test_cli_emit_observe_no_block_all_defaults(tmp_path):
+    stdout, stderr, rc = _run_emit_observe(tmp_path, "# Nothing here\n")
+    assert rc == 0, stderr
+    loaded = yaml.safe_load(stdout)
+    assert loaded == {"blis_observe": {
+        "maxConcurrency": 10000, "timeout": 1800, "warmupRequests": 50,
+        "prewarmDuration": "60s", "extraArgs": "",
+    }}
+    assert stdout.count("# source: sim2real-bootstrap default") == 5
+
+
+def test_cli_emit_observe_absent_config_all_defaults(tmp_path):
+    """Per issue #403 acceptance criteria: config.md absent → all defaults, exit 0."""
+    stdout, stderr, rc = _run_emit_observe(tmp_path, None)
+    assert rc == 0, stderr
+    loaded = yaml.safe_load(stdout)
+    assert loaded == {"blis_observe": {
+        "maxConcurrency": 10000, "timeout": 1800, "warmupRequests": 50,
+        "prewarmDuration": "60s", "extraArgs": "",
+    }}

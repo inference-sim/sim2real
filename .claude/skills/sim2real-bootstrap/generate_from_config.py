@@ -751,7 +751,28 @@ def main():
     parser.add_argument(
         "--dry-run", action="store_true", help="Print YAML to stdout, don't write file"
     )
+    parser.add_argument(
+        "--emit-observe-yaml",
+        action="store_true",
+        help=(
+            "Emit only a `blis_observe:` YAML fragment (parsed from the "
+            "`blis observe \\ ... \\` block in config.md) to stdout, then "
+            "exit 0. Skips scenario YAML generation. If config.md is "
+            "missing, emits an all-defaults fragment."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.emit_observe_yaml:
+        config_path = args.config
+        if os.path.isfile(config_path):
+            with open(config_path) as f:
+                text = f.read()
+            parsed = parse_observe_block(text)
+        else:
+            parsed = {}
+        sys.stdout.write(render_blis_observe_yaml(parsed))
+        return
 
     config_path = args.config
     if not os.path.isfile(config_path):
