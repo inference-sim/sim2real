@@ -1247,6 +1247,13 @@ def _cmd_build(args) -> int:
             return 2
         generated_dir = tdir / "generated"
 
+        print(
+            f"[sim2real build] applying overlay for {algo_name}: "
+            f"files_created={len(algo_output.get('files_created', []))} "
+            f"files_modified={len(algo_output.get('files_modified', []))} "
+            f"source_dir={source_dir}",
+            flush=True,
+        )
         try:
             restore_baseline(source_dir, algo_output)
             restore_treatment(
@@ -1308,6 +1315,10 @@ def _cmd_build(args) -> int:
             # outcome. Any per-algo files the overlay copied are removed and
             # modified files are reverted, so subsequent iterations start
             # from a clean tree.
+            print(
+                f"[sim2real build] restoring baseline after {algo_name} build",
+                flush=True,
+            )
             try:
                 restore_baseline(source_dir, algo_output)
             except (subprocess.CalledProcessError, OSError) as exc:
