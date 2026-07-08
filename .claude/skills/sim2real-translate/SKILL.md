@@ -1,13 +1,15 @@
 ---
 name: sim2real-translate
 description: |
-  Translates a simulation-discovered algorithm into a production plugin for
-  llm-d-inference-scheduler. Reads skill_input.json (written by prepare.py),
-  spawns a three-agent team (expert + writer + reviewer) where the expert does
-  deep repo exploration in parallel with writer/reviewer initialization, then
-  the writer owns the translate loop, build/test gate, and review rounds.
-  Use after prepare.py reaches the translation checkpoint.
-argument-hint: "[--experiment-root PATH] [--rounds N] [--rebuild-context]"
+  Translates simulation-discovered algorithms into production Go plugins for the
+  target component (e.g. llm-d-inference-scheduler). Reads
+  workspace/translations/<hash>/skill_input.json (written by `sim2real translate`),
+  spawns a three-agent team (expert + writer + reviewer) per algorithm, and
+  writes plugin source + treatment overlay to
+  workspace/translations/<hash>/generated/<algo>/{cmd,pkg,<algo>_config.yaml,<algo>_output.json}.
+  Use after `sim2real translate` reaches the translation checkpoint; follow up
+  with `sim2real translate --resume` to validate outputs.
+argument-hint: "[--experiment-root PATH] [--rounds N]"
 user-invocable: true
 allowed-tools:
   - Agent
@@ -18,6 +20,7 @@ allowed-tools:
   - TaskUpdate
   - TaskList
   - Bash(python3 *)
+  - Bash(.venv/bin/python *)
   - Bash(cd * && *)
   - Bash(test *)
   - Bash(git *)
@@ -30,373 +33,326 @@ allowed-tools:
 
 # sim2real-translate
 
-Translate a simulation algorithm into a production plugin using a two-agent
-team: a writer that owns the build/test gate and round loop, and a reviewer
-that is exceptionally critical and includes assembly simulation checks.
+Translate simulation algorithms into production plugins using a three-agent
+team per algorithm: an expert that explores the target repo up front and
+answers technical queries, a writer that owns the build/test gate and round
+loop, and a reviewer that is exceptionally critical and includes
+assembly-simulation checks. Runs one algorithm at a time; iterates over every
+algorithm that `skill_input.json:algorithms[]` declares but has no
+`<algo>_output.json` yet.
 
 ## CRITICAL: Working Directory
 
-Run from the **experiment repo root** (where `transfer.yaml`, `algorithm/`, and
-`llm-d-inference-scheduler/` live) OR from any directory with `--experiment-root PATH`.
-The `sim2real/` pipeline root is discovered automatically from `setup_config.json`.
+Run from the **experiment repo root** (where `transfer.yaml`, `algorithms/`,
+and the target component checkout live) OR pass `--experiment-root PATH`. The
+`sim2real/` pipeline root is discovered automatically from
+`workspace/setup_config.json` (falls back to the `SIM2REAL_ROOT` env var).
 
 Target repo commands run via subshell: `(cd $TARGET_REPO && ...)`
 
-Before each major step, verify the experiment root has the expected layout:
+Before proceeding, verify the experiment root has the expected layout:
 ```bash
-test -f "$EXPERIMENT_ROOT/workspace/setup_config.json" || { echo "ERROR: no setup_config.json in $EXPERIMENT_ROOT/workspace/"; exit 1; }
+test -f "$EXPERIMENT_ROOT/transfer.yaml" || { echo "ERROR: no transfer.yaml in $EXPERIMENT_ROOT"; exit 1; }
 ```
 
 ## Arguments
 
-- `--experiment-root PATH` — Path to experiment repo (default: current working directory)
-- `--rounds N` — Max review rounds (default: 3)
-- `--rebuild-context` — Force context reassembly even if cache exists
+- `--experiment-root PATH` — Path to experiment repo (default: current working directory).
+- `--rounds N` — Max review rounds per algorithm (default: 3).
 
 Initialize shell variables from skill invocation arguments:
 
 ```bash
-EXPERIMENT_ROOT=$(pwd)  # overridden by --experiment-root PATH
-REVIEW_ROUNDS=3         # override with --rounds N
-REBUILD_CONTEXT=false   # set true with --rebuild-context
+EXPERIMENT_ROOT=$(pwd)    # overridden by --experiment-root PATH
+REVIEW_ROUNDS=3           # overridden by --rounds N
 ```
 
 If `--experiment-root PATH` was passed, set `EXPERIMENT_ROOT=$(realpath PATH)`.
-If `--rounds N` was passed, set `REVIEW_ROUNDS=N`. If `--rebuild-context` was
-passed, set `REBUILD_CONTEXT=true`.
+If `--rounds N` was passed, set `REVIEW_ROUNDS=N`.
 
 ## Prerequisites
 
-Use TaskCreate to create an overall progress task:
+Create an overall progress task:
 ```
-TaskCreate subject="sim2real-translate: $RUN_NAME" description="Running translation skill"
+TaskCreate subject="sim2real-translate" description="Running translation skill against workspace/translations/<hash>/"
 ```
 
-Load `setup_config.json` and derive `REPO_ROOT` and `RUN_DIR`:
+Locate `REPO_ROOT` (the sim2real repo root — this file's ancestor). Prefer
+`workspace/setup_config.json:sim2real_root` if present; fall back to
+`SIM2REAL_ROOT`:
 
 ```bash
-python3 -c "
-import json, sys, os
+REPO_ROOT=$(python3 - <<'PY'
+import json, os
 from pathlib import Path
-
-exp = os.environ.get('EXPERIMENT_ROOT', os.getcwd())
-ws = Path(exp) / 'workspace'
-
-# --- current_run: setup_config.json or latest run with skill_input.json ---
-config_path = ws / 'setup_config.json'
-run_name = ''
-repo_root = ''
-if config_path.exists():
-    cfg = json.loads(config_path.read_text())
-    run_name = cfg.get('current_run', '')
-    repo_root = cfg.get('sim2real_root', '')
-
-if not run_name:
-    runs_dir = ws / 'runs'
-    if runs_dir.exists():
-        candidates = sorted(
-            [d for d in runs_dir.iterdir()
-             if d.is_dir() and (d / 'skill_input.json').exists()],
-            key=lambda d: d.stat().st_mtime, reverse=True
-        )
-        if candidates:
-            run_name = candidates[0].name
-
-if not run_name:
-    print('HALT: No run with skill_input.json found in workspace/runs/. Run pipeline/prepare.py first.', file=sys.stderr)
-    sys.exit(1)
-
-run_dir = ws / 'runs' / run_name
-if not (run_dir / 'skill_input.json').exists():
-    print(f'HALT: {run_dir}/skill_input.json not found. Run pipeline/prepare.py first.', file=sys.stderr)
-    sys.exit(1)
-
-# --- sim2real root: setup_config.json > SIM2REAL_ROOT env > error ---
-if not repo_root:
-    repo_root = os.environ.get('SIM2REAL_ROOT', '')
-if not repo_root or not Path(repo_root).exists():
-    print('HALT: Cannot determine sim2real repo root.', file=sys.stderr)
-    print('  Fix A: Run pipeline/setup.py first (records sim2real_root in workspace/setup_config.json)', file=sys.stderr)
-    print('  Fix B: Set SIM2REAL_ROOT env var: export SIM2REAL_ROOT=/path/to/sim2real', file=sys.stderr)
-    sys.exit(1)
-
-print(f'RUN_DIR={run_dir}')
-print(f'REPO_ROOT={repo_root}')
-" | tee /tmp/translate_prereq.txt
-test $? -eq 0 || exit 1
-
-RUN_DIR=$(grep '^RUN_DIR=' /tmp/translate_prereq.txt | cut -d= -f2-)
-REPO_ROOT=$(grep '^REPO_ROOT=' /tmp/translate_prereq.txt | cut -d= -f2-)
-test -n "$RUN_DIR" || exit 1
+exp = Path(os.environ.get("EXPERIMENT_ROOT", os.getcwd()))
+cfg = exp / "workspace" / "setup_config.json"
+root = ""
+if cfg.exists():
+    try:
+        root = json.loads(cfg.read_text()).get("sim2real_root", "")
+    except Exception:
+        root = ""
+if not root:
+    root = os.environ.get("SIM2REAL_ROOT", "")
+if not root or not Path(root).exists():
+    raise SystemExit(
+        "HALT: cannot determine sim2real repo root. "
+        "Run `pipeline/setup.py` first, or export SIM2REAL_ROOT=/path/to/sim2real."
+    )
+print(root)
+PY
+) || exit 1
 test -n "$REPO_ROOT" || exit 1
 ```
 
-Validate and load `skill_input.json`:
+Load and validate `transfer.yaml`, then compute the translation hash exactly
+the way `sim2real translate` does (same call site — the skill is not allowed
+to drift from the pinned hash):
 
 ```bash
-python3 -c "
-import json, sys
-si = json.load(open('$RUN_DIR/skill_input.json'))
-required = ['run_name', 'run_dir', 'scenario', 'context_path', 'manifest_path',
-            'algorithm_source',
-            'target', 'build_commands', 'config_kind', 'context',
-            'current_algorithm']
-missing = [f for f in required if f not in si]
+python3 - "$EXPERIMENT_ROOT" "$REPO_ROOT" <<'PY' > /tmp/sim2real_translate_prereq.txt
+import sys
+from pathlib import Path
+exp = Path(sys.argv[1])
+repo = Path(sys.argv[2])
+sys.path.insert(0, str(repo))
+from pipeline.lib import manifest as mf
+from pipeline.lib import slicer as sl
+manifest_path = exp / "transfer.yaml"
+data = mf.load_manifest(manifest_path)
+thash = sl.translation_hash_with_sources(data, exp)
+print(f"TRANSLATION_HASH={thash}")
+print(f"SCENARIO={data['scenario']}")
+component = data.get("component", {}) or {}
+print(f"TARGET_REPO_REL={component.get('path', '')}")
+print(f"CONFIG_KIND={component.get('kind', '')}")
+build = component.get("build") or {}
+import json as _json
+print("BUILD_COMMANDS_JSON=" + _json.dumps(build.get("commands", [])))
+PY
+[ $? -eq 0 ] || exit 1
+
+TRANSLATION_HASH=$(grep '^TRANSLATION_HASH=' /tmp/sim2real_translate_prereq.txt | cut -d= -f2-)
+SCENARIO=$(grep '^SCENARIO=' /tmp/sim2real_translate_prereq.txt | cut -d= -f2-)
+TARGET_REPO_REL=$(grep '^TARGET_REPO_REL=' /tmp/sim2real_translate_prereq.txt | cut -d= -f2-)
+CONFIG_KIND=$(grep '^CONFIG_KIND=' /tmp/sim2real_translate_prereq.txt | cut -d= -f2-)
+BUILD_COMMANDS=$(grep '^BUILD_COMMANDS_JSON=' /tmp/sim2real_translate_prereq.txt | cut -d= -f2-)
+TARGET_REPO="$EXPERIMENT_ROOT/$TARGET_REPO_REL"
+TRANSLATIONS_DIR="$EXPERIMENT_ROOT/workspace/translations/$TRANSLATION_HASH"
+
+test -n "$TRANSLATION_HASH" || { echo "HALT: empty TRANSLATION_HASH"; exit 1; }
+test -n "$TARGET_REPO_REL" || { echo "HALT: transfer.yaml component.repo/path missing"; exit 1; }
+test -d "$TARGET_REPO" || { echo "HALT: target repo not found at $TARGET_REPO"; exit 1; }
+test -f "$TRANSLATIONS_DIR/skill_input.json" || {
+    echo "HALT: $TRANSLATIONS_DIR/skill_input.json not found — run 'sim2real translate' first"
+    exit 1
+}
+```
+
+Load per-algorithm inputs from `skill_input.json`. Every path in the file is
+interpreted relative to `experiment_root` (for `source_path`) or
+`translations_dir` (for `output_dir`, `config_output_path`,
+`algorithms[i].baseline_overlay_path`):
+
+Path-safe emission: each `ALGO` row is TAB-delimited; each context file path is
+written to a separate line in a dedicated file (`/tmp/sim2real_translate_ctx_paths.txt`)
+so paths containing spaces are preserved unchanged. `CONTEXT_TEXT` is base64-encoded
+to survive newlines and non-printable characters in operator-supplied notes.
+
+```bash
+python3 - "$TRANSLATIONS_DIR" "$EXPERIMENT_ROOT" <<'PY' > /tmp/sim2real_translate_algos.txt
+import json, sys, base64
+from pathlib import Path
+tdir = Path(sys.argv[1])
+exp = Path(sys.argv[2])
+si = json.loads((tdir / "skill_input.json").read_text())
+required = ("version", "translation_hash", "experiment_root", "translations_dir",
+            "scenario", "algorithms", "context")
+missing = [k for k in required if k not in si]
 if missing:
-    print(f'HALT: skill_input.json missing fields: {missing}')
-    sys.exit(1)
-if 'repo' not in si['target']:
-    print('HALT: skill_input.json target.repo missing')
-    sys.exit(1)
-if not si.get('current_algorithm'):
-    print('HALT: skill_input.json current_algorithm is empty')
-    sys.exit(1)
-print(f'Loaded: run={si[\"run_name\"]} scenario={si[\"scenario\"]} algorithm={si[\"current_algorithm\"]}')
-" || exit 1
+    raise SystemExit(f"HALT: skill_input.json missing keys: {missing}")
+ctx = si.get("context") or {}
+print("CONTEXT_TEXT_B64=" + base64.b64encode(
+    (ctx.get("text") or "").encode()).decode())
+# Write context paths (one per line) to a dedicated file — paths may contain spaces.
+ctx_paths_out = Path("/tmp/sim2real_translate_ctx_paths.txt")
+paths = [str(exp / p) for p in (ctx.get("file_paths") or [])]
+ctx_paths_out.write_text("".join(p + "\n" for p in paths))
+for algo in si["algorithms"]:
+    # baseline_overlay_path is None when this algorithm's ``defaults``
+    # baseline isn't in ``skill_input.baselines`` (or the manifest has
+    # no baselines at all) — emit an empty string so the writer's
+    # Phase 2 skip-check triggers.
+    print("ALGO\t" + "\t".join([
+        algo["name"],
+        algo["source_path"],
+        algo["output_dir"],
+        algo["config_output_path"],
+        algo.get("baseline_overlay_path") or "",
+        algo.get("notes") or "",
+    ]))
+PY
+[ $? -eq 0 ] || exit 1
+
+CONTEXT_TEXT_B64_VAL=$(grep '^CONTEXT_TEXT_B64=' /tmp/sim2real_translate_algos.txt | cut -d= -f2-)
+if [ -n "$CONTEXT_TEXT_B64_VAL" ]; then
+    CONTEXT_TEXT=$(printf '%s' "$CONTEXT_TEXT_B64_VAL" | base64 -d) || {
+        echo "HALT: failed to decode CONTEXT_TEXT_B64"; exit 1;
+    }
+else
+    CONTEXT_TEXT=""
+fi
+# When the writer/reviewer/expert prompts substitute {CONTEXT_FILE_PATHS},
+# they receive the newline-delimited file contents (spaces preserved).
+CONTEXT_FILE_PATHS=$(cat /tmp/sim2real_translate_ctx_paths.txt)
 ```
 
-Load into shell variables. All paths in `skill_input.json` are relative to
-`$EXPERIMENT_ROOT`; prefix each with `$EXPERIMENT_ROOT/` to get absolute paths:
+Verify that every algorithm source and every context file exists (absolute
+paths; iterate via `< <(...)` so `exit 1` inside the loop halts the outer
+script, and read context paths line-by-line so paths containing spaces are
+preserved):
 
 ```bash
-RUN_NAME=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['run_name'])")
-SCENARIO=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['scenario'])")
-CONTEXT_PATH=$EXPERIMENT_ROOT/$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['context_path'])")
-MANIFEST_PATH=$EXPERIMENT_ROOT/$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['manifest_path'])")
-ALGO_SOURCE=$EXPERIMENT_ROOT/$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['algorithm_source'])")
-ALGO_CONFIG=$(python3 -c "import json; v=json.load(open('$RUN_DIR/skill_input.json')).get('algorithm_config'); print('$EXPERIMENT_ROOT/' + v if v else '')")
-TARGET_REPO=$EXPERIMENT_ROOT/$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['target']['repo'])")
-CONFIG_KIND=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['config_kind'])")
-CURRENT_ALGORITHM=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['current_algorithm'])")
-CONTEXT_TEXT=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json')).get('context', {}).get('text', ''))")
+while IFS=$'\t' read -r _ name source_rel _ _ _ _; do
+    test -f "$EXPERIMENT_ROOT/$source_rel" || {
+        echo "HALT: algorithm source not found: $EXPERIMENT_ROOT/$source_rel"
+        exit 1
+    }
+done < <(grep -E '^ALGO\b' /tmp/sim2real_translate_algos.txt) || exit 1
+
+while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    test -f "$p" || { echo "HALT: context file not found: $p"; exit 1; }
+done < /tmp/sim2real_translate_ctx_paths.txt || exit 1
 ```
 
-Verify source files exist:
+## Idempotency Check
+
+Skip algorithms whose `<algo>_output.json` already exists — those are done. If
+every algorithm is complete, exit with an "already complete" message:
 
 ```bash
-test -f "$ALGO_SOURCE" || { echo "HALT: algorithm source not found: $ALGO_SOURCE"; exit 1; }
-[ -z "$ALGO_CONFIG" ] || test -f "$ALGO_CONFIG" || { echo "HALT: algorithm config not found: $ALGO_CONFIG"; exit 1; }
-test -d "$TARGET_REPO" || { echo "HALT: target repo not found: $TARGET_REPO"; exit 1; }
+INCOMPLETE_ALGOS=""
+while IFS=$'\t' read -r _ name _ output_dir _ _ _; do
+    algo_out="$TRANSLATIONS_DIR/$output_dir/${name}_output.json"
+    if [ ! -f "$algo_out" ]; then
+        INCOMPLETE_ALGOS="$INCOMPLETE_ALGOS $name"
+    fi
+done < <(grep -E '^ALGO\b' /tmp/sim2real_translate_algos.txt)
+INCOMPLETE_ALGOS=$(echo "$INCOMPLETE_ALGOS" | xargs)
+
+if [ -z "$INCOMPLETE_ALGOS" ]; then
+    echo "translation $TRANSLATION_HASH already complete — run 'sim2real translate --resume' next"
+    exit 0
+fi
 ```
 
-## Resumability Check
+## Per-Algorithm Loop
 
-Load `.state.json` to detect completed phases:
+For each name in `$INCOMPLETE_ALGOS`, run one full team session. Every session
+is independent — a failure on one algorithm leaves the others available to
+retry on the next skill invocation (the on-disk `<algo>_output.json`
+completeness check ensures idempotency).
+
+For each `ALGO_NAME` in `$INCOMPLETE_ALGOS`:
+
+### Step 1: Load per-algorithm variables
 
 ```bash
-python3 -c "
-import json, os, sys
-from pathlib import Path
-state_path = Path('$RUN_DIR') / '.state.json'
-if not state_path.exists():
-    print('State: fresh run')
-    print('BASELINE_DONE=false')
-    print('TREATMENT_DONE=false')
-    sys.exit(0)
-state = json.loads(state_path.read_text())
-phases = state.get('phases', {})
-ctx = phases.get('context', {})
-bd = phases.get('baseline_derivation', {})
-td = phases.get('treatment_derivation', {})
-tr = phases.get('translate', {})
-print(f'context: {ctx.get(\"status\", \"pending\")}' + (f' (hash={ctx[\"hash\"]})' if ctx.get('hash') else ''))
-print(f'baseline_derivation: {bd.get(\"status\", \"pending\")} user_approved={bd.get(\"user_approved\", False)}')
-print(f'treatment_derivation: {td.get(\"status\", \"pending\")} user_approved={td.get(\"user_approved\", False)}')
-print(f'translate: {tr.get(\"status\", \"pending\")}')
-if tr.get('status') == 'done':
-    print(f'  files={tr.get(\"files\", [])}')
-    print(f'  review_rounds={tr.get(\"review_rounds\", 0)} consensus={tr.get(\"consensus\", \"?\")}')
-bd_done = bd.get('status') == 'done' and bd.get('user_approved', False)
-td_done = td.get('status') == 'done' and td.get('user_approved', False)
-print(f'BASELINE_DONE={\"true\" if bd_done else \"false\"}')
-print(f'TREATMENT_DONE={\"true\" if td_done else \"false\"}')
-" | tee /tmp/resume_state.txt
+# Extract this algorithm's row from /tmp/sim2real_translate_algos.txt.
+IFS=$'\t' read -r _ _ ALGO_SOURCE_REL OUTPUT_DIR_REL CONFIG_OUTPUT_REL BASELINE_OVERLAY_REL ALGO_NOTES < <(
+    awk -F$'\t' -v n="$ALGO_NAME" '$1=="ALGO" && $2==n {print}' /tmp/sim2real_translate_algos.txt
+)
+ALGO_SOURCE="$EXPERIMENT_ROOT/$ALGO_SOURCE_REL"
+OUTPUT_DIR="$TRANSLATIONS_DIR/$OUTPUT_DIR_REL"
+CONFIG_OUTPUT_PATH="$TRANSLATIONS_DIR/$CONFIG_OUTPUT_REL"
+if [ -n "$BASELINE_OVERLAY_REL" ]; then
+    BASELINE_OVERLAY_PATH="$TRANSLATIONS_DIR/$BASELINE_OVERLAY_REL"
+else
+    BASELINE_OVERLAY_PATH=""
+fi
+# The new skill_input schema has no algorithm_config field — parameters (if
+# any) live inside the source file. Pass "" so the prompts take their
+# "parameter-free" branches when reasoning about configurable weights.
+ALGO_CONFIG=""
 
-# Parse skip flags from python output
-BASELINE_DONE=$(grep '^BASELINE_DONE=' /tmp/resume_state.txt | cut -d= -f2)
-TREATMENT_DONE=$(grep '^TREATMENT_DONE=' /tmp/resume_state.txt | cut -d= -f2)
+mkdir -p "$OUTPUT_DIR"
 ```
 
-**If `translate` phase is `done` and per-algorithm output exists:**
-- Check `$RUN_DIR/generated/$CURRENT_ALGORITHM/${CURRENT_ALGORITHM}_output.json`
-- Read it and verify all `files_created` + `files_modified` exist
-  in `$RUN_DIR/generated/$CURRENT_ALGORITHM/`
-- If complete: print the summary (see Step 6) and HALT with:
-  `Translation for $CURRENT_ALGORITHM already complete. Re-run prepare.py to continue.`
-- If `generated/$CURRENT_ALGORITHM/` is missing files: jump directly to Step 6 to re-copy
+### Step 2: Spawn the team
 
-**If `context_file_populated=true` in state AND `$CONTEXT_PATH` exists AND `REBUILD_CONTEXT=false`:**
-- Skip Step 1 entirely
-
-Note: `prepare.py` marks `context_file_prepared=true, context_file_populated=false` when
-it assembles the raw context file from `context.files`. The skill's subagent enriches that
-file with production interfaces, example plugins, and the registration pattern from the
-target repo, then marks `context_file_populated=true`. Checking `context_file_populated`
-(not just `context_file_prepared`) ensures the skill always runs Step 1 on a fresh
-prepare.py run.
-
-**If snapshots or review rounds exist but `translate` is not `done`:**
-- Resume the loop: check which snapshot versions exist and which review rounds exist,
-  then start from the appropriate point
-
-## Step 1: Context Check
-
-Use TaskCreate: `"Step 1: Context Check"` → TaskUpdate in_progress
-
-Check the two context fields in state:
-
-```bash
-python3 -c "
-import json, sys
-from pathlib import Path
-state_path = Path('$RUN_DIR') / '.state.json'
-if not state_path.exists():
-    print('context_file_prepared=false context_file_populated=false')
-    sys.exit(0)
-ctx = json.loads(state_path.read_text()).get('phases', {}).get('context', {})
-print(f'context_file_prepared={str(ctx.get(\"context_file_prepared\", False)).lower()}')
-print(f'context_file_populated={str(ctx.get(\"context_file_populated\", False)).lower()}')
-"
-```
-
-**If `context_file_prepared=false`:** prepare.py hasn't assembled the raw context file
-yet. Run it now:
-
-```bash
-python3 $REPO_ROOT/pipeline/prepare.py context
-echo "Context file prepared."
-```
-
-**If `context_file_populated=false` (always true after a fresh prepare.py run):**
-enrich the existing context document with production interfaces from the target repo.
-
-The context file at `$CONTEXT_PATH` already contains content assembled by `prepare.py`
-from the manifest's `context.files` (e.g., README.md, config.md). This content includes
-deployment guidance, signal mapping, InferenceObjectives, and other scenario-specific
-details that the writer depends on. **Do not overwrite it.**
-
-Read the existing file, then **append** the following sections to it using the Edit tool
-(append at end of file). Explore `$TARGET_REPO` to gather the content for each section:
-
-1. Production interfaces for `$SCENARIO` — explore the target repo to find the relevant
-   interface definitions:
-   - routing → `Scorer` interface, `EndpointPickerConfig`, `SchedulingContext`
-   - admission_control → `Admission` interface, `AdmissionPolicyConfig`
-   - flowcontrol → `UsageLimitPolicy` interface, `SaturationDetector`
-   Read from the actual `.go` source files.
-2. One or two representative example plugins from the same directory — read in full
-3. Plugin registration pattern: explore `$TARGET_REPO` to discover the registration file
-   (typically `runner.go` or `register.go`) and read the relevant section
-
-Append these sections to `$CONTEXT_PATH`:
-
-```
-## Production Interfaces
-[Interface definitions extracted verbatim from source, not paraphrased]
-
-## Example Plugin: <filename>
-[full contents of a representative plugin in the same category]
-
-## Plugin Registration
-[registration pattern showing how plugins are registered]
-```
-
-Do NOT include context.text in the context file — it is held in session memory via $CONTEXT_TEXT.
-Do NOT rewrite the file header or existing content — only append new sections.
-
-Verify the file was written:
-
-```bash
-test -f "$CONTEXT_PATH" || { echo "HALT: Failed to write context document to $CONTEXT_PATH"; exit 1; }
-```
-
-Mark context as populated in state:
-
-```bash
-python3 -c "
-import json, tempfile
-from pathlib import Path
-from datetime import datetime, timezone
-
-state_path = Path('$RUN_DIR') / '.state.json'
-state = json.loads(state_path.read_text())
-state.setdefault('phases', {}).setdefault('context', {})['context_file_populated'] = True
-fd, tmp = tempfile.mkstemp(dir='$RUN_DIR', suffix='.tmp')
-import os; os.close(fd)
-Path(tmp).write_text(json.dumps(state, indent=2))
-Path(tmp).replace(state_path)
-print('State updated: context_file_populated=true')
-"
-```
-
-TaskUpdate Step 1 → completed
-
-## Step 2: Team Translation
-
-Use TaskCreate: `"Step 2: Team Translation"` → TaskUpdate in_progress
-
-Read the BUILD_COMMANDS list from skill_input.json:
-
-```bash
-BUILD_COMMANDS=$(python3 -c "
-import json
-si = json.load(open('$RUN_DIR/skill_input.json'))
-print(json.dumps(si.get('build_commands', [])))
-")
-```
-
-Read the three prompt templates from the skill's prompts/ directory:
+Read the three prompt templates:
 - `$REPO_ROOT/.claude/skills/sim2real-translate/prompts/agent-expert.md`
 - `$REPO_ROOT/.claude/skills/sim2real-translate/prompts/agent-writer.md`
 - `$REPO_ROOT/.claude/skills/sim2real-translate/prompts/agent-reviewer.md`
 
-Construct agent prompts by substituting all `{PLACEHOLDER}` values with the
-corresponding shell variables:
+Substitute every `{PLACEHOLDER}` occurrence with the corresponding shell
+variable:
+
 - `{REPO_ROOT}` → `$REPO_ROOT`
 - `{EXPERIMENT_ROOT}` → `$EXPERIMENT_ROOT`
-- `{RUN_DIR}` → `$RUN_DIR`
-- `{CONTEXT_PATH}` → `$CONTEXT_PATH`
+- `{TRANSLATIONS_DIR}` → `$TRANSLATIONS_DIR`
+- `{OUTPUT_DIR}` → `$OUTPUT_DIR`
+- `{BASELINE_OVERLAY_PATH}` → `$BASELINE_OVERLAY_PATH` (per-algorithm — points
+  at the overlay for THIS algorithm's baseline via `algorithms[i].baseline_overlay_path`;
+  empty when the algorithm's `defaults` isn't in `skill_input.baselines` or the
+  manifest has no baselines — writer's Phase 2 handles this)
 - `{ALGO_SOURCE}` → `$ALGO_SOURCE`
-- `{ALGO_CONFIG}` → `$ALGO_CONFIG`
-- `{EXPERT_AGENT_NAME}` → `"expert"`
+- `{ALGO_CONFIG}` → `$ALGO_CONFIG` (always empty string; see Step 1 comment)
+- `{ALGO_NAME}` → `$ALGO_NAME`
+- `{ALGO_NOTES}` → `$ALGO_NOTES`
 - `{TARGET_REPO}` → `$TARGET_REPO`
 - `{CONFIG_KIND}` → `$CONFIG_KIND`
-- `{REVIEW_ROUNDS}` → `$REVIEW_ROUNDS`
 - `{SCENARIO}` → `$SCENARIO`
-- `{ALGO_NAME}` → `$CURRENT_ALGORITHM`
-- `{BUILD_COMMANDS}` → `$BUILD_COMMANDS`
+- `{BUILD_COMMANDS}` → `$BUILD_COMMANDS` (JSON list of shell commands)
+- `{REVIEW_ROUNDS}` → `$REVIEW_ROUNDS`
 - `{CONTEXT_TEXT}` → `$CONTEXT_TEXT`
+- `{CONTEXT_FILE_PATHS}` → `$CONTEXT_FILE_PATHS` (newline-separated absolute paths — one path per line)
+- `{EXPERT_AGENT_NAME}` → `"expert"`
 - `{MAIN_SESSION_NAME}` → `"main-session"`
 
-Use TeamCreate to create the team:
+Create the team:
 ```
-TeamCreate(team_name="translate-$RUN_NAME", description="sim2real expert+writer+reviewer for $RUN_NAME")
+TeamCreate(team_name="translate-${TRANSLATION_HASH:0:12}-$ALGO_NAME",
+           description="sim2real expert+writer+reviewer for $ALGO_NAME")
 ```
 
-**Spawn all three agents in a single tool-call message** so they start in parallel.
-Issue three Agent tool calls at once — do not wait between them:
+**Spawn all three agents in a single tool-call message** so they start in
+parallel. Issue three Agent tool calls at once — do not wait between them:
 
-1. Agent(name="expert", team_name="translate-$RUN_NAME", run_in_background=true,
-         subagent_type=general-purpose, model="opus",
+1. Agent(name="expert", team_name="translate-<prefix>-<algo>",
+         run_in_background=true, subagent_type=general-purpose, model="opus",
          prompt=<substituted agent-expert.md>)
-
-2. Agent(name="reviewer", team_name="translate-$RUN_NAME", run_in_background=true,
-         subagent_type=general-purpose, model="opus",
+2. Agent(name="reviewer", team_name="translate-<prefix>-<algo>",
+         run_in_background=true, subagent_type=general-purpose, model="opus",
          prompt=<substituted agent-reviewer.md>)
-
-3. Agent(name="writer", team_name="translate-$RUN_NAME",
+3. Agent(name="writer", team_name="translate-<prefix>-<algo>",
          subagent_type=general-purpose, model="opus",
          prompt=<substituted agent-writer.md>)
 
-All three start simultaneously. Expert and Reviewer initialize in the background while
-Writer begins Phase 2. By the time Writer reaches Phase 4 (translation), Expert will
-have completed its repo exploration and be ready to answer queries.
+All three start simultaneously. Expert and Reviewer initialize in the
+background while Writer begins Phase 2. By the time Writer reaches Phase 4
+(translation), Expert will have completed its repo exploration and be ready
+to answer queries.
 
-Wait for the Writer to send a message to the main session. Handle each case:
+### Step 3: Handle team messages
 
-**On "baseline-ready: ...":**
+Wait for messages from the team (Expert and Writer both send to
+`{MAIN_SESSION_NAME}`). Handle each case:
 
-Read `$RUN_DIR/generated/baseline_config.yaml` and print to user:
+**On `expert-ready: ...`:**
+
+The Expert has finished initialization and is ready for queries. Log
+`"Expert initialized"` and continue waiting for the next message (no reply
+to the Expert needed — its readiness state is implicit from here on).
+
+**On `baseline-ready: ...`:**
+
+If `$BASELINE_OVERLAY_PATH` is empty (manifest declares no baseline overlay),
+this branch should not fire; if it does, send back
+`SendMessage("writer", "no-baseline")` and skip. Otherwise read the file the
+writer produced (at `$BASELINE_OVERLAY_PATH`) and print to the user:
 ```
 ━━━ Baseline Config (derived from sim → real EPP) ━━━
 <file contents>
@@ -404,36 +360,12 @@ Read `$RUN_DIR/generated/baseline_config.yaml` and print to user:
 
 Provide feedback to revise, or type 'done' to proceed.
 ```
+Read user input. If it starts with `feedback:`, forward verbatim to the
+writer. If it is exactly `done`, send `SendMessage("writer", "continue")`.
 
-Read user input. If feedback:
-```
-SendMessage("writer", "feedback: <user feedback text>")
-```
-If "done":
-```bash
-python3 -c "
-import json, tempfile
-from pathlib import Path
-from datetime import datetime, timezone
+**On `treatment-ready: ...`:**
 
-state_path = Path('$RUN_DIR') / '.state.json'
-state = json.loads(state_path.read_text())
-state.setdefault('phases', {})['baseline_derivation'] = {
-    'status': 'done', 'user_approved': True,
-    'timestamp': datetime.now(timezone.utc).isoformat()
-}
-fd, tmp = tempfile.mkstemp(dir='$RUN_DIR', suffix='.tmp')
-import os; os.close(fd)
-Path(tmp).write_text(json.dumps(state, indent=2))
-Path(tmp).replace(state_path)
-print('State: baseline_derivation done')
-"
-SendMessage("writer", "continue")
-```
-
-**On "treatment-ready: ...":**
-
-Read `$RUN_DIR/generated/$CURRENT_ALGORITHM/${CURRENT_ALGORITHM}_config.yaml` and print to user:
+Read `$CONFIG_OUTPUT_PATH` and print to the user:
 ```
 ━━━ Treatment Config (derived from baseline + algorithm) ━━━
 <file contents>
@@ -441,76 +373,41 @@ Read `$RUN_DIR/generated/$CURRENT_ALGORITHM/${CURRENT_ALGORITHM}_config.yaml` an
 
 Provide feedback to revise, or type 'done' to proceed.
 ```
+Handle feedback / continue as above.
 
-Handle feedback / continue as for `baseline-ready:`. On continue, update state:
-```bash
-python3 -c "
-import json, tempfile
-from pathlib import Path
-from datetime import datetime, timezone
+**On `review-passed: round=N plugin_type=<type>`:**
 
-state_path = Path('$RUN_DIR') / '.state.json'
-state = json.loads(state_path.read_text())
-state.setdefault('phases', {})['treatment_derivation'] = {
-    'status': 'done', 'user_approved': True,
-    'timestamp': datetime.now(timezone.utc).isoformat()
-}
-fd, tmp = tempfile.mkstemp(dir='$RUN_DIR', suffix='.tmp')
-import os; os.close(fd)
-Path(tmp).write_text(json.dumps(state, indent=2))
-Path(tmp).replace(state_path)
-print('State: treatment_derivation done')
-"
-SendMessage("writer", "continue")
-```
-
-**On "review-passed: round=N ...":**
-
-```bash
-python3 -c "
-import json
-from pathlib import Path
-algo = '$CURRENT_ALGORITHM'
-algo_out = Path('$RUN_DIR/generated') / algo / f'{algo}_output.json'
-o = json.load(open(algo_out))
-print('Plugin files:', o.get('files_created', []))
-"
-python3 -c "print(open('$RUN_DIR/generated/$CURRENT_ALGORITHM/${CURRENT_ALGORITHM}_config.yaml').read())"
-```
-
-Print to user:
+Read `$OUTPUT_DIR/${ALGO_NAME}_output.json` for the plugin file list and
+print `$CONFIG_OUTPUT_PATH` for the operator. Then prompt:
 ```
 ━━━ Review Passed — ACTION REQUIRED ━━━
 Treatment Config: <contents above>
-Plugin files: <list above>
+Plugin files: <files_created from ${ALGO_NAME}_output.json>
 
-⚠ This arm is INCOMPLETE until you reply. Source files have NOT yet been
-  written to generated/<algo>/. Choose one:
+⚠ This algorithm's translation is INCOMPLETE until you reply. Source files
+  have NOT yet been copied to $OUTPUT_DIR/. Choose one:
 
-  • Reply `done`            → finalize: copy source overlay to generated/<algo>/
-                              and let prepare.py advance to the next algorithm
+  • Reply `done`             → finalize: copy plugin source files from the target repo into $OUTPUT_DIR/,
+                               shut down the team, and move to the next algorithm
   • Reply `feedback: <text>` → iterate one more review round with the feedback
 
-Without a reply, the writer agent will wait indefinitely and the run will
-not progress.
+Without a reply, the writer agent will wait indefinitely.
 ```
-
-If reply is exactly "done": `SendMessage("writer", "done")`
-If reply starts with "feedback:": `SendMessage("writer", "feedback: <text>")`
+If reply is exactly `done`: `SendMessage("writer", "done")`.
+If reply starts with `feedback:`: `SendMessage("writer", "feedback: <text>")`.
 Otherwise: re-print the prompt and wait — do NOT silently treat ambiguous
 input as either branch.
 
-**On "done: ...":**
+**On `done: ...`:**
 
-The writer completed successfully. Proceed to Step 6 (which will shut down the team
-after artifacts are collected).
+The writer completed successfully. Proceed to Step 4.
 
-**On "escalate: ...":**
+**On `escalate: ...`:**
 
 Prompt the operator:
 ```
-Translation exhausted $REVIEW_ROUNDS rounds without reviewer approval.
-Remaining issues:
+Translation exhausted $REVIEW_ROUNDS rounds without reviewer approval for
+$ALGO_NAME. Remaining issues:
 <paste issues from the escalate message>
 
 Options:
@@ -519,182 +416,105 @@ Options:
   [q] Quit and investigate — reply with: quit
 ```
 
-- If "continue N": update REVIEW_ROUNDS (e.g. `REVIEW_ROUNDS=$((REVIEW_ROUNDS + N))`),
-  then spawn a NEW Writer agent with the updated value substituted into the prompt.
-  The reviewer is still idle — it does not need to be restarted.
-- If "accept": proceed to Step 6 with `consensus='accepted_without_consensus'`
-  (Step 6 will shut down the team after artifacts are collected).
-- If "quit":
+- If `continue N`: bump `REVIEW_ROUNDS=$((REVIEW_ROUNDS + N))`, then spawn a
+  NEW writer agent with the updated value substituted. The reviewer is still
+  idle — it does not need to be restarted.
+- If `accept`: proceed to Step 4 with `consensus='accepted_without_consensus'`.
+- If `quit`:
   ```
-  SendMessage(to="writer", "shutdown")
-  SendMessage(to="reviewer", "shutdown")
-  SendMessage(to="expert", "shutdown")
+  SendMessage("writer", "shutdown")
+  SendMessage("reviewer", "shutdown")
+  SendMessage("expert", "shutdown")
   TeamDelete()
   ```
-  Exit without copying artifacts.
+  Skip to the next algorithm in the loop (or exit if none remain).
 
-**On "build-failed: ...":**
+**On `build-failed: ...`:**
 
 Surface the build error to the operator:
 ```
-Translation build failed after 6 retries.
+Translation build failed after 6 retries for $ALGO_NAME.
 Error: <paste error from message>
 
 Fix the algorithm source or target repo state, then re-run /sim2real-translate.
 ```
+Shut down the team as under `quit` and skip to the next algorithm.
 
-Shut down the team and exit:
-```
-SendMessage(to="writer", "shutdown")
-SendMessage(to="reviewer", "shutdown")
-SendMessage(to="expert", "shutdown")
-TeamDelete()
-```
+### Step 4: Copy source and shut down
 
-TaskUpdate Step 2 → completed
-
-## Step 6: Output
-
-Use TaskCreate: `"Step 6: Output Artifacts"` → TaskUpdate in_progress
-
-Note: The writer agent writes `review/round_N.json` directly. Verify it exists:
-
-```bash
-ls $RUN_DIR/review/round_*.json 2>/dev/null || echo "WARNING: no round review files found"
-```
-
-Determine final review outcome from the most recent round file:
-
-```bash
-FINAL_CONSENSUS=$(python3 -c "
-import json
-from pathlib import Path
-rounds = sorted((Path('$RUN_DIR/review')).glob('round_*.json'))
-if not rounds:
-    print('none')
-else:
-    last = json.loads(rounds[-1].read_text())
-    if last.get('consensus'):
-        print(f'{last[\"approve_count\"]}/{last[\"total_successful\"]}')
-    else:
-        print('accepted_without_consensus')
-" 2>/dev/null || echo "none")
-
-REVIEW_ROUNDS_DONE=$(python3 -c "
-from pathlib import Path
-print(len(list((Path('$RUN_DIR/review')).glob('round_*.json'))))
-" 2>/dev/null || echo 0)
-```
-
-Derive file lists from git state, update per-algorithm output, and copy to `$RUN_DIR/generated/$CURRENT_ALGORITHM/`:
+Derive the file list from git state in `$TARGET_REPO`, update
+`${ALGO_NAME}_output.json`, and copy plugin sources into `$OUTPUT_DIR`:
 
 ```bash
 python3 -c "
 import sys
 sys.path.insert(0, '$REPO_ROOT/.claude/skills/sim2real-translate/scripts')
 from copy_generated import copy_generated
-copy_generated('$TARGET_REPO', '$RUN_DIR', algo_name='$CURRENT_ALGORITHM')
+copy_generated('$TARGET_REPO', '$TRANSLATIONS_DIR', algo_name='$ALGO_NAME')
 " || exit 1
 ```
 
-Update `.state.json`:
+Verify the per-algorithm output:
 
 ```bash
-python3 -c "
-import json, tempfile
-from pathlib import Path
-from datetime import datetime, timezone
-
-state_path = Path('$RUN_DIR') / '.state.json'
-state = json.loads(state_path.read_text())
-algo = '$CURRENT_ALGORITHM'
-algo_out = Path('$RUN_DIR/generated') / algo / f'{algo}_output.json'
-o = json.load(open(algo_out))
-translate_phase = state.setdefault('phases', {}).setdefault('translate', {})
-translate_phase.setdefault('completed_algorithms', {})[algo] = {
-    'timestamp': datetime.now(timezone.utc).isoformat(),
-    'files': o['files_created'],
-    'review_rounds': $REVIEW_ROUNDS_DONE,
-    'consensus': '$FINAL_CONSENSUS',
-}
-fd, tmp = tempfile.mkstemp(dir='$RUN_DIR', suffix='.tmp')
-import os; os.close(fd)
-Path(tmp).write_text(json.dumps(state, indent=2))
-Path(tmp).replace(state_path)
-print('State updated: translate done')
-"
-```
-
-Verify outputs:
-
-```bash
-python3 -c "
+python3 - "$OUTPUT_DIR" "$ALGO_NAME" <<'PY' || exit 1
 import json, sys
 from pathlib import Path
-algo = '$CURRENT_ALGORITHM'
-algo_dir = Path('$RUN_DIR/generated') / algo
-algo_out = algo_dir / f'{algo}_output.json'
+out_dir = Path(sys.argv[1])
+algo = sys.argv[2]
+algo_out = out_dir / f"{algo}_output.json"
 if not algo_out.exists():
-    print(f'ERROR: {algo_dir}/{algo}_output.json not found')
-    sys.exit(1)
-o = json.load(open(algo_out))
-required = ['plugin_type', 'files_created', 'files_modified', 'package',
-            'register_file', 'test_commands', 'config_kind',
-            'treatment_config_generated', 'description']
+    raise SystemExit(f"ERROR: {algo_out} not found")
+o = json.loads(algo_out.read_text())
+required = ("plugin_type", "files_created", "files_modified", "package",
+            "register_file", "test_commands", "config_kind",
+            "treatment_config_generated", "description")
 missing = [f for f in required if f not in o]
 if missing:
-    print(f'ERROR: {algo}_output.json missing: {missing}')
-    sys.exit(1)
-for f in o['files_created'] + o.get('files_modified', []):
-    dst = algo_dir / f
-    if not dst.exists():
-        print(f'ERROR: generated/{algo}/{f} not found')
-        sys.exit(1)
-print(f'Verified: plugin_type={o[\"plugin_type\"]}, '
-      f'{len(o[\"files_created\"])} created, '
-      f'{len(o.get(\"files_modified\", []))} modified')
-" || exit 1
+    raise SystemExit(f"ERROR: {algo_out} missing keys: {missing}")
+for rel in o["files_created"] + o.get("files_modified", []):
+    if not (out_dir / rel).exists():
+        raise SystemExit(f"ERROR: expected copy at {out_dir}/{rel} not found")
+print(f"Verified {algo}: plugin_type={o['plugin_type']}, "
+      f"{len(o['files_created'])} created, "
+      f"{len(o.get('files_modified', []))} modified")
+PY
 ```
 
-When everything is done, you MUST tell the user what to do next, which is continuing the python pipeline/prepare.py script to run the remaining phases (Assembly, Summary, Gate) and complete the run.
+Shut down the team:
+```
+SendMessage("writer", "shutdown")
+SendMessage("reviewer", "shutdown")
+SendMessage("expert", "shutdown")
+TeamDelete()
+```
 
-TaskUpdate all open tasks → completed.
+Loop to the next algorithm in `$INCOMPLETE_ALGOS`.
 
-Print completion summary:
+## Completion
+
+After all algorithms are done, print:
 
 ```
 ━━━ /sim2real-translate complete ━━━
 
-Plugin:   <plugin_type>
-Package:  <package>
-Files:    <files_created> (created)
-          <files_modified> (modified)
-Review:   <consensus> after <N> rounds
-Snapshots: <N> versions in $RUN_DIR/snapshots/
+Translation: $TRANSLATION_HASH
+Algorithms translated: <count>
 
-Output artifacts:
-  $RUN_DIR/generated/$CURRENT_ALGORITHM/${CURRENT_ALGORITHM}_output.json
-  $RUN_DIR/generated/$CURRENT_ALGORITHM/
-  $RUN_DIR/snapshots/
-  $RUN_DIR/review/
+Per-algorithm artifacts:
+  $TRANSLATIONS_DIR/generated/<algo>/{cmd,pkg}/
+  $TRANSLATIONS_DIR/generated/<algo>/<algo>_config.yaml
+  $TRANSLATIONS_DIR/generated/<algo>/<algo>_output.json
 
-Next: re-run prepare.py to pick up the next untranslated algorithm (or continue
-through Assembly if all algorithms are complete).
-  python3 $REPO_ROOT/pipeline/prepare.py
-  (or: cd $EXPERIMENT_ROOT && python3 $REPO_ROOT/pipeline/prepare.py)
+Next: run `sim2real translate --resume` to validate outputs, then
+`sim2real build --translation <alias-or-hash>` to build the EPP images.
 ```
 
-Shut down the agent team:
-```
-SendMessage(to="writer", "shutdown")
-SendMessage(to="reviewer", "shutdown")
-SendMessage(to="expert", "shutdown")
-TeamDelete()
-```
+TaskUpdate all open tasks → completed.
 
 ## What This Skill Does NOT Do
 
-- Does not assemble resolved scenarios or cluster YAMLs (prepare.py Phase 4)
-- Does not touch cluster config or bundle inputs (baseline.yaml, treatment.yaml)
-- Does not generate run_summary.md or perform the human gate
-- Job: produce working, reviewed Go code + treatment config + metadata in generated/
+- Does not drift from the pinned `translation_hash`: it calls `slicer.translation_hash_with_sources` at the same call site `sim2real translate` uses (so hashes stay identical) and then looks up `translations/<hash>/skill_input.json`. It does not cross-check the hash inside `skill_input.json` against the recomputed value — divergence there is treated as a caller bug in `sim2real translate`, not a skill invariant.
+- Does not build container images (`sim2real build`'s job).
+- Does not touch cluster config, bundle inputs, or run summaries.
+- Job: produce working, reviewed Go plugin source + treatment overlay + per-algo metadata under `translations/<hash>/generated/<algo>/`.

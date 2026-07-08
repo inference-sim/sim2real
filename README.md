@@ -35,37 +35,40 @@ claude --dangerously-skip-permissions --add-dir $SIM2REAL
 /sim2real-bootstrap
 ```
 
-Skip this step if your experiment repo already contains `transfer.yaml`, `baselines/`, and a component submodule.
+For BYO operators — pre-built EPP image(s) + baseline scenario + per-algorithm overlay(s), no BLIS artifacts — use `--byo` mode instead: `/sim2real-bootstrap --byo --baseline ... --algorithm ... --algorithm-image ... --algorithm-config ...`. See [`.claude/skills/sim2real-bootstrap/SKILL.md`](.claude/skills/sim2real-bootstrap/SKILL.md#--byo-mode) for the full invocation.
+
+Skip this step if your experiment repo already contains `transfer.yaml`, `baselines/`, and (BLIS only) a component submodule.
 
 ### 2. Set required environment variables
 
 ```bash
 export HF_TOKEN=<huggingface token with access to required models>
-export NAMESPACES=<comma,separated,list,of,namespaces>   # one or more pre-created cluster namespaces
-export RUN=<run-name>                                    # human-readable identifier for this run
 ```
 
-### 3. Set up the cluster
+### 3. Provision the cluster (one-time per cluster)
 
-One-time, idempotent. Provisions RBAC, secrets, PVCs, and Tekton tasks in each namespace.
+Idempotent. Provisions namespaces, RBAC, PVCs, and Tekton tasks. Re-run when adding namespace slots or rotating secrets.
 
 ```bash
-python $SIM2REAL/pipeline/setup.py --run $RUN
+python $SIM2REAL/pipeline/cluster.py provision <cluster_id> \
+    --namespaces <comma,separated,namespace,slots>
 ```
 
-Accept the default values when prompted for any options not set above.
+### 4. Configure the workspace (one-time per experiment repo)
 
-### 4. Prepare the run
-
-Runs phases 1–6. Pauses at phase 3 (translate checkpoint) so you can run the AI translation skill.
+Records the registry and orchestrator image in `workspace/setup_config.json`.
 
 ```bash
-python $SIM2REAL/pipeline/prepare.py
+python $SIM2REAL/pipeline/setup.py
 ```
 
-### 5. Translate and validate
+### 5. Translate
 
-In a Claude Code session pointed at the framework repo:
+Skill-driven (default). Checkpoint the translation, run the translation skill, then validate:
+
+```bash
+python $SIM2REAL/pipeline/sim2real.py translate
+```
 
 ```bash
 claude --dangerously-skip-permissions --add-dir $SIM2REAL
@@ -73,48 +76,56 @@ claude --dangerously-skip-permissions --add-dir $SIM2REAL
 
 ```text
 /sim2real-translate
-/sim2real-check
 ```
-
-Address any `FAIL` items reported by `/sim2real-check` before continuing.
-
-### 6. Resume preparation
-
-Re-running `prepare.py` skips already-completed phases and proceeds from phase 4 (assembly) through the gate.
 
 ```bash
-python $SIM2REAL/pipeline/prepare.py
+python $SIM2REAL/pipeline/sim2real.py translate --resume
 ```
 
-### 7. Deploy
+Alternative (BYO): if you already have a pre-built image, skip the skill and register it directly — `python $SIM2REAL/pipeline/sim2real.py translation register --algorithm <name> --image <ref> --config <treatment-overlay-path>`. See [`pipeline/README.md § Register a translation`](pipeline/README.md#register-a-translation-byo).
 
-Builds the EPP image and runs each (workload, package) pair via Tekton.
+### 6. Build images
+
+Compiles per-algorithm plugin sources into container images and pushes them to your registry. Skip when using BYO — the image is already built.
 
 ```bash
-python $SIM2REAL/pipeline/deploy.py run --remote
+python $SIM2REAL/pipeline/sim2real.py build --translation <alias-or-hash>
 ```
 
-Watch real-time progress:
+### 7. Assemble the run
+
+Materializes `workspace/runs/<run-name>/` from the translation and the experiment repo's `transfer.yaml`.
 
 ```bash
-kubectl logs -f job/sim2real-orchestrator
+python $SIM2REAL/pipeline/sim2real.py assemble \
+    --translation <alias-or-hash> \
+    --cluster <cluster_id> \
+    --run <run-name>
 ```
 
-Or check pair status:
+### 8. Deploy
+
+Dispatches Tekton PipelineRuns across the provisioned namespace slots. Add `--remote` to run the orchestrator as an in-cluster Job instead of locally.
 
 ```bash
-python $SIM2REAL/pipeline/deploy.py status
+python $SIM2REAL/pipeline/deploy.py --run <run-name> run
 ```
 
-### 8. Collect results
-
-Pulls completed traces and logs out of the cluster PVC. Safe to run repeatedly — only collects what is new.
+Check pair status while it runs:
 
 ```bash
-python $SIM2REAL/pipeline/deploy.py collect
+python $SIM2REAL/pipeline/deploy.py --run <run-name> status
 ```
 
-### 9. Validate and analyze
+### 9. Collect results
+
+Pulls per-pair metrics and logs from the cluster PVC. Safe to run repeatedly — only collects what is new.
+
+```bash
+python $SIM2REAL/pipeline/deploy.py --run <run-name> collect
+```
+
+### 10. Validate and analyze
 
 Re-run `/sim2real-check` against the collected results to confirm the deployed run matches the simulation, then `/sim2real-analyze` to produce comparison tables and charts.
 
@@ -126,6 +137,8 @@ claude --dangerously-skip-permissions --add-dir $SIM2REAL
 /sim2real-check
 /sim2real-analyze
 ```
+
+For pipeline details and flag reference, see [`pipeline/README.md`](pipeline/README.md).
 
 ## Troubleshooting
 

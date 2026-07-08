@@ -2,8 +2,8 @@
 
 import yaml
 
-from pipeline.lib.assemble import assemble_scenarios
 from pipeline.lib.epp import inject_epp_image, inject_image_ref
+from pipeline.lib.values import deep_merge
 from pipeline.lib.tekton import make_pipelinerun_scenario
 
 
@@ -19,9 +19,10 @@ class TestInjectEppImage:
         }
         result = inject_epp_image(scenario, "ghcr.io/me", "llm-d-inference-scheduler", "run-1")
         assert result is True
-        img = scenario["scenario"][0]["images"]["inferenceScheduler"]
+        img = scenario["scenario"][0]["router"]["epp"]["image"]
         assert img == {
-            "repository": "ghcr.io/me/llm-d-inference-scheduler",
+            "registry": "ghcr.io/me",
+            "repository": "llm-d-inference-scheduler",
             "tag": "run-1",
             "pullPolicy": "Always",
         }
@@ -37,23 +38,29 @@ class TestInjectEppImage:
         result = inject_epp_image(scenario, "reg.io", "epp", "v1")
         assert result is True
         for entry in scenario["scenario"]:
-            assert entry["images"]["inferenceScheduler"]["repository"] == "reg.io/epp"
-            assert entry["images"]["inferenceScheduler"]["tag"] == "v1"
+            img = entry["router"]["epp"]["image"]
+            assert img["registry"] == "reg.io"
+            assert img["repository"] == "epp"
+            assert img["tag"] == "v1"
 
-    def test_overwrites_existing_inference_scheduler(self):
-        """BC-1: Pre-existing inferenceScheduler image is replaced, not preserved.
+    def test_overwrites_existing_epp_image(self):
+        """BC-1: Pre-existing router.epp.image is replaced, not preserved.
 
-        Guards against regression to setdefault("inferenceScheduler", epp_img)
+        Guards against regression to setdefault("image", epp_img)
         which would silently produce an A/A experiment.
         """
         scenario = {
             "scenario": [
-                {"name": "s", "images": {"inferenceScheduler": {"repository": "old/repo", "tag": "old-tag", "pullPolicy": "IfNotPresent"}}},
+                {"name": "s", "router": {"epp": {"image": {
+                    "registry": "old", "repository": "repo",
+                    "tag": "old-tag", "pullPolicy": "IfNotPresent",
+                }}}},
             ]
         }
         inject_epp_image(scenario, "ghcr.io/new", "epp", "run-99")
-        img = scenario["scenario"][0]["images"]["inferenceScheduler"]
-        assert img["repository"] == "ghcr.io/new/epp"
+        img = scenario["scenario"][0]["router"]["epp"]["image"]
+        assert img["registry"] == "ghcr.io/new"
+        assert img["repository"] == "epp"
         assert img["tag"] == "run-99"
         assert img["pullPolicy"] == "Always"
 
@@ -62,7 +69,7 @@ class TestInjectEppImage:
         scenario = {"scenario": [{"name": "test"}]}
         result = inject_epp_image(scenario, "", "repo", "tag")
         assert result is False
-        assert "images" not in scenario["scenario"][0]
+        assert "router" not in scenario["scenario"][0]
 
     def test_no_scenario_entries_skips(self):
         """BC-3 variant: No scenario entries means no injection."""
@@ -85,23 +92,24 @@ class TestInjectEppImage:
         }
         inject_epp_image(scenario, "reg.io", "epp", "v2")
         assert scenario["scenario"][0]["images"]["vllm"] == {"repository": "vllm-r", "tag": "vllm-t"}
-        assert scenario["scenario"][0]["images"]["inferenceScheduler"]["tag"] == "v2"
+        assert scenario["scenario"][0]["router"]["epp"]["image"]["tag"] == "v2"
 
     def test_inject_epp_image_with_algo_suffix(self):
         """Per-algorithm tag: tag becomes '{tag}-{algo_name}' when algo_name is set."""
         scenario = {"scenario": [{"name": "s1"}]}
         result = inject_epp_image(scenario, "reg.io", "epp", "r1", algo_name="algo1")
         assert result is True
-        img = scenario["scenario"][0]["images"]["inferenceScheduler"]
+        img = scenario["scenario"][0]["router"]["epp"]["image"]
         assert img["tag"] == "r1-algo1"
-        assert img["repository"] == "reg.io/epp"
+        assert img["registry"] == "reg.io"
+        assert img["repository"] == "epp"
 
     def test_inject_epp_image_without_algo_name_unchanged(self):
         """Backward compat: tag stays as-is when algo_name is None."""
         scenario = {"scenario": [{"name": "s1"}]}
         result = inject_epp_image(scenario, "reg.io", "epp", "r1")
         assert result is True
-        img = scenario["scenario"][0]["images"]["inferenceScheduler"]
+        img = scenario["scenario"][0]["router"]["epp"]["image"]
         assert img["tag"] == "r1"
 
 
@@ -110,8 +118,9 @@ class TestInjectImageRef:
         scenario = {"scenario": [{"name": "s1"}]}
         result = inject_image_ref(scenario, "ghcr.io/org/scheduler", "abc12345")
         assert result is True
-        img = scenario["scenario"][0]["images"]["inferenceScheduler"]
-        assert img["repository"] == "ghcr.io/org/scheduler"
+        img = scenario["scenario"][0]["router"]["epp"]["image"]
+        assert img["registry"] == "ghcr.io/org"
+        assert img["repository"] == "scheduler"
         assert img["tag"] == "abc12345"
         assert img["pullPolicy"] == "Always"
 
@@ -127,7 +136,17 @@ class TestInjectImageRef:
         scenario = {"scenario": [{"name": "s1", "images": {"vllm": {"repository": "vllm-r", "tag": "vllm-t"}}}]}
         inject_image_ref(scenario, "ghcr.io/org/scheduler", "tag1")
         assert scenario["scenario"][0]["images"]["vllm"] == {"repository": "vllm-r", "tag": "vllm-t"}
-        assert scenario["scenario"][0]["images"]["inferenceScheduler"]["tag"] == "tag1"
+        assert scenario["scenario"][0]["router"]["epp"]["image"]["tag"] == "tag1"
+
+    def test_bare_repository_no_registry(self):
+        """A repository with no '/' becomes bare-repo + empty registry."""
+        scenario = {"scenario": [{"name": "s1"}]}
+        result = inject_image_ref(scenario, "bare-repo", "t1")
+        assert result is True
+        img = scenario["scenario"][0]["router"]["epp"]["image"]
+        assert img["registry"] == ""
+        assert img["repository"] == "bare-repo"
+        assert img["tag"] == "t1"
 
 
 def _write(path, data):
@@ -145,38 +164,37 @@ class TestEppIntegration:
     """Integration: assemble → inject → serialize → make_pipelinerun_scenario."""
 
     def test_epp_image_in_pipelinerun_scenario_content(self, tmp_path):
-        """BC-4: EPP image string appears in the final PipelineRun scenarioContent param."""
+        """BC-4: EPP image fields appear in the final PipelineRun scenarioContent param."""
         baseline_data = {
             "scenario": [{
                 "name": "test-scenario",
                 "model": {"name": "TestModel"},
-                "images": {"inferenceScheduler": {"repository": "ghcr.io/orig", "tag": "v1"}},
+                "router": {"epp": {"image": {
+                    "registry": "ghcr.io", "repository": "orig", "tag": "v1"
+                }}},
             }]
         }
         treatment_overlay = {
             "scenario": [{
                 "name": "test-scenario",
-                "inferenceExtension": {"pluginsConfigFile": "plugins.yaml"},
+                "router": {"epp": {"pluginsConfigFile": "plugins.yaml"}},
             }]
         }
         _write(tmp_path / "baseline.yaml", baseline_data)
         _write(tmp_path / "generated" / "baseline_config.yaml", {})
         _write(tmp_path / "generated" / "treatment_config.yaml", treatment_overlay)
 
-        _, treatment_resolved = assemble_scenarios(
-            baseline_path=tmp_path / "baseline.yaml",
-            treatment_path=None,
-            baseline_overlay_path=tmp_path / "generated" / "baseline_config.yaml",
-            treatment_overlay_path=tmp_path / "generated" / "treatment_config.yaml",
-        )
+        # Deep-merge baseline + overlays inline.
+        baseline_resolved = deep_merge(baseline_data, {})
+        treatment_resolved = deep_merge(baseline_resolved, treatment_overlay)
 
-        # Inject EPP image (simulating what prepare.py does)
+        # Inject EPP image (simulating what sim2real assemble does)
         inject_epp_image(treatment_resolved, "ghcr.io/test", "my-epp", "run-42")
 
-        # Serialize (same as prepare.py line 452)
+        # Serialize (same shape as sim2real assemble's scenarioContent param)
         scenario_content = yaml.dump(treatment_resolved, default_flow_style=False, allow_unicode=True)
 
-        # Generate PipelineRun (same as prepare.py line 457)
+        # Generate PipelineRun (same shape as sim2real assemble)
         pr = make_pipelinerun_scenario(
             phase="treatment",
             workload={"name": "integration-wl"},
@@ -190,14 +208,16 @@ class TestEppIntegration:
         params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
         content = params["scenarioContent"]
 
-        # The EPP image MUST appear in the serialized scenario content
-        assert "ghcr.io/test/my-epp" in content
+        # The EPP image fields MUST appear in the serialized scenario content
+        assert "ghcr.io/test" in content
+        assert "my-epp" in content
         assert "run-42" in content
 
         # Verify it's valid YAML and the structure is correct
         parsed = yaml.safe_load(content)
-        img = parsed["scenario"][0]["images"]["inferenceScheduler"]
-        assert img["repository"] == "ghcr.io/test/my-epp"
+        img = parsed["scenario"][0]["router"]["epp"]["image"]
+        assert img["registry"] == "ghcr.io/test"
+        assert img["repository"] == "my-epp"
         assert img["tag"] == "run-42"
         assert img["pullPolicy"] == "Always"
 
@@ -206,21 +226,20 @@ class TestEppIntegration:
         baseline_data = {
             "scenario": [{
                 "name": "test-scenario",
-                "images": {"inferenceScheduler": {"repository": "ghcr.io/orig", "tag": "v1"}},
+                "router": {"epp": {"image": {
+                    "registry": "ghcr.io", "repository": "orig", "tag": "v1"
+                }}},
             }]
         }
         _write(tmp_path / "baseline.yaml", baseline_data)
         _write(tmp_path / "generated" / "baseline_config.yaml", {})
         _write(tmp_path / "generated" / "treatment_config.yaml", {})
 
-        baseline_resolved, treatment_resolved = assemble_scenarios(
-            baseline_path=tmp_path / "baseline.yaml",
-            treatment_path=None,
-            baseline_overlay_path=tmp_path / "generated" / "baseline_config.yaml",
-            treatment_overlay_path=tmp_path / "generated" / "treatment_config.yaml",
-        )
+        # Deep-merge inline; empty overlays are no-ops.
+        baseline_resolved = deep_merge(baseline_data, {})
+        treatment_resolved = deep_merge(baseline_resolved, {})
 
-        # Only inject into treatment (as prepare.py does)
+        # Only inject into treatment (as sim2real assemble does)
         inject_epp_image(treatment_resolved, "ghcr.io/test", "my-epp", "run-42")
 
         # Serialize baseline (NOT treatment)
@@ -240,6 +259,6 @@ class TestEppIntegration:
         content = params["scenarioContent"]
 
         # Baseline must NOT have the injected EPP image
-        assert "ghcr.io/test/my-epp" not in content
+        assert "my-epp" not in content
         # It should still have the original image
-        assert "ghcr.io/orig" in content
+        assert "orig" in content

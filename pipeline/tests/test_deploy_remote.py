@@ -10,7 +10,7 @@ import pipeline.deploy as mod
 
 
 def _make_run_args(*, remote=False, workload=None, only=None, package=None,
-                   status=None, force=False, skip_build=False,
+                   status=None, iteration=None, force=False, skip_build=False,
                    skip_teardown=False,
                    max_retries=2, poll_interval=30, gpu_resource_type=None,
                    default_gpu_cost=1, pending_threshold=600,
@@ -18,7 +18,7 @@ def _make_run_args(*, remote=False, workload=None, only=None, package=None,
                    shadow_ttl=120):
     return argparse.Namespace(
         remote=remote, workload=workload, only=only, package=package,
-        status=status, force=force, skip_build=skip_build,
+        status=status, iteration=iteration, force=force, skip_build=skip_build,
         skip_teardown=skip_teardown,
         max_retries=max_retries, poll_interval=poll_interval,
         gpu_resource_type=gpu_resource_type, default_gpu_cost=default_gpu_cost,
@@ -83,6 +83,29 @@ def test_collect_run_flags_default_shadow_ttl_not_forwarded():
     args = _make_run_args(shadow_ttl=120)
     flags = mod._collect_run_flags(args)
     assert "--shadow-ttl" not in flags
+
+
+def test_collect_run_flags_iteration_forwarded():
+    """--iteration must reach the in-cluster Job (regression for PR #520 review)."""
+    args = _make_run_args(iteration="2")
+    flags = mod._collect_run_flags(args)
+    assert "--iteration" in flags
+    idx = flags.index("--iteration")
+    assert flags[idx + 1] == "2"
+
+
+def test_collect_run_flags_iteration_range_forwarded():
+    """--iteration '1-3' is forwarded verbatim (parser lives in-cluster too)."""
+    args = _make_run_args(iteration="1-3")
+    flags = mod._collect_run_flags(args)
+    assert "--iteration" in flags
+    idx = flags.index("--iteration")
+    assert flags[idx + 1] == "1-3"
+
+
+def test_collect_run_flags_iteration_absent_by_default():
+    args = _make_run_args()
+    assert "--iteration" not in mod._collect_run_flags(args)
 
 
 # ── skip-teardown parser tests ─────────────────────────────────────────────
@@ -400,6 +423,11 @@ def _setup_run_dir(tmp_path):
     cluster_dir = run_dir / "cluster"
     cluster_dir.mkdir(parents=True)
     (workspace / "setup_config.json").write_text("{}")
+    cluster_config_dir = workspace / "clusters" / "test-cluster"
+    cluster_config_dir.mkdir(parents=True)
+    (cluster_config_dir / "cluster_config.json").write_text(
+        json.dumps({"namespaces": ["ns"]})
+    )
     (run_dir / "run_metadata.json").write_text(json.dumps({
         "component_image": "registry.example.com/epp:latest",
     }))
@@ -418,10 +446,11 @@ def test_run_remote_refuses_when_active(monkeypatch, tmp_path):
     monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
 
     args = _make_run_args(remote=True, skip_build=True)
-    setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
+    setup_config = {"orchestrator_image": "img:latest"}
+    cluster_config = {"namespaces": ["ns"]}
 
     with pytest.raises(SystemExit) as exc_info:
-        mod._cmd_run_remote(args, run_dir, setup_config)
+        mod._cmd_run_remote(args, run_dir, setup_config, cluster_config)
     assert exc_info.value.code == 1
 
 
@@ -446,8 +475,9 @@ def test_run_remote_deletes_completed_job(monkeypatch, tmp_path):
 
     with patch("subprocess.run", side_effect=_mock_subprocess_ok):
         args = _make_run_args(remote=True, skip_build=True)
-        setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
-        mod._cmd_run_remote(args, run_dir, setup_config)
+        setup_config = {"orchestrator_image": "img:latest"}
+        cluster_config = {"namespaces": ["ns"]}
+        mod._cmd_run_remote(args, run_dir, setup_config, cluster_config)
 
     delete_calls = [c for c in calls if "delete" in c]
     assert len(delete_calls) == 1
@@ -471,10 +501,11 @@ def test_run_remote_completed_delete_failure_exits(monkeypatch, tmp_path, capsys
     monkeypatch.setattr(mod, "run", fake_run)
 
     args = _make_run_args(remote=True, skip_build=True)
-    setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
+    setup_config = {"orchestrator_image": "img:latest"}
+    cluster_config = {"namespaces": ["ns"]}
 
     with pytest.raises(SystemExit) as exc_info:
-        mod._cmd_run_remote(args, run_dir, setup_config)
+        mod._cmd_run_remote(args, run_dir, setup_config, cluster_config)
     assert exc_info.value.code == 1
     assert "forbidden" in capsys.readouterr().err.lower()
 
@@ -495,8 +526,9 @@ def test_run_remote_creates_configmap_and_job(monkeypatch, tmp_path):
 
     with patch("subprocess.run", side_effect=fake_subprocess_run):
         args = _make_run_args(remote=True, skip_build=True)
-        setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
-        mod._cmd_run_remote(args, run_dir, setup_config)
+        setup_config = {"orchestrator_image": "img:latest"}
+        cluster_config = {"namespaces": ["ns"]}
+        mod._cmd_run_remote(args, run_dir, setup_config, cluster_config)
 
     assert len(apply_inputs) == 2
     assert apply_inputs[0]["kind"] == "ConfigMap"
@@ -520,8 +552,9 @@ def test_run_remote_uses_server_side_apply(monkeypatch, tmp_path):
 
     with patch("subprocess.run", side_effect=fake_subprocess_run):
         args = _make_run_args(remote=True, skip_build=True)
-        setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
-        mod._cmd_run_remote(args, run_dir, setup_config)
+        setup_config = {"orchestrator_image": "img:latest"}
+        cluster_config = {"namespaces": ["ns"]}
+        mod._cmd_run_remote(args, run_dir, setup_config, cluster_config)
 
     assert len(apply_cmds) == 2
     for cmd in apply_cmds:
@@ -546,8 +579,9 @@ def test_run_remote_job_uses_initcontainer_and_emptydir(monkeypatch, tmp_path):
 
     with patch("subprocess.run", side_effect=fake_subprocess_run):
         args = _make_run_args(remote=True, skip_build=True)
-        setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
-        mod._cmd_run_remote(args, run_dir, setup_config)
+        setup_config = {"orchestrator_image": "img:latest"}
+        cluster_config = {"namespaces": ["ns"]}
+        mod._cmd_run_remote(args, run_dir, setup_config, cluster_config)
 
     job = apply_inputs[1]
     spec = job["spec"]["template"]["spec"]
@@ -584,8 +618,9 @@ def test_run_remote_passes_scoping_flags(monkeypatch, tmp_path):
 
     with patch("subprocess.run", side_effect=fake_subprocess_run):
         args = _make_run_args(remote=True, skip_build=True, workload="wl-smoke")
-        setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
-        mod._cmd_run_remote(args, run_dir, setup_config)
+        setup_config = {"orchestrator_image": "img:latest"}
+        cluster_config = {"namespaces": ["ns"]}
+        mod._cmd_run_remote(args, run_dir, setup_config, cluster_config)
 
     job_dict = apply_inputs[1]
     container_args = job_dict["spec"]["template"]["spec"]["containers"][0]["args"]
@@ -642,9 +677,10 @@ def test_run_remote_preflight_accepts_newly_discovered_workload(monkeypatch, tmp
 
     with patch("subprocess.run", side_effect=fake_subprocess_run):
         args = _make_run_args(remote=True, skip_build=True, workload="wl-newwl")
-        setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
+        setup_config = {"orchestrator_image": "img:latest"}
+        cluster_config = {"namespaces": ["ns"]}
         # Must NOT SystemExit at pre-flight.
-        mod._cmd_run_remote(args, run_dir, setup_config)
+        mod._cmd_run_remote(args, run_dir, setup_config, cluster_config)
 
     # ConfigMap + Job were submitted (we got past pre-flight + image build).
     assert len(apply_inputs) == 2
@@ -673,10 +709,11 @@ def test_run_remote_preflight_still_rejects_truly_unknown_workload(monkeypatch, 
     monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
 
     args = _make_run_args(remote=True, skip_build=True, workload="wl-bogus")
-    setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
+    setup_config = {"orchestrator_image": "img:latest"}
+    cluster_config = {"namespaces": ["ns"]}
 
     with pytest.raises(SystemExit) as exc_info:
-        mod._cmd_run_remote(args, run_dir, setup_config)
+        mod._cmd_run_remote(args, run_dir, setup_config, cluster_config)
     assert exc_info.value.code == 1
     err = capsys.readouterr().err
     assert "wl-bogus" in err
@@ -688,10 +725,11 @@ def test_run_remote_no_image_exits(monkeypatch, tmp_path):
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
 
     args = _make_run_args(remote=True, skip_build=True)
-    setup_config = {"namespaces": ["ns"]}
+    setup_config = {}
+    cluster_config = {"namespaces": ["ns"]}
 
     with pytest.raises(SystemExit) as exc_info:
-        mod._cmd_run_remote(args, run_dir, setup_config)
+        mod._cmd_run_remote(args, run_dir, setup_config, cluster_config)
     assert exc_info.value.code == 1
 
 
@@ -707,9 +745,10 @@ def test_run_remote_configmap_apply_failure_exits(monkeypatch, tmp_path, capsys)
 
     with patch("subprocess.run", side_effect=fake_subprocess_run):
         args = _make_run_args(remote=True, skip_build=True)
-        setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
+        setup_config = {"orchestrator_image": "img:latest"}
+        cluster_config = {"namespaces": ["ns"]}
         with pytest.raises(SystemExit) as exc_info:
-            mod._cmd_run_remote(args, run_dir, setup_config)
+            mod._cmd_run_remote(args, run_dir, setup_config, cluster_config)
     assert exc_info.value.code == 1
     assert "configmap" in capsys.readouterr().err.lower()
 
@@ -726,12 +765,13 @@ def test_main_routes_run_remote(tmp_path, monkeypatch):
 
     remote_calls = []
 
-    def mock_run_remote(args, rd, sc):
+    def mock_run_remote(args, rd, sc, cc):
         remote_calls.append(True)
 
     with patch.object(mod, "_cmd_run_remote", mock_run_remote):
         with patch.object(mod, "_load_setup_config", return_value={
             "current_run": "test-run",
+        }), patch.object(mod, "_load_run_cluster_config", return_value={
             "namespaces": ["ns"],
         }):
             mod.main()
@@ -749,12 +789,13 @@ def test_main_routes_run_local(tmp_path, monkeypatch):
 
     local_calls = []
 
-    def mock_run(args, rd, sc):
+    def mock_run(args, rd, cc):
         local_calls.append(True)
 
     with patch.object(mod, "_cmd_run", mock_run):
         with patch.object(mod, "_load_setup_config", return_value={
             "current_run": "test-run",
+        }), patch.object(mod, "_load_run_cluster_config", return_value={
             "namespaces": ["ns"],
         }):
             mod.main()
@@ -785,8 +826,9 @@ def test_run_remote_status_filter_uses_configmap(monkeypatch, tmp_path):
 
     with patch("subprocess.run", side_effect=_mock_subprocess_ok):
         args = _make_run_args(remote=True, skip_build=True, status="failed")
-        setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
-        mod._cmd_run_remote(args, run_dir, setup_config)
+        setup_config = {"orchestrator_image": "img:latest"}
+        cluster_config = {"namespaces": ["ns"]}
+        mod._cmd_run_remote(args, run_dir, setup_config, cluster_config)
 
 
 def test_run_remote_status_filter_rejects_unmatched(monkeypatch, tmp_path):
@@ -805,10 +847,11 @@ def test_run_remote_status_filter_rejects_unmatched(monkeypatch, tmp_path):
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: progress_all_done.copy())
 
     args = _make_run_args(remote=True, skip_build=True, status="failed")
-    setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
+    setup_config = {"orchestrator_image": "img:latest"}
+    cluster_config = {"namespaces": ["ns"]}
 
     with pytest.raises(SystemExit) as exc_info:
-        mod._cmd_run_remote(args, run_dir, setup_config)
+        mod._cmd_run_remote(args, run_dir, setup_config, cluster_config)
     assert exc_info.value.code == 1
 
 
@@ -830,8 +873,9 @@ def test_run_remote_skips_validation_when_configmap_unreachable(monkeypatch, tmp
 
     with patch("subprocess.run", side_effect=_mock_subprocess_ok):
         args = _make_run_args(remote=True, skip_build=True, status="failed")
-        setup_config = {"namespaces": ["ns"], "orchestrator_image": "img:latest"}
-        mod._cmd_run_remote(args, run_dir, setup_config)
+        setup_config = {"orchestrator_image": "img:latest"}
+        cluster_config = {"namespaces": ["ns"]}
+        mod._cmd_run_remote(args, run_dir, setup_config, cluster_config)
 
     captured = capsys.readouterr()
     combined = captured.out + captured.err

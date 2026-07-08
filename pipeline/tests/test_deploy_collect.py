@@ -40,7 +40,7 @@ def test_collect_with_progress_default(tmp_path, monkeypatch):
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert collected_phases == ["baseline", "treatment"]
 
@@ -65,7 +65,7 @@ def test_collect_fallback_no_progress(tmp_path, monkeypatch):
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
          patch.object(deploy, "warn") as mock_warn:
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert collected_phases == ["baseline", "treatment"]
     mock_warn.assert_called()
@@ -94,7 +94,7 @@ def test_collect_single_package_from_progress(tmp_path, monkeypatch):
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert collected_phases == ["treatment"]
 
@@ -123,7 +123,7 @@ def test_collect_experiment_expands_to_all_progress_phases(tmp_path, monkeypatch
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     # Should expand to all phases from progress (sorted)
     assert collected_phases == ["baseline", "canary", "treatment"]
@@ -146,7 +146,7 @@ def test_collect_unknown_package_exits(tmp_path, monkeypatch):
         skip_logs = False
 
     with pytest.raises(SystemExit):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
 
 def test_collect_custom_package_in_progress(tmp_path, monkeypatch):
@@ -172,7 +172,7 @@ def test_collect_custom_package_in_progress(tmp_path, monkeypatch):
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert collected_phases == ["canary"]
 
@@ -202,7 +202,7 @@ def test_collect_corrupt_configmap_exits(tmp_path, monkeypatch):
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
          pytest.raises(SystemExit) as exc_info:
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert exc_info.value.code != 0
     # Phase extraction must not have run — corrupt progress halts before that.
@@ -242,7 +242,7 @@ def test_collect_unreachable_configmap_exits(tmp_path, monkeypatch, capsys):
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
          pytest.raises(SystemExit) as exc_info:
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert exc_info.value.code != 0
     assert collected_phases == []
@@ -275,7 +275,7 @@ def test_collect_only_done_phases(tmp_path, monkeypatch):
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     # treatment is pending — excluded; baseline and canary are done — included
     assert sorted(collected_phases) == ["baseline", "canary"]
@@ -304,7 +304,7 @@ def test_collect_missing_package_key_skipped(tmp_path, monkeypatch):
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert collected_phases == ["baseline"]
 
@@ -333,7 +333,7 @@ def test_collect_with_multi_baseline_progress(tmp_path, monkeypatch):
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert collected_phases == ["ac1", "b1", "b2"]
 
@@ -360,7 +360,7 @@ def test_collect_fallback_discovers_from_pipelinerun_files(tmp_path, monkeypatch
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert collected_phases == ["b1", "b2"]
 
@@ -396,7 +396,7 @@ def test_collect_with_workload_scope(tmp_path, monkeypatch):
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert len(extract_calls) == 1
     assert extract_calls[0]["namespace"] == "ns-0"
@@ -434,7 +434,7 @@ def test_collect_with_only_scope(tmp_path, monkeypatch):
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert len(extract_calls) == 1
     assert extract_calls[0]["namespace"] == "ns-0"
@@ -470,7 +470,7 @@ def test_collect_only_without_prefix(tmp_path, monkeypatch):
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert len(extract_calls) == 1
     assert extract_calls[0]["allowed_workloads"] == {"baseline": {"smoke"}}
@@ -506,7 +506,7 @@ def test_collect_workload_with_package_filter(tmp_path, monkeypatch):
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert len(extract_calls) == 1
     assert extract_calls[0]["phases"] == ["baseline"]
@@ -531,7 +531,7 @@ def test_collect_workload_no_match_exits(tmp_path, monkeypatch):
         skip_logs = False
 
     with pytest.raises(SystemExit):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
 
 def test_collect_warns_nondone_scoped_pairs(tmp_path, monkeypatch):
@@ -560,7 +560,7 @@ def test_collect_warns_nondone_scoped_pairs(tmp_path, monkeypatch):
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
          patch.object(deploy, "warn") as mock_warn:
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert len(extract_calls) == 1
     assert extract_calls[0]["phases"] == ["baseline"]
@@ -592,7 +592,7 @@ def test_collect_unscoped_unchanged(tmp_path, monkeypatch):
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert len(extract_calls) == 1
     assert extract_calls[0]["workload"] is None
@@ -614,7 +614,7 @@ def test_collect_scoped_without_progress_exits(tmp_path, monkeypatch):
         skip_logs = False
 
     with pytest.raises(SystemExit):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
 
 def test_collect_scoped_all_nondone_no_extraction(tmp_path, monkeypatch):
@@ -643,7 +643,7 @@ def test_collect_scoped_all_nondone_no_extraction(tmp_path, monkeypatch):
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
          patch.object(deploy, "warn") as mock_warn:
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert len(extract_calls) == 0
     assert any("running" in str(c) or "pending" in str(c) for c in mock_warn.call_args_list)
@@ -671,7 +671,7 @@ def test_collect_scoped_runtime_error(tmp_path, monkeypatch):
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
          patch.object(deploy, "warn") as mock_warn:
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert any("pod failed" in str(c) for c in mock_warn.call_args_list)
 
@@ -705,7 +705,7 @@ def test_collect_scoped_per_phase_failure(tmp_path, monkeypatch):
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
          patch.object(deploy, "warn") as mock_warn:
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert any("tar failed" in str(c) for c in mock_warn.call_args_list)
 
@@ -740,7 +740,7 @@ def test_collect_only_takes_precedence_over_workload(tmp_path, monkeypatch):
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert len(extract_calls) == 1
     assert extract_calls[0]["phases"] == ["baseline"]
@@ -772,7 +772,7 @@ def test_collect_unscoped_multi_namespace_dispatch(tmp_path, monkeypatch):
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert len(extract_calls) == 2
     by_ns = {c["namespace"]: c for c in extract_calls}
@@ -807,7 +807,7 @@ def test_collect_unscoped_missing_completed_namespace_warns_and_skips(tmp_path, 
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
          patch.object(deploy, "warn") as mock_warn:
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     # No extraction — all entries missing completed_namespace
     assert extract_calls == []
@@ -846,7 +846,7 @@ def test_collect_scoped_multi_namespace_dispatch(tmp_path, monkeypatch):
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-primary"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-primary"]})
 
     assert len(extract_calls) == 1
     assert extract_calls[0]["namespace"] == "ns-0"
@@ -880,7 +880,7 @@ def test_collect_scoped_missing_completed_namespace_warns_and_skips(tmp_path, mo
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
          patch.object(deploy, "warn") as mock_warn:
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert extract_calls == []
     warnings = [str(c) for c in mock_warn.call_args_list]
@@ -911,7 +911,7 @@ def test_collect_reads_from_configmap(tmp_path, monkeypatch):
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert len(extract_calls) == 1
     assert sorted(extract_calls[0]["phases"]) == ["baseline", "treatment"]
@@ -921,12 +921,17 @@ def test_collect_reads_from_configmap(tmp_path, monkeypatch):
 # ── Incremental collect helpers ──────────────────────────────────────────────
 
 def test_probe_remote_mtimes_parses_output():
-    """_probe_remote_mtimes parses stat output into {workload: mtime} dict."""
+    """_probe_remote_mtimes parses stat output into {workload: mtime} dict.
+
+    Post step-5, traces live under ``<phase>/<workload>/i<N>/trace_data.csv``.
+    Keys are derived by walking two levels up from the trace file, so the
+    workload name (not the iteration directory) is the dict key.
+    """
     from pipeline.deploy import _probe_remote_mtimes
 
     stat_output = (
-        "1715800000 /data/run1/baseline/wl-smoke/trace_data.csv\n"
-        "1715800100 /data/run1/baseline/wl-load/trace_data.csv\n"
+        "1715800000 /data/run1/baseline/wl-smoke/i1/trace_data.csv\n"
+        "1715800100 /data/run1/baseline/wl-load/i1/trace_data.csv\n"
     )
 
     with patch("subprocess.run") as mock_run:
@@ -970,13 +975,13 @@ def test_probe_remote_mtimes_warns_on_stderr():
     from pipeline import deploy
     from pipeline.deploy import _probe_remote_mtimes
 
-    stat_output = "1715800000 /data/run1/baseline/wl-smoke/trace_data.csv\n"
+    stat_output = "1715800000 /data/run1/baseline/wl-smoke/i1/trace_data.csv\n"
 
     with patch("subprocess.run") as mock_run, \
          patch.object(deploy, "warn") as mock_warn:
         mock_run.return_value = MagicMock(
             returncode=0, stdout=stat_output,
-            stderr="stat: /data/run1/baseline/wl-broken/trace_data.csv: No such file")
+            stderr="stat: /data/run1/baseline/wl-broken/i1/trace_data.csv: No such file")
         result = _probe_remote_mtimes("pod", "/data/run1/baseline", "ns-0")
 
     assert result == {"wl-smoke": 1715800000.0}
@@ -988,7 +993,7 @@ def test_probe_remote_mtimes_warns_on_unparseable_line():
     from pipeline import deploy
     from pipeline.deploy import _probe_remote_mtimes
 
-    stat_output = "garbage /data/run1/baseline/wl-bad/trace_data.csv\n1715800000 /data/run1/baseline/wl-smoke/trace_data.csv\n"
+    stat_output = "garbage /data/run1/baseline/wl-bad/i1/trace_data.csv\n1715800000 /data/run1/baseline/wl-smoke/i1/trace_data.csv\n"
 
     with patch("subprocess.run") as mock_run, \
          patch.object(deploy, "warn") as mock_warn:
@@ -1005,7 +1010,7 @@ def test_probe_remote_mtimes_warns_on_single_token_line():
     from pipeline import deploy
     from pipeline.deploy import _probe_remote_mtimes
 
-    stat_output = "onlyone\n1715800000 /data/run1/baseline/wl-smoke/trace_data.csv\n"
+    stat_output = "onlyone\n1715800000 /data/run1/baseline/wl-smoke/i1/trace_data.csv\n"
 
     with patch("subprocess.run") as mock_run, \
          patch.object(deploy, "warn") as mock_warn:
@@ -1018,7 +1023,12 @@ def test_probe_remote_mtimes_warns_on_single_token_line():
 
 
 def test_is_up_to_date_true_when_local_newer(tmp_path):
-    """_is_up_to_date returns True when local file is at least as new as remote."""
+    """_is_up_to_date returns True when local file is at least as new as remote.
+
+    This is the plans-YAML use case: a single-file freshness check kept intact
+    for ``_extract_phase_plans``. The workload-directory / iN-scan variant is
+    ``_is_workload_up_to_date`` (covered in test_collect_internals.py).
+    """
     from pipeline.deploy import _is_up_to_date
 
     local_csv = tmp_path / "trace_data.csv"
@@ -1099,7 +1109,7 @@ def test_collect_unscoped_reports_per_pair_with_namespace(tmp_path, monkeypatch,
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     captured = capsys.readouterr()
     output = captured.out + captured.err
@@ -1140,7 +1150,7 @@ def test_collect_unscoped_failure_reports_pair_count(tmp_path, monkeypatch, caps
         return {"baseline": None, "treatment": RuntimeError("disk full")}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     captured = capsys.readouterr()
     # 1 pair collected (baseline/smoke), 1 failed (treatment/smoke)
@@ -1174,7 +1184,7 @@ def test_collect_scoped_reports_namespace_context(tmp_path, monkeypatch, capsys)
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-primary"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-primary"]})
 
     captured = capsys.readouterr()
     output = captured.out
@@ -1211,7 +1221,7 @@ def test_collect_unscoped_no_cross_product_on_slot_reuse(tmp_path, monkeypatch, 
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     captured = capsys.readouterr()
     output = captured.out + captured.err
@@ -1263,7 +1273,7 @@ def test_collect_unscoped_parallel_multi_ns(tmp_path, monkeypatch):
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
          patch("concurrent.futures.ThreadPoolExecutor", TrackingExecutor):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert len(extract_calls) == 3
     ns_set = {c["namespace"] for c in extract_calls}
@@ -1301,7 +1311,7 @@ def test_collect_unscoped_single_ns_no_threading(tmp_path, monkeypatch):
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
          patch("concurrent.futures.ThreadPoolExecutor", TrackingExecutor):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert len(executor_used) == 0
 
@@ -1334,7 +1344,7 @@ def test_collect_unscoped_parallel_one_slot_fails(tmp_path, monkeypatch, capsys)
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     captured = capsys.readouterr()
     out = captured.out + captured.err
@@ -1363,7 +1373,7 @@ def test_collect_unscoped_parallel_step_header(tmp_path, monkeypatch, capsys):
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     out = capsys.readouterr().out
     assert "2 slots in parallel" in out
@@ -1397,7 +1407,7 @@ def test_collect_unscoped_parallel_non_runtime_error(tmp_path, monkeypatch, caps
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     captured = capsys.readouterr()
     out = captured.out + captured.err
@@ -1428,7 +1438,7 @@ def test_collect_unscoped_parallel_all_slots_fail(tmp_path, monkeypatch, capsys)
         raise RuntimeError(f"pod failed in {namespace}")
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     out = capsys.readouterr().out
     assert "0/" in out
@@ -1514,24 +1524,30 @@ def test_collect_per_workload_clears_stale_files(tmp_path, monkeypatch):
 
 
 def test_collect_skip_logs_clears_stale_log_dirs(tmp_path, monkeypatch):
-    """--skip-logs path removes stale server_logs/, epp_logs/, and gpu_logs/ before copying."""
+    """--skip-logs path removes stale server_logs/, epp_logs/, and gpu_logs/
+    inside every existing local iteration subtree before copying.
+
+    Post step-5, log subdirs live under ``<wl>/i<N>/{server_logs,epp_logs,gpu_logs}``.
+    The wipe walks each ``i*/`` under the workload dir.
+    """
     from pipeline import deploy
     import subprocess
 
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     (run_dir / "cluster").mkdir(parents=True)
     results_dir = run_dir / "results" / "baseline" / "wl-smoke"
-    results_dir.mkdir(parents=True)
+    iter_dir = results_dir / "i1"
+    iter_dir.mkdir(parents=True)
 
-    stale_server = results_dir / "server_logs" / "stale.log"
+    stale_server = iter_dir / "server_logs" / "stale.log"
     stale_server.parent.mkdir(parents=True)
     stale_server.write_text("stale server log")
 
-    stale_epp = results_dir / "epp_logs" / "stale.log"
+    stale_epp = iter_dir / "epp_logs" / "stale.log"
     stale_epp.parent.mkdir(parents=True)
     stale_epp.write_text("stale epp log")
 
-    stale_gpu = results_dir / "gpu_logs" / "stale.log"
+    stale_gpu = iter_dir / "gpu_logs" / "stale.log"
     stale_gpu.parent.mkdir(parents=True)
     stale_gpu.write_text("stale gpu log")
 
@@ -1543,7 +1559,11 @@ def test_collect_skip_logs_clears_stale_log_dirs(tmp_path, monkeypatch):
     def mock_run(cmd, **kwargs):
         mock = MagicMock(returncode=0, stdout="", stderr="")
         cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
-        if "exec" in cmd_str and "ls" in cmd_str:
+        if "exec" in cmd_str and "ls " in cmd_str and "/wl-smoke/" in cmd_str:
+            # Second-level ls: list iteration subdirs under the workload
+            mock.stdout = "i1"
+        elif "exec" in cmd_str and "ls" in cmd_str:
+            # First-level ls: list workload subdirs under the phase
             mock.stdout = "wl-smoke"
         if "exec" in cmd_str and "stat" in cmd_str:
             mock.stdout = ""
@@ -1555,13 +1575,14 @@ def test_collect_skip_logs_clears_stale_log_dirs(tmp_path, monkeypatch):
         ["baseline"], "test-run", "ns-0", run_dir, skip_logs=True)
 
     assert not stale_server.exists()
-    assert not (results_dir / "server_logs").exists()
+    assert not (iter_dir / "server_logs").exists()
     assert not stale_epp.exists()
     assert not stale_gpu.exists()
 
 
 def test_collect_skip_logs_invokes_gpu_logs_copy(tmp_path, monkeypatch):
-    """--skip-logs path issues a kubectl cp for gpu_logs/ alongside epp_logs/."""
+    """--skip-logs path issues a kubectl cp for gpu_logs/ alongside epp_logs/,
+    scoped to each iteration subdirectory (post step-5 layout)."""
     from pipeline import deploy
     import subprocess
 
@@ -1579,7 +1600,9 @@ def test_collect_skip_logs_invokes_gpu_logs_copy(tmp_path, monkeypatch):
         mock = MagicMock(returncode=0, stdout="", stderr="")
         cmd_list = cmd if isinstance(cmd, list) else cmd.split()
         cmd_str = " ".join(cmd_list)
-        if "exec" in cmd_str and "ls" in cmd_str:
+        if "exec" in cmd_str and "ls " in cmd_str and "/wl-smoke/" in cmd_str:
+            mock.stdout = "i1"
+        elif "exec" in cmd_str and "ls" in cmd_str:
             mock.stdout = "wl-smoke"
         if "exec" in cmd_str and "stat" in cmd_str:
             mock.stdout = ""
@@ -1593,9 +1616,9 @@ def test_collect_skip_logs_invokes_gpu_logs_copy(tmp_path, monkeypatch):
         ["baseline"], "test-run", "ns-0", run_dir, skip_logs=True)
 
     sources = " ".join(cp_targets)
-    assert "/wl-smoke/gpu_logs/" in sources, f"no gpu_logs/ copy issued; saw: {cp_targets}"
-    assert "/wl-smoke/epp_logs/" in sources, f"sanity: epp_logs/ copy still issued; saw: {cp_targets}"
-    assert "/wl-smoke/gpu_stream_done" in sources, f"no gpu_stream_done sentinel copy; saw: {cp_targets}"
+    assert "/wl-smoke/i1/gpu_logs/" in sources, f"no i1/gpu_logs/ copy issued; saw: {cp_targets}"
+    assert "/wl-smoke/i1/epp_logs/" in sources, f"sanity: i1/epp_logs/ copy still issued; saw: {cp_targets}"
+    assert "/wl-smoke/i1/gpu_stream_done" in sources, f"no i1/gpu_stream_done sentinel copy; saw: {cp_targets}"
 
 
 def test_collect_idempotent_no_stale_accumulation(tmp_path, monkeypatch):
@@ -1687,7 +1710,7 @@ def test_collect_parallel_filters_workloads_per_slot(tmp_path, monkeypatch):
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
          patch("concurrent.futures.ThreadPoolExecutor", TrackingExecutor):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     # Should have 2 extract calls (one per slot)
     assert len(extract_calls) == 2
@@ -1745,7 +1768,7 @@ def test_collect_sequential_filters_workloads_per_slot(tmp_path, monkeypatch):
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
          patch("concurrent.futures.ThreadPoolExecutor", TrackingExecutor):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     # Sequential mode: no ThreadPoolExecutor used
     assert len(executor_used) == 0
@@ -1826,7 +1849,13 @@ def test_extract_phases_filters_by_allowed_workloads_skip_logs(tmp_path, monkeyp
     def mock_run(cmd, **kwargs):
         mock = MagicMock(returncode=0, stdout="", stderr="")
         cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
-        if "exec" in cmd_str and "ls" in cmd_str:
+        if "exec" in cmd_str and "ls " in cmd_str and any(
+            f"/{w}/" in cmd_str for w in ("wl-smoke", "wl-load", "wl-heavy")
+        ):
+            # Second-level ls: list iteration subdirs under the workload
+            mock.stdout = "i1"
+        elif "exec" in cmd_str and "ls" in cmd_str:
+            # First-level ls: workload subdirs under the phase
             mock.stdout = "wl-smoke\nwl-load\nwl-heavy"
         elif "exec" in cmd_str and "stat" in cmd_str:
             mock.stdout = ""
@@ -1834,7 +1863,7 @@ def test_extract_phases_filters_by_allowed_workloads_skip_logs(tmp_path, monkeyp
             for wl in ("wl-smoke", "wl-load", "wl-heavy"):
                 if wl in cmd_str:
                     copied_workloads.append(wl)
-                    dest = run_dir / "results" / "baseline" / wl
+                    dest = run_dir / "results" / "baseline" / wl / "i1"
                     dest.mkdir(parents=True, exist_ok=True)
                     break
         return mock
@@ -1945,7 +1974,7 @@ def test_collect_scoped_multi_slot_per_workload(tmp_path, monkeypatch):
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-primary"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-primary"]})
 
     assert len(extract_calls) == 3, f"Expected 3 slot dispatches, got {len(extract_calls)}"
     ns_set = {c["namespace"] for c in extract_calls}
@@ -2031,7 +2060,7 @@ def test_collect_package_baseline_with_workload_no_spurious_warn(tmp_path, monke
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
          patch.object(deploy, "warn") as mock_warn:
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert len(extract_calls) == 1
     assert extract_calls[0]["phases"] == ["baseline"]
@@ -2082,7 +2111,7 @@ def test_collect_package_experiment_with_workload_still_warns_nondone(tmp_path, 
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
          patch.object(deploy, "warn") as mock_warn:
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert len(extract_calls) == 1
     # Only baseline is done, so that's all that gets extracted, but every
@@ -2131,7 +2160,7 @@ def test_collect_multi_package_with_workload(tmp_path, monkeypatch):
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
          patch.object(deploy, "warn") as mock_warn:
-        deploy._cmd_collect(Args(), run_dir, {"namespace": "ns-0"})
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
 
     assert len(extract_calls) == 1
     assert extract_calls[0]["phases"] == ["baseline", "softreflective"]
@@ -2144,3 +2173,192 @@ def test_collect_multi_package_with_workload(tmp_path, monkeypatch):
     assert not any("wl-reason-treatment" in m for m in warn_msgs), (
         f"Spurious warn about out-of-scope pair: {warn_msgs}"
     )
+
+
+# ── main() dispatcher tests for `collect` subcommand (#447) ────────────────
+
+def _run_deploy_main_collect(argv, monkeypatch, tmp_path):
+    """Call deploy.main() with mocked argv and --experiment-root=tmp_path.
+
+    Mirrors the helper in test_deploy_run.py — main() re-resolves
+    EXPERIMENT_ROOT from --experiment-root (or cwd), so monkeypatching the
+    module-level global is not enough.
+    """
+    import sys as _sys
+    from pipeline import deploy
+    monkeypatch.setattr(_sys, "argv",
+                        ["deploy.py", "--experiment-root", str(tmp_path), *argv])
+    monkeypatch.setattr(deploy, "_tty", False, raising=False)
+    return deploy.main()
+
+
+def _make_collect_run_dir(tmp_path, run_name="trial-1", *,
+                          with_cluster=True, with_metadata=True,
+                          metadata_content=None):
+    """Fixture helper: build a workspace/runs/<run>/ tree for collect dispatcher tests."""
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / "runs" / run_name
+    run_dir.mkdir(parents=True)
+    if with_cluster:
+        (run_dir / "cluster").mkdir()
+    if with_metadata:
+        content = metadata_content if metadata_content is not None else \
+            {"version": 1, "run_name": run_name, "cluster_id": "ocp-east"}
+        (run_dir / "run_metadata.json").write_text(json.dumps(content))
+    return workspace, run_dir
+
+
+def test_main_collect_missing_run_dir_emits_assemble_hint(tmp_path, capsys, monkeypatch):
+    """`deploy.py --run trial-1 collect` with no run dir → assemble hint."""
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "setup_config.json").write_text("{}")
+    with pytest.raises(SystemExit):
+        _run_deploy_main_collect(["--run", "trial-1", "collect"], monkeypatch, tmp_path)
+    assert "run 'sim2real assemble --run trial-1' first" in capsys.readouterr().err
+
+
+def test_main_collect_missing_cluster_dir_emits_assemble_hint(tmp_path, capsys, monkeypatch):
+    """`deploy.py --run trial-1 collect` with runs/trial-1/ but no cluster/ → assemble hint."""
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "setup_config.json").write_text("{}")
+    _make_collect_run_dir(tmp_path, with_cluster=False)
+    with pytest.raises(SystemExit):
+        _run_deploy_main_collect(["--run", "trial-1", "collect"], monkeypatch, tmp_path)
+    assert "run 'sim2real assemble --run trial-1' first" in capsys.readouterr().err
+
+
+def test_main_collect_missing_run_metadata_emits_corrupt_hint(tmp_path, capsys, monkeypatch):
+    """`deploy.py --run trial-1 collect` with no run_metadata.json → 're-assemble' hint."""
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "setup_config.json").write_text("{}")
+    _make_collect_run_dir(tmp_path, with_metadata=False)
+    with pytest.raises(SystemExit):
+        _run_deploy_main_collect(["--run", "trial-1", "collect"], monkeypatch, tmp_path)
+    assert "run metadata corrupted; re-assemble" in capsys.readouterr().err
+
+
+def test_main_collect_missing_cluster_id_emits_corrupt_hint(tmp_path, capsys, monkeypatch):
+    """`deploy.py --run trial-1 collect` with metadata missing cluster_id → 're-assemble' hint."""
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "setup_config.json").write_text("{}")
+    _make_collect_run_dir(tmp_path,
+                          metadata_content={"version": 1, "run_name": "trial-1"})
+    with pytest.raises(SystemExit):
+        _run_deploy_main_collect(["--run", "trial-1", "collect"], monkeypatch, tmp_path)
+    assert "run metadata corrupted; re-assemble" in capsys.readouterr().err
+
+
+def test_cmd_collect_empty_namespaces_exits(tmp_path, capsys, monkeypatch):
+    """_cmd_collect with cluster_config missing 'namespaces' → 'No namespace configured.' exit."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "trial-1"
+    (run_dir / "cluster").mkdir(parents=True)
+
+    # NAMESPACE env var must be unset for the guard to fire.
+    monkeypatch.delenv("NAMESPACE", raising=False)
+
+    class Args:
+        package = None
+        skip_logs = False
+
+    with pytest.raises(SystemExit):
+        deploy._cmd_collect(Args(), run_dir, {})
+    assert "No namespace configured." in capsys.readouterr().err
+
+
+# ── --iteration filter (issue #512) ─────────────────────────────────────────
+
+
+def test_collect_iteration_filter_narrows_scope(tmp_path, monkeypatch):
+    """--iteration 1-3 restricts collect to the matching iteration subset.
+
+    Integration test named in the issue: pairs exist at i1..i5 for the same
+    (workload, package); ``deploy.py collect --iteration 1-3`` must consider
+    only i1..i3. We surface the effect by placing i4 and i5 in a separate
+    completed_namespace and asserting no extract call is made against that
+    namespace when the filter is applied.
+    """
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    data = {
+        "wl-chat-mid|sim2real-ac|i1": {"workload": "chat-mid", "package": "sim2real-ac", "status": "done", "completed_namespace": "ns-a"},
+        "wl-chat-mid|sim2real-ac|i2": {"workload": "chat-mid", "package": "sim2real-ac", "status": "done", "completed_namespace": "ns-a"},
+        "wl-chat-mid|sim2real-ac|i3": {"workload": "chat-mid", "package": "sim2real-ac", "status": "done", "completed_namespace": "ns-a"},
+        "wl-chat-mid|sim2real-ac|i4": {"workload": "chat-mid", "package": "sim2real-ac", "status": "done", "completed_namespace": "ns-b"},
+        "wl-chat-mid|sim2real-ac|i5": {"workload": "chat-mid", "package": "sim2real-ac", "status": "done", "completed_namespace": "ns-b"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        only = None
+        workload = None
+        package = None
+        iteration = "1-3"
+        skip_logs = False
+
+    extract_calls = []
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+        extract_calls.append({"namespace": namespace, "phases": sorted(phases)})
+        return {p: None for p in phases}
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-a"]})
+
+    dispatched_ns = {c["namespace"] for c in extract_calls}
+    assert "ns-a" in dispatched_ns, "expected extract against ns-a (holds i1..i3)"
+    assert "ns-b" not in dispatched_ns, (
+        "ns-b holds only i4..i5 — must be excluded by --iteration 1-3")
+
+
+def test_collect_iteration_filter_no_match_aborts(tmp_path, capsys, monkeypatch):
+    """--iteration with no matching iteration aborts via _report_filter_mismatch."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    data = {
+        "wl-chat-mid|sim2real-ac|i1": {"workload": "chat-mid", "package": "sim2real-ac", "status": "done", "completed_namespace": "ns-a"},
+        "wl-chat-mid|sim2real-ac|i2": {"workload": "chat-mid", "package": "sim2real-ac", "status": "done", "completed_namespace": "ns-a"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        only = None
+        workload = None
+        package = None
+        iteration = "9"
+        skip_logs = False
+
+    with pytest.raises(SystemExit) as exc_info:
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-a"]})
+    assert exc_info.value.code == 1
+    assert "--iteration '9'" in capsys.readouterr().err
+
+
+def test_collect_iteration_malformed_exits(tmp_path, capsys, monkeypatch):
+    """--iteration abc surfaces parse_iteration_spec's error before doing work."""
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    data = {
+        "wl-chat-mid|sim2real-ac|i1": {"workload": "chat-mid", "package": "sim2real-ac", "status": "done", "completed_namespace": "ns-a"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    class Args:
+        only = None
+        workload = None
+        package = None
+        iteration = "abc"
+        skip_logs = False
+
+    with pytest.raises(SystemExit) as exc_info:
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-a"]})
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "iteration" in (captured.out + captured.err).lower()

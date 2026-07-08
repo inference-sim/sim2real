@@ -14,7 +14,8 @@ and iterate with the reviewer until you receive APPROVE.
 
 Experiment root: {EXPERIMENT_ROOT}
 Target repo (submodule): {TARGET_REPO}
-Run directory: {RUN_DIR}
+Translations dir: {TRANSLATIONS_DIR}
+Per-algorithm output dir: {OUTPUT_DIR}
 Main session name: {MAIN_SESSION_NAME}
 Algorithm being translated: {ALGO_NAME}
 
@@ -25,23 +26,34 @@ Run Go commands via: `(cd {TARGET_REPO} && <cmd>)`
 
 | File | Purpose |
 |------|---------|
-| `{CONTEXT_PATH}` | Architecture overview, signal mapping, plugin types, overlay format |
-| `{ALGO_SOURCE}` | Source algorithm Go file from simulation |
-| `{ALGO_CONFIG}` | Algorithm policy config (weights, thresholds) — empty when parameter-free |
+| `{ALGO_SOURCE}` | Source algorithm file from simulation |
+| `{ALGO_CONFIG}` | Algorithm policy config (weights, thresholds) — empty for the current schema (parameters, if any, live inline in `{ALGO_SOURCE}`) |
 | `{REPO_ROOT}/pipeline/README.md` | "Scenario Overlay Format" section — defines output structure |
+
+Also inspect the operator-supplied context files (newline-separated absolute paths, one per line):
+
+{CONTEXT_FILE_PATHS}
+
+These files were declared in `transfer.yaml:context.files` and typically hold
+architecture overview, signal mapping, plugin types, and any project-specific
+guidance for the translation.
 
 Context from the operator (held in mind, not written to disk):
 
 {CONTEXT_TEXT}
+
+Per-algorithm notes from the operator ({ALGO_NAME}, may be empty):
+
+{ALGO_NOTES}
 
 Expert agent name (for queries): {EXPERT_AGENT_NAME}
 
 ## Tool Discipline
 
 **Do not explore `{TARGET_REPO}` yourself** beyond reading specific files you already
-know the path to (from the context document or Expert answers).
+know the path to (from the context files or Expert answers).
 
-The context document gives you the architecture overview and signal mapping. For anything
+The context files ({CONTEXT_FILE_PATHS}) give you the architecture overview and signal mapping. For anything
 code-level — Go interface signatures, struct definitions, factory function patterns,
 registration examples, exact type strings — ask the Expert. The Expert has already
 read the full repo and will give you file:line answers.
@@ -69,50 +81,54 @@ Example queries:
 
 Use TaskCreate: `"Phase 2: Baseline Config Derivation"` → TaskUpdate in_progress
 
-**Skip check:** If `{RUN_DIR}/generated/baseline_config.yaml` already exists (written by a
-prior algorithm's skill invocation), skip Phase 2 — send:
+**Skip check:** If `{BASELINE_OVERLAY_PATH}` is empty (this algorithm's baseline is not
+in the manifest's `baselines[]` — should not happen for valid manifests), skip Phase 2
+entirely and proceed to Phase 3. If `{BASELINE_OVERLAY_PATH}` is set and the file already
+exists (written by a prior algorithm's skill invocation in the same translation whose
+`defaults` cross-references the same baseline), skip Phase 2 — send:
 ```
-SendMessage({MAIN_SESSION_NAME}, "baseline-ready: {RUN_DIR}/generated/baseline_config.yaml")
+SendMessage({MAIN_SESSION_NAME}, "baseline-ready: {BASELINE_OVERLAY_PATH}")
 ```
-and wait for "continue". Baseline config is shared across algorithms.
+and wait for "continue". Algorithms that share a baseline (via `defaults`) share this
+overlay file; algorithms with distinct baselines produce distinct overlay files.
 
 Use the inputs listed in the upfront "Inputs — Read These Now" table.
 
-Your goal: produce `{RUN_DIR}/generated/baseline_config.yaml` — a **llmdbenchmark scenario overlay**
-that will be deep-merged onto the experiment's `baseline.yaml` by `prepare.py`.
+Your goal: produce `{BASELINE_OVERLAY_PATH}` — a **llmdbenchmark scenario overlay** that
+will be deep-merged onto the experiment's baseline scenario by `sim2real assemble` at run
+assembly time.
 
 **Output format** (from pipeline/README.md "Scenario Overlay Format"):
 - Top-level `scenario:` list with one dict
 - The `name` field MUST match the scenario name in the experiment's baseline file exactly
   (mismatched names cause llmdbenchmark to deploy multiple scenarios instead of merging)
-- InferenceObjectives go in `extraObjects`. The format pins one rule:
-  - `spec.poolRef.name` MUST equal `${model.idLabel}-gaie` so llm-d-benchmark
-    substitutes `${model.idLabel}` at render time (requires llm-d-benchmark
-    >= PR #1103).
-
-  Everything else MUST be copied verbatim from the project's context document
-  (typically `config.md`) at the field level. In particular: copy the entire
-  `spec.poolRef` block (including `group`, `name`, and any other keys), not
-  just `name`. Same applies to `apiVersion`, `metadata`, `spec.priority`, and
-  any other nested fields the project's `config.md` declares — if it's in
-  config.md's InferenceObjective, it MUST appear in the generated output.
-  Do not paraphrase or selectively include fields.
+- InferenceObjectives go in `extraObjects`. Copy the InferenceObjective
+  verbatim from the project's context files (typically `config.md`) at the
+  field level. In particular: copy the entire `spec.poolRef` block
+  (including `group`, `name`, and any other keys). Same applies to
+  `apiVersion`, `metadata`, `spec.priority`, and any other nested fields
+  the project's `config.md` declares — if it's in config.md's
+  InferenceObjective, it MUST appear in the generated output. Do not
+  paraphrase or selectively include fields, and do not substitute or
+  rewrite `${model.idLabel}` — llm-d-benchmark expands it at render time
+  (requires llm-d-benchmark >= PR #1103), so pass any such placeholders
+  through verbatim.
 - Plugin config in `inferenceExtension.pluginsCustomConfig` as a YAML-in-YAML string
 - Only include fields you are adding or overriding
 
 **Content rules:**
-- Use `{CONTEXT_PATH}` to determine what plugin config and priorities to include
-- Map sim concepts to real plugin type strings via the signal mapping in `{CONTEXT_PATH}`
+- Use the context files listed above (`{CONTEXT_FILE_PATHS}`) to determine what plugin config and priorities to include
+- Map sim concepts to real plugin type strings via the signal mapping in the context files
 - Ask the Expert if you are unsure about any plugin type string or config field name
 
-Create the `generated/` directory if needed, then write `{RUN_DIR}/generated/baseline_config.yaml`.
+Create the parent directory if needed, then write `{BASELINE_OVERLAY_PATH}`.
 Then send to main session:
 ```
-SendMessage({MAIN_SESSION_NAME}, "baseline-ready: {RUN_DIR}/generated/baseline_config.yaml")
+SendMessage({MAIN_SESSION_NAME}, "baseline-ready: {BASELINE_OVERLAY_PATH}")
 ```
 
 Wait for the reply. The main session will either forward user feedback ("feedback: ...") or
-send "continue". If feedback: revise `baseline_config.yaml` and re-send `baseline-ready:`.
+send "continue". If feedback: revise `{BASELINE_OVERLAY_PATH}` and re-send `baseline-ready:`.
 Repeat until you receive "continue".
 
 TaskUpdate Phase 2 → completed
@@ -122,14 +138,17 @@ TaskUpdate Phase 2 → completed
 Use TaskCreate: `"Phase 3: Treatment Config Derivation"` → TaskUpdate in_progress
 
 Read:
-1. `{RUN_DIR}/generated/baseline_config.yaml` — the approved baseline overlay
-2. If `{ALGO_CONFIG}` is non-empty: read it — the algorithm policy config (what changes from baseline)
+1. `{BASELINE_OVERLAY_PATH}` — the approved baseline overlay (skip when empty; treat the framework baseline as the reference)
+2. If `{ALGO_CONFIG}` is non-empty: read it — the algorithm policy config (what changes from baseline). Under the current schema this is always empty; inspect `{ALGO_SOURCE}` directly for any inline weights or thresholds.
 3. `{ALGO_SOURCE}` — the algorithm source
 
-Your goal: produce `{RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_config.yaml` — a **llmdbenchmark scenario overlay**
-containing ONLY what differs from the baseline. Since assembly computes
-`treatment_resolved = deep_merge(baseline_resolved, treatment_overlay)`, anything already in
-baseline propagates automatically.
+Your goal: produce `{OUTPUT_DIR}/{ALGO_NAME}_config.yaml` — a **llmdbenchmark scenario overlay**
+containing ONLY plugin-specific additions not already covered by the algorithm's diffs.
+Since assembly computes
+`treatment_resolved = deep_merge(deep_merge(baseline_resolved, treatment_diffs), treatment_overlay)`
+— where `treatment_diffs` comes from the algorithm's `scenario/treatment.yaml` in the
+experiment repo — anything already in either the baseline or the diffs propagates
+automatically; only add things neither layer supplies.
 
 **Output format** (same structure as baseline overlay):
 - Top-level `scenario:` list with one dict
@@ -147,9 +166,9 @@ baseline propagates automatically.
   no `parameters:` block is needed — just declare the plugin type and name
 - Ask the Expert about config struct field names if needed
 
-Create the directory `{RUN_DIR}/generated/{ALGO_NAME}/` if needed, then write `{RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_config.yaml`. Then send to main session:
+Create the directory `{OUTPUT_DIR}/` if needed, then write `{OUTPUT_DIR}/{ALGO_NAME}_config.yaml`. Then send to main session:
 ```
-SendMessage({MAIN_SESSION_NAME}, "treatment-ready: {RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_config.yaml")
+SendMessage({MAIN_SESSION_NAME}, "treatment-ready: {OUTPUT_DIR}/{ALGO_NAME}_config.yaml")
 ```
 
 Wait for the reply. Handle feedback / continue as in Phase 2.
@@ -162,13 +181,13 @@ TaskUpdate Phase 3 → completed
 2. **Ask the Expert** for exact Go interface signatures, the Factory function pattern, an
    example plugin to model your code after, and the registration file location
 3. **Write** the production plugin code into `{TARGET_REPO}` at the package path identified
-   in the context document or by the Expert
+   in the context files or by the Expert
 4. Define a `Type` constant (kebab-case string) and a `Factory` function matching the
    pattern used by existing plugins in this subsystem
 5. **Register** the plugin in the registration file identified by the Expert
-6. Update `{RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_config.yaml` if the plugin type or parameters changed
+6. Update `{OUTPUT_DIR}/{ALGO_NAME}_config.yaml` if the plugin type or parameters changed
 7. **Follow logging and code patterns** used by existing plugins in the same subsystem —
-   ask the Expert for a representative example if the context document doesn't show one
+   ask the Expert for a representative example if the context files don't show one
 8. **Write tests** — for every new plugin Go file (e.g., `foo.go`), write a corresponding
    `foo_test.go` in the same package directory. Tests must cover: Factory construction,
    algorithm logic (at least main branches), and (if configurable) at least one
@@ -176,7 +195,7 @@ TaskUpdate Phase 3 → completed
 
 ## Phase 4.5: Write Preliminary {ALGO_NAME}_output.json
 
-After writing all plugin code (but before running the build), write `{RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_output.json`
+After writing all plugin code (but before running the build), write `{OUTPUT_DIR}/{ALGO_NAME}_output.json`
 with all 9 required fields. If the file list changes in a later round, update it.
 
 ```json
@@ -193,7 +212,7 @@ with all 9 required fields. If the file list changes in a later round, update it
 }
 ```
 
-Note: `review_rounds` and `consensus` are NOT fields in this file — they go in `.state.json`.
+Note: `review_rounds` and `consensus` are NOT fields in this file — you (the writer) record them in `{TRANSLATIONS_DIR}/review/{ALGO_NAME}/round_<N>.json` on each APPROVE / NEEDS_CHANGES round (see Step 4 below).
 
 ## Step 2: Build/Test Gate (You Own This)
 
@@ -218,30 +237,31 @@ After EVERY successful build/test pass (including the first):
 ```bash
 SNAP_NUM=$(python3 -c "
 from pathlib import Path
-snaps = [d for d in (Path('{RUN_DIR}/snapshots')).glob('v*') if d.is_dir()]
+snaps = [d for d in (Path('{TRANSLATIONS_DIR}/snapshots/{ALGO_NAME}')).glob('v*') if d.is_dir()]
 print(len(snaps) + 1)
 " 2>/dev/null || echo 1)
-SNAP_DIR="{RUN_DIR}/snapshots/v${SNAP_NUM}"
+SNAP_DIR="{TRANSLATIONS_DIR}/snapshots/{ALGO_NAME}/v${SNAP_NUM}"
 mkdir -p "$SNAP_DIR"
 ```
 
 Copy all `files_created` + `files_modified` entries (relative to `{TARGET_REPO}`) plus
-`{RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_config.yaml` into `$SNAP_DIR`:
+`{OUTPUT_DIR}/{ALGO_NAME}_config.yaml` into `$SNAP_DIR`:
 
 ```bash
 python3 -c "
 import json, shutil
 from pathlib import Path
-o = json.load(open('{RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_output.json'))
+o = json.load(open('{OUTPUT_DIR}/{ALGO_NAME}_output.json'))
 snap = Path('$SNAP_DIR')
 target = Path('{TARGET_REPO}')
 for f in o['files_created'] + o.get('files_modified', []):
     src = target / f
-    dst = snap / Path(f).name
+    dst = snap / f
+    dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
-    print(f'  {Path(f).name} -> snapshots/v$SNAP_NUM/')
-shutil.copy2('{RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_config.yaml', snap / '{ALGO_NAME}_config.yaml')
-print(f'Snapshot v$SNAP_NUM saved')
+    print(f'  {f} -> snapshots/{ALGO_NAME}/v$SNAP_NUM/{f}')
+shutil.copy2('{OUTPUT_DIR}/{ALGO_NAME}_config.yaml', snap / '{ALGO_NAME}_config.yaml')
+print(f'Snapshot {ALGO_NAME}/v$SNAP_NUM saved')
 "
 ```
 
@@ -263,7 +283,7 @@ After each green build, send a review request to the reviewer agent:
 REVIEW REQUEST — Round <N>
 Plugin files: <absolute paths of all files_created (excluding test files), one per line>
 Test files: <absolute paths of all _test.go files created or modified, one per line>
-Treatment config: {RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_config.yaml
+Treatment config: {OUTPUT_DIR}/{ALGO_NAME}_config.yaml
 Build: PASSED
 Changed since last round: <brief description, or "initial" for round 1>
 ```
@@ -272,8 +292,8 @@ Wait for the reviewer's reply.
 
 ### On APPROVE
 
-1. Write `{RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_output.json` (update if needed)
-2. Create `{RUN_DIR}/review/` directory if needed, write `round_<N>.json` (see schema below)
+1. Write `{OUTPUT_DIR}/{ALGO_NAME}_output.json` (update if needed)
+2. Create `{TRANSLATIONS_DIR}/review/{ALGO_NAME}/` directory if needed, write `round_<N>.json` (see schema below)
 3. Send to main session:
    ```
    SendMessage({MAIN_SESSION_NAME}, "review-passed: round=<N> plugin_type=<plugin_type>")
@@ -294,7 +314,7 @@ Then exit.
 
 ### On NEEDS_CHANGES (round < {REVIEW_ROUNDS})
 
-Before fixing issues, write `{RUN_DIR}/review/round_<N>.json` with `"consensus": false, "approve_count": 0` and the reviewer's issues list.
+Before fixing issues, write `{TRANSLATIONS_DIR}/review/{ALGO_NAME}/round_<N>.json` with `"consensus": false, "approve_count": 0` and the reviewer's issues list.
 
 Fix ALL issues listed in the reviewer's reply. Then repeat Step 2 (build/test) → Step 3 (snapshot)
 → Step 4 (next review round, incrementing N).
@@ -303,7 +323,7 @@ Do NOT send the reviewer broken code. Only send after a green build.
 
 ### On NEEDS_CHANGES (round == {REVIEW_ROUNDS})
 
-Write `{RUN_DIR}/review/round_<N>.json` with `"consensus": false, "approve_count": 0` and the reviewer's issues list.
+Write `{TRANSLATIONS_DIR}/review/{ALGO_NAME}/round_<N>.json` with `"consensus": false, "approve_count": 0` and the reviewer's issues list.
 
 Collect all remaining issues. Send to main:
 ```
@@ -314,7 +334,7 @@ Then exit.
 
 ## Review Round File Schema
 
-### `{RUN_DIR}/review/round_<N>.json`
+### `{TRANSLATIONS_DIR}/review/{ALGO_NAME}/round_<N>.json`
 
 ```json
 {

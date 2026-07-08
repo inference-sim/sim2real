@@ -408,7 +408,7 @@ def test_cmd_reset_continues_on_exception(tmp_path, monkeypatch, capsys):
         preserve_done_status = False
 
     mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
-                   setup_config={"namespace": "sim2real-ns"})
+                   cluster_config={"namespaces": ["sim2real-ns"]})
 
     # Both pairs should have been attempted
     assert "wl-a-baseline" in call_count
@@ -493,7 +493,7 @@ def test_cmd_reset_skips_pending_only(tmp_path, monkeypatch, capsys):
         preserve_done_status = False
 
     mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
-                   setup_config={"namespace": "sim2real-ns"})
+                   cluster_config={"namespaces": ["sim2real-ns"]})
 
     # pending (wl-load-baseline) should be skipped
     assert "wl-load-baseline" not in cleaned
@@ -522,7 +522,7 @@ def test_cmd_reset_respects_only_filter(tmp_path, monkeypatch, capsys):
         preserve_done_status = False
 
     mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
-                   setup_config={"namespace": "sim2real-ns"})
+                   cluster_config={"namespaces": ["sim2real-ns"]})
 
     assert cleaned == ["wl-heavy-baseline"]
 
@@ -545,7 +545,7 @@ def test_cmd_reset_dry_run_does_not_save(tmp_path, monkeypatch, capsys):
         preserve_done_status = False
 
     mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
-                   setup_config={"namespace": "sim2real-ns"})
+                   cluster_config={"namespaces": ["sim2real-ns"]})
 
     # Progress should not be saved (capture_saves stays empty)
     assert saved_data == {}
@@ -579,7 +579,7 @@ def test_cmd_reset_saves_progress_on_success(tmp_path, monkeypatch, capsys):
 
     mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
                    namespaces=["sim2real-0", "sim2real-1", "sim2real-2"],
-                   setup_config={"namespace": "sim2real-ns"})
+                   cluster_config={"namespaces": ["sim2real-ns"]})
 
     # All non-pending pairs reset to pending (including done)
     assert saved_data["wl-smoke-baseline"]["status"] == "pending"
@@ -703,7 +703,7 @@ def test_cmd_reset_aborts_on_filter_mismatch(tmp_path, monkeypatch, capsys):
 
     with __import__("pytest").raises(SystemExit) as exc_info:
         mod._cmd_reset(_Args(), run_dir, _DISCOVERED,
-                       setup_config={"namespace": "sim2real-ns"})
+                       cluster_config={"namespaces": ["sim2real-ns"]})
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
     assert "no match" in captured.out + captured.err
@@ -915,3 +915,41 @@ def test_reset_pair_logs_info_before_cleanup(monkeypatch, capsys):
     mod._reset_pair("wl-c-baseline", entry3, {}, dry_run=True)
     out = capsys.readouterr().out
     assert "Resetting wl-c-baseline" not in out
+
+
+def test_main_dispatches_reset(tmp_path, monkeypatch):
+    """main() routes 'reset' with the per-run cluster_config (#449).
+
+    Fills the main() dispatcher gap: prior tests exercised _cmd_reset
+    directly with hand-mocked state but did not verify the
+    argv → _load_run_cluster_config → _cmd_reset wiring, nor that the
+    resolved run_dir + cluster_config make it through unchanged.
+    """
+    from unittest.mock import patch
+    import pipeline.deploy as mod
+
+    (tmp_path / "workspace" / "runs" / "trial-1" / "cluster").mkdir(parents=True)
+
+    monkeypatch.setattr("sys.argv", [
+        "deploy.py", "--experiment-root", str(tmp_path),
+        "--run", "trial-1", "reset",
+    ])
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+
+    reset_calls = []
+
+    def mock_reset(args, run_dir, discovered, *,
+                   namespaces=None, cluster_config=None):
+        reset_calls.append((run_dir, cluster_config))
+
+    with patch.object(mod, "_cmd_reset", mock_reset), \
+         patch.object(mod, "_load_run_cluster_config",
+                      return_value={"namespaces": ["ns-0"]}), \
+         patch.object(mod, "_load_setup_config", return_value={}), \
+         patch.object(mod, "_load_pairs", return_value={}):
+        mod.main()
+
+    assert len(reset_calls) == 1
+    run_dir, cluster_config = reset_calls[0]
+    assert run_dir.name == "trial-1"
+    assert cluster_config == {"namespaces": ["ns-0"]}

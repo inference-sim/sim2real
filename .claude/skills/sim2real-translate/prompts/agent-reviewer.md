@@ -16,7 +16,8 @@ to block a bad plugin than to let one reach production.
 
 Experiment root: {EXPERIMENT_ROOT}
 Target repo: {TARGET_REPO}
-Run directory: {RUN_DIR}
+Translations dir: {TRANSLATIONS_DIR}
+Per-algorithm output dir: {OUTPUT_DIR}
 Scenario: {SCENARIO}
 Config kind: {CONFIG_KIND}
 
@@ -24,10 +25,12 @@ Config kind: {CONFIG_KIND}
 
 Read and hold in context:
 
-1. **Context document** `{CONTEXT_PATH}` — architecture overview, signal mapping,
-   available plugin types and their type strings
-2. **Algorithm source** `{ALGO_SOURCE}` — the simulation Go file being translated
-3. If `{ALGO_CONFIG}` is non-empty: read it — weights and thresholds (ground truth)
+1. **Context files** `{CONTEXT_FILE_PATHS}` — newline-separated absolute paths
+   (one path per line) from `transfer.yaml:context.files`. These provide the architecture overview, signal mapping,
+   available plugin types and their type strings.
+2. **Algorithm source** `{ALGO_SOURCE}` — the simulation source file being translated
+3. If `{ALGO_CONFIG}` is non-empty: read it — weights and thresholds (ground truth). Under
+   the current schema this is always empty; any inline weights/thresholds live in `{ALGO_SOURCE}`.
 4. **Pipeline overlay format** `{REPO_ROOT}/pipeline/README.md` — "Scenario Overlay Format"
    section defines valid overlay structure
 
@@ -42,7 +45,8 @@ Context from the operator (held in mind, not written to disk):
 ## Tool Discipline
 
 **Do not explore `{TARGET_REPO}` yourself** beyond the specific files you must read per
-review request (plugin files, registration file, {ALGO_NAME}_config.yaml, {ALGO_NAME}_output.json).
+review request (plugin files, registration file, `{OUTPUT_DIR}/{ALGO_NAME}_config.yaml`,
+`{OUTPUT_DIR}/{ALGO_NAME}_output.json`).
 
 For anything that requires verifying code-level details — Go interface signatures,
 config struct field names, whether a built-in plugin already exists, exact type string
@@ -68,8 +72,8 @@ Example queries:
 You stay idle after initialization. When the writer sends you a review request:
 
 1. Read ALL plugin files listed in the writer's message (paths provided in the request) — fresh
-2. Read `{RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_config.yaml` fresh
-3. Read `{RUN_DIR}/generated/{ALGO_NAME}/{ALGO_NAME}_output.json` for metadata cross-reference
+2. Read `{OUTPUT_DIR}/{ALGO_NAME}_config.yaml` fresh
+3. Read `{OUTPUT_DIR}/{ALGO_NAME}_output.json` for metadata cross-reference
 4. Read the registration file mentioned in `{ALGO_NAME}_output.json` — just the relevant section
 5. Apply ALL review criteria below (never skip one)
 6. Send your verdict to the writer using SendMessage
@@ -92,11 +96,11 @@ Flag any divergence from the source algorithm as `[fidelity]` NEEDS_CHANGES.
 
 ### Criterion 2: Code Quality
 
-- Interface correctly implemented — verify method signatures against the context document or Expert
+- Interface correctly implemented — verify method signatures against the context files or Expert
 - Slice/array indexing guarded: if inputs are accessed by index, check bounds
 - No implicit assumptions: all assumptions documented in comments
 - Production patterns followed (struct layout, error propagation, naming) — verify
-  against the context document or ask the Expert for examples from the live repo
+  against the context files or ask the Expert for examples from the live repo
 - Logging and observability follow the pattern of existing plugins in the same subsystem
   (ask Expert for a reference if uncertain)
 - No unused imports, dead code, or unexported types that should be exported
@@ -129,8 +133,8 @@ This is the most common failure mode — check it carefully.
 
 ### Criterion 5: Assembly Simulation (CRITICAL)
 
-This verifies that `prepare.py` Phase 4 Assembly will succeed when it deep-merges the
-treatment overlay into the baseline-resolved scenario.
+This verifies that `sim2real assemble` will succeed when it deep-merges the
+treatment overlay into the baseline-resolved scenario at run assembly time.
 
 **Step A — Validate overlay structure:**
 Confirm `{ALGO_NAME}_config.yaml` follows the scenario overlay format from
@@ -141,7 +145,7 @@ Confirm `{ALGO_NAME}_config.yaml` follows the scenario overlay format from
 - Valid YAML: no unescaped colons, correct indentation, properly quoted special characters
 
 **Step B — Simulate the merge:**
-`prepare.py` Phase 4 calls:
+Assembly deep-merges as:
 ```python
 baseline_resolved = deep_merge(baseline_bundle, baseline_overlay)
 treatment_resolved = deep_merge(deep_merge(baseline_resolved, treatment_diffs), treatment_overlay)

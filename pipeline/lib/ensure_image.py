@@ -54,9 +54,11 @@ def compute_baseline_ref(registry_repo: str, source_dir: Path) -> str:
 
 
 def collect_scenario_images(cluster_dir: Path) -> list[dict]:
-    """Extract unique image refs from resolved scenario YAMLs in cluster/.
+    """Extract unique EPP image refs from resolved scenario YAMLs in cluster/.
 
-    Returns list of dicts: {"image_ref": "repo:tag", "package": "filename_stem"}
+    Reads ``scenario[*].router.epp.image`` (registry/repository/tag) and
+    reconstructs a full ``registry/repository:tag`` ref. Returns list of
+    dicts: ``{"image_ref": "registry/repo:tag", "package": "filename_stem"}``.
     Skips pipelinerun-*.yaml files.
     """
     if not cluster_dir.exists():
@@ -76,15 +78,17 @@ def collect_scenario_images(cluster_dir: Path) -> list[dict]:
             continue
 
         for entry in data.get("scenario", []):
-            images = entry.get("images", {})
-            sched = images.get("inferenceScheduler")
-            if not sched:
+            router = entry.get("router") or {}
+            epp = router.get("epp") or {} if isinstance(router, dict) else {}
+            img = epp.get("image") or {} if isinstance(epp, dict) else {}
+            if not img:
                 continue
-            repo = sched.get("repository", "")
-            tag = sched.get("tag", "")
-            if not repo or not tag:
+            registry = img.get("registry", "")
+            repository = img.get("repository", "")
+            tag = img.get("tag", "")
+            if not repository or not tag:
                 continue
-            ref = f"{repo}:{tag}"
+            ref = f"{registry}/{repository}:{tag}" if registry else f"{repository}:{tag}"
             if ref in seen:
                 continue
             seen.add(ref)

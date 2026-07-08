@@ -116,7 +116,7 @@ def test_main_dispatches_stop(tmp_path, monkeypatch):
     with patch.object(mod, "_cmd_stop", mock_stop):
         with patch.object(mod, "_load_setup_config", return_value={
             "current_run": "test-run",
-            "namespace": "sim2real-0",
+        }), patch.object(mod, "_load_run_cluster_config", return_value={
             "namespaces": ["sim2real-0", "sim2real-1"],
         }):
             mod.main()
@@ -124,30 +124,8 @@ def test_main_dispatches_stop(tmp_path, monkeypatch):
     assert stop_calls == ["sim2real-0"]
 
 
-def test_main_dispatches_stop_singular_namespace(tmp_path, monkeypatch):
-    """main() falls back to singular 'namespace' key when 'namespaces' is absent."""
-    monkeypatch.setattr("sys.argv", [
-        "deploy.py", "--experiment-root", str(tmp_path), "stop",
-    ])
-    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
-
-    stop_calls = []
-
-    def mock_stop(namespace):
-        stop_calls.append(namespace)
-
-    with patch.object(mod, "_cmd_stop", mock_stop):
-        with patch.object(mod, "_load_setup_config", return_value={
-            "current_run": "test-run",
-            "namespace": "sim2real-legacy",
-        }):
-            mod.main()
-
-    assert stop_calls == ["sim2real-legacy"]
-
-
 def test_main_stop_no_namespace_exits(tmp_path, monkeypatch):
-    """stop exits with code 1 when no namespaces configured."""
+    """stop exits with code 1 when no namespaces configured for the run."""
     monkeypatch.setattr("sys.argv", [
         "deploy.py", "--experiment-root", str(tmp_path), "stop",
     ])
@@ -155,28 +133,62 @@ def test_main_stop_no_namespace_exits(tmp_path, monkeypatch):
 
     with patch.object(mod, "_load_setup_config", return_value={
         "current_run": "test-run",
-    }):
+    }), patch.object(mod, "_load_run_cluster_config", return_value={}):
         with pytest.raises(SystemExit) as exc_info:
             mod.main()
         assert exc_info.value.code == 1
 
 
-def test_main_stop_does_not_require_run_dir(tmp_path, monkeypatch):
-    """stop works without a run directory or run name configured."""
+def test_main_stop_requires_run(tmp_path, monkeypatch, capsys):
+    """stop exits with code 1 when neither --run nor current_run is set (#449).
+
+    Post-issue-449 contract: stop routes through the same per-run cluster
+    resolution as every other run-scoped subcommand. That requires a run
+    name — from --run or current_run in setup_config.json. Without one,
+    main() must exit before touching the cluster.
+    """
     monkeypatch.setattr("sys.argv", [
         "deploy.py", "--experiment-root", str(tmp_path), "stop",
     ])
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
 
+    with patch.object(mod, "_load_setup_config", return_value={}):
+        with pytest.raises(SystemExit) as exc_info:
+            mod.main()
+        assert exc_info.value.code == 1
+
+    err = capsys.readouterr().err
+    assert "No run name" in err
+
+
+def test_main_stop_uses_per_run_cluster(tmp_path, monkeypatch):
+    """main() routes 'stop' via _load_run_cluster_config (per-run cluster resolution) (#449).
+
+    Verifies stop is on the same footing as every other run-scoped
+    subcommand: the run's cluster (from run_metadata.json:cluster_id)
+    supplies the primary namespace, not the workspace-heuristic
+    _load_cluster_config().
+    """
+    monkeypatch.setattr("sys.argv", [
+        "deploy.py", "--experiment-root", str(tmp_path), "--run", "trial-1", "stop",
+    ])
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+
     stop_calls = []
+    per_run_calls = []
 
     def mock_stop(namespace):
         stop_calls.append(namespace)
 
-    with patch.object(mod, "_cmd_stop", mock_stop):
-        with patch.object(mod, "_load_setup_config", return_value={
-            "namespace": "sim2real-0",
-        }):
-            mod.main()
+    def mock_per_run(run_dir):
+        per_run_calls.append(run_dir)
+        return {"namespaces": ["sim2real-per-run"]}
 
-    assert stop_calls == ["sim2real-0"]
+    with patch.object(mod, "_cmd_stop", mock_stop), \
+         patch.object(mod, "_load_run_cluster_config", mock_per_run), \
+         patch.object(mod, "_load_setup_config", return_value={}):
+        mod.main()
+
+    assert stop_calls == ["sim2real-per-run"]
+    assert len(per_run_calls) == 1
+    assert per_run_calls[0].name == "trial-1"

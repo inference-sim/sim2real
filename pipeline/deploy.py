@@ -4,7 +4,7 @@
 Subcommands:
   build    Ensure all scenario images exist (pre-flight for run)
   run      Ensure images + submit PipelineRuns
-  status   Show progress of all (workload, package) pairs
+  status   Show progress of all (workload, package, iteration) triples
   collect  Pull results from cluster for completed phases
   stop     Stop the remote orchestrator Job
   reset    Reset all non-pending pairs to pending (with cluster cleanup)
@@ -49,13 +49,33 @@ def _c(code: str, text: str) -> str:
     return f"\033[{code}m{text}\033[0m" if _tty else text
 
 
+from pipeline.lib import build, cluster_ops, layout
 from pipeline.lib.log import info, ok, warn, err
+from pipeline.lib.pairkey import parse_iteration_spec, parse_pair_key
 from pipeline.lib.redact import redact_yaml_file, redact_yaml_tree
 
 
 def _is_pair_key(key: str) -> bool:
     """Return True if key is a real pair entry (not metadata)."""
     return not key.startswith("_")
+
+
+def _key_iteration(key: str) -> int:
+    """Return the iteration number encoded in a pair key.
+
+    Canonical grammar (``wl-<workload>|<package>[|i<N>]``) yields the
+    parsed ``iteration``; keys without an ``|iN`` suffix parse as ``1``.
+    Legacy dash-shape keys that predate the step-5 grammar (e.g.
+    ``wl-smoke-baseline`` from a pre-PR-2 run) do not parse; they map to
+    ``1`` here to match the design's step-5 semantics — the
+    single-replica shape reads as implicit ``i1``. ``--iteration 1``
+    therefore includes legacy pairs and higher values exclude them,
+    which is what the design table specifies for the mid-rollout state.
+    """
+    try:
+        return parse_pair_key(key).iteration
+    except ValueError:
+        return 1
 
 
 def _format_capacity(effective: int, probed: int, reserved: int,
@@ -90,22 +110,16 @@ def run(cmd: list[str], *, check: bool = True, capture: bool = False,
 
 # ── ConfigMap namespace resolution ──────────────────────────────────────────
 
-def _configmap_namespace(setup_config: dict | None,
+def _configmap_namespace(cluster_config: dict | None,
                          namespaces: list[str] | None = None) -> str:
     """Return the namespace for the run-scoped progress ConfigMap.
 
-    Checks setup_config["namespace"] first, then falls back to
-    namespaces[0] (or setup_config["namespaces"][0] if namespaces
-    is not passed).
+    Uses ``namespaces[0]`` when the caller passes that list, else
+    ``cluster_config["namespaces"][0]``. Returns "" when neither source
+    yields a value.
     """
-    cfg = setup_config or {}
-    ns = cfg.get("namespace", "")
-    if ns:
-        return ns
-    ns_list = namespaces or cfg.get("namespaces") or []
-    if ns_list:
-        return ns_list[0]
-    return ""
+    ns_list = namespaces or (cluster_config or {}).get("namespaces") or []
+    return ns_list[0] if ns_list else ""
 
 
 # ── Phase discovery ─────────────────────────────────────────────────────────
@@ -132,6 +146,62 @@ def _load_setup_config() -> dict:
     return {}
 
 
+def _load_cluster_config() -> dict:
+    """Load the single cluster_config.json from the workspace.
+
+    Step 0 assumes one cluster per workspace. Returns ``{}`` when no
+    ``clusters/`` entry exists yet (callers surface the same
+    "no namespace configured" error path they used for an empty
+    setup_config); hard-fails when more than one cluster is present.
+    """
+    layout.set_experiment_root(EXPERIMENT_ROOT)
+    cluster_ids = layout.list_cluster_ids()
+    if not cluster_ids:
+        # Fall back to legacy workspace/ next to REPO_ROOT (matches
+        # _load_setup_config's two-path resolution for in-repo workspaces).
+        layout.set_experiment_root(REPO_ROOT)
+        cluster_ids = layout.list_cluster_ids()
+        if not cluster_ids:
+            return {}
+    if len(cluster_ids) > 1:
+        err(f"Multiple clusters found in workspace ({len(cluster_ids)}); "
+            f"Step 0 assumes a single cluster.")
+        sys.exit(1)
+    return cluster_ops.read_cluster_config(cluster_ids[0])
+
+
+def _load_run_cluster_config(run_dir: Path) -> dict:
+    """Resolve a run's cluster_config via ``run_metadata.json:cluster_id``.
+
+    Per-run dispatch (issue #446): the run's cluster is recorded in
+    ``runs/<R>/run_metadata.json`` by ``sim2real assemble``, and this helper
+    reads that field then delegates to ``cluster_ops.read_cluster_config``.
+    All error paths emit the exact acceptance-criterion strings from #446
+    and exit — no auto-fix (that is step-6's job).
+    """
+    run_name = run_dir.name
+    if not run_dir.exists() or not (run_dir / "cluster").exists():
+        err(f"run 'sim2real assemble --run {run_name}' first")
+        sys.exit(1)
+
+    meta_path = run_dir / "run_metadata.json"
+    if not meta_path.exists():
+        err("run metadata corrupted; re-assemble")
+        sys.exit(1)
+    try:
+        meta = json.loads(meta_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        err("run metadata corrupted; re-assemble")
+        sys.exit(1)
+
+    cluster_id = meta.get("cluster_id") if isinstance(meta, dict) else None
+    if not cluster_id:
+        err("run metadata corrupted; re-assemble")
+        sys.exit(1)
+
+    return cluster_ops.read_cluster_config(cluster_id)
+
+
 # ── Progress store loading ───────────────────────────────────────────────────
 
 class ProgressUnavailable(RuntimeError):
@@ -144,11 +214,17 @@ class ProgressUnavailable(RuntimeError):
     """
 
 
-def _load_progress(store, *, allow_unreachable: bool = False) -> dict:
+def _load_progress(store, *, allow_unreachable: bool = False,
+                   run_name: str = "") -> dict:
     """Load progress data with consistent corrupt/unreachable handling.
 
     Single entry point for ``store.load()`` across deploy.py subcommands so
     every command surfaces corrupt-data errors with the same UX (issue #140).
+
+    ``run_name`` is folded into the corrupt-data recovery hint when supplied
+    so the user sees the concrete ``sim2real assemble --run <name>`` command
+    to re-run; callers that do not have it in scope get a ``<run-name>``
+    placeholder styled to match the other placeholders in the message.
 
     On ``ValueError`` (corrupt-data signal from ``ConfigMapProgressStore.load``):
     print a clear error pointing at the affected ConfigMap with recovery
@@ -164,8 +240,9 @@ def _load_progress(store, *, allow_unreachable: bool = False) -> dict:
         return store.load()
     except ValueError as exc:
         err(f"Corrupt progress data: {exc}")
-        err("Re-run prepare.py, or fix the ConfigMap manually with "
-            "`kubectl edit configmap <name> -n <namespace>`.")
+        run_token = run_name if run_name else "<run-name>"
+        err(f"Re-assemble the run (sim2real assemble --run {run_token}), or fix "
+            f"the ConfigMap manually with `kubectl edit configmap <name> -n <namespace>`.")
         sys.exit(1)
     except RuntimeError as exc:
         if allow_unreachable:
@@ -178,10 +255,11 @@ def _load_progress(store, *, allow_unreachable: bool = False) -> dict:
 def _write_build_metadata(run_dir: Path, epp_image: str) -> None:
     """Record a successful EPP build in run_metadata.json.
 
-    Sets ``epp_image`` and ``stages.deploy.last_completed_step = "build"`` so
-    ``run.py inspect`` (via ``run_manager.inspect_run``) shows the deploy
-    progress. No-op if run_metadata.json is missing or unparseable — the
-    caller's earlier load/validate path already surfaces those errors.
+    Sets ``epp_image`` and ``stages.deploy.last_completed_step = "build"``.
+    No current reader consumes these fields — they remain for future
+    inspect tooling (see epic #443). No-op if run_metadata.json is missing
+    or unparseable — the caller's earlier load/validate path already
+    surfaces those errors.
     """
     meta_path = run_dir / "run_metadata.json"
     if not meta_path.exists():
@@ -192,14 +270,24 @@ def _write_build_metadata(run_dir: Path, epp_image: str) -> None:
         return
     meta["epp_image"] = epp_image
     meta.setdefault("stages", {}).setdefault("deploy", {})["last_completed_step"] = "build"
-    meta_path.write_text(json.dumps(meta, indent=2))
+    build.atomic_write_json(meta_path, meta)
 
 
-def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
+def _cmd_build(
+    run_dir: Path,
+    namespace: str,
+    skip_build: bool,
+    registry_secret_name: str,
+) -> str:
     """Ensure all required scenario images exist. Returns 'built', 'skip', or 'current'.
 
     Iterates over resolved scenarios in cluster/, extracts image refs,
     and builds any that are stale (source hash mismatch).
+
+    ``registry_secret_name`` is the k8s Secret name holding the
+    dockerconfigjson push credentials — resolved from
+    ``cluster_config.json:secret_names.registry_creds`` by callers.
+    Empty string aborts before dispatch.
     """
     from pipeline.lib.ensure_image import (
         collect_scenario_images, compute_source_hash,
@@ -208,12 +296,12 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
 
     run_meta_path = run_dir / "run_metadata.json"
     if not run_meta_path.exists():
-        err("run_metadata.json not found — run setup.py first.")
+        err(f"run_metadata.json not found at {run_meta_path} — run 'sim2real assemble --run <name>' first.")
         sys.exit(1)
     try:
         run_meta = json.loads(run_meta_path.read_text())
     except json.JSONDecodeError as e:
-        err(f"run_metadata.json is not valid JSON: {e}. Re-run setup.py.")
+        err(f"run_metadata.json is not valid JSON: {e}. Re-run 'sim2real assemble --run <name>'.")
         sys.exit(1)
 
     component_image = run_meta.get("component_image")
@@ -221,18 +309,25 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
         info("No component_image in run metadata — skipping image build")
         return "skip"
     if not component_image:
-        err("component_image is empty in run_metadata.json — re-run setup.py with a valid --registry.")
+        err("component_image is empty in run_metadata.json — re-run 'sim2real assemble --run <name>'.")
         sys.exit(1)
 
     if skip_build:
         info("--skip-build: skipping image build")
         return "skip"
 
+    if not registry_secret_name:
+        err(
+            "cluster_config.json has no secret_names.registry_creds — "
+            "re-run 'cluster.py provision --registry-user U --registry-token T'"
+        )
+        sys.exit(1)
+
     step(1, "Ensure Images")
 
     registry = run_meta.get("registry", "")
     if not registry:
-        err("registry is empty in run_metadata.json — re-run setup.py with a valid --registry.")
+        err("registry is empty in run_metadata.json — re-run 'sim2real assemble --run <name>'.")
         sys.exit(1)
     repo_name = run_meta.get("repo_name", "llm-d-inference-scheduler")
     run_name = run_dir.name
@@ -248,7 +343,7 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
 
     if not scenario_images:
         if cluster_dir.exists() and any(cluster_dir.glob("*.yaml")):
-            warn("cluster/ has scenario files but no images.inferenceScheduler found — "
+            warn("cluster/ has scenario files but no router.epp.image found — "
                  "falling back to treatment image only")
         treatment_ref = f"{registry}/{repo_name}:{run_name}"
         scenario_images = [{"image_ref": treatment_ref, "package": "treatment"}]
@@ -342,15 +437,14 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
                 sys.exit(1)
 
         info(f"Building image: {ref}")
-        result = run(
-            ["bash", str(build_script),
-             "--run-dir", str(run_dir),
-             "--run-name", run_name,
-             "--namespace", namespace,
-             "--image-ref", ref,
-             "--source-dir", str(source_dir)],
-            check=False,
-            cwd=REPO_ROOT,
+        rc = build.dispatch_buildkit_build(
+            image_ref=ref,
+            build_id=run_name,
+            namespace=namespace,
+            source_dir=source_dir,
+            run_dir=run_dir,
+            repo_root=REPO_ROOT,
+            registry_secret_name=registry_secret_name,
         )
 
         # Restore baseline after algorithm build (clean state for next iteration)
@@ -375,7 +469,7 @@ def _cmd_build(run_dir: Path, namespace: str, skip_build: bool) -> str:
                     f"  cd {source_dir} && git checkout -- .")
                 sys.exit(1)
 
-        if result.returncode != 0:
+        if rc != 0:
             err(f"Image build failed for {ref} — see output above")
             sys.exit(1)
 
@@ -585,16 +679,17 @@ def _runtime_str(entry: dict) -> str:
 
 
 def _cmd_status(args, run_dir: Path,
-                setup_config: dict | None = None) -> None:
-    """Print a snapshot table of all (workload, package) pair statuses."""
+                cluster_config: dict | None = None) -> None:
+    """Print a snapshot table of all (workload, package, iteration) statuses."""
     from pipeline.lib.progress import ConfigMapProgressStore
-    primary_ns = _configmap_namespace(setup_config)
+    primary_ns = _configmap_namespace(cluster_config)
     if not primary_ns:
-        err("No namespace configured. Run setup.py first.")
+        err("No namespace configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
     try:
-        progress = _load_progress(store, allow_unreachable=True)
+        progress = _load_progress(store, allow_unreachable=True,
+                                  run_name=run_dir.name)
     except ProgressUnavailable as exc:
         err(f"Cluster unreachable — cannot read progress ConfigMap: {exc}")
         err("Retry once kubectl can reach the cluster.")
@@ -607,6 +702,7 @@ def _cmd_status(args, run_dir: Path,
             getattr(args, "workload", None) is not None,
             getattr(args, "package", None) is not None,
             getattr(args, "status", None) is not None,
+            getattr(args, "iteration", None) is not None,
         ])
         if filters_given:
             suffix += " — filters ignored"
@@ -947,11 +1043,20 @@ def _fmt_size(b: int) -> str:
 
 
 def _probe_remote_mtimes(pod_name: str, phase_path: str, namespace: str) -> dict[str, float]:
-    """Return {workload_name: mtime_epoch} for workloads that have trace_data.csv.
+    """Return {workload_name: newest_iteration_mtime_epoch} for workloads that
+    have at least one trace_data.csv on the PVC.
 
     Uses a single kubectl exec to stat all trace_data.csv files in the phase
-    directory.  Returns empty dict on probe failure — callers should fall back
-    to full copy in that case.
+    directory. Post step-5, traces live under
+    ``<phase>/<workload>/i<N>/trace_data.csv`` — one per iteration. This
+    function walks two levels up from each trace file to derive the workload
+    name and keeps the newest mtime seen across that workload's iterations.
+    ``_is_workload_up_to_date`` then compares this against the OLDEST local iteration,
+    so an incremental skip requires every local iteration to be at least as
+    new as the newest remote iteration.
+
+    Returns empty dict on probe failure — callers should fall back to full
+    copy in that case.
     """
     result = run(
         ["kubectl", "exec", pod_name, f"-n={namespace}", "--", "sh", "-c",
@@ -975,20 +1080,60 @@ def _probe_remote_mtimes(pod_name: str, phase_path: str, namespace: str) -> dict
             warn(f"mtime probe: unparseable line: {line!r}")
             continue
         try:
-            mtimes[Path(parts[1]).parent.name] = float(parts[0])
+            mt = float(parts[0])
         except ValueError:
             warn(f"mtime probe: unparseable line: {line!r}")
+            continue
+        # Path shape: <phase_path>/<workload>/i<N>/trace_data.csv
+        # parent.parent is the workload dir.
+        wl = Path(parts[1]).parent.parent.name
+        if wl in mtimes:
+            mtimes[wl] = max(mtimes[wl], mt)
+        else:
+            mtimes[wl] = mt
     return mtimes
 
 
-def _is_up_to_date(local_csv: Path, remote_mtime: "float | None") -> bool:
-    """Return True if local trace_data.csv is at least as new as the remote copy."""
+def _is_up_to_date(local_path: Path, remote_mtime: "float | None") -> bool:
+    """Return True if *local_path* exists and its mtime is at least as new as
+    *remote_mtime*.
+
+    Used by ``_extract_phase_plans`` to decide whether a specific YAML file
+    needs re-downloading. For workload-level trace-directory checks under
+    the step-5 ``i<N>/`` layout, use ``_is_workload_up_to_date`` instead.
+    """
     if remote_mtime is None:
         return False
     try:
-        return local_csv.exists() and local_csv.stat().st_mtime >= remote_mtime
+        return local_path.exists() and local_path.stat().st_mtime >= remote_mtime
     except OSError as exc:
-        warn(f"stat failed for {local_csv}: {exc} — will re-download")
+        warn(f"stat failed for {local_path}: {exc} — will re-download")
+        return False
+
+
+def _is_workload_up_to_date(wl_dir: Path, remote_mtime: "float | None") -> bool:
+    """Return True if every ``i<N>/trace_data.csv`` under *wl_dir* is at least
+    as new as the newest remote copy for that workload.
+
+    Post step-5, a workload's traces live under
+    ``<wl_dir>/i<N>/trace_data.csv``. This function returns True only when
+    the workload has at least one collected iteration locally AND the OLDEST
+    local iteration's mtime is >= ``remote_mtime``. If some iterations are
+    missing locally OR any local iteration is older than remote, returns
+    False so the workload is redone end-to-end (matching the wipe-and-recopy
+    pattern the callers rely on).
+    """
+    if remote_mtime is None:
+        return False
+    if not wl_dir.exists():
+        return False
+    csvs = sorted(wl_dir.glob("i*/trace_data.csv"))
+    if not csvs:
+        return False
+    try:
+        return min(c.stat().st_mtime for c in csvs) >= remote_mtime
+    except OSError as exc:
+        warn(f"stat failed in {wl_dir}: {exc} — will re-download")
         return False
 
 
@@ -1121,51 +1266,112 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                         wl_names = [w for w in wl_names if w in phase_allowed]
                 phase_errors = []
                 for wl_name in wl_names:
-                    if _is_up_to_date(dest_dir / wl_name / "trace_data.csv",
-                                      remote_mtimes.get(wl_name)):
+                    if _is_workload_up_to_date(dest_dir / wl_name,
+                                               remote_mtimes.get(wl_name)):
                         info(f"[{phase}/{wl_name}] up to date — skipping")
                         if on_workload_done:
                             on_workload_done(phase, wl_name, namespace, None)
                         continue
                     wl_dest = dest_dir / wl_name
                     wl_dest.mkdir(parents=True, exist_ok=True)
-                    for log_dir in (wl_dest / "server_logs", wl_dest / "epp_logs", wl_dest / "gpu_logs", wl_dest / "resources"):
-                        if log_dir.exists():
-                            shutil.rmtree(log_dir)
-                    # Copy trace files
+                    # Wipe stale log dirs across every existing local iteration.
+                    for iN_dir in wl_dest.glob("i*"):
+                        for sub in ("server_logs", "epp_logs", "gpu_logs", "resources"):
+                            p = iN_dir / sub
+                            if p.exists():
+                                shutil.rmtree(p)
+                    # Discover iteration subdirs on the PVC (post step-5 layout).
+                    iN_ls = run(
+                        ["kubectl", "exec", pod_name, f"-n={namespace}", "--",
+                         "sh", "-c",
+                         f"ls /data/{run_name}/{phase}/{wl_name}/"],
+                        check=False, capture=True,
+                    )
+                    if iN_ls.returncode != 0:
+                        wl_errors = [
+                            f"{wl_name}: failed to list iterations: "
+                            f"{iN_ls.stderr.strip()}"
+                        ]
+                        phase_errors.extend(wl_errors)
+                        if on_workload_done:
+                            on_workload_done(
+                                phase, wl_name, namespace,
+                                RuntimeError("; ".join(wl_errors)),
+                            )
+                        continue
+                    iN_names = [
+                        n for n in iN_ls.stdout.strip().split()
+                        if n.startswith("i") and n[1:].isdigit()
+                    ]
+                    if not iN_names:
+                        wl_errors = [
+                            f"{wl_name}: no i<N>/ iteration subdirs found on PVC"
+                        ]
+                        phase_errors.extend(wl_errors)
+                        if on_workload_done:
+                            on_workload_done(
+                                phase, wl_name, namespace,
+                                RuntimeError("; ".join(wl_errors)),
+                            )
+                        continue
                     wl_errors = []
-                    for fname in ("trace_data.csv", "trace_header.yaml", "epp_stream_done", "gpu_stream_done"):
-                        src = f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{wl_name}/{fname}"
-                        r = run(["kubectl", "cp", src, str(wl_dest / fname), "--retries=3"],
-                                check=False, capture=True)
+                    for iN in iN_names:
+                        iN_dest = wl_dest / iN
+                        iN_dest.mkdir(parents=True, exist_ok=True)
+                        remote_prefix = (
+                            f"{namespace}/{pod_name}:/data/{run_name}/"
+                            f"{phase}/{wl_name}/{iN}"
+                        )
+                        # Copy trace files
+                        for fname in ("trace_data.csv", "trace_header.yaml",
+                                      "epp_stream_done", "gpu_stream_done"):
+                            r = run(
+                                ["kubectl", "cp", f"{remote_prefix}/{fname}",
+                                 str(iN_dest / fname), "--retries=3"],
+                                check=False, capture=True,
+                            )
+                            if r.returncode != 0 and "no such file" not in r.stderr.lower():
+                                wl_errors.append(
+                                    f"{wl_name}/{iN}/{fname}: {r.stderr.strip()}"
+                                )
+                        # Copy epp_logs directory
+                        epp_dest = iN_dest / "epp_logs"
+                        epp_dest.mkdir(exist_ok=True)
+                        r = run(
+                            ["kubectl", "cp", f"{remote_prefix}/epp_logs/",
+                             str(epp_dest), "--retries=3"],
+                            check=False, capture=True,
+                        )
                         if r.returncode != 0 and "no such file" not in r.stderr.lower():
-                            wl_errors.append(f"{wl_name}/{fname}: {r.stderr.strip()}")
-                    # Copy epp_logs directory
-                    epp_src = f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{wl_name}/epp_logs/"
-                    epp_dest = wl_dest / "epp_logs"
-                    epp_dest.mkdir(exist_ok=True)
-                    r = run(["kubectl", "cp", epp_src, str(epp_dest), "--retries=3"],
-                            check=False, capture=True)
-                    if r.returncode != 0 and "no such file" not in r.stderr.lower():
-                        wl_errors.append(f"{wl_name}/epp_logs: {r.stderr.strip()}")
-                    # Copy gpu_logs directory
-                    gpu_src = f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{wl_name}/gpu_logs/"
-                    gpu_dest = wl_dest / "gpu_logs"
-                    gpu_dest.mkdir(exist_ok=True)
-                    r = run(["kubectl", "cp", gpu_src, str(gpu_dest), "--retries=3"],
-                            check=False, capture=True)
-                    if r.returncode != 0 and "no such file" not in r.stderr.lower():
-                        wl_errors.append(f"{wl_name}/gpu_logs: {r.stderr.strip()}")
-                    # Copy resources directory
-                    res_src = f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{wl_name}/resources/"
-                    res_dest = wl_dest / "resources"
-                    res_dest.mkdir(exist_ok=True)
-                    r = run(["kubectl", "cp", res_src, str(res_dest), "--retries=3"],
-                            check=False, capture=True)
-                    if r.returncode != 0 and "no such file" not in r.stderr.lower():
-                        wl_errors.append(f"{wl_name}/resources: {r.stderr.strip()}")
-                    else:
-                        redact_yaml_tree(res_dest)
+                            wl_errors.append(
+                                f"{wl_name}/{iN}/epp_logs: {r.stderr.strip()}"
+                            )
+                        # Copy gpu_logs directory
+                        gpu_dest = iN_dest / "gpu_logs"
+                        gpu_dest.mkdir(exist_ok=True)
+                        r = run(
+                            ["kubectl", "cp", f"{remote_prefix}/gpu_logs/",
+                             str(gpu_dest), "--retries=3"],
+                            check=False, capture=True,
+                        )
+                        if r.returncode != 0 and "no such file" not in r.stderr.lower():
+                            wl_errors.append(
+                                f"{wl_name}/{iN}/gpu_logs: {r.stderr.strip()}"
+                            )
+                        # Copy resources directory
+                        res_dest = iN_dest / "resources"
+                        res_dest.mkdir(exist_ok=True)
+                        r = run(
+                            ["kubectl", "cp", f"{remote_prefix}/resources/",
+                             str(res_dest), "--retries=3"],
+                            check=False, capture=True,
+                        )
+                        if r.returncode != 0 and "no such file" not in r.stderr.lower():
+                            wl_errors.append(
+                                f"{wl_name}/{iN}/resources: {r.stderr.strip()}"
+                            )
+                        else:
+                            redact_yaml_tree(res_dest)
                     if wl_errors:
                         phase_errors.extend(wl_errors)
                     if on_workload_done:
@@ -1176,8 +1382,8 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                 else:
                     errors[phase] = None
             elif workload:
-                if _is_up_to_date(dest_dir / workload / "trace_data.csv",
-                                  remote_mtimes.get(workload)):
+                if _is_workload_up_to_date(dest_dir / workload,
+                                           remote_mtimes.get(workload)):
                     info(f"[{phase}/{workload}] up to date — skipping")
                     errors[phase] = None
                     if on_workload_done:
@@ -1228,8 +1434,8 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                     continue
                 phase_errors = []
                 for wl_name in wl_names:
-                    if _is_up_to_date(dest_dir / wl_name / "trace_data.csv",
-                                      remote_mtimes.get(wl_name)):
+                    if _is_workload_up_to_date(dest_dir / wl_name,
+                                               remote_mtimes.get(wl_name)):
                         info(f"[{phase}/{wl_name}] up to date — skipping")
                         if on_workload_done:
                             on_workload_done(phase, wl_name, namespace, None)
@@ -1393,9 +1599,12 @@ def _extract_phase_plans(pod_name: str, run_name: str, phase: str,
             info(f"[{phase}/plans/{flow}] copied={copied} skipped={skipped}")
 
 
-def _cmd_collect(args, run_dir: Path, setup_config: dict):
+def _cmd_collect(args, run_dir: Path, cluster_config: dict):
     """Pull results from cluster for completed phases."""
-    namespace = os.environ.get("NAMESPACE", setup_config.get("namespace", ""))
+    cluster_namespaces = cluster_config.get("namespaces") or []
+    namespace = os.environ.get(
+        "NAMESPACE", cluster_namespaces[0] if cluster_namespaces else ""
+    )
     if not namespace:
         err("No namespace configured.")
         sys.exit(1)
@@ -1404,13 +1613,14 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
 
     # Derive known phases from ConfigMap
     from pipeline.lib.progress import ConfigMapProgressStore
-    primary_ns = _configmap_namespace(setup_config)
+    primary_ns = _configmap_namespace(cluster_config)
     if not primary_ns:
-        err("No namespace configured. Run setup.py first.")
+        err("No namespace configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
     try:
-        progress = _load_progress(store, allow_unreachable=True) or None
+        progress = _load_progress(store, allow_unreachable=True,
+                                  run_name=run_dir.name) or None
     except ProgressUnavailable as exc:
         err(f"Cluster unreachable — cannot read progress ConfigMap: {exc}")
         err("Refusing to collect from filesystem-discovered phases without "
@@ -1418,14 +1628,16 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
             "cluster.")
         sys.exit(1)
 
-    # ── Pair-level scoping (--only / --workload / --package) ─────────────
+    # ── Pair-level scoping (--only / --workload / --package / --iteration) ─
     scope_only = getattr(args, "only", None)
     scope_workload = getattr(args, "workload", None)
     scope_package = _parse_list(getattr(args, "package", None))
-    scoped = scope_only is not None or scope_workload is not None
+    scope_iteration = getattr(args, "iteration", None)
+    scoped = (scope_only is not None or scope_workload is not None
+              or scope_iteration is not None)
 
     if scoped and not progress:
-        err("--only/--workload require progress data to resolve pairs, but none was found.")
+        err("--only/--workload/--iteration require progress data to resolve pairs, but none was found.")
         sys.exit(1)
 
     if scoped and progress:
@@ -1443,6 +1655,7 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
             workload = scope_workload
             package = _pair_scope_pkg
             status = None
+            iteration = scope_iteration
 
         in_scope = _resolve_scope(progress, _ScopeArgs())
 
@@ -1787,13 +2000,44 @@ def _cmd_collect(args, run_dir: Path, setup_config: dict):
 # ── Run helpers ─────────────────────────────────────────────────────────────
 
 def _load_pairs(cluster_dir: Path) -> dict:
-    """Discover all (workload, package) pairs from pipelinerun-*.yaml at cluster/ root.
+    """Discover all (workload, package, iteration) pairs from pipelinerun-*.yaml at cluster/ root.
 
     Returns dict keyed by "wl-" + filename stem (minus "pipelinerun-" prefix).
+    Thin wrapper over ``_load_pairs_with_errors``; the malformed-key count is
+    discarded here. Callers that need the count should call
+    ``_load_pairs_with_errors`` directly.
     """
-    pairs = {}
+    pairs, _ = _load_pairs_with_errors(cluster_dir)
+    return pairs
+
+
+def _load_pairs_with_errors(cluster_dir: Path) -> tuple[dict, int]:
+    """Discover pairs and report how many keys did not match the new grammar.
+
+    Returns ``(pairs, malformed_count)``. ``pairs`` has the same dict shape as
+    ``_load_pairs`` returns. ``malformed_count`` counts pair keys whose
+    filename-derived string does not parse under the canonical grammar
+    (see ``pipeline/lib/pairkey.py``).
+
+    Entries whose key parses gain an ``iteration`` field (int, >= 1).
+    Legacy keys without an ``|iN`` suffix parse as ``iteration=1``.
+
+    Deviation from the design's literal loader-layer policy (drop with
+    WARN): during the step-5 rollout, PR 2 (``assemble`` filename
+    reshape) has not yet landed, so on-disk filenames still produce
+    keys that fail the new grammar (e.g. ``wl-smoke-baseline``
+    from ``pipelinerun-smoke-baseline.yaml``). Dropping them here would
+    break every downstream command until PR 2 lands and existing runs
+    are re-assembled. Instead this loader keeps the entry (without an
+    ``iteration`` field) and reports the count so operators — and, in a
+    later PR, ``_cmd_status`` — can surface it. Once PR 2 lands and
+    runs are re-assembled, ``malformed_count`` should trend to zero and
+    the WARN/drop semantics can be tightened without behavior change.
+    """
+    pairs: dict = {}
+    malformed_count = 0
     if not cluster_dir.exists():
-        return pairs
+        return pairs, malformed_count
     for pr_path in sorted(cluster_dir.glob("pipelinerun-*.yaml")):
         try:
             pr_data = yaml.safe_load(pr_path.read_text())
@@ -1802,7 +2046,7 @@ def _load_pairs(cluster_dir: Path) -> dict:
             workload = params.get("workloadName", "")
             package = params.get("phase", "")
             key = "wl-" + pr_path.stem.removeprefix("pipelinerun-")
-            pairs[key] = {
+            entry: dict = {
                 "workload": workload,
                 "package": package,
                 "pr_name": pr_name,
@@ -1810,10 +2054,17 @@ def _load_pairs(cluster_dir: Path) -> dict:
                 "namespace": pr_data.get("metadata", {}).get("namespace", ""),
                 "scenario_content": params.get("scenarioContent"),
             }
+            try:
+                parts = parse_pair_key(key)
+            except ValueError:
+                malformed_count += 1
+            else:
+                entry["iteration"] = parts.iteration
+            pairs[key] = entry
         except Exception as e:
             warn(f"Skipping {pr_path.name}: {e}")
             continue
-    return pairs
+    return pairs, malformed_count
 
 
 def _uninstall_orphaned_helm(key: str, namespace: str) -> None:
@@ -2021,12 +2272,22 @@ def _apply_run_filters(progress: dict, args) -> set:
     """Return the set of pair keys in scope for this invocation.
 
     With no flags: returns empty set (caller interprets as all pairs in scope).
-    With flags: returns only matching pairs.
+    With flags: returns only matching pairs. Filters compose via AND.
     """
     only = _parse_list(getattr(args, "only", None))
     workload = _parse_list(getattr(args, "workload", None))
     package = _parse_list(getattr(args, "package", None))
     status_filter = getattr(args, "status", None)
+    iteration_spec = getattr(args, "iteration", None)
+
+    # Parse --iteration up-front so malformed specs fail before any other work.
+    iteration_set: "set[int] | None" = None
+    if iteration_spec is not None:
+        try:
+            iteration_set = parse_iteration_spec(iteration_spec)
+        except ValueError as exc:
+            err(str(exc))
+            sys.exit(1)
 
     if only:
         result = set()
@@ -2046,9 +2307,11 @@ def _apply_run_filters(progress: dict, args) -> set:
             valid = sorted(k for k in progress.keys() if _is_pair_key(k))
             print(f"  Valid pair keys: {valid}", file=sys.stderr)
             sys.exit(1)
+        if iteration_set is not None:
+            result = {k for k in result if _key_iteration(k) in iteration_set}
         return result
 
-    if not any([workload, package, status_filter]):
+    if not any([workload, package, status_filter, iteration_set]):
         return set()
 
     pair_entries = {k: v for k, v in progress.items() if _is_pair_key(k)}
@@ -2076,6 +2339,8 @@ def _apply_run_filters(progress: dict, args) -> set:
         candidates = {k for k in candidates if pair_entries[k].get("package") in package}
     if status_filter:
         candidates = {k for k in candidates if pair_entries[k].get("status") == status_filter}
+    if iteration_set is not None:
+        candidates = {k for k in candidates if _key_iteration(k) in iteration_set}
     return candidates
 
 
@@ -2090,6 +2355,7 @@ def _resolve_scope(progress: dict, args) -> set:
         getattr(args, "workload", None) is not None,
         getattr(args, "package", None) is not None,
         getattr(args, "status", None) is not None,
+        getattr(args, "iteration", None) is not None,
     ])
     filtered = _apply_run_filters(progress, args)
     if filters_given and not filtered:
@@ -2104,6 +2370,7 @@ def _report_filter_mismatch(progress: dict, args) -> None:
     workload = _parse_list(getattr(args, "workload", None))
     package = _parse_list(getattr(args, "package", None))
     status_filter = getattr(args, "status", None)
+    iteration_spec = getattr(args, "iteration", None)
 
     parts = []
     if only is not None:
@@ -2114,6 +2381,8 @@ def _report_filter_mismatch(progress: dict, args) -> None:
         parts.append(f"--package '{','.join(package)}'")
     if status_filter is not None:
         parts.append(f"--status '{status_filter}'")
+    if iteration_spec is not None:
+        parts.append(f"--iteration '{iteration_spec}'")
 
     err(f"No pairs matched {', '.join(parts)}.\n")
 
@@ -2126,10 +2395,12 @@ def _report_filter_mismatch(progress: dict, args) -> None:
     valid_workloads = sorted({v.get("workload", "") for v in pair_values} - {""})
     valid_packages = sorted({v.get("package", "") for v in pair_values} - {""})
     valid_statuses = sorted({v.get("status", "") for v in pair_values} - {""})
+    valid_iterations = sorted({_key_iteration(k) for k in progress if _is_pair_key(k)})
 
-    print(f"\n  Valid --workload values: {', '.join(valid_workloads)}", file=sys.stderr)
-    print(f"  Valid --package values:  {', '.join(valid_packages)}", file=sys.stderr)
-    print(f"  Valid --status values:   {', '.join(valid_statuses)}", file=sys.stderr)
+    print(f"\n  Valid --workload values:   {', '.join(valid_workloads)}", file=sys.stderr)
+    print(f"  Valid --package values:    {', '.join(valid_packages)}", file=sys.stderr)
+    print(f"  Valid --status values:     {', '.join(valid_statuses)}", file=sys.stderr)
+    print(f"  Valid --iteration values:  {', '.join(str(n) for n in valid_iterations)}", file=sys.stderr)
 
 
 def _check_slot_ready(namespace: str, hf_secret_name: str = "hf-secret") -> tuple[bool, list[str]]:
@@ -2139,7 +2410,7 @@ def _check_slot_ready(namespace: str, hf_secret_name: str = "hf-secret") -> tupl
     Returns (ready, list_of_failure_reasons).
 
     Note: Tekton tasks presence check is not yet implemented; assumes
-    ``setup.py`` has been run.
+    ``cluster.py provision`` has been run.
     """
     failures = []
 
@@ -2150,7 +2421,7 @@ def _check_slot_ready(namespace: str, hf_secret_name: str = "hf-secret") -> tupl
             check=False, capture=True,
         )
         if result.returncode != 0 or result.stdout.strip() != "Bound":
-            hint = " — re-run setup.py to provision it" if pvc == "source-pvc" else ""
+            hint = " — re-run cluster.py provision to provision it" if pvc == "source-pvc" else ""
             failures.append(f"PVC {pvc} not Bound in {namespace}{hint}")
 
     result = run(
@@ -2320,7 +2591,7 @@ def _select_dispatchable(
 
 
 def _refresh_namespaces(current: list[str]) -> list[str]:
-    """Re-read the slot list from setup_config.json for live mid-run updates.
+    """Re-read the slot list from cluster_config.json for live mid-run updates.
 
     Returns the refreshed list, or ``current`` unchanged when:
       - the file is unreadable / unparseable (best-effort: keep prior list),
@@ -2332,15 +2603,15 @@ def _refresh_namespaces(current: list[str]) -> list[str]:
     Logs once per actual change so quiet cycles stay silent.
     """
     try:
-        fresh = _load_setup_config()
+        fresh = _load_cluster_config()
     except Exception as exc:
-        warn(f"setup_config.json re-read failed: {exc} — keeping current slot list")
+        warn(f"cluster_config.json re-read failed: {exc} — keeping current slot list")
         return current
-    fresh_ns = [n for n in (fresh.get("namespaces") or [fresh.get("namespace", "")]) if n]
+    fresh_ns = [n for n in (fresh.get("namespaces") or []) if n]
     if not fresh_ns:
         return current
     if fresh_ns[0] != current[0]:
-        warn(f"setup_config.json primary namespace changed "
+        warn(f"cluster_config.json primary namespace changed "
              f"({current[0]} → {fresh_ns[0]}); ignoring (primary is pinned for the run)")
         return current
     if fresh_ns == current:
@@ -2354,7 +2625,7 @@ def _refresh_namespaces(current: list[str]) -> list[str]:
     return fresh_ns
 
 
-def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
+def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
     """Orchestrate parallel pool execution across namespace slots."""
     import tempfile as _tmp
     from pipeline.lib.progress import ConfigMapProgressStore
@@ -2363,11 +2634,19 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
         extract_node_filters, NodeFilter,
     )
 
-    namespaces = setup_config.get("namespaces") or [setup_config.get("namespace", "")]
+    namespaces = cluster_config.get("namespaces") or []
     if not namespaces or not namespaces[0]:
-        err("No namespaces configured. Run setup.py with --namespaces."); sys.exit(1)
+        err("No namespaces configured. Run cluster.py provision with --namespaces."); sys.exit(1)
 
-    _cmd_build(run_dir, namespace=namespaces[0], skip_build=args.skip_build)
+    registry_secret_name = (
+        (cluster_config.get("secret_names") or {}).get("registry_creds") or ""
+    )
+    _cmd_build(
+        run_dir,
+        namespace=namespaces[0],
+        skip_build=args.skip_build,
+        registry_secret_name=registry_secret_name,
+    )
 
     max_retries = getattr(args, "max_retries", 2)
     poll_interval = getattr(args, "poll_interval", 30)
@@ -2375,9 +2654,9 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     max_pending_stalls = getattr(args, "max_pending_stalls", 10)
 
     cluster_dir = run_dir / "cluster"
-    primary_ns = _configmap_namespace(setup_config, namespaces)
+    primary_ns = _configmap_namespace(cluster_config, namespaces)
     if not primary_ns:
-        err("No namespace configured. Run setup.py first."); sys.exit(1)
+        err("No namespace configured. Run cluster.py provision with --namespaces."); sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
 
     # Derive GPU resource type from baseline scenario
@@ -2434,11 +2713,11 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     _zero_dispatch_count = 0
 
     # Load or initialize progress
-    progress = _load_progress(store)
+    progress = _load_progress(store, run_name=run_dir.name)
 
     discovered = _load_pairs(cluster_dir)
     if not discovered:
-        err("No pairs found in cluster/. Run prepare.py first."); sys.exit(1)
+        err(f"run 'sim2real assemble --run {run_dir.name}' first"); sys.exit(1)
 
     # Initialize new entries (first run or new pairs added)
     for key, meta in discovered.items():
@@ -2482,10 +2761,10 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     store.save(progress)
 
     # Orphans: pair_keys in progress (in scope, still active) but absent from
-    # cluster/. Happens when prepare.py is re-run with a different workload set
-    # between stop and the next run. Without this guard, _pending_pairs would
-    # surface them and the dispatch loop's pair_costs[pair_key] would KeyError
-    # at startup (#408).
+    # cluster/. Happens when sim2real assemble is re-run with a different
+    # workload set between stop and the next run. Without this guard,
+    # _pending_pairs would surface them and the dispatch loop's
+    # pair_costs[pair_key] would KeyError at startup (#408).
     orphans = sorted(
         k for k, v in progress.items()
         if _is_pair_key(k) and k in _scope and k not in discovered
@@ -2493,7 +2772,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     )
     if orphans:
         warn(f"{len(orphans)} progress entries have no PipelineRun in cluster/ "
-             f"(likely from a prior prepare.py): {orphans}. Skipping. "
+             f"(likely from a prior sim2real assemble): {orphans}. Skipping. "
              f"Remove the entries manually or via `deploy.py reset --only <key>` "
              f"if they should not return.")
 
@@ -2517,7 +2796,23 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
     timeout_hours = 4
     info(f"Orchestrator: {len(_scope)} pairs in scope, {len(namespaces)} slot(s)")
     if not _work_remaining() and not slots_busy:
-        info(f"All {len(_scope)} pairs in scope already done — nothing to dispatch (use --force to reset)")
+        # Every pair in scope is in a terminal state. Count by status so
+        # the operator can distinguish a legitimately finished scope from
+        # one containing failed / timed-out / stalled pairs (issue #460).
+        # Uses the canonical status tokens ("timed-out" with a hyphen) so
+        # this line and `deploy.py status` speak the same language.
+        _terminal_states = ("done", "failed", "timed-out", "stalled")
+        _counts = {s: 0 for s in _terminal_states}
+        for k, v in progress.items():
+            if _is_pair_key(k) and k in _scope and k in discovered:
+                _status = v.get("status", "")
+                if _status in _counts:
+                    _counts[_status] += 1
+        _breakdown = ", ".join(f"{_counts[s]} {s}" for s in _terminal_states)
+        info(f"All {len(_scope)} pairs in scope are in terminal states "
+             f"({_breakdown}). Nothing to dispatch. Use "
+             f"`deploy.py reset --only <key>` to retry a specific pair, or "
+             f"`deploy.py run --force` to reset all pairs in scope.")
         return
 
     from pipeline.lib.health import RemediationTracker as _HealthTracker
@@ -2706,7 +3001,7 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
                 random.shuffle(dispatchable)
 
             for ns, pair_key in zip(free_slots, dispatchable):
-                hf_secret_name = setup_config.get("hf_secret_name", "hf-secret")
+                hf_secret_name = (cluster_config.get("secret_names") or {}).get("hf_token", "hf-secret")
                 ready, reasons = _check_slot_ready(ns, hf_secret_name=hf_secret_name)
                 if not ready:
                     warn(f"Slot {ns} not ready: {'; '.join(reasons)}")
@@ -2799,15 +3094,15 @@ def _cmd_run(args, run_dir: Path, setup_config: dict) -> None:
 
 def _cmd_reset(args, run_dir: Path, discovered: dict,
                namespaces: list[str] | None = None,
-               setup_config: dict | None = None) -> None:
+               cluster_config: dict | None = None) -> None:
     """Reset all non-pending pairs to pending (with cluster cleanup)."""
     from pipeline.lib.progress import ConfigMapProgressStore
-    primary_ns = _configmap_namespace(setup_config, namespaces)
+    primary_ns = _configmap_namespace(cluster_config, namespaces)
     if not primary_ns:
-        err("No namespace configured. Run setup.py first.")
+        err("No namespace configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
-    progress = _load_progress(store)
+    progress = _load_progress(store, run_name=run_dir.name)
 
     if not progress:
         info("No progress data found — nothing to reset")
@@ -2854,15 +3149,15 @@ def _cmd_reset(args, run_dir: Path, discovered: dict,
 
 
 def _cmd_wipe(args, run_dir: Path,
-              setup_config: dict | None = None) -> None:
+              cluster_config: dict | None = None) -> None:
     """Delete local result files for pairs in scope."""
     from pipeline.lib.progress import ConfigMapProgressStore
-    primary_ns = _configmap_namespace(setup_config)
+    primary_ns = _configmap_namespace(cluster_config)
     if not primary_ns:
-        err("No namespace configured. Run setup.py first.")
+        err("No namespace configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
     store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
-    progress = _load_progress(store)
+    progress = _load_progress(store, run_name=run_dir.name)
 
     if not progress:
         info("No progress data found — nothing to wipe")
@@ -2977,8 +3272,8 @@ _FAIL_FAST_REASONS = {
 def _collect_run_flags(args) -> list[str]:
     """Collect run subcommand flags to forward to the in-cluster Job."""
     flags: list[str] = []
-    for name in ("only", "workload", "package", "status"):
-        val = getattr(args, name)
+    for name in ("only", "workload", "package", "status", "iteration"):
+        val = getattr(args, name, None)
         if val is not None:
             if isinstance(val, list):
                 flags.extend([f"--{name}"] + val)
@@ -3128,16 +3423,17 @@ def _wait_for_job_pod(namespace: str, *, timeout: int = 120, poll: int = 5) -> N
         time.sleep(poll)
 
 
-def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
+def _cmd_run_remote(args, run_dir: "Path", setup_config: dict,
+                    cluster_config: dict) -> None:
     """Submit the orchestrator as an in-cluster Job."""
     from pipeline.lib.remote import (
         build_run_inputs_configmap, build_orchestrator_job,
     )
 
-    namespaces = setup_config.get("namespaces") or [setup_config.get("namespace", "")]
+    namespaces = cluster_config.get("namespaces") or []
     namespace = namespaces[0] if namespaces else ""
     if not namespace:
-        err("No namespaces configured. Run setup.py with --namespaces.")
+        err("No namespaces configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
 
     orchestrator_image = setup_config.get("orchestrator_image")
@@ -3165,15 +3461,16 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
         from pipeline.lib.progress import ConfigMapProgressStore
         store = ConfigMapProgressStore(namespace, run_name=run_dir.name)
         try:
-            progress = _load_progress(store, allow_unreachable=True) or None
+            progress = _load_progress(store, allow_unreachable=True,
+                                      run_name=run_dir.name) or None
         except ProgressUnavailable as exc:
             warn(f"ConfigMap unreachable — skipping pre-flight filter "
                  f"validation: {exc}")
             progress = None
         if progress is not None:
             # Mirror _cmd_run's init loop locally so the pre-flight validator
-            # sees pair_keys that prepare.py added since the last run. The
-            # in-cluster orchestrator independently does its own init from
+            # sees pair_keys that sim2real assemble added since the last run.
+            # The in-cluster orchestrator independently does its own init from
             # the ConfigMap and persists; only `workload` and `package` need
             # to be populated here — those are the fields _apply_run_filters
             # reads when building valid_workloads / valid_packages (#414).
@@ -3186,7 +3483,15 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
                     }
             _resolve_scope(progress, args)
 
-    _cmd_build(run_dir, namespace=namespace, skip_build=args.skip_build)
+    registry_secret_name = (
+        (cluster_config.get("secret_names") or {}).get("registry_creds") or ""
+    )
+    _cmd_build(
+        run_dir,
+        namespace=namespace,
+        skip_build=args.skip_build,
+        registry_secret_name=registry_secret_name,
+    )
 
     workspace_dir = EXPERIMENT_ROOT / "workspace"
     run_name = run_dir.name
@@ -3207,7 +3512,7 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict) -> None:
             defaults_content=defaults_content,
         )
     except OSError as exc:
-        err(f"{exc} — run setup.py and prepare.py first")
+        err(f"{exc} — run setup.py and 'sim2real assemble --run {run_dir.name}' first")
         sys.exit(1)
     # subprocess.run used directly because the module's run() helper doesn't
     # support stdin input, which kubectl apply -f - requires.
@@ -3285,14 +3590,18 @@ Examples:
                            help="Scope to pairs matching these workloads (comma or space-separated)")
     collect_p.add_argument("--package", nargs="+", metavar="NAME",
                            help="Collect only these packages (comma or space-separated)")
+    collect_p.add_argument("--iteration", metavar="SPEC", dest="iteration",
+                           help="Scope to iteration(s): '2', '1,3', '1-3', '1,3-5'")
     collect_p.add_argument("--skip-logs", action="store_true", dest="skip_logs",
                            help="Skip vLLM and EPP log files, collect only traces")
 
-    status_p = sub.add_parser("status", help="Show progress of all (workload, package) pairs")
+    status_p = sub.add_parser("status", help="Show progress of all (workload, package, iteration) triples")
     status_p.add_argument("--only",     nargs="+", metavar="PAIR",  help="Scope to specific pair keys (comma or space-separated, wl- prefix optional)")
     status_p.add_argument("--workload", nargs="+", metavar="NAME",  help="Scope to pairs matching these workloads (comma or space-separated)")
     status_p.add_argument("--package",  nargs="+", metavar="NAME",  help="Scope to pairs matching these packages (comma or space-separated)")
     status_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status (e.g. running, done, failed)")
+    status_p.add_argument("--iteration", metavar="SPEC", dest="iteration",
+                          help="Scope to iteration(s): '2', '1,3', '1-3', '1,3-5'")
     status_p.add_argument("-s", "--silent", action="store_true",
                           help="Suppress the per-pair table; print only the summary line")
 
@@ -3309,6 +3618,8 @@ Examples:
     run_p.add_argument("--workload",     nargs="+", metavar="NAME",  help="Scope execution to pairs matching these workloads (comma or space-separated)")
     run_p.add_argument("--package",      nargs="+", metavar="NAME",  help="Scope execution to pairs matching these packages (comma or space-separated)")
     run_p.add_argument("--status",       metavar="STATE", help="Scope execution to pairs with this status (e.g. failed, timed-out)")
+    run_p.add_argument("--iteration",    metavar="SPEC", dest="iteration",
+                       help="Scope execution to iteration(s): '2', '1,3', '1-3', '1,3-5'")
     run_p.add_argument("--force",        action="store_true",
                        help="Reset non-pending pairs to pending, cleaning cluster resources for pairs with assigned namespaces")
     run_p.add_argument("--skip-teardown", action="store_true", dest="skip_teardown",
@@ -3339,6 +3650,8 @@ Examples:
     reset_p.add_argument("--workload", nargs="+", metavar="NAME",  help="Scope to pairs matching these workloads (comma or space-separated)")
     reset_p.add_argument("--package",  nargs="+", metavar="NAME",  help="Scope to pairs matching these packages (comma or space-separated)")
     reset_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status")
+    reset_p.add_argument("--iteration", metavar="SPEC", dest="iteration",
+                         help="Scope to iteration(s): '2', '1,3', '1-3', '1,3-5'")
     reset_p.add_argument("--preserve-done-status", action="store_true", dest="preserve_done_status",
                          help="Keep done pairs' status unchanged (cluster cleanup only)")
     reset_p.add_argument("--dry-run",  action="store_true", dest="dry_run",
@@ -3348,6 +3661,8 @@ Examples:
     wipe_p.add_argument("--only",     nargs="+", metavar="PAIR",  help="Scope to specific pair keys (comma or space-separated, wl- prefix optional)")
     wipe_p.add_argument("--workload", nargs="+", metavar="NAME",  help="Scope to pairs matching these workloads (comma or space-separated)")
     wipe_p.add_argument("--package",  nargs="+", metavar="NAME",  help="Scope to pairs matching these packages (comma or space-separated)")
+    wipe_p.add_argument("--iteration", metavar="SPEC", dest="iteration",
+                        help="Scope to iteration(s): '2', '1,3', '1-3', '1,3-5'")
     wipe_p.add_argument("--dry-run",  action="store_true", dest="dry_run",
                          help="Print what would be wiped without doing it")
     wipe_p.add_argument("--yes", "-y", action="store_true",
@@ -3384,59 +3699,60 @@ def main():
 
     cmd = args.command
 
-    if cmd == "stop":
-        namespaces = [ns for ns in (setup_config.get("namespaces") or
-                      [setup_config.get("namespace", "")]) if ns]
-        if not namespaces:
-            err("No namespaces configured. Run setup.py first.")
-            sys.exit(1)
-        _cmd_stop(namespace=namespaces[0])
-        return
-
     run_name = args.run or setup_config.get("current_run", "")
     if not run_name:
         err("No run name. Use --run NAME or set current_run in setup_config.json.")
         sys.exit(1)
     run_dir = EXPERIMENT_ROOT / "workspace" / "runs" / run_name
 
-    if not run_dir.exists():
-        err(f"Run directory not found: {run_dir}")
-        sys.exit(1)
+    cluster_config = _load_run_cluster_config(run_dir)
 
     if cmd == "build":
-        namespaces = setup_config.get("namespaces") or [setup_config.get("namespace", "")]
+        namespaces = cluster_config.get("namespaces") or []
         if not namespaces or not namespaces[0]:
-            err("No namespaces configured. Run setup.py with --namespaces."); sys.exit(1)
-        _cmd_build(run_dir, namespace=namespaces[0],
-                   skip_build=getattr(args, "skip_build", False))
+            err("No namespaces configured. Run cluster.py provision with --namespaces."); sys.exit(1)
+        registry_secret_name = (
+            (cluster_config.get("secret_names") or {}).get("registry_creds") or ""
+        )
+        _cmd_build(
+            run_dir,
+            namespace=namespaces[0],
+            skip_build=getattr(args, "skip_build", False),
+            registry_secret_name=registry_secret_name,
+        )
         return
 
     if cmd == "run":
         if getattr(args, "remote", False):
-            _cmd_run_remote(args, run_dir, setup_config)
+            _cmd_run_remote(args, run_dir, setup_config, cluster_config)
         else:
-            _cmd_run(args, run_dir, setup_config)
+            _cmd_run(args, run_dir, cluster_config)
     elif cmd == "status":
-        _cmd_status(args, run_dir, setup_config=setup_config)
+        _cmd_status(args, run_dir, cluster_config=cluster_config)
     elif cmd == "collect":
-        _cmd_collect(args, run_dir, setup_config)
+        _cmd_collect(args, run_dir, cluster_config)
     elif cmd == "reset":
         cluster_dir = run_dir / "cluster"
         discovered = _load_pairs(cluster_dir)
-        namespaces = [ns for ns in (setup_config.get("namespaces") or
-                      [setup_config.get("namespace", "")]) if ns]
+        namespaces = [ns for ns in (cluster_config.get("namespaces") or []) if ns]
         if not namespaces:
-            warn("No namespaces in setup_config — PipelineRun deletion for done pairs may be incomplete")
+            warn("No namespaces in cluster_config — PipelineRun deletion for done pairs may be incomplete")
         _cmd_reset(args, run_dir, discovered,
                    namespaces=namespaces or None,
-                   setup_config=setup_config)
+                   cluster_config=cluster_config)
     elif cmd == "wipe":
-        _cmd_wipe(args, run_dir, setup_config=setup_config)
+        _cmd_wipe(args, run_dir, cluster_config=cluster_config)
     elif cmd == "pairs":
         cluster_dir = run_dir / "cluster"
         _cmd_pairs(cluster_dir, keys_only=args.keys_only,
                    workloads_only=args.workloads_only,
                    packages_only=args.packages_only)
+    elif cmd == "stop":
+        namespaces = [ns for ns in (cluster_config.get("namespaces") or []) if ns]
+        if not namespaces:
+            err("No namespaces configured. Run cluster.py provision with --namespaces.")
+            sys.exit(1)
+        _cmd_stop(namespace=namespaces[0])
     else:
         err("No subcommand specified. Use: deploy.py build | run | status | collect | stop | reset | wipe | pairs")
         sys.exit(1)

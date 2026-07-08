@@ -125,3 +125,36 @@ def test_pairs_cli_mutually_exclusive_flags():
     with pytest.raises(SystemExit) as exc_info:
         parser.parse_args(["pairs", "--keys-only", "--workloads-only"])
     assert exc_info.value.code != 0
+
+
+def test_main_dispatches_pairs(tmp_path, monkeypatch):
+    """main() routes 'pairs' with the per-run cluster_dir (#449).
+
+    Fills the main() dispatcher gap: prior tests exercised _cmd_pairs
+    directly with a hand-built tmp_path but did not verify the
+    argv → _load_run_cluster_config → cluster_dir wiring.
+    """
+    from unittest.mock import patch
+    import pipeline.deploy as mod
+
+    monkeypatch.setattr("sys.argv", [
+        "deploy.py", "--experiment-root", str(tmp_path),
+        "--run", "trial-1", "pairs",
+    ])
+    monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
+
+    pairs_calls = []
+
+    def mock_pairs(cluster_dir, *, keys_only=False,
+                   workloads_only=False, packages_only=False):
+        pairs_calls.append(cluster_dir)
+
+    with patch.object(mod, "_cmd_pairs", mock_pairs), \
+         patch.object(mod, "_load_run_cluster_config",
+                      return_value={"namespaces": ["ns-0"]}), \
+         patch.object(mod, "_load_setup_config", return_value={}):
+        mod.main()
+
+    assert len(pairs_calls) == 1
+    assert pairs_calls[0].name == "cluster"
+    assert pairs_calls[0].parent.name == "trial-1"
