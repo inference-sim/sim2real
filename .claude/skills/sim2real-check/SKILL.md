@@ -151,12 +151,14 @@ fi
 
 ### Auxiliary detection (all modes)
 
-Regardless of which mode-dispatch branch ran, the checks below need four additional variables — `SIM` (the simulation bundle), `BLIS` (the simulator codebase), `GAIE` (the gateway-api-inference-extension codebase), and `LLMD` (the llm-d-inference-scheduler codebase). The mode-dispatch block does not populate them. Run this detection *after* the mode dispatch completes, in every mode, using the same predicates as the pre-refactor skill:
+Regardless of which mode-dispatch branch ran, the checks below need four additional variables — `SIM` (the simulation bundle), `BLIS` (the simulator codebase), `GAIE` (the gateway-api-inference-extension codebase), and `LLMD` (the llm-d-router codebase). The mode-dispatch block does not populate them. Run this detection *after* the mode dispatch completes, in every mode, using the same predicates as the pre-refactor skill:
 
 - **Sim bundle** (`SIM`): if `--sim` was passed, use it verbatim. Otherwise scan `$EXPERIMENT_ROOT/experiments/*/` for directories containing `README.md` + `algorithm/` + `workloads/`. First match wins. Common patterns: `sim2real_bundle*`, `sim2real_*bundle*`. Leave unset if no candidate is found.
-- **BLIS codebase** (`BLIS`): current working directory if it contains `sim/` + `go.mod`; otherwise search `../` and `tmp/` for a directory with the same shape.
+- **BLIS codebase** (`BLIS`): first derive `$SIM2REAL_ROOT` inline via the same discovery Step 0.5 uses (`python -c 'from pipeline.lib import layout; import pathlib; print(pathlib.Path(layout.__file__).resolve().parents[2])'`); then try `$SIM2REAL_ROOT/inference-sim` — the framework repo's own BLIS submodule (`.gitmodules`) — if that directory contains `sim/` + `go.mod`. Fall back to the current working directory if it contains `sim/` + `go.mod`, otherwise search `../` and `tmp/` for a directory with the same shape.
 - **GAIE codebase** (`GAIE`): look for `gateway-api-inference-extension` under `tmp/`, `../`, or nearby.
-- **llm-d scheduler** (`LLMD`): look for `llm-d-inference-scheduler` under `tmp/`, `../`, or nearby.
+- **llm-d router** (`LLMD`): look for `llm-d-router` under `tmp/`, `../`, or nearby. (Legacy `llm-d-inference-scheduler` checkouts are no longer detected — that project has been sunset in favor of `llm-d-router`.)
+
+After all four variables have been resolved, apply this GAIE alias: **if `GAIE` is unset and `LLMD` points at an `llm-d-router` checkout, set `GAIE=$LLMD`**. `gateway-api-inference-extension` has been merged into `llm-d-router`, so the router codebase serves both roles when no standalone `gateway-api-inference-extension` checkout is on disk.
 
 **Required vs. optional at check time:**
 
@@ -212,7 +214,7 @@ Manifest assembly path:          <path or "(legacy mode)">
 Cluster config path:             <path or "(legacy mode)">
 BLIS codebase:                   <path or "(not found)">
 GAIE codebase:                   <path or "(not found)">
-llm-d scheduler (LLMD):          <path or "(not found)">
+llm-d-router (LLMD):             <path or "(not found)">
 Workload filter (WORKLOAD):      <name or "(all)">
 ```
 
@@ -359,7 +361,7 @@ For numerical checks, always show a comparison table. For code/config checks, sh
 
 - **Simulation codebase** (`BLIS`): confirmed by user
 - **GAIE codebase** (`GAIE`): confirmed by user
-- **llm-d scheduler** (`LLMD`): confirmed by user
+- **llm-d router** (`LLMD`): confirmed by user
 - **Sim bundle** (`SIM`): `$SIM/README.md`, `$SIM/config.md`, `$SIM/algorithm/`, `$SIM/workloads/`, `$SIM/results/`
 - **Configs directory** (`CONFIGS_DIR`): Go plugins + YAML configs. In resolve-mode this is the translation's `generated/` dir under `workspace/translations/<hash>/`; in legacy-mode it's `$REAL/generated/`.
 - **Results directory** (`RESULTS_DIR`): per-phase workload data. **Do not iterate `$PHASES` × `${WORKLOADS_BY_PHASE[$phase]}` directly** — iterate the `PRESENT` rows in `$ENUM_JSON` (see Step 0.5) and use each row's `results_dir` field as the working path. In replica-shape runs (`SHAPE=replica`) `results_dir` is `$RESULTS_DIR/<phase>/<workload>/i<N>/`; in legacy-shape runs (`SHAPE=legacy`) it is `$RESULTS_DIR/<phase>/<workload>/`. Each `results_dir` contains `trace_header.yaml`, `trace_data.csv`, `server_logs/`, `epp_logs/`, `gpu_logs/`, `epp_stream_done`.
