@@ -180,14 +180,20 @@ def load_defaults_overlay(defaults_dir: Path | None, *, disable: list[str]) -> d
 
 
 def inject_image_tag(scenario_dict: dict, image_ref: str) -> None:
-    """Inject BYO image into every scenario entry's ``images.inferenceScheduler``.
+    """Inject BYO image into every scenario entry's ``router.epp.image``.
 
-    Splits a ``registry/repo:tag`` ref on the last colon into ``repository``
-    and ``tag``; digest refs (``registry/repo@sha256:...``) keep the whole
-    ref as ``repository`` with ``tag=""``. ``pullPolicy`` is always set to
-    ``Always`` — mirrors the semantics of
-    ``pipeline/lib/epp.py:inject_epp_image`` so downstream benchmark
-    charts see a familiar shape.
+    Splits a ``registry/repo:tag`` ref on the last colon into a
+    full-path repository and tag, then splits the repository at the
+    last ``/`` into ``registry`` and bare-repository fields so the
+    llm-d-router chart can render ``{registry}/{repository}:{tag}``
+    directly. Digest refs (``registry/repo@sha256:...``) are split at
+    the last ``/`` the same way as tag refs — the ``@sha256:...``
+    suffix stays attached to the bare repository component — but
+    ``tag`` is always ``""`` for digests. Refs with no ``/`` (bare
+    image names) yield ``registry=""`` and ``repository=<full-ref>``.
+    ``pullPolicy`` is always set to ``Always`` — mirrors the
+    semantics of ``pipeline/lib/epp.py:inject_epp_image`` so
+    downstream benchmark charts see a familiar shape.
     """
     scenario_list = scenario_dict.get("scenario")
     if not scenario_list:
@@ -195,18 +201,22 @@ def inject_image_tag(scenario_dict: dict, image_ref: str) -> None:
             "cannot inject image_tag: scenario dict has no 'scenario' entries"
         )
     if "@sha256:" in image_ref:
-        repository, tag = image_ref, ""
+        full_repository, tag = image_ref, ""
     else:
         # rsplit on the last "/" isolates the registry:port/path portion so
         # only a trailing "repo:tag" colon splits — never a registry-port colon.
         if ":" in image_ref.rsplit("/", 1)[-1]:
-            repository, tag = image_ref.rsplit(":", 1)
+            full_repository, tag = image_ref.rsplit(":", 1)
         else:
-            repository, tag = image_ref, ""
+            full_repository, tag = image_ref, ""
+    if "/" in full_repository:
+        registry, bare_repository = full_repository.rsplit("/", 1)
+    else:
+        registry, bare_repository = "", full_repository
     for entry in scenario_list:
-        entry["images"] = entry.get("images") or {}
-        entry["images"]["inferenceScheduler"] = {
-            "repository": repository,
+        entry.setdefault("router", {}).setdefault("epp", {})["image"] = {
+            "registry": registry,
+            "repository": bare_repository,
             "tag": tag,
             "pullPolicy": "Always",
         }
@@ -279,6 +289,36 @@ def write_run_metadata(run_dir: Path, meta: dict) -> Path:
     return out
 
 
+def _align_overlay_name(base: dict, overlay: dict) -> dict:
+    """Realign overlay's ``scenario[0].name`` to match base to prevent list-merge duplication.
+
+    The ``deep_merge`` list strategy in ``pipeline/lib/values.py`` picks ``name``
+    as the merge key when every entry on both sides carries it, then merges list
+    items by identity on that key. Framework-default fragments under
+    ``baselines/defaults/*.yaml`` are authored as ``scenario: - name: defaults``
+    (a placeholder — see each fragment's top-of-file comment "scenario[0].name
+    is realigned to the experiment baseline at merge time"). If the baseline
+    entry is named anything other than ``defaults`` (i.e. every real experiment),
+    a naive merge would append the defaults content as a second, unwanted
+    scenario entry — and llm-d-benchmark's templater would then render it as a
+    separate deployment carrying the framework-default model
+    (``facebook/opt-125m``) instead of the intended model. See issue #516.
+
+    Copies the overlay's first scenario name from the base's first scenario name
+    when both are non-empty and differ. Mutates and returns ``overlay``.
+
+    Ported verbatim from ``pipeline/lib/assemble.py:_align_overlay_name`` on
+    ``main`` — dropped by step-2's ``assemble.py`` → ``assemble_run.py`` rename.
+    """
+    base_scenarios = base.get("scenario", [])
+    overlay_scenarios = overlay.get("scenario", [])
+    if base_scenarios and overlay_scenarios:
+        base_name = base_scenarios[0].get("name", "")
+        if base_name and overlay_scenarios[0].get("name", "") != base_name:
+            overlay_scenarios[0]["name"] = base_name
+    return overlay
+
+
 def resolve_baseline(
     *,
     bundle_path: Path,
@@ -291,6 +331,13 @@ def resolve_baseline(
     ``baselines/defaults/`` directory). ``overlay_path`` may be ``None`` or
     point at a non-existent file (BYO baseline without a baseline overlay).
     Bundle is required — a missing bundle raises AssembleError.
+
+    Before the merge, ``framework_defaults[scenario][0].name`` is realigned
+    to the bundle's ``scenario[0].name`` so both sides collapse into a single
+    scenario entry (see ``_align_overlay_name``). Without this, a defaults
+    overlay named ``defaults`` and a baseline named anything else produce two
+    scenario entries — an intended one plus a phantom one that inherits the
+    llm-d-benchmark framework-default model (issue #516).
     """
     if not bundle_path.exists():
         raise AssembleError(f"baseline scenario not found: {bundle_path}")
@@ -300,7 +347,8 @@ def resolve_baseline(
         if overlay_path is not None and overlay_path.exists()
         else {}
     )
-    resolved = deep_merge(copy.deepcopy(framework_defaults), bundle)
+    aligned_defaults = _align_overlay_name(bundle, copy.deepcopy(framework_defaults))
+    resolved = deep_merge(aligned_defaults, bundle)
     resolved = deep_merge(resolved, overlay)
     return resolved
 

@@ -108,9 +108,10 @@ class TestInjectImageTag:
         scenario = {"scenario": [{"name": "s"}, {"name": "s2"}]}
         assemble_run.inject_image_tag(scenario, "ghcr.io/foo/bar:v1")
         for entry in scenario["scenario"]:
-            img = entry["images"]["inferenceScheduler"]
+            img = entry["router"]["epp"]["image"]
             assert img == {
-                "repository": "ghcr.io/foo/bar",
+                "registry": "ghcr.io/foo",
+                "repository": "bar",
                 "tag": "v1",
                 "pullPolicy": "Always",
             }
@@ -119,8 +120,10 @@ class TestInjectImageTag:
         scenario = {"scenario": [{"name": "s"}]}
         digest_ref = "ghcr.io/foo/bar@sha256:" + "a" * 64
         assemble_run.inject_image_tag(scenario, digest_ref)
-        img = scenario["scenario"][0]["images"]["inferenceScheduler"]
-        assert img["repository"] == digest_ref
+        img = scenario["scenario"][0]["router"]["epp"]["image"]
+        # Digest ref: last "/" segment becomes bare repo (includes the @sha256 suffix)
+        assert img["registry"] == "ghcr.io/foo"
+        assert img["repository"] == "bar@sha256:" + "a" * 64
         assert img["tag"] == ""
 
     def test_no_scenario_entries_raises(self):
@@ -131,20 +134,32 @@ class TestInjectImageTag:
         with pytest.raises(assemble_run.AssembleError):
             assemble_run.inject_image_tag({}, "ghcr.io/foo/bar:v1")
 
-    def test_overwrites_existing_inference_scheduler(self):
+    def test_bare_image_no_registry(self):
+        """A ref with no '/' becomes bare-repo + empty registry (mirrors
+        epp.inject_image_ref's test_bare_repository_no_registry)."""
+        scenario = {"scenario": [{"name": "s"}]}
+        assemble_run.inject_image_tag(scenario, "myimage:v1")
+        img = scenario["scenario"][0]["router"]["epp"]["image"]
+        assert img["registry"] == ""
+        assert img["repository"] == "myimage"
+        assert img["tag"] == "v1"
+        assert img["pullPolicy"] == "Always"
+
+    def test_overwrites_existing_epp_image(self):
         scenario = {
             "scenario": [
                 {
                     "name": "s",
-                    "images": {
-                        "inferenceScheduler": {"repository": "old", "tag": "old"}
-                    },
+                    "router": {"epp": {"image": {
+                        "registry": "old", "repository": "old", "tag": "old"
+                    }}},
                 }
             ]
         }
         assemble_run.inject_image_tag(scenario, "ghcr.io/foo/bar:v1")
-        img = scenario["scenario"][0]["images"]["inferenceScheduler"]
-        assert img["repository"] == "ghcr.io/foo/bar"
+        img = scenario["scenario"][0]["router"]["epp"]["image"]
+        assert img["registry"] == "ghcr.io/foo"
+        assert img["repository"] == "bar"
         assert img["tag"] == "v1"
 
 
@@ -328,6 +343,104 @@ class TestResolveScenarios:
                 overlay_path=None,
                 framework_defaults={},
             )
+
+    def test_framework_defaults_named_defaults_merge_into_baseline_entry(self, tmp_path):
+        """Regression test for issue #516.
+
+        Framework-default fragments under ``baselines/defaults/*.yaml`` are
+        authored with a placeholder ``scenario[0].name = "defaults"``. When the
+        experiment's baseline entry is named anything else (i.e. every real
+        experiment), the two must still merge into a SINGLE scenario entry —
+        otherwise llm-d-benchmark templates the placeholder as an independent
+        deployment inheriting the framework-default model (facebook/opt-125m).
+
+        Before the fix, ``resolve_baseline`` produced two scenario entries
+        (``[{name: defaults, ...}, {name: <baseline>, ...}]``) and a phantom
+        facebook/opt-125m deployment materialized alongside the intended one.
+        """
+        bundle = {
+            "scenario": [{
+                "name": "sr",
+                "model": {"name": "Qwen/Qwen3-14B", "path": "models/Qwen"},
+                "decode": {"replicas": 2},
+            }],
+        }
+        framework_defaults = {
+            "scenario": [{
+                "name": "defaults",  # placeholder; realigned at merge time
+                "gateway": {"externallyManaged": True},
+                "inferenceExtension": {"verbosity": "5"},
+                "extraObjects": [{"apiVersion": "v1", "kind": "Role",
+                                  "metadata": {"name": "epp-role"}}],
+            }],
+        }
+        bundle_path = tmp_path / "sr.yaml"
+        self._write(bundle_path, bundle)
+
+        resolved = assemble_run.resolve_baseline(
+            bundle_path=bundle_path,
+            overlay_path=None,
+            framework_defaults=framework_defaults,
+        )
+
+        # 1) Single scenario entry, carrying the baseline's name (not "defaults").
+        assert len(resolved["scenario"]) == 1
+        entry = resolved["scenario"][0]
+        assert entry["name"] == "sr"
+
+        # 2) Baseline content preserved (model + decode).
+        assert entry["model"]["name"] == "Qwen/Qwen3-14B"
+        assert entry["decode"]["replicas"] == 2
+
+        # 3) Framework-defaults content merged in.
+        assert entry["gateway"]["externallyManaged"] is True
+        assert entry["inferenceExtension"]["verbosity"] == "5"
+        assert entry["extraObjects"] == [
+            {"apiVersion": "v1", "kind": "Role",
+             "metadata": {"name": "epp-role"}}
+        ]
+
+    def test_framework_defaults_no_op_when_names_already_match(self, tmp_path):
+        """When both sides already have matching names, no realignment needed."""
+        bundle = {"scenario": [{"name": "same", "a": 1}]}
+        framework_defaults = {"scenario": [{"name": "same", "b": 2}]}
+        bundle_path = tmp_path / "b.yaml"
+        self._write(bundle_path, bundle)
+        resolved = assemble_run.resolve_baseline(
+            bundle_path=bundle_path,
+            overlay_path=None,
+            framework_defaults=framework_defaults,
+        )
+        assert resolved == {"scenario": [{"name": "same", "a": 1, "b": 2}]}
+
+    def test_framework_defaults_empty_scenario_no_op(self, tmp_path):
+        """Empty framework_defaults must not corrupt the bundle."""
+        bundle = {"scenario": [{"name": "sr", "a": 1}]}
+        bundle_path = tmp_path / "b.yaml"
+        self._write(bundle_path, bundle)
+        resolved = assemble_run.resolve_baseline(
+            bundle_path=bundle_path,
+            overlay_path=None,
+            framework_defaults={},
+        )
+        assert resolved == bundle
+
+    def test_align_overlay_name_does_not_mutate_caller_state(self, tmp_path):
+        """resolve_baseline must not mutate the caller's framework_defaults dict."""
+        bundle = {"scenario": [{"name": "sr"}]}
+        framework_defaults = {"scenario": [{"name": "defaults", "x": 1}]}
+        original_snapshot = {
+            "scenario": [{"name": "defaults", "x": 1}],
+        }
+        bundle_path = tmp_path / "b.yaml"
+        self._write(bundle_path, bundle)
+        assemble_run.resolve_baseline(
+            bundle_path=bundle_path,
+            overlay_path=None,
+            framework_defaults=framework_defaults,
+        )
+        # Caller's dict is untouched — the helper deep-copies before renaming.
+        assert framework_defaults == original_snapshot
 
 
 class TestInjectHfSecret:
@@ -913,8 +1026,9 @@ class TestAssembleRun:
                 / "sr.yaml"
             ).read_text()
         )
-        img = sr_yaml["scenario"][0]["images"]["inferenceScheduler"]
-        assert img["repository"] == "ghcr.io/foo/bar"
+        img = sr_yaml["scenario"][0]["router"]["epp"]["image"]
+        assert img["registry"] == "ghcr.io/foo"
+        assert img["repository"] == "bar"
         assert img["tag"] == "v1"
         baseline_yaml = yaml.safe_load(
             (
@@ -926,9 +1040,9 @@ class TestAssembleRun:
                 / "baseline.yaml"
             ).read_text()
         )
-        assert "inferenceScheduler" not in (
-            baseline_yaml["scenario"][0].get("images") or {}
-        )
+        baseline_router = baseline_yaml["scenario"][0].get("router") or {}
+        baseline_epp = baseline_router.get("epp") or {}
+        assert "image" not in baseline_epp
 
     def test_params_hash_matches_manifest_assembly_bytes(self, tmp_path):
         fx = _make_experiment(

@@ -27,18 +27,27 @@ python pipeline/cluster.py provision <cluster_id> --namespaces NS1,NS2,...
 # Per-workspace + per-run cycle:
 python pipeline/setup.py       --experiment-root ../admission-control
 python pipeline/sim2real.py translation register \
-    --algorithm <name> --image <ref> --config <treatment-overlay-path>
+    --algorithm <name>=<image-ref>@<config-path>
 python pipeline/sim2real.py assemble \
     --translation <hash> --cluster <cluster_id> --run <run_name>
 python pipeline/deploy.py      --experiment-root ../admission-control
 ```
 
 The experiment repo must contain:
-- `transfer.yaml` (or `config/transfer.yaml` for backward compat) — v3 schema with `component`, `baselines`, `algorithms`, `workloads` fields
+- `transfer.yaml` (or `config/transfer.yaml` for backward compat) — v3 schema with `baselines`, `algorithms`, `workloads` fields; `component:` required unless every algorithm carries `byo: true` (see [Per-algorithm `byo:` marker](#per-algorithm-byo-marker) below)
 - `baselines/<name>.yaml` — llmdbenchmark-style scenario file per baseline (referenced from `transfer.yaml:baselines[].scenario`)
 - `baselines/defaults/*.yaml` (optional) — framework workaround fragments merged as an overlay under each baseline (opt out via `defaults.disable`)
 - `workloads/` directory referenced from `transfer.yaml:workloads`
 - `workspace/` in `.gitignore`
+
+### Per-algorithm `byo:` marker
+
+An algorithm entry may carry `byo: true` to indicate the image is pre-built and the entry has no BLIS-format source. When present:
+
+- `algorithms[i].source:` is optional for that entry (the loader otherwise requires it).
+- Top-level `component:` is optional when *every* algorithm entry carries `byo: true` — BYO manifests have no submodule to pin. Mixed manifests (any non-BYO entry) still require `component:`.
+
+`sim2real translate` refuses to run on a BYO entry (there is no `.go` source for the skill to translate) and `sim2real build` refuses to run on an all-BYO manifest (there is nothing to build). Attach pre-built BYO images with `sim2real translation register` directly. `sim2real assemble` and `sim2real-check` treat BYO entries the same as BLIS entries at the consumption boundary.
 
 `pipeline/pipeline.yaml` is the static Tekton Pipeline definition (applied by `cluster.py provision`; `sim2real assemble` generates PipelineRuns that reference it).
 
@@ -119,9 +128,38 @@ Top-level CLI introduced in step-1 of the v2 refactor. Subcommands: `translation
 
 ### Register a translation (BYO)
 
-`sim2real.py translation register` imports a pre-built EPP image and its treatment overlay YAML as a registered translation. Downstream commands (`assemble`, `deploy.py run`) treat a BYO-registered translation identically to a skill-produced one.
+`sim2real.py translation register` imports one or more pre-built EPP images and their treatment overlay YAMLs as a single registered translation. Downstream commands (`assemble`, `deploy.py run`) treat a BYO-registered translation identically to a skill-produced one.
+
+The `/sim2real-bootstrap --byo` skill scaffolds a BYO experiment repo and emits a ready-to-run `translation register` command with all algorithms batched into a single call — see [`.claude/skills/sim2real-bootstrap/SKILL.md`](../.claude/skills/sim2real-bootstrap/SKILL.md#--byo-mode).
+
+#### Preferred form: repeatable `--algorithm NAME=IMAGE@CONFIG`
+
+Pass `--algorithm` once per algorithm. Each value is a single `NAME=IMAGE@CONFIG` triple: first `=` splits the name from the rest; rightmost `@` splits the image ref from the config path. This allows digest refs (`image@sha256:…`) without ambiguity.
 
 ```bash
+# N=2 example
+python pipeline/sim2real.py translation register \
+    --algorithm softreflective=ghcr.io/org/sr-router:v1@overlays/sr.yaml \
+    --algorithm eager=ghcr.io/org/eager-router@sha256:<64-hex-digest>@overlays/eager.yaml \
+    [--baseline-config path/to/baseline-overlay.yaml] \
+    [--registered-hash <expected-sha256-hex>] \
+    [--experiment-root PATH]
+```
+
+| Flag | Required | Notes |
+|------|----------|-------|
+| `--algorithm NAME=IMAGE@CONFIG` | yes (repeatable) | `NAME` follows `[A-Za-z0-9][A-Za-z0-9._-]*`, max 128 chars, no `.` / `..`. `IMAGE` is the registry ref. `CONFIG` is the treatment overlay YAML path. Rightmost `@` is the split point, so digest refs (e.g. `image@sha256:abc`) work. **Overlay paths containing `@` cannot be represented** (structural constraint — the `@` would be misread as part of the image ref). Overlay paths containing `=` are supported. |
+| `--baseline-config PATH` | no | Baseline overlay YAML, if the translation needs one. |
+| `--registered-hash HASH` | no | Assert the computed `translation_hash` equals this value; error if not. |
+| `--force` | no | Reassign an alias if another translation already owns it. Applies per-algorithm for any N — use `--force` whenever any algorithm name in the batch was previously used as an alias by a different translation. For N>1 the newly-registered translation itself has `alias=null` (batched translations are referenced by hash); `--force` only clears the colliding aliases on the previous owners. |
+| `--experiment-root PATH` | no | Defaults to cwd. |
+
+#### Deprecated form: `--algorithm NAME --image REF --config PATH`
+
+The step-1 single-algorithm form still works as the N=1 case but **is deprecated**. A deprecation warning is emitted to stderr. Removal is targeted for step-5+.
+
+```bash
+# Deprecated — prefer the NAME=IMAGE@CONFIG form above
 python pipeline/sim2real.py translation register \
     --algorithm softreflective \
     --image ghcr.io/kalantar-msb/sr-router:some-tag \
@@ -131,33 +169,28 @@ python pipeline/sim2real.py translation register \
     [--experiment-root PATH]
 ```
 
-| Flag | Required | Notes |
-|------|----------|-------|
-| `--algorithm NAME` | yes | `[A-Za-z0-9][A-Za-z0-9._-]*`, max 128 chars, reject `.` / `..`. Also written as the translation's `alias`. Single algorithm per call. |
-| `--image REF` | yes | Registry ref. If it contains `@sha256:HEX`, that digest is recorded; otherwise `image_digest` is `null` with a warning. |
-| `--config PATH` | yes | Treatment overlay YAML. Validated as YAML before any writes. |
-| `--baseline-config PATH` | no | Baseline overlay YAML, if the translation needs one. |
-| `--registered-hash HASH` | no | Assert the computed `translation_hash` equals this value; error if not. |
-| `--force` | no | Reassign the alias (`--algorithm` value) if another translation already owns it. Clears the alias on the previous translation atomically. |
-| `--experiment-root PATH` | no | Defaults to cwd. |
-
 **Outputs** — under `workspace/translations/<translation_hash>/`:
 
-- `translation_output.json` — algorithm index + provenance (v1 schema). Includes `alias` (top-level, same value as `--algorithm`) and per-algorithm `image_ref` / `image_digest` inside `algorithms[i]`. Step-1 legacy files (top-level `image_ref`) remain readable via a compatibility shim in `pipeline/lib/translation_ref.py`.
-- `registered.json` — image ref + digest (BYO-only audit trail; v1 schema).
-- `generated/<algorithm>/<algorithm>_config.yaml` — the treatment overlay content.
+- `translation_output.json` — algorithm index + provenance. Top-level `alias` (set to the algorithm name for N=1; `null` for N>1). Per-algorithm `image_ref` / `image_digest` inside `algorithms[i]`. Step-1 legacy files (top-level `image_ref`) remain readable via a compatibility shim in `pipeline/lib/translation_ref.py`.
+- `registered.json` — per-algorithm image refs and digests (BYO-only audit trail; batched shape with an `algorithms` list).
+- `generated/<algorithm>/<algorithm>_config.yaml` — the treatment overlay content, one file per algorithm.
 - `generated/baseline_config.yaml` — present only when `--baseline-config` is given.
 
-**`translation_hash` derivation (BYO):** SHA-256 hex over canonical JSON of `{algorithm_name, config_sha256, image_digest_or_ref}`. Deterministic — same inputs produce the same hash. When the image ref lacks a digest, the raw ref string is substituted for `image_digest_or_ref`, so the hash is stable within the offline session but changes if the same image is later re-registered with a digest ref.
+**`translation_hash` derivation (BYO, batched):** SHA-256 hex over canonical JSON of a list of `{name, image, config}` dicts sorted by `name`, where `config` is the SHA-256 of the overlay file content and `image` is the digest ref if present (otherwise the raw ref string). Order-invariant — registering the same algorithms in a different order produces the same hash.
 
-**Idempotency:** re-registering the same triple (algorithm, image, config content) is a no-op — the existing translation directory is detected, a warning is printed, and exit is 0.
+```
+sha256(canonical-json(sorted-by-name list of {name, image, config}))
+```
+
+**Idempotency:** re-registering the same set of (algorithm, image, config-content) tuples — in any order — is a no-op. The existing translation directory is detected, a warning is printed, and exit is 0.
 
 **Failure modes:**
 
 - `--config` file missing or malformed YAML → exit 2, no writes.
-- Existing translation directory records a different algorithm name (hash collision) → exit 2, no writes.
+- Existing translation directory records different algorithm names (hash collision) → exit 2, no writes.
 - `--registered-hash` given and does not match computed → exit 2, no writes.
-- Another translation already owns the `--algorithm` alias with a different hash → exit 2, no writes; re-run with `--force` to reassign.
+- Another translation already owns an `--algorithm` alias (an algorithm name from the batch collides with an existing translation's alias, on any N) → exit 2, no writes; re-run with `--force` to clear the previous owners' aliases before proceeding.
+- Duplicate algorithm names within a single invocation → exit 2, no writes.
 
 ---
 
@@ -286,7 +319,7 @@ baseline_resolved  = deep_merge(framework_defaults, baseline_bundle, baseline_ov
 treatment_resolved = deep_merge(baseline_resolved, treatment_bundle_diffs, algo_overlay)
 ```
 
-Then each treatment scenario has `images.inferenceScheduler` set from that algorithm's own `translation_output.json:algorithms[i].image_ref`, and every scenario has `huggingface.secretName` set from `cluster_config.json:secret_names.hf_token`.
+Then each treatment scenario has `router.epp.image` set from that algorithm's own `translation_output.json:algorithms[i].image_ref` (split into `registry` + bare `repository` fields for the routerlib chart's expected shape), and every scenario has `huggingface.secretName` set from `cluster_config.json:secret_names.hf_token`.
 
 **`params_hash`** is SHA-256 over the canonical bytes of `manifest.assembly.yaml` with the top-level `replicas` field excluded — bumping `--replicas N` must not change the hash. Recorded in `run_metadata.json` for drift detection on re-assemble.
 
@@ -335,7 +368,7 @@ Common flags (all subcommands):
 | `--experiment-root PATH` | cwd | path to experiment repo |
 | `--skip-build` | false | skip image build pre-flight |
 
-**Image build** — `deploy.py build` (called implicitly as pre-flight by `deploy.py run`) iterates over all resolved scenarios in `cluster/`, collects unique `images.inferenceScheduler` refs, and builds any that are stale. Baseline images are tagged by the component directory's HEAD SHA (8 chars); algorithm images are tagged `{run_name}-{algo_name}` (per-algorithm). For each algorithm build, the component working tree is reset to baseline and only that algorithm's files are applied before building. Source hash comparison skips builds when the image is already current.
+**Image build** — `deploy.py build` (called implicitly as pre-flight by `deploy.py run`) iterates over all resolved scenarios in `cluster/`, collects unique `router.epp.image` refs, and builds any that are stale. Baseline images are tagged by the component directory's HEAD SHA (8 chars); algorithm images are tagged `{run_name}-{algo_name}` (per-algorithm). For each algorithm build, the component working tree is reset to baseline and only that algorithm's files are applied before building. Source hash comparison skips builds when the image is already current.
 
 **Pair keys.** A pair key names a `(workload, package, iteration)` triple in the ConfigMap and on disk. Canonical grammar:
 
@@ -541,14 +574,14 @@ Writes `workspace/setup_config.json` with registry, repo name, and orchestrator 
 ### 3. Register a translation (BYO)
 
 ```bash
+# Preferred: repeatable --algorithm NAME=IMAGE@CONFIG (N algorithms in one call)
 python pipeline/sim2real.py translation register \
-    --algorithm <algorithm> \
-    --image <image-ref> \
-    --config <treatment-overlay-path> \
+    --algorithm <name>=<image-ref>@<config-path> \
+    [--algorithm <name>=<image-ref>@<config-path> ...] \
     --experiment-root <experiment-root>
 ```
 
-Writes `workspace/translations/<hash>/` with `translation_output.json`, `registered.json`, and `generated/<algorithm>/<algorithm>_config.yaml`. Prints the `<hash>` on success.
+Writes `workspace/translations/<hash>/` with `translation_output.json`, `registered.json`, and `generated/<algorithm>/<algorithm>_config.yaml` for each algorithm. Prints the `<hash>` on success. See the [Register a translation](#register-a-translation-byo) section for the full flag reference, the hash formula, and the deprecated single-algorithm form.
 
 ### 4. Assemble the run
 
@@ -669,8 +702,8 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). Key files:
 | `setup_config.json` (workspace fields: registry, repo_name, orchestrator_image, sim2real_root) | `setup.py` | `deploy.py`, `sim2real.py list runs` |
 | `setup_config.json:current_run` (active run pointer) | `sim2real.py use` | `deploy.py` (default `--run`), `sim2real.py list runs` (active-mark `*`) |
 | `clusters/<id>/cluster_config.json` (cluster fields: cluster_id, namespaces, is_openshift, storage_class, secret_names, workspaces, created_at) | `cluster.py provision` | `sim2real assemble`, `deploy.py`, `lib/remote.py` |
-| `translations/<hash>/translation_output.json` | `sim2real translation register` | `sim2real assemble`, `deploy.py` |
-| `translations/<hash>/registered.json` | `sim2real translation register` | audit trail |
+| `translations/<hash>/translation_output.json` | `sim2real translation register` (batched; N per-algo entries in `algorithms`) | `sim2real assemble`, `deploy.py` |
+| `translations/<hash>/registered.json` | `sim2real translation register` (batched; N per-algo entries in `algorithms`) | audit trail |
 | `translations/<hash>/generated/…` | `sim2real translation register` | `sim2real assemble` |
 | `runs/<run>/run_metadata.json` | `sim2real assemble` | `deploy.py`, `sim2real.py list runs` |
 | `runs/<run>/manifest.assembly.yaml` | `sim2real assemble` | reproducibility / drift detection (step-5) |
@@ -846,12 +879,12 @@ inferenceExtension:
 ### Typical overlay content
 
 **Baseline overlay** — adds InferenceObjectives and the baseline EPP plugin config:
-- `extraObjects` (InferenceObjectives with `poolRef`)
-- `inferenceExtension.pluginsCustomConfig` (baseline scorer config)
+- `router.inferenceObjectives` (list of `{name, priority}` — the routerlib chart renders each as an `InferenceObjective` CR)
+- `router.epp.pluginsCustomConfig` (baseline scorer config)
 
 **Treatment overlay** — only the delta from baseline:
-- `inferenceExtension.pluginsCustomConfig` (evolved scorer config)
-- `images.inferenceScheduler` (custom EPP image — injected by `sim2real assemble` from `translation_output.json:algorithms[i].image_ref` for the matching algorithm)
+- `router.epp.pluginsCustomConfig` (evolved scorer config)
+- `router.epp.image` (custom EPP image — injected by `sim2real assemble` from `translation_output.json:algorithms[i].image_ref` for the matching algorithm; registry and bare repository written as separate fields)
 
 If treatment uses the same InferenceObjectives as baseline, do NOT repeat them — they propagate from `baseline_resolved`.
 

@@ -343,7 +343,7 @@ def _cmd_build(
 
     if not scenario_images:
         if cluster_dir.exists() and any(cluster_dir.glob("*.yaml")):
-            warn("cluster/ has scenario files but no images.inferenceScheduler found — "
+            warn("cluster/ has scenario files but no router.epp.image found — "
                  "falling back to treatment image only")
         treatment_ref = f"{registry}/{repo_name}:{run_name}"
         scenario_images = [{"image_ref": treatment_ref, "package": "treatment"}]

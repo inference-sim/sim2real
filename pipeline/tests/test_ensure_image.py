@@ -118,15 +118,15 @@ class TestCollectScenarioImages:
         cluster_dir = tmp_path / "cluster"
         cluster_dir.mkdir()
         baseline = {
-            "scenario": [{"name": "s1", "images": {
-                "inferenceScheduler": {"repository": "ghcr.io/org/scheduler", "tag": "abc1234"}
-            }}]
+            "scenario": [{"name": "s1", "router": {"epp": {"image": {
+                "registry": "ghcr.io/org", "repository": "scheduler", "tag": "abc1234"
+            }}}}]
         }
         (cluster_dir / "base1.yaml").write_text(yaml.dump(baseline))
         algo = {
-            "scenario": [{"name": "s1", "images": {
-                "inferenceScheduler": {"repository": "ghcr.io/org/scheduler", "tag": "r1"}
-            }}]
+            "scenario": [{"name": "s1", "router": {"epp": {"image": {
+                "registry": "ghcr.io/org", "repository": "scheduler", "tag": "r1"
+            }}}}]
         }
         (cluster_dir / "algo1.yaml").write_text(yaml.dump(algo))
 
@@ -139,9 +139,9 @@ class TestCollectScenarioImages:
         cluster_dir = tmp_path / "cluster"
         cluster_dir.mkdir()
         scenario = {
-            "scenario": [{"name": "s1", "images": {
-                "inferenceScheduler": {"repository": "ghcr.io/org/sched", "tag": "v1"}
-            }}]
+            "scenario": [{"name": "s1", "router": {"epp": {"image": {
+                "registry": "ghcr.io/org", "repository": "sched", "tag": "v1"
+            }}}}]
         }
         (cluster_dir / "base1.yaml").write_text(yaml.dump(scenario))
         (cluster_dir / "base2.yaml").write_text(yaml.dump(scenario))
@@ -152,9 +152,9 @@ class TestCollectScenarioImages:
     def test_skips_pipelinerun_files(self, tmp_path):
         cluster_dir = tmp_path / "cluster"
         cluster_dir.mkdir()
-        pr = {"scenario": [{"name": "s", "images": {
-            "inferenceScheduler": {"repository": "r", "tag": "t"}
-        }}]}
+        pr = {"scenario": [{"name": "s", "router": {"epp": {"image": {
+            "registry": "", "repository": "r", "tag": "t"
+        }}}}]}
         (cluster_dir / "pipelinerun-wl1-base.yaml").write_text(yaml.dump(pr))
 
         result = collect_scenario_images(cluster_dir)

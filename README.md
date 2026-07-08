@@ -35,7 +35,9 @@ claude --dangerously-skip-permissions --add-dir $SIM2REAL
 /sim2real-bootstrap
 ```
 
-Skip this step if your experiment repo already contains `transfer.yaml`, `baselines/`, and a component submodule.
+For BYO operators — pre-built EPP image(s) + baseline scenario + per-algorithm overlay(s), no BLIS artifacts — use `--byo` mode instead: `/sim2real-bootstrap --byo --baseline ... --algorithm ... --algorithm-image ... --algorithm-config ...`. See [`.claude/skills/sim2real-bootstrap/SKILL.md`](.claude/skills/sim2real-bootstrap/SKILL.md#--byo-mode) for the full invocation.
+
+Skip this step if your experiment repo already contains `transfer.yaml`, `baselines/`, and (BLIS only) a component submodule.
 
 ### 2. Set required environment variables
 
