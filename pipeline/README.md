@@ -754,21 +754,20 @@ defaults:                   # optional — controls framework defaults overlay
                             # docs/troubleshooting.md#framework-defaults-overlay.
 
 # v3 fields (required unless noted)
-target:
-  repo: <path>              # llm-d-inference-scheduler repo path
-config:
-  kind: <string>            # config kind (e.g. "gaie")
-build:                      # optional — defaults applied if absent
-  commands: []              # EPP build commands
-epp_image:                  # optional
-  upstream:
-    hub: <registry>
-    name: <repo>
-    tag: <tag>
-  build:                    # override for built EPP image coordinates
-    hub: <registry>
-    name: <repo>
-    tag: <tag>
+component:                    # required when algorithms[] contains any non-BYO entry;
+                              # optional if every algorithm carries `byo: true`.
+  repo: <name>                # component repo name (matches submodule directory in the sim2real repo)
+  kind: <string>              # component kind (e.g. "EndpointPickerConfig")
+  path: <string>              # optional — defaults to the last segment of `repo`
+  ref: <string>               # optional — tag, branch, or commit SHA identifying the expected component version
+  base_image:                 # optional — base image the built EPP layers on top of
+    hub: <registry>           # e.g. ghcr.io/llm-d
+    name: <repo>              # e.g. llm-d-inference-scheduler
+  build:                      # optional — build overrides
+    commands: []              # component build commands (list of argv-style commands)
+    image:                    # optional — override coords for the built EPP image
+      hub: <registry>         # defaults to base_image.hub when set
+      name: <repo>            # defaults to base_image.name when set
 pipeline:                   # optional — defaults applied if absent
   name: sim2real            # Pipeline resource name referenced in PipelineRuns (default: "sim2real")
   yaml: pipeline/pipeline.yaml  # path relative to repo root (default: "pipeline/pipeline.yaml")
