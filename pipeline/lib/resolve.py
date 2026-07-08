@@ -170,8 +170,11 @@ def _build_translation_section(
         bl_name = bl.get("name") or ""
         if not bl_name:
             continue
+        # Nested per-baseline overlay layout under a ``baselines/``
+        # umbrella (issue #544 — see pipeline/lib/assemble_run.py for the
+        # matching reader).
         overlay_path = (
-            generated_dir / f"baseline_{bl_name}" / "baseline_config.yaml"
+            generated_dir / "baselines" / bl_name / "baseline_config.yaml"
         )
         baselines.append(
             {

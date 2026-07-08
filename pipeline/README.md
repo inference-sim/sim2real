@@ -35,7 +35,7 @@ python pipeline/deploy.py      --experiment-root ../admission-control
 
 The experiment repo must contain:
 - `transfer.yaml` (or `config/transfer.yaml` for backward compat) — v3 schema with `baselines`, `algorithms`, `workloads` fields; `component:` required unless every algorithm carries `byo: true` (see [Per-algorithm `byo:` marker](#per-algorithm-byo-marker) below)
-- `baselines/<name>.yaml` — llmdbenchmark-style scenario file per baseline (referenced from `transfer.yaml:baselines[].scenario`)
+- `baselines/baseline.yaml` — llmdbenchmark-style scenario file (referenced from `transfer.yaml:baselines[0].scenario`). Filename is always `baseline.yaml` (issue #544).
 - `baselines/defaults/*.yaml` (optional) — framework workaround fragments merged as an overlay under each baseline (opt out via `defaults.disable`)
 - `workloads/` directory referenced from `transfer.yaml:workloads`
 - `workspace/` in `.gitignore`
@@ -217,10 +217,10 @@ The translation hash is derived from `transfer.yaml`'s translation slice (scenar
 
 **Outputs** — under `workspace/translations/<translation_hash>/` (initial run only; the skill populates the rest):
 
-- `skill_input.json` — the material `/sim2real-translate` reads. Pinned schema (see `docs/epics/step-2/design.md`) — includes `translation_hash`, absolute `experiment_root` and `translations_dir`, `scenario`, a `baselines[]` list (one entry per baseline that any algorithm's `defaults` cross-references, each carrying `name` and a `generated_overlay_path` under `generated/baseline_<name>/`), `algorithms[]` (each with `source_path`, `source_sha256`, `output_dir`, `config_output_path`, and a `baseline_overlay_path` resolved via `defaults`), and `context` (text + file paths).
+- `skill_input.json` — the material `/sim2real-translate` reads. Pinned schema (see `docs/epics/step-2/design.md`) — includes `translation_hash`, absolute `experiment_root` and `translations_dir`, `scenario`, a `baselines[]` list (one entry per baseline that any algorithm's `defaults` cross-references, each carrying `name` and a `generated_overlay_path` under `generated/baselines/<name>/`), `algorithms[]` (each with `source_path`, `source_sha256`, `output_dir`, `config_output_path`, and a `baseline_overlay_path` resolved via `defaults`), and `context` (text + file paths).
 - `translation_output.json` — algorithm index with `image_ref: null` on every entry. `sim2real build` fills these in later.
 - `generated/<algo>/` (empty) — the skill writes `cmd/`, `pkg/`, `<algo>_output.json`, and `<algo>_config.yaml` under this directory.
-- `generated/baseline_<name>/` (empty) — one directory per referenced baseline. The skill writes `baseline_config.yaml` under each. Shared by all algorithms whose `defaults` names that baseline.
+- `generated/baselines/<name>/` (empty) — one directory per referenced baseline (under a `baselines/` umbrella; issue #544). The skill writes `baseline_config.yaml` under each. Shared by all algorithms whose `defaults` names that baseline.
 
 Once `translate --resume` succeeds, run `sim2real build --translation <alias>` to compile and push images, then `sim2real assemble` as usual.
 
@@ -293,12 +293,12 @@ python pipeline/sim2real.py assemble \
 **Inputs read:**
 
 - `workspace/translations/<hash>/translation_output.json` — algorithms with per-algo `image_ref`. Legacy step-1 files (top-level `image_ref`) are read transparently via `pipeline/lib/translation_ref.py`'s on-read shim.
-- `workspace/translations/<hash>/generated/baseline_<name>/baseline_config.yaml` — per-baseline overlay (skill-driven; written by `/sim2real-translate` for each baseline that any algorithm's `defaults` names). Assemble applies each entry to its matching `manifest.baselines[]` entry.
+- `workspace/translations/<hash>/generated/baselines/<name>/baseline_config.yaml` — per-baseline overlay (skill-driven; written by `/sim2real-translate` for each baseline that any algorithm's `defaults` names). Nested under a `baselines/` umbrella (issue #544). Assemble applies each entry to its matching `manifest.baselines[]` entry.
 - `workspace/translations/<hash>/generated/baseline_config.yaml` — legacy BYO overlay (written by `translation register --baseline-config`). Applied to every baseline in the manifest when the per-baseline directory above is absent — falls back automatically so BYO translations remain resolvable.
 - `workspace/translations/<hash>/generated/<algo>/<algo>_config.yaml` — per-algorithm treatment overlay.
 - `workspace/clusters/<cluster_id>/cluster_config.json` — namespaces, workspace bindings, hf secret name.
 - `<experiment-root>/transfer.yaml` (or `config/transfer.yaml`) — v3 manifest.
-- `<experiment-root>/baselines/<name>.yaml` — baseline bundles referenced by `transfer.yaml:baselines[].scenario`.
+- `<experiment-root>/baselines/baseline.yaml` — baseline bundle referenced by `transfer.yaml:baselines[0].scenario`. The baseline identifier is always the literal string `baseline` (issue #544).
 - `<experiment-root>/baselines/defaults/*.yaml` — framework defaults overlays (opt-out via `transfer.yaml:defaults.disable`).
 - `<sim2real-repo>/.gitmodules` and `<sim2real-repo>/{inference-sim,llm-d-benchmark}/` — the framework submodules' clone URLs (from `.gitmodules`) and HEAD SHAs (from `git rev-parse HEAD`), which populate `benchmarkGitRepoUrl` / `benchmarkGitCommit` / `blisGitRepoUrl` / `blisGitCommit` in every generated PipelineRun. Initialize with `git submodule update --init` in the sim2real repo before running `sim2real assemble`; a missing submodule falls back to `"unknown"` for its commit SHA (assemble prints a warning) and the cluster-side `git clone` step then fails visibly at the right point.
 
@@ -553,7 +553,7 @@ The full BYO flow. Every step is idempotent and re-runnable. Substitute your own
 
 ### Prerequisites
 
-- An experiment repo with `transfer.yaml`, `baselines/<name>.yaml`, and the workloads referenced in `transfer.yaml:workloads`.
+- An experiment repo with `transfer.yaml`, `baselines/baseline.yaml`, and the workloads referenced in `transfer.yaml:workloads`.
 - A cluster with kubectl / Tekton reachable.
 - Registry credentials (HF, image registry) exported or provided via flags.
 
@@ -802,12 +802,12 @@ All subcommands (`status`, `collect`, `run`, `reset`, `wipe`) use a run-scoped `
 
 Overlay files live under `workspace/translations/<hash>/generated/`. The baseline overlay layout differs between the two translation producers:
 
-- **Skill-driven** (`/sim2real-translate`) — writes one overlay per referenced baseline at `baseline_<name>/baseline_config.yaml`. Assemble reads each baseline's overlay from its own directory.
+- **Skill-driven** (`/sim2real-translate`) — writes one overlay per referenced baseline at `baselines/<name>/baseline_config.yaml` (nested under a `baselines/` umbrella; issue #544). Assemble reads each baseline's overlay from its own directory.
 - **BYO** (`sim2real translation register`) — writes a single shared overlay at `baseline_config.yaml` (the operator-supplied `--baseline-config` file). Applied to every baseline in the manifest; used as the fallback when a per-baseline directory is absent.
 
 Overlays present in each translation:
 
-- `baseline_<name>/baseline_config.yaml` — per-baseline overlay (skill-driven). One directory per baseline that any algorithm's `defaults` cross-references.
+- `baselines/<name>/baseline_config.yaml` — per-baseline overlay (skill-driven). One directory per baseline that any algorithm's `defaults` cross-references.
 - `baseline_config.yaml` — legacy shared overlay (BYO). Present when `--baseline-config` was passed to `translation register`.
 - `{algo_name}/{algo_name}_config.yaml` — per-algorithm treatment overlay (verbatim copy of the `--config` file for BYO; produced by the skill for skill-driven).
 
@@ -820,7 +820,7 @@ baseline_resolved = deep_merge(framework_defaults, baseline_bundle, baseline_ove
 treatment_resolved = deep_merge(baseline_resolved, treatment_bundle_diffs, algo_overlay)
 ```
 
-Where `baseline_bundle` is the experiment's `baselines/<name>.yaml`, `treatment_diffs` is the experiment's optional `treatment.yaml`, `framework_defaults` merges `<experiment-root>/baselines/defaults/*.yaml` fragments (opt out via `transfer.yaml:defaults.disable`), and the overlays are the files written by `sim2real translation register`.
+Where `baseline_bundle` is the experiment's `baselines/baseline.yaml` (issue #544 — the baseline file is always this name), `treatment_diffs` is the experiment's optional `treatment.yaml`, `framework_defaults` merges `<experiment-root>/baselines/defaults/*.yaml` fragments (opt out via `transfer.yaml:defaults.disable`), and the overlays are the files written by `sim2real translation register`.
 
 ### Deep merge semantics
 

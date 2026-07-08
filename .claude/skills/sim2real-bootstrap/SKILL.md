@@ -196,6 +196,12 @@ Generate llm-d-benchmark scenario YAML(s) for baseline arm(s).
    python3 "$SKILL_DIR/generate_from_config.py" "$EXPERIMENT_ROOT/config.md" \
        -o "$EXPERIMENT_ROOT/baselines/"
    ```
+   The output file is always `<experiment-root>/baselines/baseline.yaml`
+   (issue #544 — the baseline identifier is hardcoded to the literal
+   string `baseline` regardless of project). The inner `scenario: - name:`
+   label inside the emitted YAML is still derived from the folder name
+   (or `-n` override) and used as the benchmark-harness scenario label.
+
    The script will:
    - Parse the vLLM configuration table from config.md
    - Apply MODEL_METADATA and HARDWARE_LABELS lookups
@@ -208,6 +214,16 @@ Generate llm-d-benchmark scenario YAML(s) for baseline arm(s).
    python3 "$SKILL_DIR/generate_scenarios.py" "$INPUT_FILE" "$EXPERIMENT_ROOT/baselines/"
    ```
    Review any "unknown fields" warnings from the script's output.
+
+   `generate_scenarios.py` writes one file per candidate (e.g.
+   `top3-1.yaml`, `top3-2.yaml`, `top3-3.yaml`). After the operator picks
+   the winning candidate, rename it to `baseline.yaml` — the transfer.yaml
+   emitted in task-5 always references `baselines/baseline.yaml` (issue
+   #544):
+   ```bash
+   mv "$EXPERIMENT_ROOT/baselines/<chosen-candidate>.yaml" \
+      "$EXPERIMENT_ROOT/baselines/baseline.yaml"
+   ```
 
 4. If neither input exists, flag to user — cannot generate baseline without config.
 
@@ -245,9 +261,9 @@ max-num-seqs, hardware) and ask for approval.
 
 **Verify:**
 ```bash
-for f in baselines/*.yaml; do
-  python3 -c "import yaml; yaml.safe_load(open('$f'))" && echo "OK: $f"
-done
+# Post-rename, the operator's chosen baseline is at baselines/baseline.yaml.
+python3 -c "import yaml; yaml.safe_load(open('baselines/baseline.yaml'))" \
+  && echo "OK: baselines/baseline.yaml"
 ```
 
 ---
@@ -306,9 +322,10 @@ Assemble transfer manifest from all prior task outputs.
    - `Scorer` / scheduling -> `EndpointPickerConfig`
    - `Admission` -> `AdmissionPolicyConfig`
 4. `component.build.commands`: standard Go build + test for relevant package
-5. `baselines`: from task-3 output
+5. `baselines`: one entry, always `{ name: baseline, scenario: baselines/baseline.yaml }` (issue #544 — the baseline identifier is hardcoded)
 6. `algorithms`: from `algorithms/*.go` — each file with a Factory function
-   or plugin registration pattern is a candidate
+   or plugin registration pattern is a candidate. Every entry's `defaults`
+   field is always `baseline`.
 7. `workloads`: from task-4 output
 8. `context.files`: files in experiment root with deployment config or signal
    mapping (README.md, config.md, etc.)
@@ -341,11 +358,11 @@ component:
 algorithms:
   - name: <lowercase-alphanumeric>
     source: <relative path to algorithm .go file>
-    defaults: <name of baseline from task-3 — must match baselines[].name>
+    defaults: baseline  # issue #544 — always the literal string 'baseline'
 
 baselines:
-  - name: <from task-3>
-    scenario: <path to baseline YAML>
+  - name: baseline
+    scenario: baselines/baseline.yaml
 
 workloads: <list from task-4>
 
@@ -484,12 +501,17 @@ Use `--byo` when the operator has a pre-built EPP image (or several), a full bas
 ```bash
 python3 "$SKILL_DIR/byo.py" \
     --byo \
-    --baseline <name>=<scenario-path> \
+    --baseline <scenario-path> \
     --algorithm <name> [--algorithm <name>]... \
     --algorithm-image <name>=<image-ref> [--algorithm-image ...]... \
     --algorithm-config <name>=<overlay-path> [--algorithm-config ...]... \
     [--scenario <name>] [--force] [--non-interactive]
 ```
+
+Note: `--baseline` takes only a path — the baseline identifier in
+`transfer.yaml` is always the literal string `baseline` (issue #544).
+The file lands at `<experiment-root>/baselines/baseline.yaml` regardless
+of the source path.
 
 The BYO branch is implemented in `byo.py` (bundled with this skill). SKILL.md's role is to accept operator input (structured args OR natural-language prose), collect any missing fields, and hand off to `byo.py`.
 
@@ -498,7 +520,7 @@ The BYO branch is implemented in `byo.py` (bundled with this skill). SKILL.md's 
 Operators may invoke the skill in either shape:
 
 1. **Structured args** — the invocation above, verbatim.
-2. **Natural language** — e.g., *"bootstrap --byo with baseline at /path/baseline.yaml, algorithm foo image ghcr.io/foo:tag config /path/foo.yaml, algorithm bar image ghcr.io/bar@sha256:... config /path/bar.yaml"*. Parse the description into structured args (algorithm/image/config triples + baseline).
+2. **Natural language** — e.g., *"bootstrap --byo with baseline at /path/baseline.yaml, algorithm foo image ghcr.io/foo:tag config /path/foo.yaml, algorithm bar image ghcr.io/bar@sha256:... config /path/bar.yaml"*. Parse the description into structured args (algorithm/image/config triples + baseline path).
 
 If any required field is missing after parsing, prompt with plain-text numbered prompts (one prompt per missing field). Example prompts:
 
@@ -514,7 +536,7 @@ If stdin is not a TTY OR the operator passed `--non-interactive`, do not prompt 
 ### Reserved names
 
 - `default`, `defaults` — reserved for any role.
-- `baseline` — reserved as an algorithm name only (a baseline named `baseline` is the canonical case).
+- `baseline`, `baselines` — reserved as algorithm names. The baseline identifier is always `baseline` (issue #544), so operators do not choose it; the `baselines` reservation guards the `translations/<hash>/generated/baselines/` overlay umbrella from a collision with an algorithm dir.
 
 ### On-disk layout (produced by `byo.py`)
 
@@ -522,7 +544,7 @@ If stdin is not a TTY OR the operator passed `--non-interactive`, do not prompt 
 <experiment-root>/
   transfer.yaml                                  <- BYO transfer.yaml (byo: true per algo, no component:)
   baselines/
-    <baseline-name>.yaml                         <- copy of operator's baseline scenario
+    baseline.yaml                                <- copy of operator's baseline scenario (always this name)
     defaults/*.yaml                              <- framework fragments (all listed under defaults.disable)
   algorithms/
     <algo-1>/<algo-1>_config.yaml                <- copy of operator's overlay

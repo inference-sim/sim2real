@@ -188,14 +188,14 @@ class TestBuildSkillInput:
             scenario="s",
             baselines=[{
                 "name": "base",
-                "generated_overlay_path": "generated/baseline_base/baseline_config.yaml",
+                "generated_overlay_path": "generated/baselines/base/baseline_config.yaml",
             }],
             algorithms=[],
             context={"text": "hint text", "file_paths": ["docs/a.md"]},
         )
         assert skin["baselines"][0]["name"] == "base"
         assert skin["baselines"][0]["generated_overlay_path"] == (
-            "generated/baseline_base/baseline_config.yaml"
+            "generated/baselines/base/baseline_config.yaml"
         )
         # ``config_path`` was dropped in the #480/#481 review cycle — the
         # v3 manifest schema nests baseline config paths under
@@ -215,11 +215,11 @@ class TestBuildSkillInput:
             baselines=[
                 {
                     "name": "base",
-                    "generated_overlay_path": "generated/baseline_base/baseline_config.yaml",
+                    "generated_overlay_path": "generated/baselines/base/baseline_config.yaml",
                 },
                 {
                     "name": "alt",
-                    "generated_overlay_path": "generated/baseline_alt/baseline_config.yaml",
+                    "generated_overlay_path": "generated/baselines/alt/baseline_config.yaml",
                 },
             ],
             algorithms=[
@@ -241,8 +241,8 @@ class TestBuildSkillInput:
             context={"text": "", "file_paths": []},
         )
         overlay_by_algo = {a["name"]: a["baseline_overlay_path"] for a in skin["algorithms"]}
-        assert overlay_by_algo["algo1"] == "generated/baseline_base/baseline_config.yaml"
-        assert overlay_by_algo["algo2"] == "generated/baseline_alt/baseline_config.yaml"
+        assert overlay_by_algo["algo1"] == "generated/baselines/base/baseline_config.yaml"
+        assert overlay_by_algo["algo2"] == "generated/baselines/alt/baseline_config.yaml"
 
     def test_algorithm_baseline_overlay_path_null_when_defaults_unreferenced(self):
         skin = sim2real._build_skill_input(
@@ -367,11 +367,11 @@ class TestTranslateEmpty:
         # per-algorithm baseline_overlay_path resolves via defaults="base".
         assert skin["baselines"] == [{
             "name": "base",
-            "generated_overlay_path": "generated/baseline_base/baseline_config.yaml",
+            "generated_overlay_path": "generated/baselines/base/baseline_config.yaml",
         }]
         assert (
             skin["algorithms"][0]["baseline_overlay_path"]
-            == "generated/baseline_base/baseline_config.yaml"
+            == "generated/baselines/base/baseline_config.yaml"
         )
 
     def test_plain_prints_checkpoint_message(self, tmp_path, capsys):

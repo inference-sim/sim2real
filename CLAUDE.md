@@ -105,7 +105,8 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). When no `-
 | `translations/<hash>/generated/{algo}/{algo}_output.json` (skill-driven only) | `/sim2real-translate` skill | `sim2real translate --resume`, `sim2real build` (completeness check) |
 | `translations/<hash>/generated/{algo}/{cmd,pkg}/` (skill-driven only) | `/sim2real-translate` skill | `sim2real build` (buildkit input) |
 | `translations/<hash>/registered.json` | `sim2real translation register` | audit trail |
-| `translations/<hash>/generated/baseline_config.yaml` | `sim2real translation register` (via `--baseline-config`) | `sim2real assemble` (baseline overlay) |
+| `translations/<hash>/generated/baseline_config.yaml` | `sim2real translation register` (via `--baseline-config`) | `sim2real assemble` (baseline overlay — legacy BYO fallback) |
+| `translations/<hash>/generated/baselines/{name}/baseline_config.yaml` | `/sim2real-translate` skill | `sim2real assemble` (per-baseline overlay; primary skill-driven path — issue #544) |
 | `translations/<hash>/generated/{algo}/{algo}_config.yaml` | `sim2real translation register` | `sim2real assemble` (per-algo treatment overlay) |
 | `runs/<run>/run_metadata.json` | `sim2real assemble` | `deploy.py`, `sim2real.py list runs` |
 | `runs/<run>/manifest.assembly.yaml` | `sim2real assemble` | reproducibility / drift detection on re-assemble; carries top-level `replicas: N` |

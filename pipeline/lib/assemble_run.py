@@ -579,7 +579,13 @@ def _resolve_packages(
         )
         if bundle_path is None:
             raise AssembleError(f"baseline '{bl_name}' has no scenario file")
-        overlay_path = generated_root / f"baseline_{bl_name}" / "baseline_config.yaml"
+        # Per-baseline overlay layout: ``generated/baselines/<name>/baseline_config.yaml``.
+        # The ``baselines/`` umbrella (issue #544) avoids the awkward
+        # ``baseline_baseline/`` shape from the pre-#544 flat layout under
+        # the standardized ``name: baseline`` identifier, and keeps
+        # multi-baseline test cases (``baselines/base/``, ``baselines/alt/``)
+        # readable.
+        overlay_path = generated_root / "baselines" / bl_name / "baseline_config.yaml"
         if not overlay_path.exists():
             # BYO ``translation register`` writes the shared step-1
             # ``generated/baseline_config.yaml`` at the generated root.

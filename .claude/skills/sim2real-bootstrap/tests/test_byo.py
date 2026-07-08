@@ -98,7 +98,7 @@ def _happy_argv(
 ) -> list[str]:
     argv = [
         "--byo",
-        "--baseline", f"baseline={files['baseline']}",
+        "--baseline", str(files['baseline']),
         "--algorithm", "foo",
         "--algorithm", "bar",
         "--algorithm-image", "foo=ghcr.io/example/foo:latest",
@@ -223,7 +223,7 @@ def test_happy_path_single_algorithm(tmp_path, operator_files):
 
     argv = [
         "--byo",
-        "--baseline", f"baseline={operator_files['baseline']}",
+        "--baseline", str(operator_files['baseline']),
         "--algorithm", "foo",
         "--algorithm-image", "foo=ghcr.io/example/foo:latest",
         "--algorithm-config", f"foo={operator_files['foo']}",
@@ -257,7 +257,7 @@ def test_error_missing_baseline(bare_exp_root, operator_files):
 def test_error_no_algorithm(bare_exp_root, operator_files):
     argv = [
         "--byo",
-        "--baseline", f"baseline={operator_files['baseline']}",
+        "--baseline", str(operator_files['baseline']),
         "--non-interactive",
     ]
     code, message = byo.run_byo(argv, bare_exp_root, _SKILL_DIR, stdin_isatty=False)
@@ -268,7 +268,7 @@ def test_error_no_algorithm(bare_exp_root, operator_files):
 def test_error_algorithm_without_image(bare_exp_root, operator_files):
     argv = [
         "--byo",
-        "--baseline", f"baseline={operator_files['baseline']}",
+        "--baseline", str(operator_files['baseline']),
         "--algorithm", "foo",
         "--algorithm-config", f"foo={operator_files['foo']}",
         "--non-interactive",
@@ -282,7 +282,7 @@ def test_error_algorithm_without_image(bare_exp_root, operator_files):
 def test_error_algorithm_without_config(bare_exp_root, operator_files):
     argv = [
         "--byo",
-        "--baseline", f"baseline={operator_files['baseline']}",
+        "--baseline", str(operator_files['baseline']),
         "--algorithm", "foo",
         "--algorithm-image", "foo=ghcr.io/example/foo:latest",
         "--non-interactive",
@@ -296,7 +296,7 @@ def test_error_algorithm_without_config(bare_exp_root, operator_files):
 def test_error_duplicate_algorithm_names(bare_exp_root, operator_files):
     argv = [
         "--byo",
-        "--baseline", f"baseline={operator_files['baseline']}",
+        "--baseline", str(operator_files['baseline']),
         "--algorithm", "foo",
         "--algorithm", "foo",
         "--algorithm-image", "foo=ghcr.io/example/foo:latest",
@@ -331,7 +331,7 @@ def test_error_malformed_overlay_yaml(bare_exp_root, operator_files, tmp_path):
     bad = _write(tmp_path / "bad.yaml", "this is: not: valid: yaml: [\n")
     argv = [
         "--byo",
-        "--baseline", f"baseline={operator_files['baseline']}",
+        "--baseline", str(operator_files['baseline']),
         "--algorithm", "foo",
         "--algorithm-image", "foo=ghcr.io/example/foo:latest",
         "--algorithm-config", f"foo={bad}",
@@ -347,7 +347,7 @@ def test_error_malformed_baseline_yaml(bare_exp_root, operator_files, tmp_path):
     bad = _write(tmp_path / "bad_baseline.yaml", "this is: not: valid: yaml: [\n")
     argv = [
         "--byo",
-        "--baseline", f"baseline={bad}",
+        "--baseline", str(bad),
         "--algorithm", "foo",
         "--algorithm-image", "foo=ghcr.io/example/foo:latest",
         "--algorithm-config", f"foo={operator_files['foo']}",
@@ -367,7 +367,7 @@ def test_error_non_mapping_root_yaml(bare_exp_root, operator_files, tmp_path, ba
     bad = _write(tmp_path / "non_mapping.yaml", bad_content)
     argv = [
         "--byo",
-        "--baseline", f"baseline={operator_files['baseline']}",
+        "--baseline", str(operator_files['baseline']),
         "--algorithm", "foo",
         "--algorithm-image", "foo=ghcr.io/example/foo:latest",
         "--algorithm-config", f"foo={bad}",
@@ -381,7 +381,7 @@ def test_error_multi_document_yaml(bare_exp_root, operator_files, tmp_path):
     multi = _write(tmp_path / "multi.yaml", "a: 1\n---\nb: 2\n")
     argv = [
         "--byo",
-        "--baseline", f"baseline={operator_files['baseline']}",
+        "--baseline", str(operator_files['baseline']),
         "--algorithm", "foo",
         "--algorithm-image", "foo=ghcr.io/example/foo:latest",
         "--algorithm-config", f"foo={multi}",
@@ -395,7 +395,7 @@ def test_error_multi_document_yaml(bare_exp_root, operator_files, tmp_path):
 def test_error_overlay_path_missing(bare_exp_root, operator_files, tmp_path):
     argv = [
         "--byo",
-        "--baseline", f"baseline={operator_files['baseline']}",
+        "--baseline", str(operator_files['baseline']),
         "--algorithm", "foo",
         "--algorithm-image", "foo=ghcr.io/example/foo:latest",
         "--algorithm-config", f"foo={tmp_path / 'does_not_exist.yaml'}",
@@ -409,7 +409,7 @@ def test_error_overlay_path_missing(bare_exp_root, operator_files, tmp_path):
 def test_error_baseline_path_missing(bare_exp_root, operator_files, tmp_path):
     argv = [
         "--byo",
-        "--baseline", f"baseline={tmp_path / 'nowhere.yaml'}",
+        "--baseline", str(tmp_path / 'nowhere.yaml'),
         "--algorithm", "foo",
         "--algorithm-image", "foo=ghcr.io/example/foo:latest",
         "--algorithm-config", f"foo={operator_files['foo']}",
@@ -428,7 +428,7 @@ def test_error_source_symlink_outside_regular_file_required(bare_exp_root, tmp_p
     src_symlink.symlink_to(outside)  # Symlink to a directory, not a file
     argv = [
         "--byo",
-        "--baseline", f"baseline={src_symlink}",
+        "--baseline", str(src_symlink),
         "--algorithm", "foo",
         "--algorithm-image", "foo=ghcr.io/example/foo:latest",
         "--algorithm-config", f"foo={src_symlink}",
@@ -529,7 +529,7 @@ def test_args_vs_nl_parse_equivalence(operator_files):
     # args. The parser helper is order-agnostic on the dict shape.
     argv_from_nl_shape = [
         "--byo",
-        "--baseline", f"baseline={operator_files['baseline']}",
+        "--baseline", str(operator_files['baseline']),
         # NL parser might reorder these — validate order-independence
         "--algorithm-image", "foo=ghcr.io/example/foo:latest",
         "--algorithm-image", "bar=ghcr.io/example/bar@sha256:" + "a" * 64,
@@ -575,7 +575,7 @@ def test_shlex_quote_covers_shell_metacharacters(tmp_path):
 
     argv = [
         "--byo",
-        "--baseline", f"baseline={baseline}",
+        "--baseline", str(baseline),
         "--algorithm", "foo",
         "--algorithm-image", "foo=ghcr.io/example/foo:latest",
         "--algorithm-config", f"foo={overlay}",
@@ -626,7 +626,7 @@ def test_invalid_algorithm_name_rejected(bad_name, bare_exp_root, operator_files
         pytest.skip("single-digit name is valid")
     argv = [
         "--byo",
-        "--baseline", f"baseline={operator_files['baseline']}",
+        "--baseline", str(operator_files['baseline']),
         "--algorithm", bad_name,
         "--algorithm-image", f"{bad_name}=ghcr.io/example/x:latest",
         "--algorithm-config", f"{bad_name}={operator_files['foo']}",
@@ -640,7 +640,7 @@ def test_reserved_algorithm_name_baseline_rejected(bare_exp_root, operator_files
     """An algorithm named `baseline` collides with the framework role."""
     argv = [
         "--byo",
-        "--baseline", f"baseline={operator_files['baseline']}",
+        "--baseline", str(operator_files['baseline']),
         "--algorithm", "baseline",
         "--algorithm-image", "baseline=ghcr.io/example/x:latest",
         "--algorithm-config", f"baseline={operator_files['foo']}",
@@ -651,11 +651,37 @@ def test_reserved_algorithm_name_baseline_rejected(bare_exp_root, operator_files
     assert "reserved" in message.lower()
 
 
-def test_baseline_named_baseline_is_allowed(bare_exp_root, operator_files):
-    """A *baseline* named 'baseline' is the canonical case, not reserved."""
-    argv = _happy_argv(operator_files)  # baseline=baseline
+def test_baseline_identifier_is_hardcoded(bare_exp_root, operator_files):
+    """Issue #544 — the baseline identifier in transfer.yaml is always
+    the literal string ``baseline``, regardless of the operator's baseline
+    source path. The file always lands at ``baselines/baseline.yaml``."""
+    argv = _happy_argv(operator_files)
     code, _ = byo.run_byo(argv, bare_exp_root, _SKILL_DIR, stdin_isatty=False)
     assert code == 0
+    from pipeline.lib.manifest import load_manifest
+    manifest = load_manifest(bare_exp_root / "transfer.yaml")
+    assert manifest["baselines"] == [
+        {"name": "baseline", "scenario": "baselines/baseline.yaml"}
+    ]
+    for algo in manifest["algorithms"]:
+        assert algo["defaults"] == "baseline"
+    assert (bare_exp_root / "baselines" / "baseline.yaml").exists()
+
+
+def test_reserved_algorithm_name_baselines_rejected(bare_exp_root, operator_files):
+    """An algorithm named ``baselines`` collides with the per-baseline
+    overlay umbrella dir (``translations/<hash>/generated/baselines/``)."""
+    argv = [
+        "--byo",
+        "--baseline", str(operator_files['baseline']),
+        "--algorithm", "baselines",
+        "--algorithm-image", "baselines=ghcr.io/example/x:latest",
+        "--algorithm-config", f"baselines={operator_files['foo']}",
+        "--non-interactive",
+    ]
+    code, message = byo.run_byo(argv, bare_exp_root, _SKILL_DIR, stdin_isatty=False)
+    assert code == 2
+    assert "reserved" in message.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -837,7 +863,6 @@ def test_transfer_yaml_shape_matches_design(tmp_path, operator_files):
     ]
     doc = byo.build_transfer_yaml(
         scenario="my-scenario",
-        baseline_name="baseline",
         algorithms=algorithms,
         workloads=[root / "workloads" / "w1.yaml", root / "workloads" / "w2.yaml"],
         exp_root=root,
