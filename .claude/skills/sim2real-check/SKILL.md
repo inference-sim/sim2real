@@ -477,7 +477,7 @@ The real bundle may contain multiple experiment variants — one per phase in `$
 | `plugins` (list of plugin types) | Mostly — see below | Only the flow control policy plugin entry |
 | `schedulingProfiles` (scorers, weights, picker) | Yes | — |
 | `flowControl` | — | Yes — this is the independent variable |
-| `extraObjects` (InferenceObjective CRDs) | Yes (priority bands) | — |
+| `router.inferenceObjectives` (priority bands) | Yes | — |
 | Instance count (from server_logs) | Yes | — |
 | vLLM config (from server logs) | Yes | — |
 
@@ -505,10 +505,10 @@ Step 2c is a cross-variant **identity** check — all variants can be wrong in t
 
 | `config.md` block | Generated artifact |
 |---|---|
-| `## llm-d EPP Configuration — Baseline` | `$BASELINE_CONFIG_PATH` → `inferenceExtension.pluginsCustomConfig.custom-plugins.yaml` (parse the inner YAML string) |
+| `## llm-d EPP Configuration — Baseline` | `$BASELINE_CONFIG_PATH` → `router.epp.pluginsCustomConfig.custom-plugins.yaml` (parse the inner YAML string). Falls back to legacy `inferenceExtension.pluginsCustomConfig.custom-plugins.yaml` if the `router.epp` path is absent (pre-v0.7.0 runs). |
 | `## llm-d EPP Configuration — Treatment` | `$CONFIGS_DIR/<treatment>/<treatment>_config.yaml` deep-merged onto baseline |
 | `## llm-d EPP Configuration — Control` | `$CONFIGS_DIR/<control>/<control>_config.yaml` deep-merged onto baseline |
-| InferenceObjective entries (`kind: InferenceObjective`) | `$BASELINE_CONFIG_PATH` → `extraObjects` filtered to `kind: InferenceObjective` |
+| InferenceObjective entries (`kind: InferenceObjective`) | `$BASELINE_CONFIG_PATH` → `router.inferenceObjectives` (list of `{name, priority}` — the v0.9.0 chart renders each into a `kind: InferenceObjective` CR at deploy time). Falls back to legacy `extraObjects` filtered to `kind: InferenceObjective` if `router.inferenceObjectives` is absent (pre-v0.7.0 runs). |
 
 **Compare these fields (order-independent for lists):**
 
@@ -517,7 +517,7 @@ Step 2c is a cross-variant **identity** check — all variants can be wrong in t
 - `plugins` — list of `(type, name, parameters)` tuples
 - `schedulingProfiles` — for each profile, the `(pluginRef, weight)` map
 - `flowControl.usageLimitPolicyPluginRef`
-- For each InferenceObjective: `metadata.name`, `spec.priority`, `spec.poolRef.name`, `spec.poolRef.group`
+- For each `router.inferenceObjectives` entry: `name`, `priority`. `poolRef.name` and `poolRef.group` are hardcoded by the v0.9.0 chart (`Release.Name` + `inference.networking.k8s.io`) and MUST be validated once against `config.md` rather than per-item. On legacy shape (`extraObjects` filtered to `kind: InferenceObjective`), compare `metadata.name`, `spec.priority`, `spec.poolRef.name`, `spec.poolRef.group` as before.
 
 **Show:** side-by-side table — `field path | config.md value | generated value | match`.
 
@@ -664,17 +664,17 @@ Verify from EPP logs (`$RESULTS_DIR/<phase>/<workload>/epp_logs/`) that the conf
 
 Step 5c.2 (priority bands recognized) is a downstream symptom check — it sees that priorities are missing without saying why. This sub-section pins the runtime cause: it confirms the EPP loaded the configured InferenceObjective CRs and associated them with requests.
 
-**Conditional**: run only if `$BASELINE_CONFIG_PATH` declares at least one `kind: InferenceObjective` in `extraObjects`. Otherwise SKIP with note "no objectives configured."
+**Conditional**: run only if `$BASELINE_CONFIG_PATH` declares at least one entry under `router.inferenceObjectives` (v0.9.0 chart-native shape) or at least one `kind: InferenceObjective` under `extraObjects` (legacy shape). Otherwise SKIP with note "no objectives configured."
 
 **Verbosity prerequisite.** This check reads `objectiveKey` and `priority` fields from `Request handled` log lines, attached at `director.go:275` (`logger.WithValues("objectiveKey", ..., "priority", ...)`). These fields are present whenever the EPP is at `-v=3` (`V(logutil.VERBOSE)`) or higher. Before evaluating, grep `$RESULTS_DIR/<phase>/<workload>/epp_logs/*.log` for any line containing `"objectiveKey"`. If absent, this check is INAPPLICABLE — surface that the EPP must be redeployed with `-v=3` or higher.
 
 **Why a positive resolution check rather than a negative-string grep.** A previous version of this check greped for `"No associated InferenceObjective found, using default"` and FAILed on any occurrence. That doesn't work in production-shaped deployments: k8s readiness/liveness probes from the gateway / Service hit the EPP without the `x-llm-d-objective` header by design, so they always trigger that fallback path. The grep can't distinguish that benign infrastructure traffic from a real workload-resolution bug, and it produces FAILs on every run. The positive check below tests what the bug-grep was *meant* to detect — that workload requests resolve to their configured objectives — without false-positiving on infrastructure traffic.
 
-**Inputs.** Parse every `Request handled` line in `$RESULTS_DIR/<phase>/<workload>/epp_logs/*.log` and extract `(objectiveKey, priority)`. Read the configured set of `(name, spec.priority)` pairs from `$BASELINE_CONFIG_PATH` `extraObjects` filtered to `kind: InferenceObjective`. Read `trace_data.csv` row count per cell.
+**Inputs.** Parse every `Request handled` line in `$RESULTS_DIR/<phase>/<workload>/epp_logs/*.log` and extract `(objectiveKey, priority)`. Read the configured set of `(name, priority)` pairs from `$BASELINE_CONFIG_PATH` `router.inferenceObjectives` (v0.9.0 chart-native shape); fall back to `(name, spec.priority)` pairs from `$BASELINE_CONFIG_PATH` `extraObjects` filtered to `kind: InferenceObjective` (legacy shape) if the chart-native path is absent. Read `trace_data.csv` row count per cell.
 
 **Five criteria — all must PASS for the check to PASS:**
 
-1. **Coverage.** Every configured `InferenceObjective` name appears at least once in the `Request handled` lines, resolving to its configured `spec.priority`. *Every configured objective receives traffic.*
+1. **Coverage.** Every configured `InferenceObjective` name appears at least once in the `Request handled` lines, resolving to its configured priority (`priority` from `router.inferenceObjectives` on chart-native shape, or `spec.priority` from `extraObjects` on legacy shape — see Inputs above). *Every configured objective receives traffic.*
 2. **Determinism.** Each distinct `objectiveKey` value resolves to a singleton `priority`. No `objectiveKey` fans out to multiple priorities. *No mis-mapping mid-run.*
 3. **Workload resolution rate.** `count(Request handled lines with objectiveKey != "")` ≥ `count(rows in trace_data.csv)` per cell. *Every workload request carried the header and resolved to a configured objective.*
 4. **Priority value set.** The set of `priority` values seen across all `Request handled` lines is a subset of `{configured priorities} ∪ {0}`. The 0 is the documented `defaultPriority` fallback at `director.go:222`. *No stray priorities, e.g. from a misloaded CR.*
