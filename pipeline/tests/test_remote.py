@@ -267,6 +267,17 @@ def test_job_orchestrator_unbuffered():
     assert env["PYTHONUNBUFFERED"] == "1"
 
 
+def test_job_orchestrator_pod_marker_env_var_set():
+    """`SIM2REAL_ORCHESTRATOR_POD=1` is set so deploy.py error paths can emit
+    pod-appropriate hints instead of the local "run cluster.py provision"
+    message (#562).
+    """
+    job = _build_job()
+    container = job["spec"]["template"]["spec"]["containers"][0]
+    env = {e["name"]: e["value"] for e in container["env"]}
+    assert env.get("SIM2REAL_ORCHESTRATOR_POD") == "1"
+
+
 def test_job_workspace_is_writable_emptydir():
     """Orchestrator mounts a writable emptyDir at /data/workspace."""
     job = _build_job()

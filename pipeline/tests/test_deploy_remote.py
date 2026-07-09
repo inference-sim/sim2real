@@ -882,3 +882,80 @@ def test_run_remote_skips_validation_when_configmap_unreachable(monkeypatch, tmp
     combined = captured.out + captured.err
     assert "ConfigMap unreachable" in combined
     assert "skipping pre-flight filter validation" in combined
+
+
+# ── _init_experiment_root — mirror args into layout (#562) ──────────────────
+
+def test_init_experiment_root_mirrors_arg_into_layout(tmp_path, monkeypatch):
+    """When --experiment-root is passed, layout.experiment_root() returns it,
+    NOT Path.cwd(). Regression guard for #562: without this, an orchestrator
+    pod (WORKDIR /app, --experiment-root /data) would resolve every
+    layout-mediated path against /app and read empty cluster_config.
+    """
+    from pipeline.lib import layout
+    # Force cwd to differ from experiment_root so the fallback would
+    # produce the wrong answer if the fix were removed.
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    exp_root = tmp_path / "workspace-root"
+    exp_root.mkdir()
+
+    args = argparse.Namespace(experiment_root=str(exp_root))
+    resolved = mod._init_experiment_root(args)
+
+    assert resolved == exp_root
+    assert layout.experiment_root() == exp_root
+    assert layout.experiment_root() != other
+
+
+def test_init_experiment_root_falls_back_to_cwd_when_arg_absent(tmp_path, monkeypatch):
+    """No --experiment-root → uses cwd for both the module global and layout."""
+    from pipeline.lib import layout
+    monkeypatch.chdir(tmp_path)
+    args = argparse.Namespace(experiment_root=None)
+    resolved = mod._init_experiment_root(args)
+
+    assert resolved == tmp_path
+    assert layout.experiment_root() == tmp_path
+
+
+def test_init_experiment_root_empty_string_treated_as_absent(tmp_path, monkeypatch):
+    """argparse-style empty-string arg (falsy) should fall back to cwd, not
+    resolve to Path('')."""
+    from pipeline.lib import layout
+    monkeypatch.chdir(tmp_path)
+    args = argparse.Namespace(experiment_root="")
+    resolved = mod._init_experiment_root(args)
+    assert resolved == tmp_path
+    assert layout.experiment_root() == tmp_path
+
+
+# ── _no_namespaces_hint — pod-vs-local context detection (#562) ─────────────
+
+def test_no_namespaces_hint_local_context(monkeypatch):
+    monkeypatch.delenv("SIM2REAL_ORCHESTRATOR_POD", raising=False)
+    msg = mod._no_namespaces_hint()
+    assert "cluster.py provision" in msg
+    assert "run-inputs" not in msg
+
+
+def test_no_namespaces_hint_pod_context(monkeypatch):
+    monkeypatch.setenv("SIM2REAL_ORCHESTRATOR_POD", "1")
+    msg = mod._no_namespaces_hint()
+    # In the pod, hint should NOT tell the operator to run cluster.py —
+    # they can't from inside the pod.
+    assert "cluster.py provision" not in msg
+    # And it should point at the actual recovery step (re-assemble).
+    assert "sim2real assemble" in msg
+
+
+def test_no_namespaces_hint_pod_env_var_only_matches_exact_one(monkeypatch):
+    """A stray truthy-looking value like '0' or 'false' must NOT flip the
+    branch — only the literal '1' set by build_orchestrator_job counts."""
+    monkeypatch.setenv("SIM2REAL_ORCHESTRATOR_POD", "0")
+    assert "cluster.py provision" in mod._no_namespaces_hint()
+    monkeypatch.setenv("SIM2REAL_ORCHESTRATOR_POD", "false")
+    assert "cluster.py provision" in mod._no_namespaces_hint()
+    monkeypatch.setenv("SIM2REAL_ORCHESTRATOR_POD", "")
+    assert "cluster.py provision" in mod._no_namespaces_hint()
