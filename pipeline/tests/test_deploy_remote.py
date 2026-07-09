@@ -7,6 +7,23 @@ import pytest
 from unittest.mock import patch
 
 import pipeline.deploy as mod
+from pipeline.lib import layout
+
+
+@pytest.fixture(autouse=True)
+def _reset_layout_experiment_root():
+    """Clear layout._EXPERIMENT_ROOT before and after every test.
+
+    Tests that call mod._init_experiment_root() (or otherwise invoke
+    layout.set_experiment_root) mutate module-global state that would
+    otherwise leak into later tests, producing order-dependent failures.
+    Matches the pattern used across test_layout.py, test_cluster_ops.py,
+    test_build.py, test_resolve.py, and every other file that touches
+    layout state.
+    """
+    layout._EXPERIMENT_ROOT = None
+    yield
+    layout._EXPERIMENT_ROOT = None
 
 
 def _make_run_args(*, remote=False, workload=None, only=None, package=None,
@@ -882,3 +899,162 @@ def test_run_remote_skips_validation_when_configmap_unreachable(monkeypatch, tmp
     combined = captured.out + captured.err
     assert "ConfigMap unreachable" in combined
     assert "skipping pre-flight filter validation" in combined
+
+
+# ── _init_experiment_root — mirror args into layout (#562) ──────────────────
+
+def test_init_experiment_root_mirrors_arg_into_layout(tmp_path, monkeypatch):
+    """When --experiment-root is passed, layout.experiment_root() returns it,
+    NOT Path.cwd(). Regression guard for #562: without this, an orchestrator
+    pod (WORKDIR /app, --experiment-root /data) would resolve every
+    layout-mediated path against /app and read empty cluster_config.
+    """
+    from pipeline.lib import layout
+    # Force cwd to differ from experiment_root so the fallback would
+    # produce the wrong answer if the fix were removed.
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    exp_root = tmp_path / "workspace-root"
+    exp_root.mkdir()
+
+    args = argparse.Namespace(experiment_root=str(exp_root))
+    resolved = mod._init_experiment_root(args)
+
+    assert resolved == exp_root
+    assert layout.experiment_root() == exp_root
+    assert layout.experiment_root() != other
+
+
+def test_init_experiment_root_falls_back_to_cwd_when_arg_absent(tmp_path, monkeypatch):
+    """No --experiment-root → uses cwd for both the module global and layout."""
+    from pipeline.lib import layout
+    monkeypatch.chdir(tmp_path)
+    args = argparse.Namespace(experiment_root=None)
+    resolved = mod._init_experiment_root(args)
+
+    assert resolved == tmp_path
+    assert layout.experiment_root() == tmp_path
+
+
+def test_init_experiment_root_empty_string_treated_as_absent(tmp_path, monkeypatch):
+    """argparse-style empty-string arg (falsy) should fall back to cwd, not
+    resolve to Path('')."""
+    from pipeline.lib import layout
+    monkeypatch.chdir(tmp_path)
+    args = argparse.Namespace(experiment_root="")
+    resolved = mod._init_experiment_root(args)
+    assert resolved == tmp_path
+    assert layout.experiment_root() == tmp_path
+
+
+# ── _no_namespaces_hint — pod-vs-local context detection (#562) ─────────────
+
+def test_no_namespaces_hint_local_context(monkeypatch):
+    monkeypatch.delenv("SIM2REAL_ORCHESTRATOR_POD", raising=False)
+    msg = mod._no_namespaces_hint()
+    assert "cluster.py provision" in msg
+    assert "run-inputs" not in msg
+
+
+def test_no_namespaces_hint_pod_context(monkeypatch):
+    monkeypatch.setenv("SIM2REAL_ORCHESTRATOR_POD", "1")
+    msg = mod._no_namespaces_hint()
+    # In the pod, hint should NOT tell the operator to run cluster.py —
+    # they can't from inside the pod.
+    assert "cluster.py provision" not in msg
+    # And it should point at the actual recovery step (re-assemble).
+    assert "sim2real assemble" in msg
+
+
+def test_no_namespaces_hint_pod_env_var_only_matches_exact_one(monkeypatch):
+    """A stray truthy-looking value like '0' or 'false' must NOT flip the
+    branch — only the literal '1' set by build_orchestrator_job counts."""
+    monkeypatch.setenv("SIM2REAL_ORCHESTRATOR_POD", "0")
+    assert "cluster.py provision" in mod._no_namespaces_hint()
+    monkeypatch.setenv("SIM2REAL_ORCHESTRATOR_POD", "false")
+    assert "cluster.py provision" in mod._no_namespaces_hint()
+    monkeypatch.setenv("SIM2REAL_ORCHESTRATOR_POD", "")
+    assert "cluster.py provision" in mod._no_namespaces_hint()
+
+
+# ── _load_run_cluster_config — end-to-end with cwd ≠ experiment_root (#562) ──
+
+def test_load_run_cluster_config_reads_from_experiment_root_not_cwd(tmp_path, monkeypatch):
+    """The exact regression #562 calls out: an orchestrator pod with
+    cwd=/app and --experiment-root=/data was hitting layout.experiment_root()
+    → Path.cwd() = /app → wrong workspace → empty config.
+
+    This test locks that path down end-to-end through _load_run_cluster_config:
+    with cwd pointed at a directory that has NO workspace/, the loader must
+    still find the cluster_config.json under the workspace anchored at
+    layout._EXPERIMENT_ROOT. If a future refactor drops layout and reads
+    from mod.EXPERIMENT_ROOT directly (or Path.cwd() again), this test
+    fails.
+    """
+    cluster_id = "test-cluster"
+    run_name = "trial-1"
+
+    # Realistic workspace layout under tmp_path (the "experiment root").
+    exp_root = tmp_path / "experiment"
+    workspace = exp_root / "workspace"
+    (workspace / "clusters" / cluster_id).mkdir(parents=True)
+    (workspace / "clusters" / cluster_id / "cluster_config.json").write_text(
+        json.dumps({"namespaces": ["ns-x", "ns-y"], "secret_names": {}})
+    )
+    run_dir = workspace / "runs" / run_name
+    (run_dir / "cluster").mkdir(parents=True)
+    (run_dir / "run_metadata.json").write_text(
+        json.dumps({"cluster_id": cluster_id, "scenario": "s"})
+    )
+
+    # Cwd anywhere BUT the experiment root. Without the fix, layout would
+    # anchor here and every subsequent path resolution would miss.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    # Simulate what main() does at startup: mirror --experiment-root into
+    # layout via the extracted helper.
+    args = argparse.Namespace(experiment_root=str(exp_root))
+    mod._init_experiment_root(args)
+
+    # Sanity: layout was actually redirected away from cwd.
+    assert layout.experiment_root() == exp_root.resolve()
+    assert layout.experiment_root() != elsewhere
+
+    # The behavior we're guarding: run_dir is under exp_root, loader
+    # follows run_metadata.json → cluster_ops.read_cluster_config →
+    # layout.cluster_config_path → succeeds despite cwd being elsewhere.
+    cfg = mod._load_run_cluster_config(run_dir)
+    assert cfg["namespaces"] == ["ns-x", "ns-y"]
+
+
+def test_load_run_cluster_config_returns_empty_when_config_absent(tmp_path, monkeypatch):
+    """Symmetric coverage: when cluster_config.json is genuinely missing
+    from the workspace, the loader returns {} (silent empty). This is the
+    behavior _cmd_run relies on to emit the "No namespaces" hint at line
+    2800. Guards against a future change that swaps the empty-dict return
+    for an exception, which would surface as a raw traceback instead of
+    the pod-appropriate hint.
+    """
+    cluster_id = "test-cluster"
+    run_name = "trial-1"
+
+    exp_root = tmp_path / "experiment"
+    workspace = exp_root / "workspace"
+    # Note: no clusters/<id>/cluster_config.json — this is the point.
+    run_dir = workspace / "runs" / run_name
+    (run_dir / "cluster").mkdir(parents=True)
+    (run_dir / "run_metadata.json").write_text(
+        json.dumps({"cluster_id": cluster_id, "scenario": "s"})
+    )
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    args = argparse.Namespace(experiment_root=str(exp_root))
+    mod._init_experiment_root(args)
+
+    cfg = mod._load_run_cluster_config(run_dir)
+    assert cfg == {}

@@ -191,7 +191,13 @@ def build_orchestrator_job(
                         "name": "orchestrator",
                         "image": image,
                         "args": args,
-                        "env": [{"name": "PYTHONUNBUFFERED", "value": "1"}],
+                        "env": [
+                            {"name": "PYTHONUNBUFFERED", "value": "1"},
+                            # Marker so downstream deploy.py code paths can
+                            # emit pod-appropriate error hints instead of the
+                            # local "run cluster.py provision" message (#562).
+                            {"name": "SIM2REAL_ORCHESTRATOR_POD", "value": "1"},
+                        ],
                         "volumeMounts": [
                             {"name": "workspace", "mountPath": workspace_path},
                         ],

@@ -138,6 +138,63 @@ def _discover_phases(cluster_dir: "Path") -> list[str]:
 
 # ── Setup config ─────────────────────────────────────────────────────────────
 
+# Set to "1" in build_orchestrator_job's env spec so downstream deploy.py
+# error paths can distinguish "user is running this locally" from "running
+# inside the orchestrator pod" and emit a hint the operator can act on
+# (issue #562).
+_ORCHESTRATOR_POD_ENV = "SIM2REAL_ORCHESTRATOR_POD"
+
+
+def _in_orchestrator_pod() -> bool:
+    return os.environ.get(_ORCHESTRATOR_POD_ENV) == "1"
+
+
+def _no_namespaces_hint() -> str:
+    """Return the operator-actionable "no namespaces" message for this context.
+
+    In the pod: the cluster_config that was uploaded via the run-inputs
+    ConfigMap didn't carry a ``namespaces`` list — an ``assemble``/pod-input
+    problem, not a cluster-provisioning problem. Running ``cluster.py`` here
+    is impossible; the pointer at ``sim2real assemble`` is what recovers.
+
+    Locally: the historical hint at ``cluster.py provision --namespaces``
+    is correct — this is where the operator adds namespaces to the
+    cluster's ``cluster_config.json``.
+    """
+    if _in_orchestrator_pod():
+        return (
+            "No namespaces in the run-inputs cluster_config — the uploaded "
+            "ConfigMap is missing them. Re-run 'sim2real assemble --run <N>' "
+            "locally (ensure the target cluster has namespaces provisioned) "
+            "and then 'deploy.py run --remote' again."
+        )
+    return "No namespaces configured. Run cluster.py provision with --namespaces."
+
+
+def _init_experiment_root(args) -> Path:
+    """Resolve EXPERIMENT_ROOT from CLI args and mirror it into ``layout``.
+
+    Every subsequent path resolution — ``layout.workspace_dir()``,
+    ``layout.cluster_config_path()``, ``cluster_ops.read_cluster_config()``
+    — reads from ``layout._EXPERIMENT_ROOT`` via ``layout.experiment_root()``.
+    That accessor falls back to ``Path.cwd()`` when the module global is
+    unset, which is subtly wrong in any context where ``--experiment-root``
+    differs from the current working directory — most visibly the
+    orchestrator pod, whose Dockerfile pins ``WORKDIR /app`` while the
+    entrypoint receives ``--experiment-root /data`` (issue #562).
+
+    Wiring layout at startup means every downstream consumer sees the same
+    experiment root the deploy.py module global does. ``set_experiment_root``
+    is idempotent, so re-calling in main is safe.
+    """
+    global EXPERIMENT_ROOT
+    EXPERIMENT_ROOT = (
+        Path(args.experiment_root).resolve() if args.experiment_root else Path.cwd()
+    )
+    layout.set_experiment_root(EXPERIMENT_ROOT)
+    return EXPERIMENT_ROOT
+
+
 def _load_setup_config() -> dict:
     path = EXPERIMENT_ROOT / "workspace" / "setup_config.json"
     if not path.exists():
@@ -2740,7 +2797,7 @@ def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
 
     namespaces = cluster_config.get("namespaces") or []
     if not namespaces or not namespaces[0]:
-        err("No namespaces configured. Run cluster.py provision with --namespaces."); sys.exit(1)
+        err(_no_namespaces_hint()); sys.exit(1)
 
     registry_secret_name = (
         (cluster_config.get("secret_names") or {}).get("registry_creds") or ""
@@ -2760,7 +2817,7 @@ def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
     cluster_dir = run_dir / "cluster"
     primary_ns = _configmap_namespace(cluster_config, namespaces)
     if not primary_ns:
-        err("No namespace configured. Run cluster.py provision with --namespaces."); sys.exit(1)
+        err(_no_namespaces_hint()); sys.exit(1)
     store = _make_progress_store(primary_ns, run_dir)
 
     # Derive GPU resource type from baseline scenario
@@ -3793,8 +3850,7 @@ def main():
     if not machine_readable:
         print(_c("36", "\n━━━ sim2real-deploy ━━━\n"))
 
-    global EXPERIMENT_ROOT
-    EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if args.experiment_root else Path.cwd()
+    _init_experiment_root(args)
 
     setup_config = _load_setup_config()
 
