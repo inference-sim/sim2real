@@ -223,9 +223,19 @@ All timestamps are **microseconds**. Metrics:
 - TPOT = (last_chunk_time_us - first_chunk_time_us) / (output_tokens - 1) / 1000 ms (output_tokens > 1 only)
 - E2E  = (last_chunk_time_us - send_time_us) / 1000 ms
 
-## Example analysis scripts
+## Example one-off analysis script
 
-### TTFT distribution histogram
+Common analyses live in the catalog (see previous section). This
+example shows the shape of a one-off script for the fallback flow when
+you need something the catalog doesn't cover — for instance, a
+histogram at a different bin size or a workload subset.
+
+### TTFT distribution histogram (one-off example)
+
+For the standard CDF view use `ttft-cdf` from the catalog. Reach for a
+per-workload histogram when you need to see bin density directly (e.g.,
+"is the TTFT distribution bimodal at 50ms increments?") rather than
+the smoothed cumulative view.
 
 ```python
 import pandas as pd
@@ -251,34 +261,6 @@ for ax, wl in zip(axes, workloads):
 
 plt.tight_layout()
 out = f"workspace/runs/{run}/results_charts/ttft_distribution.png"
-plt.savefig(out)
-print(f"Saved: {out}")
-```
-
-### Throughput over time
-
-```python
-import pandas as pd
-import matplotlib.pyplot as plt
-
-run = "<name>"
-wl = "workload_fm8_short_output_highrate"
-
-fig, ax = plt.subplots(figsize=(12, 4))
-for phase in ["baseline", "treatment"]:
-    df = pd.read_csv(f"workspace/runs/{run}/results/{phase}/{wl}/trace_data.csv")
-    df = df[df["status"] == "ok"]  # only compute metrics for successful requests
-    t0 = df["arrival_time_us"].min()
-    df["t_sec"] = (df["arrival_time_us"] - t0) / 1e6
-    counts = df.groupby(df["t_sec"].astype(int)).size()
-    ax.plot(counts.index, counts.values, label=phase)
-
-ax.set_xlabel("Time (s)")
-ax.set_ylabel("Requests/s")
-ax.set_title(f"Throughput over time — {wl.replace('workload_','').replace('_','-')}")
-ax.legend()
-plt.tight_layout()
-out = f"workspace/runs/{run}/results_charts/throughput_over_time.png"
 plt.savefig(out)
 print(f"Saved: {out}")
 ```
