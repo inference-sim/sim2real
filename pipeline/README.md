@@ -422,7 +422,7 @@ python pipeline/deploy.py wipe  [flags]     # delete local result files for pair
 python pipeline/deploy.py pairs   [flags]   # list available pair keys, workloads, and packages
 ```
 
-**`deploy.py run`** — assigns `(workload, package, iteration)` triples to free namespace slots, polls for completion, and retries pairs that time out. Reads progress from the `sim2real-progress-{scenario}-{run}` ConfigMap (scenario + run scoped, so cross-experiment-root runs sharing a run name do not collide — issue #551) to resume interrupted runs. On first read, a legacy `sim2real-progress-{run}` ConfigMap is migrated into the new name and the legacy CM is deleted (invisible to operators). Requires a configured namespace. Use `deploy.py collect` to pull results off-cluster after runs complete. The run's cluster is resolved from `workspace/runs/<R>/run_metadata.json:cluster_id`; if the run directory or its `cluster/` subdirectory does not exist, `deploy.py run --run <R>` exits with `run 'sim2real assemble --run <R>' first`, and if `run_metadata.json` is missing, unparseable, or lacks a non-empty `cluster_id`, it exits with `run metadata corrupted; re-assemble`.
+**`deploy.py run`** — assigns `(workload, package, iteration)` triples to free namespace slots, polls for completion, and retries pairs that time out. Reads progress from the `sim2real-progress-{scenario}-{run}` ConfigMap (scenario + run scoped, so cross-experiment-root runs sharing a run name do not collide — issue #551) to resume interrupted runs. There is no automatic migration from the pre-#551 `sim2real-progress-{run}` name; operators clean those up manually with `kubectl delete cm sim2real-progress-<run> -n <ns>` when they want to. Requires a configured namespace. Use `deploy.py collect` to pull results off-cluster after runs complete. The run's cluster is resolved from `workspace/runs/<R>/run_metadata.json:cluster_id`; if the run directory or its `cluster/` subdirectory does not exist, `deploy.py run --run <R>` exits with `run 'sim2real assemble --run <R>' first`, and if `run_metadata.json` is missing, unparseable, or lacks a non-empty `cluster_id`, it exits with `run metadata corrupted; re-assemble`.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -606,7 +606,7 @@ python pipeline/deploy.py --experiment-root <experiment-root> \
     --run <run-name> run
 ```
 
-Builds the treatment EPP image (if not current), dispatches PipelineRuns across the namespace slots, and polls for completion. Progress lands in the run-scoped `sim2real-progress-<run-name>` ConfigMap. Use `deploy.py --run <run-name> status` to snapshot progress; use `deploy.py --run <run-name> stop` to cancel the remote orchestrator Job (if `--remote` was passed); use `deploy.py --run <run-name> reset` to requeue non-pending pairs (which also cancels their in-flight PipelineRuns).
+Builds the treatment EPP image (if not current), dispatches PipelineRuns across the namespace slots, and polls for completion. Progress lands in the `sim2real-progress-<scenario>-<run-name>` ConfigMap (scoped by both `transfer.yaml:scenario` and the run name — issue #551). Use `deploy.py --run <run-name> status` to snapshot progress; use `deploy.py --run <run-name> stop` to cancel the remote orchestrator Job (if `--remote` was passed); use `deploy.py --run <run-name> reset` to requeue non-pending pairs (which also cancels their in-flight PipelineRuns).
 
 ### 6. Collect results
 

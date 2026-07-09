@@ -96,6 +96,7 @@ def _make_run(
             "params_hash": "b751df5",
             "image_tag": (algorithms[0].get("image_ref") if algorithms else ""),
             "assembled_at": "2026-07-04T15:41:48Z",
+            "scenario": "test-scenario",
         },
     )
 
@@ -182,8 +183,25 @@ class TestResolveRunHappyPath:
         assert result["params_hash"] == "b751df5"
         assert result["image_tag"] == "ghcr.io/foo/bar:v1"
         assert result["assembled_at"] == "2026-07-04T15:41:48Z"
+        # #551: scenario surfaces from run_metadata.json.
+        assert result["scenario"] == "test-scenario"
         assert Path(result["run_dir"]).is_absolute()
         assert Path(result["experiment_root"]).is_absolute()
+
+    def test_scenario_defaults_empty_when_run_metadata_omits_it(self, tmp_path):
+        """Legacy runs (assembled before #551) have no scenario key; resolve
+        returns "" rather than raising, so downstream consumers can decide
+        whether to error or fall back."""
+        import json as _json
+        _make_run(tmp_path)
+        # Rewrite run_metadata without the scenario field.
+        run_dir = tmp_path / "workspace" / "runs" / "trial-1"
+        meta_path = run_dir / "run_metadata.json"
+        meta = _json.loads(meta_path.read_text())
+        del meta["scenario"]
+        _write_json(meta_path, meta)
+        result = resolve.resolve_run(tmp_path, "trial-1")
+        assert result["scenario"] == ""
 
     def test_top_level_omits_translation_hash(self, tmp_path):
         """Design decision: translation_hash appears only under translation.hash."""

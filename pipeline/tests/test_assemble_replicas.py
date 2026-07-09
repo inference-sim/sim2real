@@ -351,3 +351,30 @@ class TestAssembleReplicas:
         with pytest.raises(assemble_run.AssembleError,
                            match="not valid JSON"):
             _assemble(fx, replicas=5)
+
+    def test_additive_grow_backfills_scenario_for_legacy_run(self, tmp_path):
+        """A run assembled before #551 has no `scenario` in run_metadata.json.
+        Growing it (replicas N → N+1) must backfill the field from the manifest
+        so deploy.py's hard guard on scenario doesn't trip. Regression guard
+        for the migration story called out in issue #551.
+        """
+        import json as _json
+        fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
+                              algo_names_manifest=["sr"])
+        _assemble(fx, replicas=2, now_iso="2026-07-01T00:00:00Z")
+        # Simulate a pre-#551 run: strip scenario from run_metadata.json.
+        rm_path = _run_dir_of(fx) / "run_metadata.json"
+        rm = _json.loads(rm_path.read_text())
+        assert rm.get("scenario"), "pre-condition: fresh assemble writes scenario"
+        del rm["scenario"]
+        rm_path.write_text(_json.dumps(rm, indent=2, sort_keys=True) + "\n")
+        assert "scenario" not in _json.loads(rm_path.read_text())
+
+        # Additive-grow from 2 to 3 replicas.
+        _assemble(fx, replicas=3, now_iso="2026-07-02T00:00:00Z")
+
+        # Scenario is repopulated from the manifest.
+        rm_after = _json.loads(rm_path.read_text())
+        # _make_experiment uses "test-scenario" in its transfer.yaml.
+        assert rm_after["scenario"] == "test-scenario"
+        assert rm_after["replicas"] == 3
