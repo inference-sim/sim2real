@@ -714,10 +714,14 @@ def _additive_grow(
     write_manifest_assembly(run_dir, manifest, now_iso=now_iso, replicas=new_replicas)
 
     # Rewrite run_metadata.json. params_hash is preserved (drift check passed).
+    # `scenario` is also refreshed from the manifest so legacy runs (assembled
+    # before #551) get the field populated when they're grown, avoiding a
+    # deploy-time scenario-missing failure downstream.
     rm_path = run_dir / "run_metadata.json"
     rm = json.loads(rm_path.read_text())
     rm["replicas"] = new_replicas
     rm["assembled_at"] = now_iso
+    rm["scenario"] = manifest.get("scenario", "") or ""
     rm_path.write_text(json.dumps(rm, indent=2, sort_keys=True) + "\n")
 
 
@@ -948,6 +952,9 @@ def assemble_run(
         translated_algos[kept_algos[0]["name"]]["image_ref"]
         if kept_algos else ""
     )
+    # `scenario` is required by transfer.yaml (validated in sim2real.py before
+    # this call) and is used at deploy time to scope the progress ConfigMap
+    # per (scenario, run) so cross-experiment-root runs don't collide (#551).
     write_run_metadata(
         run_dir,
         {
@@ -959,6 +966,7 @@ def assemble_run(
             "image_tag": run_meta_image_tag,
             "replicas": replicas,
             "assembled_at": now_iso,
+            "scenario": manifest.get("scenario", "") or "",
         },
     )
     # Skipped-algorithm list exposed for the CLI wrapper to surface as warnings.
