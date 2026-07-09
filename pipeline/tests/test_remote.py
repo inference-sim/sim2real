@@ -7,6 +7,9 @@ import pytest
 from pipeline.lib.remote import (
     CONFIGMAP_NAME,
     JOB_NAME,
+    _CM_KEY_ALLOWED_RE,
+    _decode_filename_from_cm,
+    _encode_filename_for_cm,
     build_orchestrator_job,
     build_run_inputs_configmap,
     _configmap_items,
@@ -351,3 +354,137 @@ def test_configmap_items_defaults_at_root():
     data = {"defaults.yaml": "content", "setup_config.json": "{}"}
     items = _configmap_items(data, "run1")
     assert {"key": "defaults.yaml", "path": "defaults.yaml"} in items
+
+
+# --- pipe-shape filename encoding (issue #557) ---
+
+
+def test_encode_pipe_to_dot7c():
+    """`|` is encoded as `.7C` in CM keys."""
+    assert (
+        _encode_filename_for_cm("pipelinerun-wl-a|baseline|i1.yaml")
+        == "pipelinerun-wl-a.7Cbaseline.7Ci1.yaml"
+    )
+
+
+def test_encode_no_pipe_unchanged():
+    """Filenames without `|` pass through unchanged."""
+    assert _encode_filename_for_cm("baseline.yaml") == "baseline.yaml"
+    assert _encode_filename_for_cm("pipelinerun-smoke-baseline.yaml") == (
+        "pipelinerun-smoke-baseline.yaml"
+    )
+
+
+def test_decode_dot7c_to_pipe():
+    """`.7C` in an encoded key decodes back to `|`."""
+    assert (
+        _decode_filename_from_cm("pipelinerun-wl-a.7Cbaseline.7Ci1.yaml")
+        == "pipelinerun-wl-a|baseline|i1.yaml"
+    )
+
+
+@pytest.mark.parametrize("original", [
+    "pipelinerun-code-generation-10|constantceiling|i2.yaml",
+    "pipelinerun-interactive-chat-80|softreflective|i1.yaml",
+    "pipelinerun-reasoning-0-2|baseline|i2.yaml",
+    "baseline.yaml",
+    "constantceiling.yaml",
+    "pipelinerun-smoke-baseline.yaml",  # legacy dash-shape, no pipes
+])
+def test_encode_decode_roundtrip(original):
+    """Encoding then decoding yields the original filename byte-for-byte."""
+    encoded = _encode_filename_for_cm(original)
+    assert _CM_KEY_ALLOWED_RE.match(encoded), (
+        f"encoded name {encoded!r} contains chars outside "
+        f"the ConfigMap key allowed set"
+    )
+    assert _decode_filename_from_cm(encoded) == original
+
+
+def test_pipe_shape_filenames_produce_legal_cm_keys(workspace):
+    """Pipe-shape pipelinerun filenames yield ConfigMap keys that pass k8s validation.
+
+    Regression for the bug in issue #557: kubectl apply rejected the CM with
+    `data[cluster--pipelinerun-code-generation-10|constantceiling|i2.yaml]:
+    Invalid value ... regex used for validation is '[-._a-zA-Z0-9]+'` because
+    the pair-key grammar (lib/pairkey.py) produces `|`-containing filenames
+    that were used verbatim as CM data keys.
+    """
+    workspace_dir, run_dir = workspace
+    _write_defaults(workspace_dir, run_dir)
+    # Mix of pipe-shape (post-PR-2) and no-pipe (treatment overlay) files as
+    # in a real cluster/ directory.
+    (run_dir / "cluster" / "baseline.yaml").write_text("t: 1\n")
+    (run_dir / "cluster" / "pipelinerun-wl-a|baseline|i1.yaml").write_text("p: 1\n")
+    (run_dir / "cluster" / "pipelinerun-wl-a|baseline|i2.yaml").write_text("p: 2\n")
+    cm = build_run_inputs_configmap(
+        run_dir=run_dir, workspace_dir=workspace_dir,
+        namespace="ns", run_name="test-run",
+    )
+    illegal = [k for k in cm["data"] if not _CM_KEY_ALLOWED_RE.match(k)]
+    assert illegal == [], (
+        f"kubectl would reject these CM data keys: {illegal}"
+    )
+    # And no `|` leaked through despite the source filenames containing `|`.
+    assert not any("|" in k for k in cm["data"])
+
+
+def test_pipe_shape_roundtrip_via_configmap_items(workspace):
+    """End-to-end: CM key encodes `|`, projected volume `path:` restores `|`.
+
+    This is what the remote orchestrator Job relies on — the projected file
+    inside the pod must have the same name as the source on the operator's
+    disk so pair-key parsing and workload lookup work identically in-cluster.
+    """
+    workspace_dir, run_dir = workspace
+    _write_defaults(workspace_dir, run_dir)
+    # _write_defaults seeds `pipelinerun-smoke-baseline.yaml`; include it in
+    # the expected set so the assertion matches the full cluster/ contents.
+    extra_filenames = {
+        "pipelinerun-code-generation-10|constantceiling|i2.yaml",
+        "pipelinerun-interactive-chat-80|softreflective|i1.yaml",
+        "baseline.yaml",
+    }
+    for name in extra_filenames:
+        (run_dir / "cluster" / name).write_text(f"# {name}\n")
+    source_filenames = extra_filenames | {"pipelinerun-smoke-baseline.yaml"}
+    cm = build_run_inputs_configmap(
+        run_dir=run_dir, workspace_dir=workspace_dir,
+        namespace="ns", run_name="test-run",
+    )
+    items = _configmap_items(cm["data"], "test-run")
+    reconstructed = {
+        i["path"].removeprefix("runs/test-run/cluster/")
+        for i in items
+        if i["path"].startswith("runs/test-run/cluster/")
+    }
+    assert reconstructed == source_filenames
+
+
+def test_configmap_items_decodes_pipe_shape_cluster_yaml():
+    """`_configmap_items` decodes `.7C` back to `|` when constructing paths."""
+    data = {"cluster--pipelinerun-wl-a.7Cbaseline.7Ci1.yaml": "p"}
+    items = _configmap_items(data, "run-x")
+    assert items == [{
+        "key": "cluster--pipelinerun-wl-a.7Cbaseline.7Ci1.yaml",
+        "path": "runs/run-x/cluster/pipelinerun-wl-a|baseline|i1.yaml",
+    }]
+
+
+def test_cm_key_allowed_re_matches_k8s_validator():
+    """Guard against divergence from Kubernetes' CM-key validation regex.
+
+    The Kubernetes validator's error message quotes the regex as
+    ``[-._a-zA-Z0-9]+``. If that ever changes upstream (unlikely), this test
+    surfaces the drift.
+    """
+    # Legal.
+    assert _CM_KEY_ALLOWED_RE.match("simple.name")
+    assert _CM_KEY_ALLOWED_RE.match("KEY_NAME")
+    assert _CM_KEY_ALLOWED_RE.match("key-name")
+    assert _CM_KEY_ALLOWED_RE.match("pipelinerun-wl-a.7Cbaseline.7Ci1.yaml")
+    # Illegal — anything with `|`.
+    assert not _CM_KEY_ALLOWED_RE.match("pipelinerun-wl-a|baseline|i1.yaml")
+    # Illegal — spaces, slashes, other punctuation.
+    assert not _CM_KEY_ALLOWED_RE.match("with space")
+    assert not _CM_KEY_ALLOWED_RE.match("with/slash")
