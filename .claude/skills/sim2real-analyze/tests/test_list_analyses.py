@@ -32,11 +32,26 @@ def write_script(dir_path: Path, script_name: str) -> Path:
 
 # ── Real-catalog smoke test ──────────────────────────────────────────────────
 
-def test_real_catalog_has_two_entries():
-    """The shipped catalog resolves without warnings and contains both exemplars."""
+def test_real_catalog_contains_expected_entries():
+    """The shipped catalog resolves without warnings and contains every expected entry.
+
+    Uses subset comparison so the assertion tolerates future additions without
+    another test-file edit — each new entry only has to appear here and in the
+    catalog itself. If an entry is REMOVED, the intersection fails loudly.
+    """
     entries = list_analyses.load_catalog(REAL_ANALYSES_DIR)
     names = {e["name"] for e in entries}
-    assert names == {"latency-table", "per-request-scatter"}
+    expected = {
+        "latency-table",
+        "per-request-scatter",
+        "ttft-cdf",
+        "tpot-cdf",
+        "e2e-cdf",
+        "throughput-over-time",
+        "error-rate",
+    }
+    missing = expected - names
+    assert not missing, f"catalog missing entries: {sorted(missing)}"
 
 
 def test_real_catalog_entries_have_all_required_fields():
@@ -46,11 +61,15 @@ def test_real_catalog_entries_have_all_required_fields():
             assert e.get(field), f"entry {e.get('name')!r} missing {field!r}"
 
 
-def test_real_catalog_script_entry_points_at_existing_file():
-    entries = {e["name"]: e for e in list_analyses.load_catalog(REAL_ANALYSES_DIR)}
-    lt = entries["latency-table"]
-    assert lt["runner"] == "script"
-    assert (REAL_ANALYSES_DIR / lt["script"]).exists()
+def test_real_catalog_script_entries_point_at_existing_files():
+    """Every runner:script entry in the shipped catalog references an existing .py."""
+    entries = list_analyses.load_catalog(REAL_ANALYSES_DIR)
+    script_entries = [e for e in entries if e["runner"] == "script"]
+    assert script_entries, "expected at least one script-runner entry"
+    for e in script_entries:
+        assert (REAL_ANALYSES_DIR / e["script"]).exists(), (
+            f"entry {e['name']!r} points at missing script {e['script']!r}"
+        )
 
 
 # ── Isolated-catalog tests ────────────────────────────────────────────────────
