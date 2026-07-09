@@ -235,7 +235,7 @@ histogram at a different bin size or a workload subset.
 For the standard CDF view use `ttft-cdf` from the catalog. Reach for a
 per-workload histogram when you need to see bin density directly (e.g.,
 "is the TTFT distribution bimodal at 50ms increments?") rather than
-the smoothed cumulative view.
+the empirical step-function CDF the catalog entry produces.
 
 ```python
 import pandas as pd
