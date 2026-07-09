@@ -63,6 +63,9 @@ def test_main_status_silent_suppresses_banner(tmp_path, monkeypatch, capsys):
 
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     run_dir.mkdir(parents=True)
+    (run_dir / "run_metadata.json").write_text(
+        json.dumps({"scenario": "test-scenario", "run_name": "test-run"})
+    )
     ws = tmp_path / "workspace"
     (ws / "setup_config.json").write_text(json.dumps({"current_run": "test-run"}))
 
@@ -91,6 +94,9 @@ def test_main_status_without_silent_keeps_banner(tmp_path, monkeypatch, capsys):
 
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     run_dir.mkdir(parents=True)
+    (run_dir / "run_metadata.json").write_text(
+        json.dumps({"scenario": "test-scenario", "run_name": "test-run"})
+    )
     ws = tmp_path / "workspace"
     (ws / "setup_config.json").write_text(json.dumps({"current_run": "test-run"}))
 

@@ -15,10 +15,21 @@ _PROGRESS = {
 
 
 def _mock_cm(monkeypatch, data):
-    """Monkeypatch ConfigMapProgressStore to return a deep copy of *data* on load."""
+    """Monkeypatch ConfigMapProgressStore to return a deep copy of *data* on load.
+
+    Also bypasses deploy._make_progress_store's run_metadata.json read (#551).
+    """
     monkeypatch.setattr(ConfigMapProgressStore, "load",
                         lambda self: json.loads(json.dumps(data)))
     monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
+    from pipeline import deploy as _deploy_mod
+    monkeypatch.setattr(
+        _deploy_mod,
+        "_make_progress_store",
+        lambda ns, run_dir: ConfigMapProgressStore(
+            ns, run_name=run_dir.name, scenario="test-scenario"
+        ),
+    )
 
 
 def _setup_results(run_dir: Path) -> None:
@@ -402,6 +413,13 @@ def test_wipe_does_not_save_progress(tmp_path, monkeypatch):
                         lambda self: json.loads(json.dumps(_PROGRESS)))
     monkeypatch.setattr(ConfigMapProgressStore, "save",
                         lambda self, d: save_called.append(True))
+    monkeypatch.setattr(
+        mod,
+        "_make_progress_store",
+        lambda ns, run_dir: ConfigMapProgressStore(
+            ns, run_name=run_dir.name, scenario="test-scenario"
+        ),
+    )
     _setup_results(run_dir)
 
     class _Args:

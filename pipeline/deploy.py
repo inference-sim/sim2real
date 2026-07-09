@@ -203,6 +203,42 @@ def _load_run_cluster_config(run_dir: Path) -> dict:
     return cluster_ops.read_cluster_config(cluster_id)
 
 
+def _make_progress_store(namespace: str, run_dir: Path):
+    """Construct a ConfigMapProgressStore scoped to this run's (scenario, run_name).
+
+    Reads ``run_metadata.json:scenario`` — written by ``sim2real assemble``
+    since issue #551. Exits with an operator-friendly error when the field
+    is missing (a run assembled before #551 that hasn't been re-assembled)
+    so operators aren't left staring at a NotFound after an unexpected name
+    change. Callers get a store whose ConfigMap name is unique per
+    (scenario, run) — no more cross-experiment-root bleed.
+    """
+    from pipeline.lib.progress import ConfigMapProgressStore
+    meta_path = run_dir / "run_metadata.json"
+    if not meta_path.exists():
+        err(f"run_metadata.json not found at {meta_path} — "
+            f"run 'sim2real assemble --run {run_dir.name}' first.")
+        sys.exit(1)
+    try:
+        meta = json.loads(meta_path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        err(f"run_metadata.json is not valid JSON: {exc}. "
+            f"Re-run 'sim2real assemble --run {run_dir.name}'.")
+        sys.exit(1)
+    scenario = (
+        (meta.get("scenario") or "").strip()
+        if isinstance(meta, dict) else ""
+    )
+    if not scenario:
+        err(f"run_metadata.json is missing 'scenario' — re-run "
+            f"'sim2real assemble --run {run_dir.name}' to record it "
+            f"(added in issue #551).")
+        sys.exit(1)
+    return ConfigMapProgressStore(
+        namespace, run_name=run_dir.name, scenario=scenario
+    )
+
+
 # ── Progress store loading ───────────────────────────────────────────────────
 
 class ProgressUnavailable(RuntimeError):
@@ -682,12 +718,11 @@ def _runtime_str(entry: dict) -> str:
 def _cmd_status(args, run_dir: Path,
                 cluster_config: dict | None = None) -> None:
     """Print a snapshot table of all (workload, package, iteration) statuses."""
-    from pipeline.lib.progress import ConfigMapProgressStore
     primary_ns = _configmap_namespace(cluster_config)
     if not primary_ns:
         err("No namespace configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
-    store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
+    store = _make_progress_store(primary_ns, run_dir)
     try:
         progress = _load_progress(store, allow_unreachable=True,
                                   run_name=run_dir.name)
@@ -1613,12 +1648,11 @@ def _cmd_collect(args, run_dir: Path, cluster_config: dict):
     run_name = run_dir.name
 
     # Derive known phases from ConfigMap
-    from pipeline.lib.progress import ConfigMapProgressStore
     primary_ns = _configmap_namespace(cluster_config)
     if not primary_ns:
         err("No namespace configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
-    store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
+    store = _make_progress_store(primary_ns, run_dir)
     try:
         progress = _load_progress(store, allow_unreachable=True,
                                   run_name=run_dir.name) or None
@@ -2682,7 +2716,6 @@ def _refresh_namespaces(current: list[str]) -> list[str]:
 def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
     """Orchestrate parallel pool execution across namespace slots."""
     import tempfile as _tmp
-    from pipeline.lib.progress import ConfigMapProgressStore
     from pipeline.lib.capacity import (
         probe_free_gpus, derive_gpu_resource_type, load_defaults,
         extract_node_filters, NodeFilter,
@@ -2711,7 +2744,7 @@ def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
     primary_ns = _configmap_namespace(cluster_config, namespaces)
     if not primary_ns:
         err("No namespace configured. Run cluster.py provision with --namespaces."); sys.exit(1)
-    store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
+    store = _make_progress_store(primary_ns, run_dir)
 
     # Derive GPU resource type from baseline scenario
     # CLI --gpu-resource-type overrides auto-derivation when explicitly set
@@ -3150,12 +3183,11 @@ def _cmd_reset(args, run_dir: Path, discovered: dict,
                namespaces: list[str] | None = None,
                cluster_config: dict | None = None) -> None:
     """Reset all non-pending pairs to pending (with cluster cleanup)."""
-    from pipeline.lib.progress import ConfigMapProgressStore
     primary_ns = _configmap_namespace(cluster_config, namespaces)
     if not primary_ns:
         err("No namespace configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
-    store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
+    store = _make_progress_store(primary_ns, run_dir)
     progress = _load_progress(store, run_name=run_dir.name)
 
     if not progress:
@@ -3205,12 +3237,11 @@ def _cmd_reset(args, run_dir: Path, discovered: dict,
 def _cmd_wipe(args, run_dir: Path,
               cluster_config: dict | None = None) -> None:
     """Delete local result files for pairs in scope."""
-    from pipeline.lib.progress import ConfigMapProgressStore
     primary_ns = _configmap_namespace(cluster_config)
     if not primary_ns:
         err("No namespace configured. Run cluster.py provision with --namespaces.")
         sys.exit(1)
-    store = ConfigMapProgressStore(primary_ns, run_name=run_dir.name)
+    store = _make_progress_store(primary_ns, run_dir)
     progress = _load_progress(store, run_name=run_dir.name)
 
     if not progress:
@@ -3512,8 +3543,7 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict,
     cluster_dir = run_dir / "cluster"
     discovered = _load_pairs(cluster_dir)
     if discovered:
-        from pipeline.lib.progress import ConfigMapProgressStore
-        store = ConfigMapProgressStore(namespace, run_name=run_dir.name)
+        store = _make_progress_store(namespace, run_dir)
         try:
             progress = _load_progress(store, allow_unreachable=True,
                                       run_name=run_dir.name) or None

@@ -24,7 +24,8 @@ def _mock_cm(monkeypatch, data, capture_saves=None):
     """Monkeypatch ConfigMapProgressStore to return a deep copy of *data* on load.
 
     If *capture_saves* is a dict, saves are captured into it.
-    Otherwise saves are no-ops.
+    Otherwise saves are no-ops. Also bypasses deploy._make_progress_store's
+    run_metadata.json read (#551).
     """
     import json as _json
     monkeypatch.setattr(ConfigMapProgressStore, "load",
@@ -36,6 +37,14 @@ def _mock_cm(monkeypatch, data, capture_saves=None):
         monkeypatch.setattr(ConfigMapProgressStore, "save", _save)
     else:
         monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
+    from pipeline import deploy as _deploy_mod
+    monkeypatch.setattr(
+        _deploy_mod,
+        "_make_progress_store",
+        lambda ns, run_dir: ConfigMapProgressStore(
+            ns, run_name=run_dir.name, scenario="test-scenario"
+        ),
+    )
 
 
 def test_reset_pair_failed_deletes_pr_and_helm(monkeypatch):

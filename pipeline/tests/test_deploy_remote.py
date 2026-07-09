@@ -430,6 +430,7 @@ def _setup_run_dir(tmp_path):
     )
     (run_dir / "run_metadata.json").write_text(json.dumps({
         "component_image": "registry.example.com/epp:latest",
+        "scenario": "test-scenario",
     }))
     (cluster_dir / "pipelinerun-baseline.yaml").write_text("apiVersion: v1")
     return run_dir
