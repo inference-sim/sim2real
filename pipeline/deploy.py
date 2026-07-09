@@ -230,9 +230,26 @@ def _make_progress_store(namespace: str, run_dir: Path):
         if isinstance(meta, dict) else ""
     )
     if not scenario:
-        err(f"run_metadata.json is missing 'scenario' — re-run "
-            f"'sim2real assemble --run {run_dir.name}' to record it "
-            f"(added in issue #551).")
+        # The remediation names --force because the assemble no-op path
+        # (same manifest content + same replicas since last assemble)
+        # would otherwise swallow the backfill silently. Prefill
+        # --translation and --cluster from run_metadata.json when present
+        # so the operator can copy-paste; fall back to placeholders when
+        # either field is absent.
+        translation_ref = ""
+        cluster_ref = ""
+        if isinstance(meta, dict):
+            translation_ref = str(meta.get("translation_hash") or "").strip()
+            cluster_ref = str(meta.get("cluster_id") or "").strip()
+        translation_arg = translation_ref or "<translation-ref>"
+        cluster_arg = cluster_ref or "<cluster-id>"
+        err(
+            f"scenario not recorded for run '{run_dir.name}' — this run "
+            f"predates scenario tracking and cannot be resolved to a "
+            f"ConfigMap. To backfill: sim2real assemble "
+            f"--translation {translation_arg} --cluster {cluster_arg} "
+            f"--run {run_dir.name} --force"
+        )
         sys.exit(1)
     return ConfigMapProgressStore(
         namespace, run_name=run_dir.name, scenario=scenario

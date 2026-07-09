@@ -1106,6 +1106,78 @@ class TestAssembleCommand:
         assert (run_dir / "cluster" / "sr.yaml").exists()
         assert (run_dir / "cluster" / "pipelinerun-w1|baseline|i1.yaml").exists()
         assert (run_dir / "cluster" / "pipelinerun-w1|sr|i1.yaml").exists()
+        # Issue #555: write path prints the past-tense ack.
+        out = capsys.readouterr().out
+        assert "assembled run trial-1" in out
+
+    def test_noop_reassemble_prints_no_change_message(self, tmp_path, capsys):
+        """Issue #555: second assemble with identical inputs prints the
+        'No change needed' message and does not print 'assembled run …'."""
+        thash = self._make_minimal_registration(tmp_path)
+        cluster_id = self._bootstrap_experiment(tmp_path)
+        # First assemble — write path.
+        rc1 = sim2real.main(
+            [
+                "--experiment-root", str(tmp_path),
+                "assemble",
+                "--translation", thash,
+                "--cluster", cluster_id,
+                "--run", "trial-1",
+            ]
+        )
+        assert rc1 == 0
+        # Capture prior assembled_at so we can assert the message includes it.
+        run_dir = tmp_path / "workspace" / "runs" / "trial-1"
+        meta = json.loads((run_dir / "run_metadata.json").read_text())
+        prior_assembled_at = meta["assembled_at"]
+        capsys.readouterr()  # drain
+        # Second assemble — same inputs — no-op path.
+        rc2 = sim2real.main(
+            [
+                "--experiment-root", str(tmp_path),
+                "assemble",
+                "--translation", thash,
+                "--cluster", cluster_id,
+                "--run", "trial-1",
+            ]
+        )
+        assert rc2 == 0
+        out = capsys.readouterr().out
+        assert "No change needed for run 'trial-1'" in out
+        assert prior_assembled_at in out
+        assert "--force" in out
+        assert "assembled run trial-1" not in out
+
+    def test_force_rebuild_prints_assembled_not_no_change(self, tmp_path, capsys):
+        """Issue #555: --force after an initial assemble still prints the
+        past-tense ack, not the no-op message."""
+        thash = self._make_minimal_registration(tmp_path)
+        cluster_id = self._bootstrap_experiment(tmp_path)
+        rc1 = sim2real.main(
+            [
+                "--experiment-root", str(tmp_path),
+                "assemble",
+                "--translation", thash,
+                "--cluster", cluster_id,
+                "--run", "trial-1",
+            ]
+        )
+        assert rc1 == 0
+        capsys.readouterr()  # drain
+        rc2 = sim2real.main(
+            [
+                "--experiment-root", str(tmp_path),
+                "assemble",
+                "--translation", thash,
+                "--cluster", cluster_id,
+                "--run", "trial-1",
+                "--force",
+            ]
+        )
+        assert rc2 == 0
+        out = capsys.readouterr().out
+        assert "assembled run trial-1" in out
+        assert "No change needed" not in out
 
     def test_refuses_existing_run_without_force(self, tmp_path, capsys):
         thash = self._make_minimal_registration(tmp_path)

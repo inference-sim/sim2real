@@ -1460,7 +1460,19 @@ def _cmd_assemble(args) -> int:
             "in the sim2real repo to fix.",
             file=sys.stderr,
         )
-    print(f"assembled run {args.run}")
+    status = getattr(_assemble_run_lib.assemble_run, "status", "written")
+    if status == "noop":
+        prior_assembled_at = getattr(
+            _assemble_run_lib.assemble_run, "prior_assembled_at", ""
+        ) or "unknown"
+        print(
+            f"No change needed for run '{args.run}': manifest, replicas, and "
+            f"translation are unchanged since {prior_assembled_at}.\n"
+            "To rebuild anyway (e.g. after an assembler code update), "
+            "pass --force."
+        )
+    else:
+        print(f"assembled run {args.run}")
     return 0
 
 

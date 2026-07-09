@@ -867,6 +867,10 @@ def assemble_run(
                                 # True no-op: reset side-band attrs and return.
                                 assemble_run.skipped_algorithms = []  # type: ignore[attr-defined]
                                 assemble_run.missing_submodules = []  # type: ignore[attr-defined]
+                                assemble_run.status = "noop"  # type: ignore[attr-defined]
+                                assemble_run.prior_assembled_at = (  # type: ignore[attr-defined]
+                                    str(prior_rm.get("assembled_at") or "")
+                                )
                                 return
                         elif force:
                             # replicas > prior_replicas with --force: full
@@ -896,6 +900,8 @@ def assemble_run(
         # skipped_algorithms/missing_submodules unchanged from prior assemble.
         assemble_run.skipped_algorithms = []  # type: ignore[attr-defined]
         assemble_run.missing_submodules = []  # type: ignore[attr-defined]
+        assemble_run.status = "written"  # type: ignore[attr-defined]
+        assemble_run.prior_assembled_at = ""  # type: ignore[attr-defined]
         return
 
     # 4. Resolve packages (translation load, algorithm filter, baseline +
@@ -971,8 +977,12 @@ def assemble_run(
     )
     # Skipped-algorithm list exposed for the CLI wrapper to surface as warnings.
     assemble_run.skipped_algorithms = resolved.skipped_algo_names  # type: ignore[attr-defined]
+    assemble_run.status = "written"  # type: ignore[attr-defined]
+    assemble_run.prior_assembled_at = ""  # type: ignore[attr-defined]
 
 
 # Initialize side-band attributes so `getattr` in the CLI works on first call.
 assemble_run.skipped_algorithms = []  # type: ignore[attr-defined]
 assemble_run.missing_submodules = []  # type: ignore[attr-defined]
+assemble_run.status = "written"  # type: ignore[attr-defined]
+assemble_run.prior_assembled_at = ""  # type: ignore[attr-defined]

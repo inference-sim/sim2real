@@ -327,7 +327,7 @@ Then each treatment scenario has `router.epp.image` set from that algorithm's ow
 
 **Additive-merge (grow-only).** Re-assembling an existing run with `--replicas` interacts with the prior state as follows (without `--force`):
 
-- `N == prior_replicas` — true no-op. No files rewritten; the assemble returns silently.
+- `N == prior_replicas` — true no-op. No files rewritten. The CLI prints `No change needed for run '<run>': manifest, replicas, and translation are unchanged since <prior assembled_at>. To rebuild anyway (e.g. after an assembler code update), pass --force.` so operators can tell a no-op from an actual write; the past-tense `assembled run <name>` ack is reserved for paths that touched disk.
 - `N > prior_replicas` — additive grow. Existing PipelineRun files (`i1..i{prior}`) are preserved byte-for-byte and by mtime; new files are emitted for `i{prior+1}..iN`. `manifest.assembly.yaml` and `run_metadata.json` are rewritten with the new `replicas` count; `params_hash` is preserved (drift check passed).
 - `N < prior_replicas` — refused with `run '<name>' already has <prior> replicas; refusing to shrink to <N>. Replica shrink is tracked in #506.` This guard runs BEFORE every other check, so `--force` does NOT bypass it.
 
