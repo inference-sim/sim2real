@@ -93,10 +93,9 @@ def test_main_all_errors_reports_hundred_percent(workspace, monkeypatch, capsys,
     assert "100.00%" in out
 
 
-def test_main_empty_csv_is_skipped(workspace, monkeypatch, capsys, make_csv):
-    """Workloads with empty rows in both phases are skipped, not fatal."""
+def test_main_reports_multiple_workloads(workspace, monkeypatch, capsys, make_csv):
+    """Both alpha (from fixture) and beta (added here) appear in the output."""
     _patch_workspace(monkeypatch, workspace["ws"])
-    # Add a second workload with a single ok row in each phase.
     make_csv(workspace["baseline"] / "workload_beta" / "trace_data.csv",
              [{"send_time_us": "0", "first_chunk_time_us": "0",
                "last_chunk_time_us": "0", "output_tokens": "0", "status": "ok"}])
@@ -106,6 +105,5 @@ def test_main_empty_csv_is_skipped(workspace, monkeypatch, capsys, make_csv):
     monkeypatch.setattr(sys, "argv", ["error_rate.py", "--run", workspace["run"]])
     error_rate.main()
     out = capsys.readouterr().out
-    # Both workloads should be reported
     assert "alpha" in out
     assert "beta" in out

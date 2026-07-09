@@ -13,7 +13,15 @@ script: throughput_over_time.py
 One panel per workload arranged in a grid capped at three columns
 wide. Each panel plots sends-per-second (bucketed by integer second
 of `send_time_us`) for both phases: baseline in blue, treatment in
-red. Legend shows total ok-status count per phase.
+red. Legend shows total send count per phase.
+
+**This chart measures offered load, not successful throughput.** No
+`status` filter is applied — every row in `trace_data.csv` is counted
+as one send at its `send_time_us`. A request that later failed with
+`status == "500"` was still injected and still shows up on the
+timeline. If baseline and treatment have materially different error
+rates, cross-check with the `error-rate` catalog entry before
+interpreting shape differences as algorithmic.
 
 Time origin is the first send in the (phase, workload) cell — so the
 two curves in a panel share an x-axis that starts at each phase's own
@@ -48,7 +56,9 @@ python .claude/skills/sim2real-analyze/analyses/throughput_over_time.py --run <n
 
 ## Why sends, not completions
 
-`send_time_us` measures load *offered* to the server. Completion-time
-buckets (using `last_chunk_time_us`) would measure processing rate,
-which is the algorithm's *response* to that load — informative but
-easily confused with cause vs effect. Sends is the cleaner baseline.
+`send_time_us` — with no status filter — measures load *offered* to
+the server. Completion-time buckets (using `last_chunk_time_us`)
+would measure processing rate, which is the algorithm's *response*
+to that load — informative but easily confused with cause vs effect.
+Sends is the cleaner baseline. See `error-rate` for the ok-vs-error
+split that this chart deliberately does not surface.

@@ -1,8 +1,6 @@
 """Tests for throughput_over_time.py."""
 import sys
 
-import pytest
-
 import _common
 import throughput_over_time as tot
 
@@ -57,13 +55,16 @@ def test_main_produces_png(workspace, monkeypatch, capsys):
     assert png.stat().st_size > 0
 
 
-def test_main_no_ok_rows_exits_nonzero(workspace, monkeypatch, capsys, make_row, make_csv):
+def test_main_all_error_rows_still_plots(workspace, monkeypatch, capsys, make_row, make_csv):
+    """Offered-load semantics: an error row is still a send. Chart renders."""
     _patch_workspace(monkeypatch, workspace["ws"])
-    bad = [make_row(status="error") for _ in range(10)]
+    bad = [make_row(send=i * 100_000, status="error") for i in range(10)]
     make_csv(workspace["baseline"] / workspace["workload"] / "trace_data.csv", bad)
     make_csv(workspace["treatment"] / workspace["workload"] / "trace_data.csv", bad)
     monkeypatch.setattr(sys, "argv", ["throughput_over_time.py", "--run", workspace["run"]])
-    with pytest.raises(SystemExit) as exc:
-        tot.main()
-    assert exc.value.code == 1
-    assert "no throughput data" in capsys.readouterr().err
+    tot.main()
+    out = capsys.readouterr().out
+    assert "Saved:" in out
+    png = workspace["ws"] / "runs" / workspace["run"] / "results_charts" / "throughput_over_time.png"
+    assert png.exists()
+    assert png.stat().st_size > 0

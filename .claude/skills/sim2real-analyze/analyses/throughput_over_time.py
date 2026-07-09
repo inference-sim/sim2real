@@ -58,14 +58,16 @@ def _plot(run: str, workloads: list[str], baseline_log: Path, treatment_log: Pat
         panel_has_data = False
         for phase, log_dir in zip(PHASES, (baseline_log, treatment_log)):
             rows = load_csv(log_dir / wl / "trace_data.csv")
-            ok = [r for r in rows if r["status"] == "ok"]
-            if not ok:
-                warn(f"skipping throughput for workload '{wl}' phase '{phase}' — no ok rows")
+            # No status filter: this chart measures OFFERED load. A failed
+            # request was still sent, and its send_time_us is still a valid
+            # datapoint on the injection timeline.
+            if not rows:
+                warn(f"skipping throughput for workload '{wl}' phase '{phase}' — no rows")
                 continue
-            xs, ys = _rate_series(ok)
+            xs, ys = _rate_series(rows)
             if not xs:
                 continue
-            ax.plot(xs, ys, label=f"{phase} (n={len(ok)})",
+            ax.plot(xs, ys, label=f"{phase} (n={len(rows)})",
                     color=PHASE_COLORS[phase], linewidth=1.4)
             panel_has_data = True
 
