@@ -1,5 +1,6 @@
 """Remote run support — Kubernetes resource generation for --remote mode."""
 
+import re
 from pathlib import Path
 
 CONFIGMAP_NAME = "sim2real-run-inputs"
@@ -12,6 +13,46 @@ MOUNT_BASE = "/data"
 # ``clusters/<cluster_id>/cluster_config.json``. Distinct from ``cluster--``,
 # which is reserved for per-run cluster/*.yaml files.
 _CLUSTER_CONFIG_KEY_PREFIX = "cluster_config--"
+
+# Kubernetes ConfigMap data keys must match this regex. See
+# https://kubernetes.io/docs/concepts/overview/working-with-objects/names/
+# and the validator's error message ("regex used for validation is
+# '[-._a-zA-Z0-9]+'"). Anything outside this set must be encoded before use
+# as a data key and decoded when reconstructing the source filename.
+_CM_KEY_ALLOWED_RE = re.compile(r"^[-._a-zA-Z0-9]+$")
+
+# In-scope characters to encode. Today only ``|`` appears in cluster/*.yaml
+# filenames (produced by the pipe-shape pair-key grammar in lib/pairkey.py).
+# Encoding follows URL-percent-encoding shape but uses ``.`` as the escape
+# introducer since ``%`` is not in the CM-key allowed set. Round-trip is
+# ``|`` <-> ``.7C``; extend ``_CM_KEY_ESCAPES`` if new disallowed chars
+# appear in filenames.
+_CM_KEY_ESCAPES = {"|": ".7C"}
+
+
+def _encode_filename_for_cm(name: str) -> str:
+    """Return ``name`` transformed into a ConfigMap-key-legal string.
+
+    Only characters listed in ``_CM_KEY_ESCAPES`` are transformed. All other
+    characters pass through — in particular ``.`` (extension separator) and
+    ``-`` (identifier separator) are already legal. Callers should verify the
+    result is legal before use; see ``_CM_KEY_ALLOWED_RE``.
+    """
+    for src, esc in _CM_KEY_ESCAPES.items():
+        name = name.replace(src, esc)
+    return name
+
+
+def _decode_filename_from_cm(key_suffix: str) -> str:
+    """Inverse of ``_encode_filename_for_cm``.
+
+    ``key_suffix`` is the part of the CM key after the ``cluster--`` prefix has
+    been stripped. Returns the original filename with disallowed characters
+    restored so it can be used as an on-disk path.
+    """
+    for src, esc in _CM_KEY_ESCAPES.items():
+        key_suffix = key_suffix.replace(esc, src)
+    return key_suffix
 
 
 def _discover_cluster_id(workspace_dir: Path) -> str:
@@ -76,7 +117,7 @@ def build_run_inputs_configmap(
             f"No cluster YAML files in {cluster_dir} — re-assemble the run"
         )
     for yaml_file in yaml_files:
-        data[f"cluster--{yaml_file.name}"] = yaml_file.read_text()
+        data[f"cluster--{_encode_filename_for_cm(yaml_file.name)}"] = yaml_file.read_text()
 
     return {
         "apiVersion": "v1",
@@ -103,7 +144,7 @@ def _configmap_items(data: dict, run_name: str) -> list[dict]:
                 "path": f"clusters/{cluster_id}/cluster_config.json",
             })
         elif key.startswith("cluster--"):
-            filename = key[len("cluster--"):]
+            filename = _decode_filename_from_cm(key[len("cluster--"):])
             items.append({"key": key, "path": f"runs/{run_name}/cluster/{filename}"})
         else:
             raise ValueError(
