@@ -109,6 +109,7 @@ def resolve_run(experiment_root: Path, run_name: str) -> dict:
         "image_tag": run_meta.get("image_tag") or "",
         "replicas": run_meta.get("replicas") or 1,
         "assembled_at": run_meta.get("assembled_at") or "",
+        "scenario": run_meta.get("scenario") or "",
         "experiment_root": str(experiment_root),
         "translation": _build_translation_section(
             translation_hash, translation_dir, tout, manifest_assembly

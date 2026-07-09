@@ -22,9 +22,22 @@ _PROGRESS = {
 
 
 def _mock_cm(monkeypatch, data):
-    """Monkeypatch ConfigMapProgressStore to return *data* on load and no-op on save."""
+    """Monkeypatch ConfigMapProgressStore to return *data* on load and no-op on save.
+
+    Also bypasses deploy._make_progress_store's run_metadata.json read (#551) so
+    tests don't need to author a metadata file — the command-under-test only
+    cares about the store's load()/save() behavior.
+    """
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: data)
     monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
+    from pipeline import deploy as _deploy_mod
+    monkeypatch.setattr(
+        _deploy_mod,
+        "_make_progress_store",
+        lambda ns, run_dir: ConfigMapProgressStore(
+            ns, run_name=run_dir.name, scenario="test-scenario"
+        ),
+    )
 
 
 def test_status_output_contains_all_pairs(tmp_path, capsys, monkeypatch):
@@ -3291,7 +3304,7 @@ def test_dispatch_sets_entry_running(tmp_path, monkeypatch):
     (cluster_dir / "pipelinerun-a-baseline.yaml").write_text(_yaml.dump(pr))
 
     # Write run_metadata.json (needed by _cmd_build)
-    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+    (run_dir / "run_metadata.json").write_text(json.dumps({"scenario": "test-scenario"}))
 
     # Setup config with one namespace slot
     cluster_config = {"namespaces": ["sim2real-0"]}
@@ -3404,7 +3417,7 @@ def test_all_slots_busy_skips_gpu_probe(tmp_path, monkeypatch, capsys):
     cluster_dir.mkdir(parents=True)
     _write_pr(cluster_dir, "a")
     _write_pr(cluster_dir, "b")
-    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+    (run_dir / "run_metadata.json").write_text(json.dumps({"scenario": "test-scenario"}))
     cluster_config = {"namespaces": ["sim2real-0"]}
 
     # wl-a already running in the only slot (busy); wl-b pending.
@@ -3490,7 +3503,7 @@ def test_free_slot_runs_gpu_probe_and_dispatches(tmp_path, monkeypatch):
     cluster_dir = run_dir / "cluster"
     cluster_dir.mkdir(parents=True)
     _write_pr(cluster_dir, "a")
-    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+    (run_dir / "run_metadata.json").write_text(json.dumps({"scenario": "test-scenario"}))
     cluster_config = {"namespaces": ["sim2real-0"]}
 
     saved_progress = {}
@@ -3549,7 +3562,7 @@ def _orphan_harness(tmp_path, monkeypatch, *, initial_progress):
     cluster_dir = run_dir / "cluster"
     cluster_dir.mkdir(parents=True)
     _write_pr(cluster_dir, "a")
-    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+    (run_dir / "run_metadata.json").write_text(json.dumps({"scenario": "test-scenario"}))
     cluster_config = {"namespaces": ["sim2real-0"]}
 
     saved_progress = {}
@@ -3674,7 +3687,7 @@ def _run_harness(tmp_path, monkeypatch, *, status_fn, extra_patches=None):
         ]},
     }
     (cluster_dir / "pipelinerun-a-baseline.yaml").write_text(_yaml.dump(pr))
-    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+    (run_dir / "run_metadata.json").write_text(json.dumps({"scenario": "test-scenario"}))
 
     cluster_config = {"namespaces": ["sim2real-0"]}
 
@@ -3768,7 +3781,7 @@ def test_derive_costs_only_for_scoped_pairs(tmp_path, monkeypatch):
             (cluster_dir / f"pipelinerun-{wl}-{pkg}.yaml").write_text(_yaml.dump(pr))
 
     # Write run_metadata.json
-    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+    (run_dir / "run_metadata.json").write_text(json.dumps({"scenario": "test-scenario"}))
 
     # Setup config
     cluster_config = {"namespaces": ["sim2real-0"]}
@@ -3969,7 +3982,7 @@ def test_health_escalation_cancels_pipelinerun(tmp_path, monkeypatch):
         ]},
     }
     (cluster_dir / "pipelinerun-a-baseline.yaml").write_text(_yaml.dump(pr))
-    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+    (run_dir / "run_metadata.json").write_text(json.dumps({"scenario": "test-scenario"}))
 
     cluster_config = {"namespaces": ["sim2real-0"]}
 
@@ -4157,7 +4170,7 @@ def test_dispatch_shuffles_dispatchable(tmp_path, monkeypatch):
         ]},
     }
     (cluster_dir / "pipelinerun-a-baseline.yaml").write_text(_yaml.dump(pr))
-    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+    (run_dir / "run_metadata.json").write_text(json.dumps({"scenario": "test-scenario"}))
 
     cluster_config = {"namespaces": ["sim2real-0"]}
 
@@ -4236,7 +4249,7 @@ def test_shadow_ledger_prevents_over_subscription(tmp_path, monkeypatch):
         }
         (cluster_dir / f"pipelinerun-{name}-baseline.yaml").write_text(_yaml.dump(pr))
 
-    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+    (run_dir / "run_metadata.json").write_text(json.dumps({"scenario": "test-scenario"}))
 
     cluster_config = {"namespaces": ["sim2real-0", "sim2real-1", "sim2real-2"]}
 
@@ -4320,7 +4333,7 @@ def test_shadow_ttl_zero_disables_gating(tmp_path, monkeypatch):
         }
         (cluster_dir / f"pipelinerun-{name}-baseline.yaml").write_text(_yaml.dump(pr))
 
-    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+    (run_dir / "run_metadata.json").write_text(json.dumps({"scenario": "test-scenario"}))
 
     # 3 slots, 12 probed free GPUs, cost 4 each — without shadow all 3 fit
     cluster_config = {"namespaces": ["sim2real-0", "sim2real-1", "sim2real-2"]}
@@ -4396,7 +4409,9 @@ def _setup_dispatch_run(tmp_path, monkeypatch, *, baseline_yaml: str):
     }
     (cluster_dir / "pipelinerun-a-baseline.yaml").write_text(_yaml.dump(pr))
     (cluster_dir / "baseline.yaml").write_text(baseline_yaml)
-    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+    (run_dir / "run_metadata.json").write_text(
+        json.dumps({"scenario": "test-scenario"})
+    )
 
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
     monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, data: None)
@@ -4600,7 +4615,9 @@ def test_one_cycle_emits_unified_capacity_log_and_effective_free_warn(
     cluster_dir = run_dir / "cluster"
     cluster_dir.mkdir(parents=True)
     _write_pr(cluster_dir, "a")
-    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+    (run_dir / "run_metadata.json").write_text(
+        json.dumps({"scenario": "test-scenario"})
+    )
     cluster_config = {"namespaces": ["sim2real-0"]}
 
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
@@ -5033,7 +5050,9 @@ def test_cmd_run_all_terminal_message_enumerates_states(tmp_path, monkeypatch, c
         ]},
     }
     (cluster_dir / "pipelinerun-a-baseline.yaml").write_text(_yaml.dump(pr))
-    (run_dir / "run_metadata.json").write_text(json.dumps({}))
+    (run_dir / "run_metadata.json").write_text(
+        json.dumps({"scenario": "test-scenario"})
+    )
 
     cluster_config = {"namespaces": ["sim2real-0"]}
 
@@ -5077,3 +5096,67 @@ def test_cmd_run_all_terminal_message_enumerates_states(tmp_path, monkeypatch, c
     assert "0 done" in out
     assert "0 timed-out" in out
     assert "0 stalled" in out
+
+
+# ── _make_progress_store (#551) ─────────────────────────────────────────────
+
+class TestMakeProgressStore:
+    def test_reads_scenario_from_run_metadata(self, tmp_path):
+        """_make_progress_store composes CM name from run_metadata:scenario."""
+        from pipeline import deploy
+        run_dir = tmp_path / "runs" / "trial-1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "run_metadata.json").write_text(json.dumps({
+            "version": 1,
+            "run_name": "trial-1",
+            "scenario": "softr",
+            "cluster_id": "c1",
+        }))
+        store = deploy._make_progress_store("sim2real-ns", run_dir)
+        assert store.configmap_name == "sim2real-progress-softr-trial-1"
+
+    def test_missing_scenario_exits(self, tmp_path, capsys):
+        """_make_progress_store exits when scenario is missing."""
+        from pipeline import deploy
+        run_dir = tmp_path / "runs" / "trial-1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "run_metadata.json").write_text(json.dumps({
+            "version": 1,
+            "run_name": "trial-1",
+            "cluster_id": "c1",
+        }))
+        with pytest.raises(SystemExit):
+            deploy._make_progress_store("sim2real-ns", run_dir)
+        err = capsys.readouterr().err
+        assert "scenario" in err.lower()
+
+    def test_empty_scenario_exits(self, tmp_path, capsys):
+        """A blank scenario value is treated as missing."""
+        from pipeline import deploy
+        run_dir = tmp_path / "runs" / "trial-1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "run_metadata.json").write_text(json.dumps({
+            "version": 1,
+            "run_name": "trial-1",
+            "scenario": "   ",
+            "cluster_id": "c1",
+        }))
+        with pytest.raises(SystemExit):
+            deploy._make_progress_store("sim2real-ns", run_dir)
+
+    def test_missing_run_metadata_exits(self, tmp_path, capsys):
+        """_make_progress_store exits when run_metadata.json is absent."""
+        from pipeline import deploy
+        run_dir = tmp_path / "runs" / "trial-1"
+        run_dir.mkdir(parents=True)
+        with pytest.raises(SystemExit):
+            deploy._make_progress_store("sim2real-ns", run_dir)
+
+    def test_corrupt_run_metadata_exits(self, tmp_path, capsys):
+        """Malformed JSON is a clean exit, not a traceback."""
+        from pipeline import deploy
+        run_dir = tmp_path / "runs" / "trial-1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "run_metadata.json").write_text("{not-json")
+        with pytest.raises(SystemExit):
+            deploy._make_progress_store("sim2real-ns", run_dir)

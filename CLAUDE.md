@@ -115,7 +115,7 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). When no `-
 | `runs/<run>/cluster/pipelinerun-*.yaml` | `sim2real assemble` | `deploy.py run` |
 | `runs/<run>/results/{phase}/` | `deploy.py collect` | `/sim2real-analyze` skill, `deploy.py wipe` |
 | `runs/<run>/results/{phase}/<workload>/i<N>/gpu_logs/<node>.log` | `deploy.py collect` (pulled from PVC) | analysis / debugging |
-| ConfigMap `sim2real-progress-{run}` | `deploy.py run`, `deploy.py reset` | All `deploy.py` subcommands |
+| ConfigMap `sim2real-progress-{scenario}-{run}` | `deploy.py run`, `deploy.py reset` | All `deploy.py` subcommands |
 | `runs/<run>/plans/<phase>/<workload>/` | `deploy.py run` | workload tasks |
 
 ## Development

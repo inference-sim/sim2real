@@ -10,10 +10,23 @@ from pipeline.lib.progress import ConfigMapProgressStore
 
 
 def _mock_cm(monkeypatch, data):
-    """Monkeypatch ConfigMapProgressStore to return *data* on load and no-op on save."""
+    """Monkeypatch ConfigMapProgressStore to return *data* on load and no-op on save.
+
+    Also bypasses deploy._make_progress_store's run_metadata.json read (#551) so
+    tests don't need to author a metadata file — the command-under-test only
+    cares about the store's load()/save() behavior.
+    """
     monkeypatch.setattr(ConfigMapProgressStore, "load",
                         lambda self: json.loads(json.dumps(data)))
     monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
+    from pipeline import deploy as _deploy_mod
+    monkeypatch.setattr(
+        _deploy_mod,
+        "_make_progress_store",
+        lambda ns, run_dir: ConfigMapProgressStore(
+            ns, run_name=run_dir.name, scenario="test-scenario"
+        ),
+    )
 
 
 def test_collect_with_progress_default(tmp_path, monkeypatch):

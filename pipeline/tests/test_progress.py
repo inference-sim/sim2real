@@ -135,3 +135,64 @@ def test_configmap_run_name_too_long_raises():
     """run_name that exceeds 253-char ConfigMap name limit is rejected."""
     with pytest.raises(ValueError, match="invalid ConfigMap name"):
         ConfigMapProgressStore("sim2real-ns", run_name="a" * 250)
+
+
+# --- Scenario scoping (#551) ---
+
+def test_configmap_name_includes_scenario_and_run():
+    """scenario + run_name yields sim2real-progress-<scenario>-<run>."""
+    store = ConfigMapProgressStore(
+        "sim2real-ns", run_name="trial-1", scenario="softr"
+    )
+    assert store.configmap_name == "sim2real-progress-softr-trial-1"
+
+
+def test_configmap_scenario_only_no_run_name():
+    """scenario without run_name yields sim2real-progress-<scenario>."""
+    store = ConfigMapProgressStore("sim2real-ns", scenario="softr")
+    assert store.configmap_name == "sim2real-progress-softr"
+
+
+def test_configmap_scenario_sanitized_lowercase_and_underscore():
+    """scenario is sanitized like run_name: lowercase, underscore→hyphen."""
+    store = ConfigMapProgressStore(
+        "sim2real-ns", run_name="trial-1", scenario="Soft_R"
+    )
+    assert store.configmap_name == "sim2real-progress-soft-r-trial-1"
+
+
+def test_configmap_scenario_plus_run_too_long_raises():
+    """scenario + run combined that exceeds 253-char CM name limit is rejected."""
+    with pytest.raises(ValueError, match="invalid ConfigMap name"):
+        ConfigMapProgressStore(
+            "sim2real-ns", run_name="r" * 200, scenario="s" * 100
+        )
+
+
+def test_save_emits_discovery_labels_when_scenario_and_run_supplied():
+    """save() sets sim2real.scenario and sim2real.run labels for kubectl -l filtering."""
+    data = {"wl-x|y|i1": {"status": "done"}}
+    with patch("subprocess.run") as mock:
+        mock.return_value = MagicMock(returncode=0)
+        store = ConfigMapProgressStore(
+            "sim2real-ns", run_name="trial-1", scenario="softr"
+        )
+        store.save(data)
+    import json as _json
+    cm = _json.loads(mock.call_args[1]["input"])
+    labels = cm["metadata"].get("labels") or {}
+    assert labels.get("sim2real.scenario") == "softr"
+    assert labels.get("sim2real.run") == "trial-1"
+
+
+def test_save_no_labels_when_scenario_missing():
+    """save() omits labels block when scenario is not supplied."""
+    data = {"wl-x|y|i1": {"status": "done"}}
+    with patch("subprocess.run") as mock:
+        mock.return_value = MagicMock(returncode=0)
+        store = ConfigMapProgressStore("sim2real-ns", run_name="trial-1")
+        store.save(data)
+    import json as _json
+    cm = _json.loads(mock.call_args[1]["input"])
+    labels = cm["metadata"].get("labels") or {}
+    assert labels == {}

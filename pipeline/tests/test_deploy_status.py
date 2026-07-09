@@ -74,23 +74,32 @@ def test_main_status_uses_current_run_when_no_flag(tmp_path, monkeypatch):
 
 
 def test_cmd_status_reads_run_scoped_configmap(tmp_path, monkeypatch):
-    """_cmd_status constructs a ConfigMapProgressStore keyed by run_dir.name (#449).
+    """_cmd_status constructs a ConfigMapProgressStore scoped to (scenario, run).
 
-    The store's run_name argument controls which ConfigMap the subcommand
-    reads (sim2real-progress-<R>). Assert the store is built with the run
-    directory's basename so status snapshots stay scoped to that run.
+    The store's name controls which ConfigMap the subcommand reads
+    (``sim2real-progress-<scenario>-<run>`` after issue #551). Assert the
+    store is built with the run directory's basename AND the scenario from
+    run_metadata.json so status snapshots stay scoped per experiment root.
     """
+    import json
     from pipeline.deploy import _cmd_status
 
     run_dir = tmp_path / "workspace" / "runs" / "trial-1"
     run_dir.mkdir(parents=True)
+    (run_dir / "run_metadata.json").write_text(
+        json.dumps({"scenario": "softr", "run_name": "trial-1"})
+    )
 
     store_kwargs = []
     original_init = ConfigMapProgressStore.__init__
 
-    def _capturing_init(self, namespace, *, run_name=""):
-        store_kwargs.append({"namespace": namespace, "run_name": run_name})
-        original_init(self, namespace, run_name=run_name)
+    def _capturing_init(self, namespace, *, run_name="", scenario=""):
+        store_kwargs.append({
+            "namespace": namespace,
+            "run_name": run_name,
+            "scenario": scenario,
+        })
+        original_init(self, namespace, run_name=run_name, scenario=scenario)
 
     monkeypatch.setattr(ConfigMapProgressStore, "__init__", _capturing_init)
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
@@ -107,3 +116,4 @@ def test_cmd_status_reads_run_scoped_configmap(tmp_path, monkeypatch):
     assert len(store_kwargs) == 1
     assert store_kwargs[0]["run_name"] == "trial-1"
     assert store_kwargs[0]["namespace"] == "sim2real-ns"
+    assert store_kwargs[0]["scenario"] == "softr"

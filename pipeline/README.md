@@ -307,7 +307,7 @@ python pipeline/sim2real.py assemble \
 | File | Purpose |
 |------|---------|
 | `manifest.assembly.yaml` | Verbatim snapshot of the assembly slice from `transfer.yaml` (produced by `pipeline/lib/slicer.py`), preceded by a top-level `replicas: N` field. |
-| `run_metadata.json` | `{version, run_name, translation_hash, cluster_id, params_hash, image_tag, replicas, assembled_at}` — pinned schema, `version: 1`. |
+| `run_metadata.json` | `{version, run_name, translation_hash, cluster_id, params_hash, image_tag, replicas, assembled_at, scenario}` — pinned schema, `version: 1`. `scenario` is the value of `transfer.yaml:scenario`, threaded through by `deploy.py` to name the progress ConfigMap `sim2real-progress-{scenario}-{run}` (issue #551). |
 | `cluster/baseline.yaml` | Resolved baseline scenario (framework defaults → bundle → baseline overlay). |
 | `cluster/<algo>.yaml` | Resolved treatment scenario per registered algorithm (baseline_resolved → treatment bundle diffs → algo overlay → injected image_tag). |
 | `cluster/pipelinerun-<workload>\|<package>\|iN.yaml` | One PipelineRun per (workload, package, iteration) tuple. Consumed by `deploy.py run`. |
@@ -422,7 +422,7 @@ python pipeline/deploy.py wipe  [flags]     # delete local result files for pair
 python pipeline/deploy.py pairs   [flags]   # list available pair keys, workloads, and packages
 ```
 
-**`deploy.py run`** — assigns `(workload, package, iteration)` triples to free namespace slots, polls for completion, and retries pairs that time out. Reads progress from the run-scoped `sim2real-progress-{run}` ConfigMap to resume interrupted runs. Requires a configured namespace. Use `deploy.py collect` to pull results off-cluster after runs complete. The run's cluster is resolved from `workspace/runs/<R>/run_metadata.json:cluster_id`; if the run directory or its `cluster/` subdirectory does not exist, `deploy.py run --run <R>` exits with `run 'sim2real assemble --run <R>' first`, and if `run_metadata.json` is missing, unparseable, or lacks a non-empty `cluster_id`, it exits with `run metadata corrupted; re-assemble`.
+**`deploy.py run`** — assigns `(workload, package, iteration)` triples to free namespace slots, polls for completion, and retries pairs that time out. Reads progress from the `sim2real-progress-{scenario}-{run}` ConfigMap (scenario + run scoped, so cross-experiment-root runs sharing a run name do not collide — issue #551) to resume interrupted runs. There is no automatic migration from the pre-#551 `sim2real-progress-{run}` name; operators clean those up manually with `kubectl delete cm sim2real-progress-<run> -n <ns>` when they want to. Requires a configured namespace. Use `deploy.py collect` to pull results off-cluster after runs complete. The run's cluster is resolved from `workspace/runs/<R>/run_metadata.json:cluster_id`; if the run directory or its `cluster/` subdirectory does not exist, `deploy.py run --run <R>` exits with `run 'sim2real assemble --run <R>' first`, and if `run_metadata.json` is missing, unparseable, or lacks a non-empty `cluster_id`, it exits with `run metadata corrupted; re-assemble`.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -459,7 +459,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 **Remote mode** — `deploy.py run --remote` submits the orchestrator as a Kubernetes Job (`sim2real-orchestrator`) instead of running locally. The launcher builds the EPP image locally, packs workspace files into a ConfigMap, applies the Job, and waits for the pod to reach Running. Use `stop` to cancel, `status` to check progress, and `collect` to pull results after completion. Requires `orchestrator_image` in `setup_config.json`.
 
-**`deploy.py status`** — prints the current state of all pairs. Reads from the run-scoped `sim2real-progress-{run}` ConfigMap. Requires a configured namespace.
+**`deploy.py status`** — prints the current state of all pairs. Reads from the `sim2real-progress-{scenario}-{run}` ConfigMap. Requires a configured namespace.
 
 | Flag | Description |
 |------|-------------|
@@ -606,7 +606,7 @@ python pipeline/deploy.py --experiment-root <experiment-root> \
     --run <run-name> run
 ```
 
-Builds the treatment EPP image (if not current), dispatches PipelineRuns across the namespace slots, and polls for completion. Progress lands in the run-scoped `sim2real-progress-<run-name>` ConfigMap. Use `deploy.py --run <run-name> status` to snapshot progress; use `deploy.py --run <run-name> stop` to cancel the remote orchestrator Job (if `--remote` was passed); use `deploy.py --run <run-name> reset` to requeue non-pending pairs (which also cancels their in-flight PipelineRuns).
+Builds the treatment EPP image (if not current), dispatches PipelineRuns across the namespace slots, and polls for completion. Progress lands in the `sim2real-progress-<scenario>-<run-name>` ConfigMap (scoped by both `transfer.yaml:scenario` and the run name — issue #551). Use `deploy.py --run <run-name> status` to snapshot progress; use `deploy.py --run <run-name> stop` to cancel the remote orchestrator Job (if `--remote` was passed); use `deploy.py --run <run-name> reset` to requeue non-pending pairs (which also cancels their in-flight PipelineRuns).
 
 ### 6. Collect results
 
@@ -713,7 +713,7 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). Key files:
 | `runs/<run>/manifest.assembly.yaml` | `sim2real assemble` | reproducibility / drift detection (step-5) |
 | `runs/<run>/cluster/…` | `sim2real assemble` | `deploy.py` |
 | `runs/<run>/results/{phase}/` | `deploy.py collect` | `/sim2real-analyze` skill, `deploy.py wipe` |
-| ConfigMap `sim2real-progress-{run}` | `deploy.py run`, `deploy.py reset` | all `deploy.py` subcommands |
+| ConfigMap `sim2real-progress-{scenario}-{run}` | `deploy.py run`, `deploy.py reset` | all `deploy.py` subcommands |
 
 See `CLAUDE.md`'s Workspace Artifacts table for the comprehensive per-file producer/consumer breakdown.
 
@@ -794,9 +794,9 @@ All paths are relative to the experiment root and validated by `sim2real assembl
 
 | Artifact | Written by | Read by |
 |----------|-----------|---------|
-| ConfigMap `sim2real-progress-{run}` | `deploy.py run`, `deploy.py reset` | All subcommands |
+| ConfigMap `sim2real-progress-{scenario}-{run}` | `deploy.py run`, `deploy.py reset` | All subcommands |
 
-All subcommands (`status`, `collect`, `run`, `reset`, `wipe`) use a run-scoped `sim2real-progress-{run}` ConfigMap as the sole progress store. Each run gets its own ConfigMap, avoiding cross-run conflicts. A configured namespace is required.
+All subcommands (`status`, `collect`, `run`, `reset`, `wipe`) use a `sim2real-progress-{scenario}-{run}` ConfigMap as the sole progress store. The name embeds both the `scenario` field from `transfer.yaml` and the run name, so two experiment repos with the same run name land in distinct ConfigMaps (issue #551). Each run gets its own ConfigMap, avoiding cross-run conflicts. A configured namespace is required.
 
 ---
 

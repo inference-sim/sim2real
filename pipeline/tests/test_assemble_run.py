@@ -750,6 +750,9 @@ class TestAssembleRun:
         assert meta["image_tag"] == "ghcr.io/foo/bar:v1"
         assert len(meta["params_hash"]) == 64
         assert meta["assembled_at"] == "2026-07-01T14:05:00Z"
+        # scenario is recorded so deploy.py can scope the progress
+        # ConfigMap per experiment root (#551).
+        assert meta["scenario"] == "test-scenario"
 
     def test_fresh_run_with_replicas_3_produces_three_files_per_pair(self, tmp_path):
         fx = _make_experiment(
@@ -1435,6 +1438,11 @@ class TestAssembleResolveContract:
             "image_tag",
             "replicas",
             "assembled_at",
+            # Recorded so deploy.py can scope the progress ConfigMap
+            # per (scenario, run) (#551). Surfaced in resolve's top-level
+            # dict as `scenario` (with fallback to manifest.assembly.yaml
+            # for legacy runs).
+            "scenario",
         }
         extra = set(run_meta.keys()) - known_keys
         assert not extra, (
