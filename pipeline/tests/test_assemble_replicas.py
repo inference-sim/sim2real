@@ -118,6 +118,40 @@ class TestAssembleReplicas:
         _assemble(fx, replicas=3, now_iso="2026-07-02T00:00:00Z")
         mtimes_after = _mtimes([p for p in all_paths if p.is_file()])
         assert mtimes_before == mtimes_after
+        # Issue #555: side-band status attrs let the CLI wrapper distinguish
+        # the no-op path from actual writes and print a truthful message.
+        assert assemble_run.assemble_run.status == "noop"
+        assert (
+            assemble_run.assemble_run.prior_assembled_at
+            == "2026-07-01T00:00:00Z"
+        )
+
+    def test_fresh_assemble_sets_status_written_and_empty_prior(self, tmp_path):
+        """Issue #555: fresh assemble is a write path — status='written',
+        prior_assembled_at=''."""
+        fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
+                              algo_names_manifest=["sr"])
+        _assemble(fx, replicas=1, now_iso="2026-07-01T00:00:00Z")
+        assert assemble_run.assemble_run.status == "written"
+        assert assemble_run.assemble_run.prior_assembled_at == ""
+
+    def test_additive_grow_sets_status_written(self, tmp_path):
+        """Issue #555: additive-grow is a write path — status='written'."""
+        fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
+                              algo_names_manifest=["sr"])
+        _assemble(fx, replicas=3, now_iso="2026-07-01T00:00:00Z")
+        _assemble(fx, replicas=5, now_iso="2026-07-02T00:00:00Z")
+        assert assemble_run.assemble_run.status == "written"
+        assert assemble_run.assemble_run.prior_assembled_at == ""
+
+    def test_force_rebuild_sets_status_written(self, tmp_path):
+        """Issue #555: --force full rebuild is a write path — status='written'."""
+        fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
+                              algo_names_manifest=["sr"])
+        _assemble(fx, replicas=3, now_iso="2026-07-01T00:00:00Z")
+        _assemble(fx, replicas=3, force=True, now_iso="2026-07-02T00:00:00Z")
+        assert assemble_run.assemble_run.status == "written"
+        assert assemble_run.assemble_run.prior_assembled_at == ""
 
     def test_reassemble_at_same_replica_count_with_force_rebuilds(self, tmp_path):
         """Issue #532: --force must rebuild even when the manifest hash and

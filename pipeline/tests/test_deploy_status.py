@@ -117,3 +117,71 @@ def test_cmd_status_reads_run_scoped_configmap(tmp_path, monkeypatch):
     assert store_kwargs[0]["run_name"] == "trial-1"
     assert store_kwargs[0]["namespace"] == "sim2real-ns"
     assert store_kwargs[0]["scenario"] == "softr"
+
+
+def test_make_progress_store_missing_scenario_prefills_ref_and_cluster(
+    tmp_path, capsys
+):
+    """Issue #555: when scenario is missing from run_metadata.json but
+    translation_hash and cluster_id are present, the error message names
+    'scenario' (not the file), drops the '(added in issue #551)' reference,
+    prefills --translation and --cluster from meta, and recommends --force.
+    """
+    import json
+    import pytest
+
+    from pipeline.deploy import _make_progress_store
+
+    run_dir = tmp_path / "workspace" / "runs" / "trial-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run_metadata.json").write_text(
+        json.dumps({
+            "run_name": "trial-1",
+            "translation_hash": "abc12345",
+            "cluster_id": "ocp-east",
+            # scenario intentionally absent
+        })
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        _make_progress_store("sim2real-ns", run_dir)
+    assert exc.value.code == 1
+
+    err = capsys.readouterr().err
+    assert "scenario not recorded for run 'trial-1'" in err
+    # Names the missing thing, not the file it lives in.
+    assert "run_metadata.json" not in err
+    # Drops the internal issue reference.
+    assert "#551" not in err
+    # Names --force explicitly (defeats the no-op path).
+    assert "--force" in err
+    # Prefills the copy-paste-able assemble invocation.
+    assert "--translation abc12345" in err
+    assert "--cluster ocp-east" in err
+    assert "--run trial-1" in err
+
+
+def test_make_progress_store_missing_scenario_placeholders_when_meta_lacks_fields(
+    tmp_path, capsys
+):
+    """Issue #555: if translation_hash or cluster_id are missing from
+    run_metadata.json (extremely old runs), the error falls back to
+    placeholders rather than emitting the empty string."""
+    import json
+    import pytest
+
+    from pipeline.deploy import _make_progress_store
+
+    run_dir = tmp_path / "workspace" / "runs" / "trial-2"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run_metadata.json").write_text(
+        json.dumps({"run_name": "trial-2"})  # nothing else
+    )
+
+    with pytest.raises(SystemExit):
+        _make_progress_store("sim2real-ns", run_dir)
+
+    err = capsys.readouterr().err
+    assert "<translation-ref>" in err
+    assert "<cluster-id>" in err
+    assert "--force" in err
