@@ -1152,18 +1152,18 @@ def _fmt_size(b: int) -> str:
     return f"{b / (1 << 10):.0f} KB"
 
 
-def _probe_remote_mtimes(pod_name: str, phase_path: str, namespace: str) -> dict[str, float]:
-    """Return {workload_name: newest_iteration_mtime_epoch} for workloads that
-    have at least one trace_data.csv on the PVC.
+def _probe_remote_mtimes(pod_name: str, phase_path: str, namespace: str) -> dict[str, dict[str, float]]:
+    """Return ``{workload_name: {iN: mtime_epoch}}`` for iterations that have
+    ``trace_data.csv`` on the PVC.
 
-    Uses a single kubectl exec to stat all trace_data.csv files in the phase
-    directory. Post step-5, traces live under
+    Uses a single kubectl exec to stat all ``trace_data.csv`` files in the
+    phase directory. Traces live under
     ``<phase>/<workload>/i<N>/trace_data.csv`` — one per iteration. This
-    function walks two levels up from each trace file to derive the workload
-    name and keeps the newest mtime seen across that workload's iterations.
-    ``_is_workload_up_to_date`` then compares this against the OLDEST local iteration,
-    so an incremental skip requires every local iteration to be at least as
-    new as the newest remote iteration.
+    function keeps mtimes at iteration granularity so the up-to-date check
+    can decide per iteration rather than per workload. Per-workload keying
+    was the root of issue #564: when two iterations of the same (phase,
+    workload) pair dispatch to different slots, collapsing to a single
+    per-workload mtime hid the missing iteration from the up-to-date gate.
 
     Returns empty dict on probe failure — callers should fall back to full
     copy in that case.
@@ -1183,7 +1183,7 @@ def _probe_remote_mtimes(pod_name: str, phase_path: str, namespace: str) -> dict
         return {}
     if result.stderr.strip():
         warn(f"mtime probe had errors: {result.stderr.strip()}")
-    mtimes: dict[str, float] = {}
+    mtimes: dict[str, dict[str, float]] = {}
     for line in result.stdout.strip().splitlines():
         parts = line.split(None, 1)
         if len(parts) != 2:
@@ -1195,12 +1195,10 @@ def _probe_remote_mtimes(pod_name: str, phase_path: str, namespace: str) -> dict
             warn(f"mtime probe: unparseable line: {line!r}")
             continue
         # Path shape: <phase_path>/<workload>/i<N>/trace_data.csv
-        # parent.parent is the workload dir.
-        wl = Path(parts[1]).parent.parent.name
-        if wl in mtimes:
-            mtimes[wl] = max(mtimes[wl], mt)
-        else:
-            mtimes[wl] = mt
+        p = Path(parts[1])
+        iN = p.parent.name
+        wl = p.parent.parent.name
+        mtimes.setdefault(wl, {})[iN] = mt
     return mtimes
 
 
@@ -1209,8 +1207,8 @@ def _is_up_to_date(local_path: Path, remote_mtime: "float | None") -> bool:
     *remote_mtime*.
 
     Used by ``_extract_phase_plans`` to decide whether a specific YAML file
-    needs re-downloading. For workload-level trace-directory checks under
-    the step-5 ``i<N>/`` layout, use ``_is_workload_up_to_date`` instead.
+    needs re-downloading. For iteration-level trace-directory checks under
+    the ``i<N>/`` layout, use ``_is_iteration_up_to_date`` instead.
     """
     if remote_mtime is None:
         return False
@@ -1221,30 +1219,87 @@ def _is_up_to_date(local_path: Path, remote_mtime: "float | None") -> bool:
         return False
 
 
-def _is_workload_up_to_date(wl_dir: Path, remote_mtime: "float | None") -> bool:
-    """Return True if every ``i<N>/trace_data.csv`` under *wl_dir* is at least
-    as new as the newest remote copy for that workload.
+def _is_iteration_up_to_date(iN_dir: Path, remote_mtime: "float | None") -> bool:
+    """Return True if ``iN_dir/trace_data.csv`` exists and its mtime is at
+    least as new as *remote_mtime*.
 
-    Post step-5, a workload's traces live under
-    ``<wl_dir>/i<N>/trace_data.csv``. This function returns True only when
-    the workload has at least one collected iteration locally AND the OLDEST
-    local iteration's mtime is >= ``remote_mtime``. If some iterations are
-    missing locally OR any local iteration is older than remote, returns
-    False so the workload is redone end-to-end (matching the wipe-and-recopy
-    pattern the callers rely on).
+    Keyed per iteration so that in cross-slot collect (issue #564) each
+    iteration is decided against its OWN remote mtime, not a per-workload
+    max. When ``remote_mtime`` is None the iteration is either absent from
+    the current slot's PVC or the probe failed — either way we can't skip.
     """
     if remote_mtime is None:
         return False
-    if not wl_dir.exists():
-        return False
-    csvs = sorted(wl_dir.glob("i*/trace_data.csv"))
-    if not csvs:
-        return False
+    csv = iN_dir / "trace_data.csv"
     try:
-        return min(c.stat().st_mtime for c in csvs) >= remote_mtime
+        return csv.exists() and csv.stat().st_mtime >= remote_mtime
     except OSError as exc:
-        warn(f"stat failed in {wl_dir}: {exc} — will re-download")
+        warn(f"stat failed for {csv}: {exc} — will re-download")
         return False
+
+
+def _list_pvc_iterations(
+    pod_name: str, run_name: str, phase: str, wl_name: str, namespace: str,
+) -> "tuple[list[str], str | None]":
+    """List ``i<N>`` iteration subdirs on the current slot's PVC for one workload.
+
+    Returns ``(iN_names, error)``. ``error`` is None on success. On kubectl
+    failure or when no ``i<N>/`` subdirs exist, ``iN_names`` is empty and
+    ``error`` describes the failure so the caller can surface it.
+    """
+    ls = run(
+        ["kubectl", "exec", pod_name, f"-n={namespace}", "--",
+         "sh", "-c", f"ls /data/{run_name}/{phase}/{wl_name}/"],
+        check=False, capture=True,
+    )
+    if ls.returncode != 0:
+        return [], f"{wl_name}: failed to list iterations: {ls.stderr.strip()}"
+    iN_names = [
+        n for n in ls.stdout.strip().split()
+        if n.startswith("i") and n[1:].isdigit()
+    ]
+    if not iN_names:
+        return [], f"{wl_name}: no i<N>/ iteration subdirs found on PVC"
+    return iN_names, None
+
+
+def _copy_workload_iterations_full(
+    pod_name: str, run_name: str, phase: str, wl_name: str, namespace: str,
+    wl_dest: Path, wl_remote_mtimes: dict[str, float],
+) -> list[str]:
+    """Enumerate ``i<N>/`` on the current slot's PVC and copy each iteration
+    individually to *wl_dest*, respecting per-iteration up-to-date skips.
+
+    The workload directory itself is NEVER wiped — only individual ``i<N>/``
+    dirs are cleaned before re-copy. This preserves iterations copied from
+    other slots (issue #564: cross-slot collect used to wipe the workload
+    dir before recopy, destroying data from the previous slot).
+
+    Returns a list of error strings; empty on success.
+    """
+    wl_dest.mkdir(parents=True, exist_ok=True)
+    iN_names, ls_error = _list_pvc_iterations(
+        pod_name, run_name, phase, wl_name, namespace)
+    if ls_error is not None:
+        return [ls_error]
+    wl_errors: list[str] = []
+    for iN in iN_names:
+        iN_dest = wl_dest / iN
+        if _is_iteration_up_to_date(iN_dest, wl_remote_mtimes.get(iN)):
+            info(f"[{phase}/{wl_name}/{iN}] up to date — skipping")
+            continue
+        if iN_dest.exists():
+            shutil.rmtree(iN_dest)
+        iN_dest.mkdir(parents=True, exist_ok=True)
+        result = run(
+            ["kubectl", "cp",
+             f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{wl_name}/{iN}/",
+             str(iN_dest), "--retries=3"],
+            check=False, capture=True,
+        )
+        if result.returncode != 0:
+            wl_errors.append(f"{wl_name}/{iN}: {result.stderr.strip()}")
+    return wl_errors
 
 
 def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
@@ -1262,8 +1317,11 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
     When *workload* is set, only that workload's subdirectory is copied for
     each phase (used by scoped ``collect --only/--workload``).
     When *workload* is None (default), workloads are discovered via ``ls`` and
-    copied individually, skipping those whose local ``trace_data.csv`` is
-    already up to date (used by unscoped ``deploy.py collect``).
+    copied individually. In both cases, each workload's iterations are
+    enumerated on the current slot's PVC and copied one ``i<N>/`` at a time;
+    iterations whose local ``trace_data.csv`` is already at least as new as
+    the remote copy are skipped, and iterations belonging to other slots (not
+    present on this slot's PVC) are left untouched on local disk (issue #564).
 
     When *allowed_workloads* is set (a dict mapping phase name to a set of
     workload names), the ``ls``-discovered list for each phase is filtered to
@@ -1351,7 +1409,7 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
 
             if skip_logs:
                 # Selective copy: trace files + epp_logs via kubectl cp per
-                # workload; skips vLLM server_logs which dominate data volume.
+                # iteration; skips vLLM server_logs which dominate data volume.
                 # BusyBox tar doesn't handle large streaming well, so use cp.
                 if workload:
                     wl_names = [workload]
@@ -1376,57 +1434,34 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                         wl_names = [w for w in wl_names if w in phase_allowed]
                 phase_errors = []
                 for wl_name in wl_names:
-                    if _is_workload_up_to_date(dest_dir / wl_name,
-                                               remote_mtimes.get(wl_name)):
-                        info(f"[{phase}/{wl_name}] up to date — skipping")
-                        if on_workload_done:
-                            on_workload_done(phase, wl_name, namespace, None)
-                        continue
+                    wl_remote_mtimes = remote_mtimes.get(wl_name, {})
                     wl_dest = dest_dir / wl_name
                     wl_dest.mkdir(parents=True, exist_ok=True)
-                    # Wipe stale log dirs across every existing local iteration.
-                    for iN_dir in wl_dest.glob("i*"):
-                        for sub in ("server_logs", "epp_logs", "gpu_logs", "resources"):
-                            p = iN_dir / sub
-                            if p.exists():
-                                shutil.rmtree(p)
                     # Discover iteration subdirs on the PVC (post step-5 layout).
-                    iN_ls = run(
-                        ["kubectl", "exec", pod_name, f"-n={namespace}", "--",
-                         "sh", "-c",
-                         f"ls /data/{run_name}/{phase}/{wl_name}/"],
-                        check=False, capture=True,
-                    )
-                    if iN_ls.returncode != 0:
-                        wl_errors = [
-                            f"{wl_name}: failed to list iterations: "
-                            f"{iN_ls.stderr.strip()}"
-                        ]
-                        phase_errors.extend(wl_errors)
+                    iN_names, ls_error = _list_pvc_iterations(
+                        pod_name, run_name, phase, wl_name, namespace)
+                    if ls_error is not None:
+                        phase_errors.append(ls_error)
                         if on_workload_done:
                             on_workload_done(
                                 phase, wl_name, namespace,
-                                RuntimeError("; ".join(wl_errors)),
+                                RuntimeError(ls_error),
                             )
                         continue
-                    iN_names = [
-                        n for n in iN_ls.stdout.strip().split()
-                        if n.startswith("i") and n[1:].isdigit()
-                    ]
-                    if not iN_names:
-                        wl_errors = [
-                            f"{wl_name}: no i<N>/ iteration subdirs found on PVC"
-                        ]
-                        phase_errors.extend(wl_errors)
-                        if on_workload_done:
-                            on_workload_done(
-                                phase, wl_name, namespace,
-                                RuntimeError("; ".join(wl_errors)),
-                            )
-                        continue
-                    wl_errors = []
+                    wl_errors: list[str] = []
                     for iN in iN_names:
                         iN_dest = wl_dest / iN
+                        if _is_iteration_up_to_date(iN_dest, wl_remote_mtimes.get(iN)):
+                            info(f"[{phase}/{wl_name}/{iN}] up to date — skipping")
+                            continue
+                        # Wipe stale log/resource dirs for this iteration
+                        # only — iterations we skip keep their existing
+                        # contents, and iterations from other slots outside
+                        # iN_names stay untouched.
+                        for sub in ("server_logs", "epp_logs", "gpu_logs", "resources"):
+                            p = iN_dest / sub
+                            if p.exists():
+                                shutil.rmtree(p)
                         iN_dest.mkdir(parents=True, exist_ok=True)
                         remote_prefix = (
                             f"{namespace}/{pod_name}:/data/{run_name}/"
@@ -1492,35 +1527,19 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                 else:
                     errors[phase] = None
             elif workload:
-                if _is_workload_up_to_date(dest_dir / workload,
-                                           remote_mtimes.get(workload)):
-                    info(f"[{phase}/{workload}] up to date — skipping")
-                    errors[phase] = None
-                    if on_workload_done:
-                        on_workload_done(phase, workload, namespace, None)
-                else:
-                    wl_dest = dest_dir / workload
-                    if wl_dest.exists():
-                        shutil.rmtree(wl_dest)
-                    wl_dest.mkdir(parents=True, exist_ok=True)
-                    result = run(
-                        ["kubectl", "cp",
-                         f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{workload}/",
-                         str(wl_dest), "--retries=3"],
-                        check=False, capture=True,
-                    )
-                    if result.returncode != 0:
-                        wl_exc = RuntimeError(
-                            f"kubectl cp failed: {result.stderr.strip()}")
-                        errors[phase] = wl_exc
-                    else:
-                        wl_exc = None
-                        errors[phase] = None
-                    if on_workload_done:
-                        on_workload_done(phase, workload, namespace, wl_exc)
+                wl_remote_mtimes = remote_mtimes.get(workload, {})
+                wl_dest = dest_dir / workload
+                wl_errors = _copy_workload_iterations_full(
+                    pod_name, run_name, phase, workload, namespace,
+                    wl_dest, wl_remote_mtimes)
+                wl_exc = RuntimeError("; ".join(wl_errors)) if wl_errors else None
+                errors[phase] = wl_exc
+                if on_workload_done:
+                    on_workload_done(phase, workload, namespace, wl_exc)
             else:
-                # Unscoped full copy: discover workloads via ls, skip
-                # up-to-date ones using remote_mtimes when available.
+                # Unscoped full copy: discover workloads via ls, then copy
+                # each iteration individually (issue #564 — never wipe the
+                # whole workload dir; other slots may hold iterations under it).
                 list_result = run(
                     ["kubectl", "exec", pod_name, f"-n={namespace}", "--",
                      "sh", "-c",
@@ -1544,27 +1563,14 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                     continue
                 phase_errors = []
                 for wl_name in wl_names:
-                    if _is_workload_up_to_date(dest_dir / wl_name,
-                                               remote_mtimes.get(wl_name)):
-                        info(f"[{phase}/{wl_name}] up to date — skipping")
-                        if on_workload_done:
-                            on_workload_done(phase, wl_name, namespace, None)
-                        continue
+                    wl_remote_mtimes = remote_mtimes.get(wl_name, {})
                     wl_dest = dest_dir / wl_name
-                    if wl_dest.exists():
-                        shutil.rmtree(wl_dest)
-                    wl_dest.mkdir(parents=True, exist_ok=True)
-                    result = run(
-                        ["kubectl", "cp",
-                         f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{wl_name}/",
-                         str(wl_dest), "--retries=3"],
-                        check=False, capture=True,
-                    )
-                    if result.returncode != 0:
-                        wl_exc = RuntimeError(f"{wl_name}: {result.stderr.strip()}")
-                        phase_errors.append(f"{wl_name}: {result.stderr.strip()}")
-                    else:
-                        wl_exc = None
+                    wl_errors = _copy_workload_iterations_full(
+                        pod_name, run_name, phase, wl_name, namespace,
+                        wl_dest, wl_remote_mtimes)
+                    if wl_errors:
+                        phase_errors.extend(wl_errors)
+                    wl_exc = RuntimeError("; ".join(wl_errors)) if wl_errors else None
                     if on_workload_done:
                         on_workload_done(phase, wl_name, namespace, wl_exc)
                 errors[phase] = RuntimeError("; ".join(phase_errors)) if phase_errors else None
