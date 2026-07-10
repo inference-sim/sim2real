@@ -1119,11 +1119,11 @@ def test_collect_reads_from_configmap(tmp_path, monkeypatch):
 # ── Incremental collect helpers ──────────────────────────────────────────────
 
 def test_probe_remote_mtimes_parses_output():
-    """_probe_remote_mtimes parses stat output into {workload: mtime} dict.
+    """_probe_remote_mtimes parses stat output into ``{workload: {iN: mtime}}``.
 
-    Post step-5, traces live under ``<phase>/<workload>/i<N>/trace_data.csv``.
-    Keys are derived by walking two levels up from the trace file, so the
-    workload name (not the iteration directory) is the dict key.
+    Traces live under ``<phase>/<workload>/i<N>/trace_data.csv``. Iterations
+    are kept as their own keys (issue #564 — collapsing to a per-workload max
+    hid cross-slot iterations from the up-to-date gate).
     """
     from pipeline.deploy import _probe_remote_mtimes
 
@@ -1137,7 +1137,10 @@ def test_probe_remote_mtimes_parses_output():
             returncode=0, stdout=stat_output, stderr="")
         result = _probe_remote_mtimes("pod", "/data/run1/baseline", "ns-0")
 
-    assert result == {"wl-smoke": 1715800000.0, "wl-load": 1715800100.0}
+    assert result == {
+        "wl-smoke": {"i1": 1715800000.0},
+        "wl-load": {"i1": 1715800100.0},
+    }
 
 
 def test_probe_remote_mtimes_returns_empty_on_failure():
@@ -1182,7 +1185,7 @@ def test_probe_remote_mtimes_warns_on_stderr():
             stderr="stat: /data/run1/baseline/wl-broken/i1/trace_data.csv: No such file")
         result = _probe_remote_mtimes("pod", "/data/run1/baseline", "ns-0")
 
-    assert result == {"wl-smoke": 1715800000.0}
+    assert result == {"wl-smoke": {"i1": 1715800000.0}}
     assert any("mtime probe had errors" in str(c) for c in mock_warn.call_args_list)
 
 
@@ -1199,7 +1202,7 @@ def test_probe_remote_mtimes_warns_on_unparseable_line():
             returncode=0, stdout=stat_output, stderr="")
         result = _probe_remote_mtimes("pod", "/data/run1/baseline", "ns-0")
 
-    assert result == {"wl-smoke": 1715800000.0}
+    assert result == {"wl-smoke": {"i1": 1715800000.0}}
     assert any("unparseable" in str(c) for c in mock_warn.call_args_list)
 
 
@@ -1216,7 +1219,7 @@ def test_probe_remote_mtimes_warns_on_single_token_line():
             returncode=0, stdout=stat_output, stderr="")
         result = _probe_remote_mtimes("pod", "/data/run1/baseline", "ns-0")
 
-    assert result == {"wl-smoke": 1715800000.0}
+    assert result == {"wl-smoke": {"i1": 1715800000.0}}
     assert any("unparseable" in str(c) for c in mock_warn.call_args_list)
 
 
@@ -1224,8 +1227,8 @@ def test_is_up_to_date_true_when_local_newer(tmp_path):
     """_is_up_to_date returns True when local file is at least as new as remote.
 
     This is the plans-YAML use case: a single-file freshness check kept intact
-    for ``_extract_phase_plans``. The workload-directory / iN-scan variant is
-    ``_is_workload_up_to_date`` (covered in test_collect_internals.py).
+    for ``_extract_phase_plans``. The iteration-scoped variant is
+    ``_is_iteration_up_to_date`` (covered in test_collect_internals.py).
     """
     from pipeline.deploy import _is_up_to_date
 
@@ -1647,16 +1650,21 @@ def test_collect_unscoped_parallel_all_slots_fail(tmp_path, monkeypatch, capsys)
 
 
 def test_collect_full_copy_clears_stale_files(tmp_path, monkeypatch):
-    """Full-copy path removes stale local files before kubectl cp."""
+    """Full-copy path removes stale files inside each ``i<N>/`` before kubectl cp.
+
+    Post-#564 the workload dir is no longer wiped as a whole — only the
+    specific ``i<N>/`` we're about to re-copy. This test places a stale log
+    inside ``i1/`` and confirms it's gone after collect.
+    """
     from pipeline import deploy
     import subprocess
 
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     (run_dir / "cluster").mkdir(parents=True)
-    results_dir = run_dir / "results" / "baseline" / "wl-smoke"
-    results_dir.mkdir(parents=True)
+    iter_dir = run_dir / "results" / "baseline" / "wl-smoke" / "i1"
+    iter_dir.mkdir(parents=True)
 
-    stale_file = results_dir / "server_logs" / "stale.log"
+    stale_file = iter_dir / "server_logs" / "stale.log"
     stale_file.parent.mkdir(parents=True)
     stale_file.write_text("stale")
 
@@ -1665,14 +1673,13 @@ def test_collect_full_copy_clears_stale_files(tmp_path, monkeypatch):
     }
     _mock_cm(monkeypatch, data)
 
-    class Args:
-        package = None
-        skip_logs = False
-
     def mock_run(cmd, **kwargs):
         mock = MagicMock(returncode=0, stdout="", stderr="")
         cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
-        if "exec" in cmd_str and "ls" in cmd_str:
+        # Second-level ls: enumerate i<N>/ under the workload
+        if "exec" in cmd_str and "ls " in cmd_str and "/wl-smoke/" in cmd_str:
+            mock.stdout = "i1"
+        elif "exec" in cmd_str and "ls" in cmd_str:
             mock.stdout = "wl-smoke"
         if "exec" in cmd_str and "stat" in cmd_str:
             mock.stdout = ""
@@ -1687,16 +1694,17 @@ def test_collect_full_copy_clears_stale_files(tmp_path, monkeypatch):
 
 
 def test_collect_per_workload_clears_stale_files(tmp_path, monkeypatch):
-    """Per-workload (scoped) path removes stale local files before kubectl cp."""
+    """Per-workload (scoped) path removes stale files inside each ``i<N>/``
+    before kubectl cp — same per-iteration semantics as the unscoped path."""
     from pipeline import deploy
     import subprocess
 
     run_dir = tmp_path / "workspace" / "runs" / "test-run"
     (run_dir / "cluster").mkdir(parents=True)
-    results_dir = run_dir / "results" / "baseline" / "wl-smoke"
-    results_dir.mkdir(parents=True)
+    iter_dir = run_dir / "results" / "baseline" / "wl-smoke" / "i1"
+    iter_dir.mkdir(parents=True)
 
-    stale_file = results_dir / "server_logs" / "stale.log"
+    stale_file = iter_dir / "server_logs" / "stale.log"
     stale_file.parent.mkdir(parents=True)
     stale_file.write_text("stale")
 
@@ -1708,6 +1716,9 @@ def test_collect_per_workload_clears_stale_files(tmp_path, monkeypatch):
     def mock_run(cmd, **kwargs):
         mock = MagicMock(returncode=0, stdout="", stderr="")
         cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+        # Second-level ls: enumerate i<N>/ under the workload
+        if "exec" in cmd_str and "ls " in cmd_str and "/wl-smoke/" in cmd_str:
+            mock.stdout = "i1"
         if "exec" in cmd_str and "stat" in cmd_str:
             mock.stdout = ""
         return mock
@@ -1820,7 +1831,11 @@ def test_collect_skip_logs_invokes_gpu_logs_copy(tmp_path, monkeypatch):
 
 
 def test_collect_idempotent_no_stale_accumulation(tmp_path, monkeypatch):
-    """Running collect twice produces same result as once (no accumulation)."""
+    """Running collect twice produces same result as once (no accumulation).
+
+    Each ``kubectl cp`` overwrites the ``i<N>`` directory contents fresh, so
+    log files from a prior collect do not pile up alongside new ones.
+    """
     from pipeline import deploy
     import subprocess
 
@@ -1837,13 +1852,16 @@ def test_collect_idempotent_no_stale_accumulation(tmp_path, monkeypatch):
     def mock_run(cmd, **kwargs):
         mock = MagicMock(returncode=0, stdout="", stderr="")
         cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
-        if "exec" in cmd_str and "ls" in cmd_str:
+        # Second-level ls: enumerate i<N>/ under the workload
+        if "exec" in cmd_str and "ls " in cmd_str and "/wl-smoke/" in cmd_str:
+            mock.stdout = "i1"
+        elif "exec" in cmd_str and "ls" in cmd_str:
             mock.stdout = "wl-smoke"
         elif "exec" in cmd_str and "stat" in cmd_str:
             mock.stdout = ""
         elif "cp" in cmd_str:
             call_count[0] += 1
-            dest = run_dir / "results" / "baseline" / "wl-smoke"
+            dest = run_dir / "results" / "baseline" / "wl-smoke" / "i1"
             dest.mkdir(parents=True, exist_ok=True)
             (dest / "trace_data.csv").write_text(f"data-{call_count[0]}")
             (dest / "server_logs").mkdir(exist_ok=True)
@@ -1858,8 +1876,8 @@ def test_collect_idempotent_no_stale_accumulation(tmp_path, monkeypatch):
     deploy._extract_phases_from_pvc(
         ["baseline"], "test-run", "ns-0", run_dir, skip_logs=False)
 
-    results_dir = run_dir / "results" / "baseline" / "wl-smoke" / "server_logs"
-    log_files = list(results_dir.glob("*.log"))
+    server_logs = run_dir / "results" / "baseline" / "wl-smoke" / "i1" / "server_logs"
+    log_files = list(server_logs.glob("*.log"))
     assert len(log_files) == 1
 
 
@@ -1995,8 +2013,13 @@ def test_extract_phases_filters_by_allowed_workloads(tmp_path, monkeypatch):
     def mock_run(cmd, **kwargs):
         mock = MagicMock(returncode=0, stdout="", stderr="")
         cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
-        if "exec" in cmd_str and "ls" in cmd_str:
-            # PVC has three workloads
+        # Second-level ls: enumerate i<N>/ under the workload
+        if "exec" in cmd_str and "ls " in cmd_str and any(
+            f"/{w}/" in cmd_str for w in ("wl-smoke", "wl-load", "wl-heavy")
+        ):
+            mock.stdout = "i1"
+        elif "exec" in cmd_str and "ls" in cmd_str:
+            # First-level ls: workload subdirs under the phase
             mock.stdout = "wl-smoke\nwl-load\nwl-heavy"
         elif "exec" in cmd_str and "stat" in cmd_str:
             # No mtimes — force copy
@@ -2006,8 +2029,7 @@ def test_extract_phases_filters_by_allowed_workloads(tmp_path, monkeypatch):
             for wl in ("wl-smoke", "wl-load", "wl-heavy"):
                 if wl in cmd_str:
                     copied_workloads.append(wl)
-                    # Create the destination file so the code doesn't error
-                    dest = run_dir / "results" / "baseline" / wl
+                    dest = run_dir / "results" / "baseline" / wl / "i1"
                     dest.mkdir(parents=True, exist_ok=True)
                     break
         return mock
@@ -2098,8 +2120,13 @@ def test_extract_phases_per_phase_filter_prevents_cross_phase_leak(tmp_path, mon
     def mock_run(cmd, **kwargs):
         mock = MagicMock(returncode=0, stdout="", stderr="")
         cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
-        if "exec" in cmd_str and "ls" in cmd_str:
-            # Both phases have chatbot and balanced on PVC (stale from prior run)
+        # Second-level ls: enumerate i<N>/ under the workload
+        if "exec" in cmd_str and "ls " in cmd_str and any(
+            f"/{w}/" in cmd_str for w in ("chatbot", "balanced")
+        ):
+            mock.stdout = "i1"
+        elif "exec" in cmd_str and "ls" in cmd_str:
+            # First-level ls: both phases have chatbot and balanced on PVC
             mock.stdout = "chatbot\nbalanced"
         elif "exec" in cmd_str and "stat" in cmd_str:
             mock.stdout = ""
@@ -2108,7 +2135,7 @@ def test_extract_phases_per_phase_filter_prevents_cross_phase_leak(tmp_path, mon
                 for wl in ("chatbot", "balanced"):
                     if f"/{phase}/{wl}/" in cmd_str:
                         copied_pairs.append(f"{phase}/{wl}")
-                        dest = run_dir / "results" / phase / wl
+                        dest = run_dir / "results" / phase / wl / "i1"
                         dest.mkdir(parents=True, exist_ok=True)
                         break
         return mock
@@ -2560,3 +2587,89 @@ def test_collect_iteration_malformed_exits(tmp_path, capsys, monkeypatch):
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
     assert "iteration" in (captured.out + captured.err).lower()
+
+
+# ── Issue #564: cross-slot iteration preservation ────────────────────────────
+
+
+def test_extract_phases_preserves_iterations_across_slot_collects(tmp_path, monkeypatch):
+    """End-to-end regression guard for #564.
+
+    Simulates the reported failure: replicas=2, one ``(phase, workload)``
+    pair. Slot A holds i1 on its PVC, slot B holds i2. Collecting slot A
+    then slot B (as the parallel/sequential caller does, one invocation per
+    slot) must land both iterations on local disk. Pre-fix, slot B would
+    wipe the workload dir and lose slot A's i1.
+    """
+    from pipeline import deploy
+    import subprocess
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+
+    # Whichever slot is being emulated for the current mock_run call.
+    active_slot = ["ns-A"]
+    # What each slot's PVC holds under /data/test-run/baseline/wl-x/
+    slot_iterations = {"ns-A": ["i1"], "ns-B": ["i2"]}
+
+    def mock_run(cmd, **kwargs):
+        mock = MagicMock(returncode=0, stdout="", stderr="")
+        cmd_list = list(cmd) if isinstance(cmd, list) else cmd.split()
+        cmd_str = " ".join(cmd_list)
+        if "exec" in cmd_str and "find" in cmd_str:
+            # mtime probe — return one line per iteration on this slot
+            lines = [
+                f"1000 /data/test-run/baseline/wl-x/{iN}/trace_data.csv"
+                for iN in slot_iterations[active_slot[0]]
+            ]
+            mock.stdout = "\n".join(lines)
+            return mock
+        if "exec" in cmd_str and "ls " in cmd_str and "/wl-x/" in cmd_str:
+            # Second-level ls: iterations this slot holds
+            mock.stdout = "\n".join(slot_iterations[active_slot[0]])
+            return mock
+        if "exec" in cmd_str and "ls" in cmd_str:
+            # First-level ls: single workload
+            mock.stdout = "wl-x"
+            return mock
+        if "exec" in cmd_str and "stat" in cmd_str:
+            # phase-size probe
+            mock.stdout = "0"
+            return mock
+        if "cp" in cmd_list:
+            # Fake the kubectl cp — write a trace file at the destination iN
+            # so subsequent stat calls could see it if needed.
+            dst = cmd_list[cmd_list.index("cp") + 2]
+            Path(dst).mkdir(parents=True, exist_ok=True)
+            (Path(dst) / "trace_data.csv").write_text(
+                f"data from {active_slot[0]}"
+            )
+            return mock
+        return mock
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    # Collect slot A first
+    active_slot[0] = "ns-A"
+    deploy._extract_phases_from_pvc(
+        ["baseline"], "test-run", "ns-A", run_dir, skip_logs=False,
+        allowed_workloads={"baseline": {"wl-x"}})
+
+    i1_local = run_dir / "results" / "baseline" / "wl-x" / "i1" / "trace_data.csv"
+    assert i1_local.exists(), "slot A's i1 should be on disk after first collect"
+    assert i1_local.read_text() == "data from ns-A"
+
+    # Now collect slot B — this used to wipe slot A's i1
+    active_slot[0] = "ns-B"
+    deploy._extract_phases_from_pvc(
+        ["baseline"], "test-run", "ns-B", run_dir, skip_logs=False,
+        allowed_workloads={"baseline": {"wl-x"}})
+
+    # Both must be present now
+    assert i1_local.exists(), (
+        "regression: slot A's i1 was wiped by slot B's collect (issue #564)"
+    )
+    assert i1_local.read_text() == "data from ns-A"
+    i2_local = run_dir / "results" / "baseline" / "wl-x" / "i2" / "trace_data.csv"
+    assert i2_local.exists(), "slot B's i2 should also land"
+    assert i2_local.read_text() == "data from ns-B"
