@@ -10,6 +10,7 @@ _SCENARIO_FILE_PATH = "/tmp/llmdbench-config/scenario.yaml"
 # whose timeout exceeds the enclosing pipeline timeout.
 _TASK_TIMEOUTS: dict[str, str] = {
     "stream-epp-logs": "2h",
+    "stream-gpu-stats": "2h",
     "run-workload-blis-observe-binary": "90m",
 }
 
