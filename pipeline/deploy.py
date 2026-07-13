@@ -2443,7 +2443,7 @@ def _apply_run_filters(progress: dict, args) -> set:
     only = _parse_list(getattr(args, "only", None))
     workload = _parse_list(getattr(args, "workload", None))
     package = _parse_list(getattr(args, "package", None))
-    status_filter = getattr(args, "status", None)
+    status_filter = _parse_list(getattr(args, "status", None))
     iteration_spec = getattr(args, "iteration", None)
 
     # Parse --iteration up-front so malformed specs fail before any other work.
@@ -2506,7 +2506,8 @@ def _apply_run_filters(progress: dict, args) -> set:
         package_set = set(package)
         candidates = {k for k in candidates if pair_entries[k].get("package") in package_set}
     if status_filter:
-        candidates = {k for k in candidates if pair_entries[k].get("status") == status_filter}
+        status_set = set(status_filter)
+        candidates = {k for k in candidates if pair_entries[k].get("status") in status_set}
     if iteration_set is not None:
         candidates = {k for k in candidates if _key_iteration(k) in iteration_set}
     return candidates
@@ -2537,7 +2538,7 @@ def _report_filter_mismatch(progress: dict, args) -> None:
     only = _parse_list(getattr(args, "only", None))
     workload = _parse_list(getattr(args, "workload", None))
     package = _parse_list(getattr(args, "package", None))
-    status_filter = getattr(args, "status", None)
+    status_filter = _parse_list(getattr(args, "status", None))
     iteration_spec = getattr(args, "iteration", None)
 
     parts = []
@@ -2548,7 +2549,7 @@ def _report_filter_mismatch(progress: dict, args) -> None:
     if package is not None:
         parts.append(f"--package '{','.join(package)}'")
     if status_filter is not None:
-        parts.append(f"--status '{status_filter}'")
+        parts.append(f"--status '{','.join(status_filter)}'")
     if iteration_spec is not None:
         parts.append(f"--iteration '{iteration_spec}'")
 
@@ -3763,7 +3764,7 @@ Examples:
     status_p.add_argument("--only",     nargs="+", metavar="PAIR",  help="Scope to specific pair keys (comma or space-separated, wl- prefix optional)")
     status_p.add_argument("--workload", nargs="+", metavar="NAME",  help="Scope to pairs matching these workloads (comma or space-separated)")
     status_p.add_argument("--package",  nargs="+", metavar="NAME",  help="Scope to pairs matching these packages (comma or space-separated)")
-    status_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status (e.g. running, done, failed)")
+    status_p.add_argument("--status",   nargs="+", metavar="STATE", help="Scope to pairs matching these statuses (comma or space-separated; e.g. running, done, failed)")
     status_p.add_argument("--iteration", metavar="SPEC", dest="iteration",
                           help="Scope to iteration(s): '2', '1,3', '1-3', '1,3-5'")
     status_p.add_argument("-s", "--silent", action="store_true",
@@ -3781,7 +3782,7 @@ Examples:
     run_p.add_argument("--only",         nargs="+", metavar="PAIR",  help="Scope execution to specific pair keys (comma or space-separated, wl- prefix optional)")
     run_p.add_argument("--workload",     nargs="+", metavar="NAME",  help="Scope execution to pairs matching these workloads (comma or space-separated)")
     run_p.add_argument("--package",      nargs="+", metavar="NAME",  help="Scope execution to pairs matching these packages (comma or space-separated)")
-    run_p.add_argument("--status",       metavar="STATE", help="Scope execution to pairs with this status (e.g. failed, timed-out)")
+    run_p.add_argument("--status",       nargs="+", metavar="STATE", help="Scope execution to pairs matching these statuses (comma or space-separated; e.g. failed, timed-out)")
     run_p.add_argument("--iteration",    metavar="SPEC", dest="iteration",
                        help="Scope execution to iteration(s): '2', '1,3', '1-3', '1,3-5'")
     run_p.add_argument("--force",        action="store_true",
@@ -3813,7 +3814,7 @@ Examples:
     reset_p.add_argument("--only",     nargs="+", metavar="PAIR",  help="Scope to specific pair keys (comma or space-separated, wl- prefix optional)")
     reset_p.add_argument("--workload", nargs="+", metavar="NAME",  help="Scope to pairs matching these workloads (comma or space-separated)")
     reset_p.add_argument("--package",  nargs="+", metavar="NAME",  help="Scope to pairs matching these packages (comma or space-separated)")
-    reset_p.add_argument("--status",   metavar="STATE", help="Scope to pairs with this status")
+    reset_p.add_argument("--status",   nargs="+", metavar="STATE", help="Scope to pairs matching these statuses (comma or space-separated)")
     reset_p.add_argument("--iteration", metavar="SPEC", dest="iteration",
                          help="Scope to iteration(s): '2', '1,3', '1-3', '1,3-5'")
     reset_p.add_argument("--preserve-done-status", action="store_true", dest="preserve_done_status",
