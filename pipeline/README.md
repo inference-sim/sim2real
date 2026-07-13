@@ -397,7 +397,7 @@ The parser accepts a legacy no-suffix form (`wl-<workload>|<package>`) and reads
 | `--workload NAME…` | Workload dimension | Multiple values are OR'd within the flag. Glob patterns supported (see below). |
 | `--package NAME…` | Package dimension | Multiple values are OR'd within the flag. Glob patterns supported (see below). |
 | `--iteration SPEC` | Iteration dimension | Grammar below. |
-| `--status STATE` | Progress state (`pending` / `running` / `done` / `failed` / `timed-out` / `stalled`) | Not available on every subcommand — see per-subcommand tables. |
+| `--status STATE…` | Progress state (`pending` / `running` / `done` / `failed` / `timed-out` / `stalled`) | Multiple values are OR'd within the flag (comma or space-separated). Not available on every subcommand — see per-subcommand tables. |
 
 Different flags compose as AND: `--workload X --package baseline --iteration 1,3` narrows to iterations 1 and 3 of workload X's baseline package.
 
@@ -431,7 +431,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 | `--workload NAME…` | — | Scope execution to pairs matching these workloads (comma or space-separated; globs OK) |
 | `--package NAME…` | — | Scope execution to pairs matching these packages (comma or space-separated; globs OK) |
 | `--iteration SPEC` | — | Scope to iteration(s): `'2'`, `'1,3'`, `'1-3'`, `'1,3-5'` |
-| `--status STATE` | — | Scope execution to pairs with this status (e.g. `failed`, `timed-out`) |
+| `--status STATE…` | — | Scope execution to pairs matching these statuses (comma or space-separated; e.g. `failed`, `timed-out`) |
 | `--skip-teardown` | — | Skip the Tekton teardown task, leaving namespace resources intact for debugging |
 | `--preserve-pipelineruns` | — | Do not delete PipelineRun objects after completion (keeps TaskRun logs for debugging) |
 | `--force` | — | Reset non-pending pairs to `pending`, cleaning cluster resources (PipelineRuns + Helm) for pairs with assigned namespaces |
@@ -467,7 +467,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 | `--workload NAME…` | Filter by workload names (comma or space-separated; globs OK) |
 | `--package NAME…` | Filter by package names (comma or space-separated; globs OK) |
 | `--iteration SPEC` | Scope to iteration(s): `'2'`, `'1,3'`, `'1-3'`, `'1,3-5'` |
-| `--status STATE` | Filter by status (e.g. `running`, `done`, `failed`) |
+| `--status STATE…` | Filter by status names (comma or space-separated; e.g. `running`, `done`, `failed`) |
 | `-s`, `--silent` | Suppress the per-pair table and banner; print only the summary line (machine-readable) |
 
 **`deploy.py collect`** — extracts results from the cluster PVC and writes to `workspace/runs/<run>/results/{phase}/<workload>/i<N>/` (one subdirectory per iteration). Repeated collects are incremental at iteration granularity: each `i<N>/trace_data.csv` on the current slot's PVC is compared to its local copy and skipped if the local mtime is at least as new. Iterations that live on other slots' PVCs (e.g. when replicas of one `(phase, workload)` pair dispatch across cluster slots) are left untouched on local disk — the workload directory is never wiped as a whole. If the mtime probe fails (e.g., pod not running), collection falls back to a full copy — this is the expected degradation path. Like `deploy.py run`, the run's cluster is resolved from `workspace/runs/<R>/run_metadata.json:cluster_id`; missing `runs/<R>/` or `runs/<R>/cluster/` exits with `run 'sim2real assemble --run <R>' first`, and a missing / unparseable `run_metadata.json` or missing `cluster_id` exits with `run metadata corrupted; re-assemble`.
@@ -494,7 +494,7 @@ When `--only` or `--workload` is given, only matching workload subdirectories ar
 | `--workload NAME…` | Scope reset to pairs matching these workloads (comma or space-separated; globs OK) |
 | `--package NAME…` | Scope reset to pairs matching these packages (comma or space-separated; globs OK) |
 | `--iteration SPEC` | Scope to iteration(s): `'2'`, `'1,3'`, `'1-3'`, `'1,3-5'` |
-| `--status STATE` | Scope reset to pairs with this status |
+| `--status STATE…` | Scope reset to pairs matching these statuses (comma or space-separated) |
 | `--preserve-done-status` | Keep done pairs' status unchanged (cluster cleanup only) |
 | `--dry-run` | Print what would be reset without acting |
 

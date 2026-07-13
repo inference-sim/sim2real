@@ -781,6 +781,28 @@ def test_apply_run_filters_by_status():
     assert result == {"wl-heavy-baseline"}
 
 
+def test_apply_run_filters_by_status_multi_list():
+    """--status accepts a list (nargs='+' shape) and matches pairs in any listed status."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = None; package = None; status = ["failed", "timed-out"]
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    assert result == {"wl-heavy-baseline", "wl-load-treatment"}
+
+
+def test_apply_run_filters_by_status_comma_string():
+    """--status accepts a single comma-separated string and matches pairs in any listed status."""
+    from pipeline.deploy import _apply_run_filters
+
+    class _Args:
+        only = None; workload = None; package = None; status = "failed,timed-out"
+
+    result = _apply_run_filters(dict(_PROGRESS), _Args())
+    assert result == {"wl-heavy-baseline", "wl-load-treatment"}
+
+
 def test_apply_run_filters_compose():
     from pipeline.deploy import _apply_run_filters
 
@@ -1415,6 +1437,18 @@ def test_report_filter_mismatch_multi_value_formatting(capsys):
     captured = capsys.readouterr().err
     assert "--workload 'wl-smoke,wl-heavy'" in captured
     assert "--package 'baseline,treatment'" in captured
+
+
+def test_report_filter_mismatch_status_list_formatting(capsys):
+    """_report_filter_mismatch formats a --status list with commas, matching --workload/--package."""
+    from pipeline.deploy import _report_filter_mismatch
+
+    class _Args:
+        only = None; workload = None; package = None; status = ["failed", "timed-out"]
+
+    _report_filter_mismatch(dict(_PROGRESS), _Args())
+    captured = capsys.readouterr().err
+    assert "--status 'failed,timed-out'" in captured
 
 
 def test_collect_run_flags_list_values():
