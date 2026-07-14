@@ -5,7 +5,8 @@ Scripts that drive the sim2real transfer pipeline. Run from the repo root.
 The pipeline has two phases:
 
 ```
-cluster.py provision  (one-time per cluster — bootstrap namespaces, RBAC, PVCs, Tekton tasks, Pipeline definition)
+cluster.py init      (one-time per cluster — bootstrap identity, primary namespace, cluster-wide Tekton)
+cluster.py slot add  (any time — grow the slot pool; live-propagates to running --remote orchestrators)
                    ↓
 setup.py → sim2real translation register → sim2real assemble → deploy.py   (per-workspace + per-run)
 ```
@@ -21,8 +22,11 @@ When algorithm content lives in its own repo (peer directory), pass `--experimen
 ```bash
 # From the sim2real/ directory:
 
-# One-time per cluster (idempotent; re-run when adding/changing slots):
-python pipeline/cluster.py provision <cluster_id> --namespaces NS1,NS2,...
+# First-time cluster bootstrap:
+python pipeline/cluster.py init <cluster_id> <primary_namespace>
+
+# Grow the pool later (safe while a run is in flight; live-propagates via --remote):
+python pipeline/cluster.py slot add <cluster_id> <namespace>
 
 # Per-workspace + per-run cycle:
 python pipeline/setup.py       --experiment-root ../admission-control
@@ -55,15 +59,29 @@ An algorithm entry may carry `byo: true` to indicate the image is pre-built and 
 
 ## cluster.py
 
-Cluster-side bootstrap. Run once per cluster, before any per-workspace or per-run commands. Idempotent — safe to re-run when adding namespace slots or rotating secrets.
+Cluster-side bootstrap and slot-pool management. Bootstrap runs once per cluster; slot add/remove/list run whenever the pool needs to grow, shrink, or be inspected. Idempotent — safe to re-run any subcommand.
 
 ```bash
+# First-time bootstrap: cluster identity + cluster-wide config + primary namespace
+python pipeline/cluster.py init <cluster_id> <primary_namespace> [flags]
+
+# Grow / shrink / inspect the slot pool
+python pipeline/cluster.py slot add    <cluster_id> <namespace> [flags]
+python pipeline/cluster.py slot remove <cluster_id> <namespace>
+python pipeline/cluster.py slot list   <cluster_id>
+
+# Backwards-compat sugar (equivalent to init + slot add loop):
 python pipeline/cluster.py provision <cluster_id> --namespaces NS1,NS2,... [flags]
 ```
 
+### `cluster init`
+
+One-time bootstrap. Refuses when `workspace/clusters/<cluster_id>/cluster_config.json` already exists. Establishes the cluster's identity, records cluster-wide config, applies the cluster-wide Tekton Pipeline definition to the primary namespace, and provisions the primary namespace's resources.
+
 | Flag | Env var | Default |
 |------|---------|---------|
-| `--namespaces NS1,NS2,...` | — | required — slot namespaces to provision |
+| `<cluster_id>` | — | required — slug matching `workspace/clusters/<id>/` |
+| `<primary_namespace>` | — | required — pinned for the cluster's lifetime; holds the run-inputs / progress ConfigMaps |
 | `--storage-class SC` | — | cluster default |
 | `--hf-token TOKEN` | `HF_TOKEN` | prompt |
 | `--github-token TOKEN` | `GITHUB_TOKEN` | optional |
@@ -74,7 +92,28 @@ python pipeline/cluster.py provision <cluster_id> --namespaces NS1,NS2,... [flag
 | `--pipeline-yaml PATH` | — | `<repo-root>/pipeline/pipeline.yaml` |
 | `--experiment-root PATH` | — | cwd |
 
-**`--pipeline-yaml PATH`** — override the Tekton Pipeline manifest applied to every namespace. When set, the path is recorded in `cluster_config.json["pipeline_yaml"]` and picked up by `apply_cluster_resources` on this run. **The flag is not sticky**: a re-run of `cluster.py provision <same-id>` without `--pipeline-yaml` drops the key and reverts to the built-in default — pass `--pipeline-yaml` on every re-run where you want the override.
+### `cluster slot add / remove / list`
+
+- **`slot add <cluster_id> <namespace>`** — provisions the namespace's cluster-side resources (namespace, RBAC, secrets, PVCs, Tekton tasks), appends it to `cluster_config['namespaces']`, applies the Pipeline definition to just that namespace, and patches the `sim2real-run-inputs` ConfigMap if a `--remote` orchestrator is currently running. Accepts the same credential flags as `init` (each namespace's Secrets are re-seeded from `HF_TOKEN` / `REGISTRY_TOKEN` env vars). Idempotent — re-adding an already-provisioned namespace is a no-op at every layer.
+
+- **`slot remove <cluster_id> <namespace>`** — drain-only. Removes the namespace from `cluster_config['namespaces']` and patches the CM. No cluster-side changes — PVCs, Secrets, and Tekton resources stay so `deploy.py collect` continues to work against the removed slot's data and the slot can be re-added later without re-provisioning. Refuses primary (`namespaces[0]`).
+
+- **`slot list <cluster_id>`** — read-only. Prints the pool with a `(primary)` marker on `namespaces[0]` plus a `provisioned=Y/N` probe (presence of the `sim2real-runner` ServiceAccount).
+
+### Live remote propagation
+
+`cluster init / slot add / slot remove` each call `publish_slot_pool` after mutating `cluster_config.json`. When the `sim2real-run-inputs` CM exists in the primary namespace (i.e. a `--remote` run is in flight), the mutation is patched into the `cluster_config--<cluster_id>` key of that CM. The orchestrator Pod's runtime container mounts this key directly (no `subPath`), so kubelet propagates the update within ~60s and the orchestrator's per-cycle `_refresh_namespaces` picks it up. When no CM exists (local mode, or between remote runs), the on-disk change is sufficient and is picked up on the next `deploy.py run --remote`'s assemble step.
+
+### `cluster provision` (backwards-compat sugar)
+
+Preserves the pre-#571 CLI. `provision <id> --namespaces N1,N2,N3` is equivalent to:
+
+- Fresh cluster: `init <id> <N1>` + `slot add <id> <N2>` + `slot add <id> <N3>`.
+- Existing cluster: `slot add <id> <Nk>` for each namespace not already in the pool.
+
+`--storage-class` and `--pipeline-yaml` on `provision` apply only when the cluster is being initialized; they are ignored (with a warning) against an existing cluster because cluster-wide config is fixed at init time.
+
+**`--pipeline-yaml PATH`** — override the Tekton Pipeline manifest applied to every namespace. Recorded in `cluster_config.json["pipeline_yaml"]` at init time. **Not sticky under sugar**: a re-run of `cluster.py provision <same-id>` without `--pipeline-yaml` warns and ignores the change; edit `cluster_config.json` by hand if you need to swap the manifest after init.
 
 **Output:** `workspace/clusters/<cluster_id>/cluster_config.json` records:
 
@@ -449,7 +488,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 **Polling and slot-aware probe skipping** — the orchestrator always sleeps at `--poll-interval` (default 30s); there is no backoff state machine. On each cycle it first checks the status of every busy slot's PipelineRun. The GPU capacity probe and dispatch computation run only when at least one slot is free; when all slots are busy the cycle logs `Dispatching 0/<pending> pending — all <total> slots busy` (deduped per state transition) and skips the probe, so slot recovery is detected within one poll interval. The base interval is itself the rate limit against hot-loop reclaim cycles. (Old progress files may still carry a legacy `_orchestrator` metadata key; it is ignored.)
 
-**Live slot-list updates (issue #372)** — each cycle re-reads `workspace/clusters/<cluster_id>/cluster_config.json` and updates the in-memory slot list. Adding a namespace makes it eligible for dispatch on the next cycle (subject to `_check_slot_ready` — PVCs bound, HF secret present); removing a namespace stops new dispatch to it but does **not** cancel a pair already running there — that pair drains and the slot is freed normally on completion. `namespaces[0]` (the primary, where the run-scoped progress ConfigMap lives) is pinned for the lifetime of the run; mid-run changes to it are logged and ignored. Parse / IO errors keep the prior list. The safe way to add a slot is `cluster.py provision <cluster_id> --namespaces NS1,NS2,NS3` (re-run with the new full list; provisions before publishing the change). When issue #377 lands, `deploy.py slots add NS` will be the operator-friendly form.
+**Live slot-list updates (issues #372, #571)** — each cycle re-reads `workspace/clusters/<cluster_id>/cluster_config.json` and updates the in-memory slot list. Adding a namespace makes it eligible for dispatch on the next cycle (subject to `_check_slot_ready` — PVCs bound, HF secret present); removing a namespace stops new dispatch to it but does **not** cancel a pair already running there — that pair drains and the slot is freed normally on completion. `namespaces[0]` (the primary, where the run-scoped progress ConfigMap lives) is pinned for the lifetime of the run; mid-run changes to it are logged and ignored. Parse / IO errors keep the prior list. The operator-friendly way to grow the pool is `cluster.py slot add <cluster_id> <namespace>` (provisions the namespace, appends to the pool, patches the run-inputs ConfigMap if a `--remote` orchestrator is running); to shrink it is `cluster.py slot remove <cluster_id> <namespace>` (drain-only, no cluster-side changes so `deploy.py collect` continues to work). Under `--remote`, the orchestrator Pod's runtime container mounts the `cluster_config--<cluster_id>` key from the `sim2real-run-inputs` ConfigMap without a subPath, so kubelet propagates the update to the Pod within ~60s and `_refresh_namespaces` picks it up on its next cycle.
 
 **Capacity probe filtering** — `pipeline/lib/capacity.py` filters cluster nodes the same way the K8s scheduler would before summing allocatable/requested GPUs. A node is excluded if cordoned (`spec.unschedulable: true`), if it carries a `NoSchedule`/`NoExecute` taint that no role's tolerations match, or if its `nvidia.com/gpu.product` label is not in the set required by the scenario. The required product set is read from `scenario[0].{decode,prefill}.acceleratorType.{labelKey, labelValue}`. When no per-role product constraint can be extracted, cordon and taint screening still apply on cluster facts. Tolerations are currently treated as empty per follow-up issue #263 — every blocking taint excludes the node until that's lifted.
 

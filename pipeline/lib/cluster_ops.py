@@ -170,6 +170,89 @@ def update_cluster_config(cluster_id: str, /, **updates) -> dict:
     return cfg
 
 
+# ── Slot-pool live propagation ───────────────────────────────────────
+
+
+# CM name where the run-inputs are packaged. Kept in lockstep with
+# ``pipeline.lib.remote.CONFIGMAP_NAME`` — that module is the CM's
+# authoring authority; we only mutate the cluster_config key here when
+# a slot is added or removed. Duplicated as a bare string so this
+# module doesn't take a dependency on ``pipeline.lib.remote`` (which
+# would introduce a cluster_ops ↔ remote cycle at import time).
+_RUN_INPUTS_CONFIGMAP_NAME = "sim2real-run-inputs"
+
+# CM key that carries the cluster_config JSON blob. Matches
+# ``_CLUSTER_CONFIG_KEY_PREFIX`` in ``pipeline.lib.remote``. Kept in
+# lockstep for the same reason as ``_RUN_INPUTS_CONFIGMAP_NAME``.
+_CLUSTER_CONFIG_KEY_PREFIX = "cluster_config--"
+
+
+def publish_slot_pool(cluster_id: str) -> None:
+    """Propagate the on-disk cluster_config.json to a live run-inputs CM.
+
+    Called after any mutation to ``cluster_config.json:namespaces`` — from
+    ``cluster init``, ``cluster slot add``, ``cluster slot remove``. Steps:
+
+    1. Read the current cluster_config from disk. Determine primary from
+       ``namespaces[0]``.
+    2. Check whether the ``sim2real-run-inputs`` ConfigMap exists in
+       ``<primary>``. If yes, patch its ``cluster_config--<cluster_id>``
+       key with the JSON serialization of the current config. If no,
+       skip with an info line — the on-disk change will be picked up on
+       the next ``deploy.py run --remote``'s assemble step.
+
+    Never creates the CM (that is ``build_run_inputs_configmap``'s
+    responsibility, called from the run-start path). Never touches Pods:
+    the running orchestrator's runtime container mounts the CM key
+    directly, so kubelet propagates the update within ~60s and the
+    orchestrator's per-cycle ``_refresh_namespaces`` picks it up.
+
+    Idempotent — patching with the same value is a no-op at the API
+    server level. Safe to call from every mutation path.
+    """
+    cfg = read_cluster_config(cluster_id)
+    namespaces = cfg.get("namespaces") or []
+    if not namespaces:
+        info(
+            f"publish_slot_pool: cluster {cluster_id!r} has no namespaces; "
+            f"skipping ConfigMap patch"
+        )
+        return
+    primary = namespaces[0]
+
+    # Existence probe. kubectl returns non-zero if the CM is absent; we
+    # treat that as the "skip" branch, not as an error.
+    probe = _run(
+        [
+            "kubectl", "get", "configmap", _RUN_INPUTS_CONFIGMAP_NAME,
+            f"-n={primary}", "--ignore-not-found", "-o=name",
+        ],
+        check=False, capture=True,
+    )
+    if probe.returncode != 0 or not (probe.stdout or "").strip():
+        info(
+            f"publish_slot_pool: no {_RUN_INPUTS_CONFIGMAP_NAME!r} ConfigMap in "
+            f"{primary!r}; on-disk change will be picked up on next "
+            f"'deploy.py run --remote' from the assemble step"
+        )
+        return
+
+    key = f"{_CLUSTER_CONFIG_KEY_PREFIX}{cluster_id}"
+    payload = json.dumps({"data": {key: json.dumps(cfg, indent=2)}})
+    _run(
+        [
+            "kubectl", "patch", "configmap", _RUN_INPUTS_CONFIGMAP_NAME,
+            f"-n={primary}", "--type=merge", "-p", payload,
+        ],
+        check=True, capture=True,
+    )
+    info(
+        f"publish_slot_pool: patched {_RUN_INPUTS_CONFIGMAP_NAME}/{key} in "
+        f"{primary!r}; running orchestrator (if any) will see the change "
+        f"within ~60s (kubelet ConfigMap propagation window)"
+    )
+
+
 # ── Subprocess + tool discovery helpers ──────────────────────────────
 
 
@@ -252,6 +335,26 @@ def secret_exists(name: str, namespace: str) -> bool:
     """Return True if the named Kubernetes secret exists in the namespace."""
     return _run(
         ["kubectl", "get", "secret", name, f"-n={namespace}"],
+        check=False, capture=True,
+    ).returncode == 0
+
+
+def namespace_provisioned(namespace: str) -> bool:
+    """Return True if the namespace looks provisioned for sim2real use.
+
+    Best-effort probe used by ``cluster slot list`` — checks for the
+    presence of the ``sim2real-runner`` ServiceAccount, which every
+    :func:`provision_namespace` invocation creates as part of its RBAC
+    step. Presence of the SA is a proxy for "this namespace has been
+    through :func:`provision_namespace`"; it does not verify that every
+    sub-resource is intact.
+
+    A False result means "operator has not (successfully) provisioned
+    this namespace via cluster init / slot add"; the namespace may
+    still exist as a k8s namespace object without being sim2real-ready.
+    """
+    return _run(
+        ["kubectl", "get", "serviceaccount", "sim2real-runner", f"-n={namespace}"],
         check=False, capture=True,
     ).returncode == 0
 
@@ -643,15 +746,54 @@ def _envsubst(text: str, env: dict[str, str]) -> str:
 # ── apply_cluster_resources ──────────────────────────────────────────
 
 
+def _resolve_pipeline_yaml(cluster_id: str) -> Path:
+    """Return the Pipeline YAML path for ``cluster_id``.
+
+    Uses ``cluster_config['pipeline_yaml']`` when set, else the default
+    ``pipeline/pipeline.yaml`` bundled with the framework. Raises
+    ``FileNotFoundError`` if the resolved path does not exist so callers
+    fail loudly before invoking kubectl.
+    """
+    cfg = read_cluster_config(cluster_id)
+    override = cfg.get("pipeline_yaml")
+    pipeline_yaml = Path(override) if override else _PIPELINE_YAML
+    if not pipeline_yaml.exists():
+        raise FileNotFoundError(f"Pipeline YAML not found at {pipeline_yaml}")
+    return pipeline_yaml
+
+
+def apply_pipeline_to_namespace(cluster_id: str, namespace: str) -> None:
+    """Apply the cluster's Tekton Pipeline definition to one namespace.
+
+    Tekton ``Pipeline`` is a namespace-scoped resource in upstream Tekton,
+    so applying the "cluster-wide" Pipeline means applying the same
+    manifest to every namespace registered for this cluster. Callers that
+    only add a single namespace to the pool (``cluster slot add``) use
+    this helper directly instead of re-applying to every namespace.
+
+    Idempotent: ``kubectl apply`` no-ops when the live object matches the
+    supplied manifest. Raises ``subprocess.CalledProcessError`` on
+    non-zero apply so the caller can surface the first failure.
+    Raises ``FileNotFoundError`` if the resolved Pipeline YAML is missing.
+    """
+    pipeline_yaml = _resolve_pipeline_yaml(cluster_id)
+    info(f"    applying {pipeline_yaml.name} to {namespace}")
+    _run(
+        ["kubectl", "apply", "-f", str(pipeline_yaml), f"-n={namespace}"],
+        check=True, capture=True,
+    )
+
+
 def apply_cluster_resources(cluster_id: str) -> None:
     """Apply cluster-wide Tekton resources (the Pipeline definition).
 
     Reads ``cluster_config['namespaces']`` and applies the Tekton Pipeline
-    manifest to each. Tekton ``Pipeline`` is a namespaced resource in
-    upstream Tekton, so "cluster-wide" here means "the same definition
-    across every namespace registered for this cluster" — it is NOT part
-    of the per-namespace flow because the source YAML is one cluster-level
-    artifact, not a per-namespace one.
+    manifest to each via :func:`apply_pipeline_to_namespace`. Tekton
+    ``Pipeline`` is a namespaced resource in upstream Tekton, so
+    "cluster-wide" here means "the same definition across every namespace
+    registered for this cluster" — it is NOT part of the per-namespace
+    flow because the source YAML is one cluster-level artifact, not a
+    per-namespace one.
 
     The manifest path is ``cluster_config['pipeline_yaml']`` when set,
     otherwise the default ``pipeline/pipeline.yaml`` bundled with the
@@ -666,21 +808,12 @@ def apply_cluster_resources(cluster_id: str) -> None:
     the caller can surface the first failure rather than silently
     continuing.
     """
-    cfg = read_cluster_config(cluster_id)
-    override = cfg.get("pipeline_yaml")
-    pipeline_yaml = Path(override) if override else _PIPELINE_YAML
-    if not pipeline_yaml.exists():
-        raise FileNotFoundError(f"Pipeline YAML not found at {pipeline_yaml}")
-
-    namespaces = cfg.get("namespaces") or []
+    pipeline_yaml = _resolve_pipeline_yaml(cluster_id)
+    namespaces = read_cluster_config(cluster_id).get("namespaces") or []
     if namespaces:
         info(f"applying cluster-wide Pipeline ({pipeline_yaml.name}) "
              f"to {len(namespaces)} namespace(s)")
     for ns in namespaces:
-        info(f"    applying {pipeline_yaml.name} to {ns}")
-        _run(
-            ["kubectl", "apply", "-f", str(pipeline_yaml), f"-n={ns}"],
-            check=True, capture=True,
-        )
+        apply_pipeline_to_namespace(cluster_id, ns)
     if namespaces:
         ok(f"{pipeline_yaml.name} applied to {len(namespaces)} namespace(s)")

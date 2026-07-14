@@ -304,15 +304,60 @@ def test_job_configmap_volume_is_read_only():
 
 
 def test_job_has_init_container_that_copies_inputs():
-    """initContainer copies ConfigMap contents to the writable workspace."""
+    """initContainer copies ConfigMap contents to the writable workspace,
+    then symlinks cluster_config.json to the live-cluster-config mount so
+    kubelet ConfigMap updates propagate mid-run (issue #571)."""
     job = _build_job()
     spec = job["spec"]["template"]["spec"]
     init = spec["initContainers"][0]
     assert init["name"] == "copy-inputs"
-    assert init["command"] == ["cp", "-r", "/data/config/.", "/data/workspace"]
+    # sh -c wrapper so cp + ln can chain with set -e.
+    assert init["command"][:2] == ["sh", "-c"]
+    script = init["command"][2]
+    assert "set -e" in script
+    assert "cp -r /data/config/. /data/workspace" in script
+    assert (
+        "ln -sf /data/live/clusters/test-cluster/cluster_config.json "
+        "/data/workspace/clusters/test-cluster/cluster_config.json"
+        in script
+    )
     mounts = {m["name"]: m for m in init["volumeMounts"]}
     assert mounts["config"]["readOnly"] is True
     assert "workspace" in mounts
+    # live-cluster-config is NOT mounted in the initContainer — the
+    # symlink target only needs to resolve at runtime, not init time.
+    assert "live-cluster-config" not in mounts
+
+
+def test_job_has_live_cluster_config_volume():
+    """A second ConfigMap volume projects just the cluster_config key with
+    no subPath, so kubelet propagates in-place updates to the runtime
+    container (issue #571)."""
+    job = _build_job()
+    volumes = {v["name"]: v for v in job["spec"]["template"]["spec"]["volumes"]}
+    assert "live-cluster-config" in volumes
+    live = volumes["live-cluster-config"]
+    assert live["configMap"]["name"] == "sim2real-run-inputs"
+    items = live["configMap"]["items"]
+    assert len(items) == 1
+    assert items[0]["key"] == "cluster_config--test-cluster"
+    assert items[0]["path"] == "cluster_config.json"
+    # No subPath in the volume spec — subPath belongs on the mount, and
+    # subPath mounts break kubelet update propagation.
+    assert "subPath" not in items[0]
+
+
+def test_job_orchestrator_mounts_live_cluster_config():
+    """The runtime container mounts live-cluster-config at the path the
+    initContainer's symlink points to (issue #571)."""
+    job = _build_job()
+    orchestrator = job["spec"]["template"]["spec"]["containers"][0]
+    mounts = {m["name"]: m for m in orchestrator["volumeMounts"]}
+    assert "live-cluster-config" in mounts
+    live_mount = mounts["live-cluster-config"]
+    assert live_mount["mountPath"] == "/data/live/clusters/test-cluster"
+    # Directory mount — no subPath, so updates propagate.
+    assert "subPath" not in live_mount
 
 
 def test_job_experiment_root_matches_mount():
