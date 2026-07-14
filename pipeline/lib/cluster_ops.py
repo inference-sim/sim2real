@@ -220,8 +220,12 @@ def publish_slot_pool(cluster_id: str) -> None:
         return
     primary = namespaces[0]
 
-    # Existence probe. kubectl returns non-zero if the CM is absent; we
-    # treat that as the "skip" branch, not as an error.
+    # Existence probe. With --ignore-not-found, kubectl exits 0 whether
+    # the CM is present or absent; a non-zero exit therefore signals a
+    # real failure (cluster unreachable, RBAC denial, malformed args)
+    # that would be quietly swallowed if we folded it into the "skip"
+    # branch. Split the two so the operator sees the auth/network
+    # problem instead of the misleading "no CM found" info line.
     probe = _run(
         [
             "kubectl", "get", "configmap", _RUN_INPUTS_CONFIGMAP_NAME,
@@ -229,7 +233,16 @@ def publish_slot_pool(cluster_id: str) -> None:
         ],
         check=False, capture=True,
     )
-    if probe.returncode != 0 or not (probe.stdout or "").strip():
+    if probe.returncode != 0:
+        stderr = (probe.stderr or probe.stdout or "").strip()
+        warn(
+            f"publish_slot_pool: probe for {_RUN_INPUTS_CONFIGMAP_NAME!r} in "
+            f"{primary!r} failed (rc={probe.returncode}): {stderr}. "
+            f"On-disk change is written; live orchestrator (if any) "
+            f"will NOT see it until the probe succeeds on a later re-run."
+        )
+        return
+    if not (probe.stdout or "").strip():
         info(
             f"publish_slot_pool: no {_RUN_INPUTS_CONFIGMAP_NAME!r} ConfigMap in "
             f"{primary!r}; on-disk change will be picked up on next "

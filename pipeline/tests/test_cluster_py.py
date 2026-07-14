@@ -517,6 +517,38 @@ class TestInitAndSlotParser:
         with pytest.raises(SystemExit):
             parser.parse_args(["slot"])
 
+    def test_experiment_root_accepted_after_positionals(self):
+        """--experiment-root works when placed AFTER the subcommand + positionals
+        (the pre-#571 CLI shape). Registered on every subparser, not just the
+        top-level parser."""
+        parser = cluster_cmd.build_parser()
+        # provision
+        args = parser.parse_args([
+            "provision", "ocp-east", "--namespaces", "ns-a",
+            "--experiment-root", "/exp",
+        ])
+        assert args.experiment_root == "/exp"
+        # init
+        args = parser.parse_args([
+            "init", "ocp-east", "ns-p", "--experiment-root", "/exp2",
+        ])
+        assert args.experiment_root == "/exp2"
+        # slot add
+        args = parser.parse_args([
+            "slot", "add", "ocp-east", "ns-b", "--experiment-root", "/exp3",
+        ])
+        assert args.experiment_root == "/exp3"
+        # slot remove
+        args = parser.parse_args([
+            "slot", "remove", "ocp-east", "ns-b", "--experiment-root", "/exp4",
+        ])
+        assert args.experiment_root == "/exp4"
+        # slot list
+        args = parser.parse_args([
+            "slot", "list", "ocp-east", "--experiment-root", "/exp5",
+        ])
+        assert args.experiment_root == "/exp5"
+
 
 def _install_fs_stubs(monkeypatch):
     """Common filesystem stubs used by cluster_ops during provision_namespace.
@@ -903,6 +935,29 @@ class TestPublishSlotPool:
         cluster_ops.publish_slot_pool("ocp-east")
         # No cluster-side calls at all.
         assert not any(c[:1] == ["kubectl"] for c in fake_run.calls)
+
+    def test_warns_on_probe_failure_no_patch(self, fake_run, capsys):
+        """Non-zero probe (cluster unreachable / RBAC denial) surfaces a warn
+        and skips the patch, not the misleading 'no CM found' info line."""
+        cluster_ops.write_cluster_config("ocp-east", {
+            "cluster_id": "ocp-east", "namespaces": ["ns-primary"],
+        })
+        fake_run.set(
+            ["kubectl", "get", "configmap", "sim2real-run-inputs"],
+            _completed(returncode=1, stderr="Error from server (Forbidden)"),
+        )
+
+        cluster_ops.publish_slot_pool("ocp-east")
+
+        # No patch call — the probe failure short-circuited.
+        assert not any(
+            c[:3] == ["kubectl", "patch", "configmap"] for c in fake_run.calls
+        )
+        # Operator-visible warning surfaced (not the info-level CM-absent line).
+        captured = capsys.readouterr()
+        combined = captured.out + captured.err
+        assert "[WARN]" in combined or "probe" in combined.lower()
+        assert "Forbidden" in combined
 
 
 class TestApplyPipelineToNamespace:

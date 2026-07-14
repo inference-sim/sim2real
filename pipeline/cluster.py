@@ -74,14 +74,31 @@ def _add_credential_flags(p: argparse.ArgumentParser) -> None:
                    help="Docker Hub token (env: DOCKERHUB_TOKEN; optional)")
 
 
+def _add_experiment_root_flag(p: argparse.ArgumentParser) -> None:
+    """Attach ``--experiment-root`` to *p*.
+
+    Registered on every subparser (not just the top-level parser) so
+    that both ``cluster.py --experiment-root PATH <cmd> ...`` and
+    ``cluster.py <cmd> ... --experiment-root PATH`` work. The latter
+    was the pre-#571 CLI shape for ``provision``; keeping it on the
+    subparsers preserves backwards compatibility for existing scripts
+    and the flag documented in ``pipeline/README.md``.
+    """
+    p.add_argument("--experiment-root", metavar="PATH", default=None,
+                   help="Root of the experiment repo (default: cwd)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pipeline/cluster.py",
         description="Cluster-side bootstrap for the sim2real pipeline. "
                     "Idempotent — safe to re-run.",
     )
-    parser.add_argument("--experiment-root", metavar="PATH", default=None,
-                        help="Root of the experiment repo (default: cwd)")
+    # Top-level --experiment-root: accepted for uniformity with other
+    # sim2real CLIs that expose it at the top-level, but each subparser
+    # ALSO carries the flag so post-subcommand placement (the pre-#571
+    # shape) still works. main() reads whichever landed on args.
+    _add_experiment_root_flag(parser)
     sub = parser.add_subparsers(dest="command", required=True)
 
     # ── cluster init ──────────────────────────────────────────────────
@@ -101,6 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Path to Tekton Pipeline YAML to apply "
                              "(default: <repo-root>/pipeline/pipeline.yaml)")
     _add_credential_flags(init_p)
+    _add_experiment_root_flag(init_p)
 
     # ── cluster slot {add,remove,list} ────────────────────────────────
     slot_p = sub.add_parser(
@@ -117,6 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Cluster identifier (must already be initialized)")
     add_p.add_argument("namespace", help="Namespace to add to the slot pool")
     _add_credential_flags(add_p)
+    _add_experiment_root_flag(add_p)
 
     rm_p = slot_sub.add_parser(
         "remove",
@@ -126,12 +145,14 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Cluster identifier (must already be initialized)")
     rm_p.add_argument("namespace",
                       help="Namespace to remove from the slot pool (primary refused)")
+    _add_experiment_root_flag(rm_p)
 
     ls_p = slot_sub.add_parser(
         "list",
         help="List the slot pool and per-slot provisioned state",
     )
     ls_p.add_argument("cluster_id", help="Cluster identifier")
+    _add_experiment_root_flag(ls_p)
 
     # ── cluster provision (backwards-compat sugar) ────────────────────
     pv = sub.add_parser(
@@ -153,6 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "(default: <repo-root>/pipeline/pipeline.yaml). "
                          "Applied only when initializing a new cluster.")
     _add_credential_flags(pv)
+    _add_experiment_root_flag(pv)
 
     return parser
 
