@@ -288,16 +288,18 @@ def publish_slot_pool(cluster_id: str) -> None:
     if patch_result.returncode != 0:
         stderr = (patch_result.stderr or patch_result.stdout or "").strip()
         warn(
-            f"publish_slot_pool: patch of {_RUN_INPUTS_CONFIGMAP_NAME}/{key} in "
-            f"{primary!r} failed (rc={patch_result.returncode}): {stderr}. "
+            f"publish_slot_pool: patch of data key {key!r} in ConfigMap "
+            f"{_RUN_INPUTS_CONFIGMAP_NAME!r} (namespace {primary!r}) failed "
+            f"(rc={patch_result.returncode}): {stderr}. "
             f"On-disk change is written; live orchestrator (if any) will NOT "
             f"see it until the patch succeeds on a later re-run."
         )
         return
     info(
-        f"publish_slot_pool: patched {_RUN_INPUTS_CONFIGMAP_NAME}/{key} in "
-        f"{primary!r}; running orchestrator (if any) will see the change "
-        f"within ~60s (kubelet ConfigMap propagation window)"
+        f"publish_slot_pool: patched data key {key!r} in ConfigMap "
+        f"{_RUN_INPUTS_CONFIGMAP_NAME!r} (namespace {primary!r}); "
+        f"running orchestrator (if any) will see the change within ~60s "
+        f"(kubelet ConfigMap propagation window)"
     )
 
 
