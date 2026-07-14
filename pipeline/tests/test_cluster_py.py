@@ -641,6 +641,34 @@ class TestCmdInit:
         ]
         assert probe_calls, f"expected CM probe against ns-primary; calls={fake_run.calls}"
 
+    def test_init_skips_publish_when_primary_provision_fails(
+        self, fake_run, monkeypatch, capsys
+    ):
+        """When provision_namespace's steps_failed is non-empty, cmd_init
+        must NOT call publish_slot_pool — mirrors cmd_slot_add's guard so
+        both commands treat divergent provisioning the same way. Prevents
+        the 'dangling CM in primary namespace' edge case (called out in
+        cmd_init's docstring) from advertising a broken primary."""
+        monkeypatch.setattr(cluster_ops, "_which", lambda cmd: False)
+        _install_fs_stubs(monkeypatch)
+
+        # Force _step_rbac to fail on the primary namespace.
+        def failing_rbac(ns, cfg, sv):
+            return ("failed", "synthetic kubectl forbidden")
+        monkeypatch.setattr(cluster_ops, "_step_rbac", failing_rbac)
+
+        rc = cluster_cmd.main([
+            "init", "ocp-east", "ns-primary",
+            "--hf-token", "hf",
+            "--registry-user", "ru", "--registry-token", "rt",
+        ])
+        assert rc == 1
+        # No CM probe — publish_slot_pool was never called.
+        assert not any(
+            c[:4] == ["kubectl", "get", "configmap", "sim2real-run-inputs"]
+            for c in fake_run.calls
+        ), "publish_slot_pool must not fire when init's provisioning diverged"
+
 
 class TestCmdSlotAdd:
     """cmd_slot_add: provisions + appends to pool + applies pipeline."""
@@ -768,6 +796,91 @@ class TestCmdSlotAdd:
         cfg = cluster_ops.read_cluster_config("ocp-east")
         # Namespaces list didn't gain a duplicate.
         assert cfg["namespaces"] == ["ns-primary", "ns-b"]
+        # publish_slot_pool still fires on the no-append re-add path.
+        # A future refactor that moves publish inside the `namespace
+        # not in current:` block would silently stop propagating live
+        # state on idempotent re-adds; this assertion locks against
+        # that regression.
+        assert any(
+            c[:4] == ["kubectl", "get", "configmap", "sim2real-run-inputs"]
+            and "-n=ns-primary" in c
+            for c in fake_run.calls
+        ), "expected publish_slot_pool to fire even when namespace is already in pool"
+
+    def test_slot_add_pipeline_apply_missing_yaml_leaves_pool_intact(
+        self, fake_run, monkeypatch, capsys
+    ):
+        """FileNotFoundError from apply_pipeline_to_namespace must
+        short-circuit with rc=1 AND leave namespaces list unchanged
+        AND not publish. This is the intermediate state the reorder
+        (issue #571) was specifically designed to protect."""
+        monkeypatch.setattr(cluster_ops, "_which", lambda cmd: False)
+        _install_fs_stubs(monkeypatch)
+        self._init_cluster(monkeypatch, fake_run)
+        fake_run.set(["kubectl", "get", "ns"], _completed(returncode=1))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+
+        # Force apply_pipeline_to_namespace to raise as if the Pipeline
+        # YAML was missing.
+        def missing_yaml(_cluster_id, _namespace):
+            raise FileNotFoundError("Pipeline YAML not found at /nowhere")
+        monkeypatch.setattr(
+            cluster_ops, "apply_pipeline_to_namespace", missing_yaml,
+        )
+
+        rc = cluster_cmd.main([
+            "slot", "add", "ocp-east", "ns-b",
+            "--hf-token", "hf",
+            "--registry-user", "ru", "--registry-token", "rt",
+        ])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "Pipeline YAML" in err
+        # Pool contents unchanged — reorder guarantee holds.
+        cfg = cluster_ops.read_cluster_config("ocp-east")
+        assert cfg["namespaces"] == ["ns-primary"]
+        # No publish fired.
+        assert not any(
+            c[:4] == ["kubectl", "get", "configmap", "sim2real-run-inputs"]
+            for c in fake_run.calls
+        ), "publish_slot_pool must not fire when pipeline apply failed"
+
+    def test_slot_add_pipeline_apply_kubectl_failure_leaves_pool_intact(
+        self, fake_run, monkeypatch, capsys
+    ):
+        """CalledProcessError from apply_pipeline_to_namespace (kubectl
+        apply non-zero exit) same story: rc=1, pool unchanged, no
+        publish."""
+        monkeypatch.setattr(cluster_ops, "_which", lambda cmd: False)
+        _install_fs_stubs(monkeypatch)
+        self._init_cluster(monkeypatch, fake_run)
+        fake_run.set(["kubectl", "get", "ns"], _completed(returncode=1))
+        fake_run.set(["kubectl", "get", "pvc"], _completed(returncode=1))
+
+        def kubectl_boom(_cluster_id, _namespace):
+            raise subprocess.CalledProcessError(
+                returncode=1, cmd=["kubectl", "apply"],
+                output="", stderr="apply forbidden",
+            )
+        monkeypatch.setattr(
+            cluster_ops, "apply_pipeline_to_namespace", kubectl_boom,
+        )
+
+        rc = cluster_cmd.main([
+            "slot", "add", "ocp-east", "ns-b",
+            "--hf-token", "hf",
+            "--registry-user", "ru", "--registry-token", "rt",
+        ])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "pipeline apply failed for ns-b" in err
+        assert "apply forbidden" in err
+        cfg = cluster_ops.read_cluster_config("ocp-east")
+        assert cfg["namespaces"] == ["ns-primary"]
+        assert not any(
+            c[:4] == ["kubectl", "get", "configmap", "sim2real-run-inputs"]
+            for c in fake_run.calls
+        ), "publish_slot_pool must not fire when pipeline apply failed"
 
 
 class TestCmdSlotRemove:
@@ -1028,6 +1141,42 @@ class TestPublishSlotPool:
         combined = captured.out + captured.err
         assert "[WARN]" in combined or "probe" in combined.lower()
         assert "Forbidden" in combined
+
+    def test_warns_on_patch_failure_no_raise(self, fake_run, capsys):
+        """Non-zero patch (TOCTOU CM deletion, mid-command RBAC change,
+        immutable CM) surfaces a warn and returns cleanly — must NOT
+        raise. A regression that reverts check=True on the patch call
+        would fail this test: CalledProcessError would escape
+        publish_slot_pool as an uncaught traceback AFTER the on-disk
+        mutation has already committed, which is the exact misleading
+        failure mode this branch (cluster_ops.py:281-296) exists to
+        prevent."""
+        cluster_ops.write_cluster_config("ocp-east", {
+            "cluster_id": "ocp-east", "namespaces": ["ns-primary"],
+        })
+        # Probe succeeds — CM present.
+        fake_run.set(
+            ["kubectl", "get", "configmap", "sim2real-run-inputs"],
+            _completed(returncode=0, stdout="configmap/sim2real-run-inputs\n"),
+        )
+        # Patch fails — e.g. CM was deleted between probe and patch.
+        fake_run.set(
+            ["kubectl", "patch", "configmap"],
+            _completed(returncode=1, stderr='configmaps "sim2real-run-inputs" not found'),
+        )
+
+        # Must NOT raise (regression check on check=False).
+        cluster_ops.publish_slot_pool("ocp-east")
+
+        # Patch was attempted (probe branch didn't short-circuit).
+        assert any(
+            c[:3] == ["kubectl", "patch", "configmap"] for c in fake_run.calls
+        )
+        # Operator-visible warning surfaced with kubectl stderr.
+        captured = capsys.readouterr()
+        combined = captured.out + captured.err
+        assert "[WARN]" in combined or "patch" in combined.lower()
+        assert "not found" in combined
 
 
 class TestApplyPipelineToNamespace:

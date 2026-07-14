@@ -429,6 +429,18 @@ def cmd_init(args: argparse.Namespace) -> int:
     )
     print(_format_summary_line(result))
 
+    if result.steps_failed:
+        # Do not publish a broken primary to any live infrastructure.
+        # cluster_config.json on disk already lists the primary (written
+        # at the top of this function so apply_cluster_resources could
+        # see it), but that's local state. Advertising the primary as
+        # ready via publish_slot_pool would be a lie in the exact edge
+        # case where publish actually does something: a dangling CM
+        # from a prior --remote run in the primary namespace. Mirror
+        # cmd_slot_add's steps_failed guard so both commands treat
+        # divergent provisioning the same way.
+        return 1
+
     # Publish at init time typically skips (no CM yet — cmd_init refuses
     # if cluster_config.json already exists, so we only reach here for
     # fresh clusters). The one scenario where the CM might already exist:
@@ -440,7 +452,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     # non-fatal and surfaces as a warn.
     cluster_ops.publish_slot_pool(cluster_id)
 
-    return 1 if result.steps_failed else 0
+    return 0
 
 
 def cmd_slot_add(args: argparse.Namespace) -> int:
