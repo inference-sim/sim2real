@@ -304,15 +304,96 @@ def test_job_configmap_volume_is_read_only():
 
 
 def test_job_has_init_container_that_copies_inputs():
-    """initContainer copies ConfigMap contents to the writable workspace."""
+    """initContainer copies ConfigMap contents to the writable workspace,
+    then symlinks cluster_config.json to the live-cluster-config mount so
+    kubelet ConfigMap updates propagate mid-run (issue #571)."""
     job = _build_job()
     spec = job["spec"]["template"]["spec"]
     init = spec["initContainers"][0]
     assert init["name"] == "copy-inputs"
-    assert init["command"] == ["cp", "-r", "/data/config/.", "/data/workspace"]
+    # sh -c wrapper so cp + ln can chain with set -e.
+    assert init["command"][:2] == ["sh", "-c"]
+    script = init["command"][2]
+    assert "set -e" in script
+    assert "cp -r /data/config/. /data/workspace" in script
+    assert (
+        "ln -sf /data/live/clusters/test-cluster/cluster_config.json "
+        "/data/workspace/clusters/test-cluster/cluster_config.json"
+        in script
+    )
     mounts = {m["name"]: m for m in init["volumeMounts"]}
     assert mounts["config"]["readOnly"] is True
     assert "workspace" in mounts
+    # live-cluster-config is NOT mounted in the initContainer — the
+    # symlink target only needs to resolve at runtime, not init time.
+    assert "live-cluster-config" not in mounts
+
+
+def test_job_has_live_cluster_config_volume():
+    """A second ConfigMap volume projects just the cluster_config key with
+    no subPath, so kubelet propagates in-place updates to the runtime
+    container (issue #571)."""
+    job = _build_job()
+    volumes = {v["name"]: v for v in job["spec"]["template"]["spec"]["volumes"]}
+    assert "live-cluster-config" in volumes
+    live = volumes["live-cluster-config"]
+    assert live["configMap"]["name"] == "sim2real-run-inputs"
+    items = live["configMap"]["items"]
+    assert len(items) == 1
+    assert items[0]["key"] == "cluster_config--test-cluster"
+    assert items[0]["path"] == "cluster_config.json"
+    # Belt-and-suspenders: subPath is not a valid ConfigMap-projection
+    # field (subPath belongs on volumeMount, not on volume-items), but
+    # assert its absence anyway so a mis-refactor that moves subPath
+    # here would fail loudly. The load-bearing "no subPath" check is on
+    # the runtime container's volumeMount below.
+    assert "subPath" not in items[0]
+
+
+def test_job_orchestrator_mounts_live_cluster_config():
+    """The runtime container mounts live-cluster-config at the path the
+    initContainer's symlink points to (issue #571)."""
+    job = _build_job()
+    orchestrator = job["spec"]["template"]["spec"]["containers"][0]
+    mounts = {m["name"]: m for m in orchestrator["volumeMounts"]}
+    assert "live-cluster-config" in mounts
+    live_mount = mounts["live-cluster-config"]
+    assert live_mount["mountPath"] == "/data/live/clusters/test-cluster"
+    # Load-bearing invariant: NO subPath on the runtime container's
+    # volumeMount. subPath mounts do NOT receive kubelet ConfigMap
+    # update propagation, which would break the whole live-refresh
+    # design (issue #571). A future refactor that adds subPath here
+    # would silently regress remote-mode slot management.
+    assert "subPath" not in live_mount
+
+
+def test_build_orchestrator_job_raises_on_missing_cluster_config_key():
+    """Zero cluster_config--* keys in configmap_data is a build-time
+    invariant violation. Failing at Job build time (rather than at Pod
+    startup) matches the design at pipeline/lib/remote.py:172-177."""
+    bad_data = {
+        "setup_config.json": "{}",
+        # No cluster_config--<id> key.
+        "run_metadata.json": "{}",
+        "cluster--baseline.yaml": "x",
+    }
+    with pytest.raises(ValueError, match="Expected exactly one"):
+        _build_job(configmap_data=bad_data)
+
+
+def test_build_orchestrator_job_raises_on_multiple_cluster_config_keys():
+    """Two cluster_config--* keys is ambiguous: build_orchestrator_job
+    can only mount one at /data/live/clusters/<id>/. Failing loudly
+    catches CM-builder invariant drift before Pod startup."""
+    bad_data = {
+        "setup_config.json": "{}",
+        "cluster_config--foo": "{}",
+        "cluster_config--bar": "{}",
+        "run_metadata.json": "{}",
+        "cluster--baseline.yaml": "x",
+    }
+    with pytest.raises(ValueError, match="Expected exactly one"):
+        _build_job(configmap_data=bad_data)
 
 
 def test_job_experiment_root_matches_mount():

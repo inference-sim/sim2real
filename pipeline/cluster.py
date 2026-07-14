@@ -1,14 +1,33 @@
 #!/usr/bin/env python3
 """sim2real cluster bootstrap — first consumer of pipeline.lib.cluster_ops.
 
-The ``provision`` subcommand replaces today's cluster-side responsibilities
-in ``pipeline/setup.py``: namespace creation, RBAC, Secrets, PVCs, and
-Tekton task bindings, plus the cluster-wide Pipeline definition. Writes
-``workspace/clusters/<cluster_id>/cluster_config.json`` for downstream
-commands to read.
+Subcommands:
 
-Idempotent — safe to re-run; pre-existing resources reconcile via
-``kubectl apply``.
+* ``init`` — first-time bootstrap of a cluster: cluster identity,
+  cluster-wide config, per-namespace resources for the primary namespace,
+  and cluster-wide Tekton Pipeline application.
+* ``slot add / remove / list`` — grow, shrink, or inspect the pool of
+  namespaces the orchestrator dispatches to. ``slot add`` is idempotent:
+  re-adding an existing namespace is a no-op at every layer. ``slot
+  remove`` is drain-only; cluster-side resources (PVCs, secrets, Tekton
+  tasks) stay so ``deploy.py collect`` continues to work and the slot can
+  be re-added later without re-provisioning (issue #571).
+* ``provision`` — backwards-compatible sugar over ``init`` + ``slot add``.
+  Preserves the pre-#571 CLI so existing scripts and the
+  ``sim2real-bootstrap`` skill do not break.
+
+Every state-changing subcommand calls
+:func:`cluster_ops.publish_slot_pool` after mutating
+``cluster_config.json``. When a ``sim2real-run-inputs`` ConfigMap exists
+in the primary namespace (i.e. a ``--remote`` orchestrator has been
+assembled), the mutation is patched into the CM so the running
+orchestrator picks it up via its live-cluster-config mount on the next
+``_refresh_namespaces`` cycle. Otherwise the on-disk change is
+sufficient and picked up on the next ``deploy.py run --remote``'s
+assemble step.
+
+Idempotent — safe to re-run every subcommand; pre-existing cluster-side
+resources reconcile via ``kubectl apply``.
 """
 
 from __future__ import annotations
@@ -32,42 +51,148 @@ from pipeline.lib import cluster_ops, layout  # noqa: E402 — must follow sys.p
 # ── Argparse ──────────────────────────────────────────────────────────
 
 
+def _add_credential_flags(p: argparse.ArgumentParser) -> None:
+    """Attach the shared secret-plumbing flags to *p*.
+
+    Used by ``init`` (primary namespace's secrets), ``slot add`` (new
+    namespace's secrets), and ``provision`` (backwards-compat sugar). All
+    three resolve values via flag > env > prompt through
+    :func:`_resolve_secret_values`, which is why the flag surface must
+    match exactly.
+    """
+    p.add_argument("--hf-token", metavar="TOKEN", default=None,
+                   help="HuggingFace API token (env: HF_TOKEN; else prompt)")
+    p.add_argument("--github-token", metavar="TOKEN", default=None,
+                   help="GitHub token (env: GITHUB_TOKEN; optional)")
+    p.add_argument("--registry-user", metavar="USER", default=None,
+                   help="Registry username (env: REGISTRY_USER; else prompt)")
+    p.add_argument("--registry-token", metavar="TOKEN", default=None,
+                   help="Registry token (env: REGISTRY_TOKEN; else prompt)")
+    p.add_argument("--dockerhub-user", metavar="USER", default=None,
+                   help="Docker Hub username (env: DOCKERHUB_USER; optional)")
+    p.add_argument("--dockerhub-token", metavar="TOKEN", default=None,
+                   help="Docker Hub token (env: DOCKERHUB_TOKEN; optional)")
+
+
+def _add_experiment_root_flag(p: argparse.ArgumentParser) -> None:
+    """Attach ``--experiment-root`` to *p*.
+
+    Registered on every subparser (not just the top-level parser) so
+    that both ``cluster.py --experiment-root PATH <cmd> ...`` and
+    ``cluster.py <cmd> ... --experiment-root PATH`` work. The latter
+    was the pre-#571 CLI shape for ``provision``; keeping it on the
+    subparsers preserves backwards compatibility for existing scripts
+    and the flag documented in ``pipeline/README.md``.
+    """
+    p.add_argument("--experiment-root", metavar="PATH", default=None,
+                   help="Root of the experiment repo (default: cwd)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pipeline/cluster.py",
         description="Cluster-side bootstrap for the sim2real pipeline. "
                     "Idempotent — safe to re-run.",
     )
+    # Top-level --experiment-root: accepted for uniformity with other
+    # sim2real CLIs that expose it at the top-level, but each subparser
+    # ALSO carries the flag so post-subcommand placement (the pre-#571
+    # shape) still works. main() reads whichever landed on args.
+    _add_experiment_root_flag(parser)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    pv = sub.add_parser("provision", help="Provision cluster-side resources")
-    pv.add_argument("cluster_id", help="Cluster identifier (slug; matches workspace/clusters/<id>/)")
+    # ── cluster init ──────────────────────────────────────────────────
+    init_p = sub.add_parser(
+        "init",
+        help="First-time bootstrap: cluster identity + cluster-wide "
+             "config + primary namespace",
+    )
+    init_p.add_argument("cluster_id",
+                        help="Cluster identifier (slug; matches workspace/clusters/<id>/)")
+    init_p.add_argument("primary_namespace",
+                        help="Primary namespace — pinned for the cluster's lifetime; "
+                             "holds the run-inputs / progress ConfigMaps")
+    init_p.add_argument("--storage-class", metavar="SC", default=None,
+                        help="PVC storage class (empty → cluster default)")
+    init_p.add_argument("--pipeline-yaml", metavar="PATH", default=None,
+                        help="Path to Tekton Pipeline YAML to apply "
+                             "(default: <repo-root>/pipeline/pipeline.yaml)")
+    _add_credential_flags(init_p)
+    _add_experiment_root_flag(init_p)
+
+    # ── cluster slot {add,remove,list} ────────────────────────────────
+    slot_p = sub.add_parser(
+        "slot",
+        help="Grow, shrink, or inspect the slot pool (add/remove/list)",
+    )
+    slot_sub = slot_p.add_subparsers(dest="slot_command", required=True)
+
+    add_p = slot_sub.add_parser(
+        "add",
+        help="Provision a namespace and add it to the pool (idempotent)",
+    )
+    add_p.add_argument("cluster_id",
+                       help="Cluster identifier (must already be initialized)")
+    add_p.add_argument("namespace", help="Namespace to add to the slot pool")
+    _add_credential_flags(add_p)
+    _add_experiment_root_flag(add_p)
+
+    rm_p = slot_sub.add_parser(
+        "remove",
+        help="Remove a namespace from the pool (drain-only; no cluster-side cleanup)",
+    )
+    rm_p.add_argument("cluster_id",
+                      help="Cluster identifier (must already be initialized)")
+    rm_p.add_argument("namespace",
+                      help="Namespace to remove from the slot pool (primary refused)")
+    _add_experiment_root_flag(rm_p)
+
+    ls_p = slot_sub.add_parser(
+        "list",
+        help="List the slot pool and per-slot provisioned state",
+    )
+    ls_p.add_argument("cluster_id", help="Cluster identifier")
+    _add_experiment_root_flag(ls_p)
+
+    # ── cluster provision (backwards-compat sugar) ────────────────────
+    pv = sub.add_parser(
+        "provision",
+        help="Backwards-compat sugar: equivalent to 'init <NS1>' + "
+             "'slot add <NS2..>' for a fresh cluster, or 'slot add' per "
+             "namespace for an existing one",
+    )
+    pv.add_argument("cluster_id",
+                    help="Cluster identifier (slug; matches workspace/clusters/<id>/)")
     pv.add_argument("--namespaces", required=True, metavar="NS1,NS2,...",
                     help="Comma-separated namespaces to provision")
     pv.add_argument("--storage-class", metavar="SC", default=None,
-                    help="PVC storage class (empty → cluster default)")
-    pv.add_argument("--hf-token", metavar="TOKEN", default=None,
-                    help="HuggingFace API token (env: HF_TOKEN; else prompt)")
-    pv.add_argument("--github-token", metavar="TOKEN", default=None,
-                    help="GitHub token (env: GITHUB_TOKEN; optional)")
-    pv.add_argument("--registry-user", metavar="USER", default=None,
-                    help="Registry username (env: REGISTRY_USER; else prompt)")
-    pv.add_argument("--registry-token", metavar="TOKEN", default=None,
-                    help="Registry token (env: REGISTRY_TOKEN; else prompt)")
-    pv.add_argument("--dockerhub-user", metavar="USER", default=None,
-                    help="Docker Hub username (env: DOCKERHUB_USER; optional)")
-    pv.add_argument("--dockerhub-token", metavar="TOKEN", default=None,
-                    help="Docker Hub token (env: DOCKERHUB_TOKEN; optional)")
+                    help="PVC storage class (empty → cluster default). "
+                         "Applied only when initializing a new cluster; "
+                         "ignored (with warning) when the cluster already exists.")
     pv.add_argument("--pipeline-yaml", metavar="PATH", default=None,
                     help="Path to Tekton Pipeline YAML to apply "
-                         "(default: <repo-root>/pipeline/pipeline.yaml)")
-    pv.add_argument("--experiment-root", metavar="PATH", default=None,
-                    help="Root of the experiment repo (default: cwd)")
+                         "(default: <repo-root>/pipeline/pipeline.yaml). "
+                         "Applied only when initializing a new cluster.")
+    _add_credential_flags(pv)
+    _add_experiment_root_flag(pv)
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    layout.set_experiment_root(args.experiment_root)
+
+    if args.command == "init":
+        return cmd_init(args)
+    if args.command == "slot":
+        if args.slot_command == "add":
+            return cmd_slot_add(args)
+        if args.slot_command == "remove":
+            return cmd_slot_remove(args)
+        if args.slot_command == "list":
+            return cmd_slot_list(args)
+        return 2  # unreachable: slot_command is required
     if args.command == "provision":
         return cmd_provision(args)
     return 2  # unreachable: subparser is required
@@ -239,47 +364,56 @@ def _format_summary_line(result) -> str:
     return f"{result.namespace}: diverged: " + ", ".join(parts)
 
 
-def cmd_provision(args: argparse.Namespace) -> int:
-    layout.set_experiment_root(args.experiment_root)
-    cluster_id = args.cluster_id
+# ── Command handlers ──────────────────────────────────────────────────
 
-    # 1. Parse namespaces — fail fast on empty.
-    try:
-        namespaces = _parse_namespaces(args.namespaces)
-    except ValueError as exc:
-        print(f"error: --namespaces: {exc}", file=sys.stderr)
-        return 2
 
-    # 2. Existing config (for created_at preservation).
-    existing = cluster_ops.read_cluster_config(cluster_id)
+def _resolve_secrets_from_args(args) -> tuple[dict, bool]:
+    """Wrap :func:`_resolve_secret_values` with the default prompters + env.
 
-    # 3. Detect OpenShift once.
-    is_openshift = cluster_ops.detect_openshift()
-
-    # 4. Resolve secret values from flag > env > prompt.
-    secret_values, has_dockerhub = _resolve_secret_values(
+    Isolated so the CLI handlers stay short and so tests can monkeypatch
+    just this seam instead of stubbing four prompters on every call.
+    """
+    return _resolve_secret_values(
         args,
         env=os.environ,
         prompter=_default_plain_prompter,
         secret_prompter=_default_secret_prompter,
     )
 
-    # 5. Build cluster_config; stamp created_at if first-time write.
+
+def cmd_init(args: argparse.Namespace) -> int:
+    """First-time cluster bootstrap. Refuses if the cluster already exists."""
+    cluster_id = args.cluster_id
+    primary = args.primary_namespace
+
+    existing = cluster_ops.read_cluster_config(cluster_id)
+    if existing:
+        print(
+            f"error: cluster {cluster_id!r} already initialized "
+            f"(namespaces={existing.get('namespaces') or []}); use "
+            f"'cluster.py slot add {cluster_id} <namespace>' to grow the pool",
+            file=sys.stderr,
+        )
+        return 1
+
+    is_openshift = cluster_ops.detect_openshift()
+    secret_values, has_dockerhub = _resolve_secrets_from_args(args)
+
     cluster_config = _build_cluster_config_dict(
-        cluster_id, namespaces,
+        cluster_id, [primary],
         is_openshift=is_openshift,
         storage_class=args.storage_class or "",
         has_dockerhub=has_dockerhub,
         pipeline_yaml=args.pipeline_yaml,
-        existing=existing,
+        existing=None,
     )
-    if "created_at" not in cluster_config:
-        cluster_config["created_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cluster_config["created_at"] = datetime.now(timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
 
-    # 6. Persist BEFORE apply_cluster_resources (it reads cluster_config from disk).
+    # Persist BEFORE apply_cluster_resources (it reads cluster_config from disk).
     cluster_ops.write_cluster_config(cluster_id, cluster_config)
 
-    # 7. Cluster-wide resources.
     try:
         cluster_ops.apply_cluster_resources(cluster_id)
     except FileNotFoundError as exc:
@@ -290,14 +424,235 @@ def cmd_provision(args: argparse.Namespace) -> int:
         print(f"error: cluster-wide apply failed: {msg}", file=sys.stderr)
         return 1
 
-    # 8. Provision each namespace; print one summary line each.
-    any_failed = False
-    for ns in namespaces:
-        result = cluster_ops.provision_namespace(
-            ns, cluster_config, secret_values=secret_values,
+    result = cluster_ops.provision_namespace(
+        primary, cluster_config, secret_values=secret_values,
+    )
+    print(_format_summary_line(result))
+
+    if result.steps_failed:
+        # Do not publish a broken primary to any live infrastructure.
+        # cluster_config.json on disk already lists the primary (written
+        # at the top of this function so apply_cluster_resources could
+        # see it), but that's local state. Advertising the primary as
+        # ready via publish_slot_pool would be a lie in the exact edge
+        # case where publish actually does something: a dangling CM
+        # from a prior --remote run in the primary namespace. Mirror
+        # cmd_slot_add's steps_failed guard so both commands treat
+        # divergent provisioning the same way.
+        return 1
+
+    # Publish at init time typically skips (no CM yet — cmd_init refuses
+    # if cluster_config.json already exists, so we only reach here for
+    # fresh clusters). The one scenario where the CM might already exist:
+    # an operator initializing from a workspace directory or machine
+    # where the local cluster_config.json is absent but a prior
+    # 'deploy.py run --remote' left a dangling ConfigMap in the primary
+    # namespace. In that case publish patches the dangling CM so it
+    # matches the freshly-initialized state; a probe / patch failure is
+    # non-fatal and surfaces as a warn.
+    cluster_ops.publish_slot_pool(cluster_id)
+
+    return 0
+
+
+def cmd_slot_add(args: argparse.Namespace) -> int:
+    """Provision a namespace and add it to the pool. Idempotent."""
+    cluster_id = args.cluster_id
+    namespace = args.namespace
+
+    cluster_config = cluster_ops.read_cluster_config(cluster_id)
+    if not cluster_config:
+        print(
+            f"error: cluster {cluster_id!r} not initialized; run "
+            f"'cluster.py init {cluster_id} <primary-namespace>' first",
+            file=sys.stderr,
         )
-        print(_format_summary_line(result))
-        if result.steps_failed:
+        return 1
+
+    secret_values, _ = _resolve_secrets_from_args(args)
+
+    result = cluster_ops.provision_namespace(
+        namespace, cluster_config, secret_values=secret_values,
+    )
+    print(_format_summary_line(result))
+    if result.steps_failed:
+        # Do not append a namespace to the pool when its provisioning
+        # diverged in a way that flips the exit code. Publish would just
+        # advertise a slot that isn't usable.
+        return 1
+
+    # Apply the Pipeline definition to the (possibly newly-provisioned)
+    # namespace BEFORE appending to the pool. In local mode the
+    # workstation orchestrator's ``_refresh_namespaces`` reads the same
+    # on-disk file we're about to mutate, so appending first would let
+    # the local dispatch loop pick up a namespace whose Tekton Pipeline
+    # is still missing. Applying first keeps the pool contents in sync
+    # with cluster reality: a Pipeline-apply failure means the on-disk
+    # ``namespaces`` list is unchanged and the CM patch is not fired,
+    # so both local and --remote consumers see the pre-change state.
+    # Idempotent kubectl apply — no-op if the Pipeline is already there.
+    # Uses the per-namespace helper so we don't re-apply to every
+    # namespace in the pool.
+    try:
+        cluster_ops.apply_pipeline_to_namespace(cluster_id, namespace)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except subprocess.CalledProcessError as exc:
+        msg = (exc.stderr or exc.stdout or str(exc)).strip()
+        print(f"error: pipeline apply failed for {namespace}: {msg}", file=sys.stderr)
+        return 1
+
+    current = list(cluster_config.get("namespaces") or [])
+    if namespace not in current:
+        current.append(namespace)
+        cluster_ops.update_cluster_config(cluster_id, namespaces=current)
+
+    cluster_ops.publish_slot_pool(cluster_id)
+    return 0
+
+
+def cmd_slot_remove(args: argparse.Namespace) -> int:
+    """Remove a namespace from the pool. Drain-only; no cluster-side changes."""
+    cluster_id = args.cluster_id
+    namespace = args.namespace
+
+    cluster_config = cluster_ops.read_cluster_config(cluster_id)
+    if not cluster_config:
+        print(
+            f"error: cluster {cluster_id!r} not initialized; nothing to remove",
+            file=sys.stderr,
+        )
+        return 1
+
+    namespaces = list(cluster_config.get("namespaces") or [])
+    if not namespaces:
+        print(
+            f"error: cluster {cluster_id!r} has no namespaces in the pool",
+            file=sys.stderr,
+        )
+        return 1
+    if namespace == namespaces[0]:
+        print(
+            f"error: cannot remove primary namespace {namespace!r}; "
+            f"primary is pinned for the cluster's lifetime. To repurpose the "
+            f"cluster, initialize a new one under a different cluster_id.",
+            file=sys.stderr,
+        )
+        return 1
+    if namespace not in namespaces:
+        print(
+            f"error: namespace {namespace!r} not in pool for cluster "
+            f"{cluster_id!r} (current pool: {namespaces})",
+            file=sys.stderr,
+        )
+        return 1
+
+    new_namespaces = [ns for ns in namespaces if ns != namespace]
+    cluster_ops.update_cluster_config(cluster_id, namespaces=new_namespaces)
+    print(f"{namespace}: removed from pool (cluster-side resources preserved)")
+
+    cluster_ops.publish_slot_pool(cluster_id)
+    return 0
+
+
+def cmd_slot_list(args: argparse.Namespace) -> int:
+    """List slot pool with per-slot provisioned probe. Read-only."""
+    cluster_id = args.cluster_id
+    cluster_config = cluster_ops.read_cluster_config(cluster_id)
+    if not cluster_config:
+        print(
+            f"error: cluster {cluster_id!r} not initialized",
+            file=sys.stderr,
+        )
+        return 1
+
+    namespaces = list(cluster_config.get("namespaces") or [])
+    if not namespaces:
+        print(f"cluster {cluster_id!r} has no namespaces in the pool")
+        return 0
+
+    print(f"cluster {cluster_id!r} pool ({len(namespaces)} namespace(s)):")
+    for i, ns in enumerate(namespaces):
+        marker = " (primary)" if i == 0 else ""
+        provisioned = cluster_ops.namespace_provisioned(ns)
+        state = "provisioned" if provisioned else "not provisioned"
+        print(f"  {ns}{marker}: {state}")
+    return 0
+
+
+def cmd_provision(args: argparse.Namespace) -> int:
+    """Backwards-compat sugar over init + slot add.
+
+    Behavior branches on whether ``cluster_config.json`` already exists:
+
+    * **Fresh cluster** (no existing config): ``init`` with
+      ``--namespaces[0]`` as primary, then ``slot add`` for each of
+      ``--namespaces[1:]``. ``--storage-class`` / ``--pipeline-yaml``
+      apply to the init call.
+
+    * **Existing cluster**: ``slot add`` for each of ``--namespaces``
+      that is not already in the pool. ``--storage-class`` /
+      ``--pipeline-yaml`` are ignored (with a warn) because those are
+      fixed at init time.
+
+    Preserves exact behavior of pre-#571 ``cluster.py provision`` for
+    both first-run and re-run invocations.
+    """
+    cluster_id = args.cluster_id
+    try:
+        namespaces = _parse_namespaces(args.namespaces)
+    except ValueError as exc:
+        print(f"error: --namespaces: {exc}", file=sys.stderr)
+        return 2
+
+    existing = cluster_ops.read_cluster_config(cluster_id)
+
+    if not existing:
+        # Fresh cluster — init on the first namespace, then slot-add the rest.
+        primary = namespaces[0]
+        init_args = argparse.Namespace(
+            cluster_id=cluster_id,
+            primary_namespace=primary,
+            storage_class=args.storage_class,
+            pipeline_yaml=args.pipeline_yaml,
+            hf_token=args.hf_token,
+            github_token=args.github_token,
+            registry_user=args.registry_user,
+            registry_token=args.registry_token,
+            dockerhub_user=args.dockerhub_user,
+            dockerhub_token=args.dockerhub_token,
+            experiment_root=getattr(args, "experiment_root", None),
+        )
+        rc = cmd_init(init_args)
+        if rc != 0:
+            return rc
+        remaining = namespaces[1:]
+    else:
+        if args.storage_class is not None or args.pipeline_yaml is not None:
+            print(
+                f"warn: cluster {cluster_id!r} already initialized; "
+                f"ignoring --storage-class / --pipeline-yaml "
+                f"(cluster-wide config is fixed at init time)",
+                file=sys.stderr,
+            )
+        remaining = namespaces
+
+    any_failed = False
+    for ns in remaining:
+        slot_args = argparse.Namespace(
+            cluster_id=cluster_id,
+            namespace=ns,
+            hf_token=args.hf_token,
+            github_token=args.github_token,
+            registry_user=args.registry_user,
+            registry_token=args.registry_token,
+            dockerhub_user=args.dockerhub_user,
+            dockerhub_token=args.dockerhub_token,
+            experiment_root=getattr(args, "experiment_root", None),
+        )
+        rc = cmd_slot_add(slot_args)
+        if rc != 0:
             any_failed = True
 
     return 1 if any_failed else 0

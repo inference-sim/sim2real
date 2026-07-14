@@ -70,7 +70,8 @@ def _discover_cluster_id(workspace_dir: Path) -> str:
     if not cluster_ids:
         raise FileNotFoundError(
             f"No cluster registered under {clusters_root}. "
-            f"Run pipeline/cluster.py provision first."
+            f"Run 'pipeline/cluster.py init <cluster-id> <primary-namespace>' "
+            f"first."
         )
     if len(cluster_ids) > 1:
         raise RuntimeError(
@@ -162,6 +163,34 @@ def build_orchestrator_job(
     config_path = f"{MOUNT_BASE}/config"
     items = _configmap_items(configmap_data, run_name)
 
+    # Locate the single cluster_config key in the CM. build_run_inputs_configmap
+    # emits exactly one — a mismatch here would mean the CM builder invariant
+    # has drifted, which is a programmer error worth surfacing at Job-build
+    # time rather than at Pod-startup time. (issue #571)
+    cluster_config_keys = [
+        k for k in configmap_data if k.startswith(_CLUSTER_CONFIG_KEY_PREFIX)
+    ]
+    if len(cluster_config_keys) != 1:
+        raise ValueError(
+            f"Expected exactly one '{_CLUSTER_CONFIG_KEY_PREFIX}*' key in "
+            f"configmap_data, found {len(cluster_config_keys)}: "
+            f"{cluster_config_keys}"
+        )
+    cluster_config_key = cluster_config_keys[0]
+    cluster_id = cluster_config_key[len(_CLUSTER_CONFIG_KEY_PREFIX):]
+
+    # Live-refresh path: mount just the cluster_config key at a distinct
+    # directory (no subPath — subPath mounts do NOT receive kubelet
+    # ConfigMap updates), then symlink the emptyDir cluster_config.json
+    # into it. When `cluster slot add/remove` patches the CM, kubelet
+    # propagates the update within ~60s and `_refresh_namespaces` picks
+    # up the change on its next dispatch cycle. (issue #571)
+    live_config_dir = f"{MOUNT_BASE}/live/clusters/{cluster_id}"
+    workspace_cluster_config = (
+        f"{workspace_path}/clusters/{cluster_id}/cluster_config.json"
+    )
+    live_cluster_config = f"{live_config_dir}/cluster_config.json"
+
     args = [
         "--experiment-root", MOUNT_BASE,
         "--run", run_name,
@@ -181,7 +210,14 @@ def build_orchestrator_job(
                     "initContainers": [{
                         "name": "copy-inputs",
                         "image": image,
-                        "command": ["cp", "-r", f"{config_path}/.", workspace_path],
+                        # sh -c so we can chain cp with the ln -sf that
+                        # redirects cluster_config.json to the live mount.
+                        # Fail fast on either step (set -e).
+                        "command": [
+                            "sh", "-c",
+                            f"set -e; cp -r {config_path}/. {workspace_path} && "
+                            f"ln -sf {live_cluster_config} {workspace_cluster_config}",
+                        ],
                         "volumeMounts": [
                             {"name": "config", "mountPath": config_path, "readOnly": True},
                             {"name": "workspace", "mountPath": workspace_path},
@@ -200,6 +236,10 @@ def build_orchestrator_job(
                         ],
                         "volumeMounts": [
                             {"name": "workspace", "mountPath": workspace_path},
+                            {
+                                "name": "live-cluster-config",
+                                "mountPath": live_config_dir,
+                            },
                         ],
                     }],
                     "volumes": [
@@ -208,6 +248,21 @@ def build_orchestrator_job(
                             "configMap": {
                                 "name": CONFIGMAP_NAME,
                                 "items": items,
+                            },
+                        },
+                        {
+                            # Same CM, projected as just the cluster_config
+                            # key at its own path so kubelet propagates
+                            # in-place updates to the runtime container.
+                            "name": "live-cluster-config",
+                            "configMap": {
+                                "name": CONFIGMAP_NAME,
+                                "items": [
+                                    {
+                                        "key": cluster_config_key,
+                                        "path": "cluster_config.json",
+                                    }
+                                ],
                             },
                         },
                         {
