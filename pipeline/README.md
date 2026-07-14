@@ -744,7 +744,7 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). Key files:
 |------|-----------|---------|
 | `setup_config.json` (workspace fields: registry, repo_name, orchestrator_image, sim2real_root) | `setup.py` | `deploy.py`, `sim2real.py list runs` |
 | `setup_config.json:current_run` (active run pointer) | `sim2real.py use` | `deploy.py` (default `--run`), `sim2real.py list runs` (active-mark `*`) |
-| `clusters/<id>/cluster_config.json` (cluster fields: cluster_id, namespaces, is_openshift, storage_class, secret_names, workspaces, created_at) | `cluster.py provision` | `sim2real assemble`, `deploy.py`, `lib/remote.py` |
+| `clusters/<id>/cluster_config.json` (cluster fields: cluster_id, namespaces, is_openshift, storage_class, secret_names, workspaces, created_at) | `cluster.py init` / `slot add` / `slot remove` (`provision` remains as sugar) | `sim2real assemble`, `deploy.py`, `lib/remote.py` |
 | `translations/<hash>/translation_output.json` | `sim2real translation register` (batched; N per-algo entries in `algorithms`) | `sim2real assemble`, `deploy.py` |
 | `translations/<hash>/registered.json` | `sim2real translation register` (batched; N per-algo entries in `algorithms`) | audit trail |
 | `translations/<hash>/generated/…` | `sim2real translation register` | `sim2real assemble` |

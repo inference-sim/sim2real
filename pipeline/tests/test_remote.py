@@ -342,8 +342,11 @@ def test_job_has_live_cluster_config_volume():
     assert len(items) == 1
     assert items[0]["key"] == "cluster_config--test-cluster"
     assert items[0]["path"] == "cluster_config.json"
-    # No subPath in the volume spec — subPath belongs on the mount, and
-    # subPath mounts break kubelet update propagation.
+    # Belt-and-suspenders: subPath is not a valid ConfigMap-projection
+    # field (subPath belongs on volumeMount, not on volume-items), but
+    # assert its absence anyway so a mis-refactor that moves subPath
+    # here would fail loudly. The load-bearing "no subPath" check is on
+    # the runtime container's volumeMount below.
     assert "subPath" not in items[0]
 
 
@@ -356,8 +359,41 @@ def test_job_orchestrator_mounts_live_cluster_config():
     assert "live-cluster-config" in mounts
     live_mount = mounts["live-cluster-config"]
     assert live_mount["mountPath"] == "/data/live/clusters/test-cluster"
-    # Directory mount — no subPath, so updates propagate.
+    # Load-bearing invariant: NO subPath on the runtime container's
+    # volumeMount. subPath mounts do NOT receive kubelet ConfigMap
+    # update propagation, which would break the whole live-refresh
+    # design (issue #571). A future refactor that adds subPath here
+    # would silently regress remote-mode slot management.
     assert "subPath" not in live_mount
+
+
+def test_build_orchestrator_job_raises_on_missing_cluster_config_key():
+    """Zero cluster_config--* keys in configmap_data is a build-time
+    invariant violation. Failing at Job build time (rather than at Pod
+    startup) matches the design at pipeline/lib/remote.py:172-177."""
+    bad_data = {
+        "setup_config.json": "{}",
+        # No cluster_config--<id> key.
+        "run_metadata.json": "{}",
+        "cluster--baseline.yaml": "x",
+    }
+    with pytest.raises(ValueError, match="Expected exactly one"):
+        _build_job(configmap_data=bad_data)
+
+
+def test_build_orchestrator_job_raises_on_multiple_cluster_config_keys():
+    """Two cluster_config--* keys is ambiguous: build_orchestrator_job
+    can only mount one at /data/live/clusters/<id>/. Failing loudly
+    catches CM-builder invariant drift before Pod startup."""
+    bad_data = {
+        "setup_config.json": "{}",
+        "cluster_config--foo": "{}",
+        "cluster_config--bar": "{}",
+        "run_metadata.json": "{}",
+        "cluster--baseline.yaml": "x",
+    }
+    with pytest.raises(ValueError, match="Expected exactly one"):
+        _build_job(configmap_data=bad_data)
 
 
 def test_job_experiment_root_matches_mount():

@@ -70,7 +70,8 @@ def _discover_cluster_id(workspace_dir: Path) -> str:
     if not cluster_ids:
         raise FileNotFoundError(
             f"No cluster registered under {clusters_root}. "
-            f"Run pipeline/cluster.py provision first."
+            f"Run 'pipeline/cluster.py init <cluster-id> <primary-namespace>' "
+            f"first."
         )
     if len(cluster_ids) > 1:
         raise RuntimeError(

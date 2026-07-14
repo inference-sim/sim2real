@@ -195,11 +195,24 @@ def publish_slot_pool(cluster_id: str) -> None:
 
     1. Read the current cluster_config from disk. Determine primary from
        ``namespaces[0]``.
-    2. Check whether the ``sim2real-run-inputs`` ConfigMap exists in
-       ``<primary>``. If yes, patch its ``cluster_config--<cluster_id>``
-       key with the JSON serialization of the current config. If no,
-       skip with an info line — the on-disk change will be picked up on
-       the next ``deploy.py run --remote``'s assemble step.
+    2. Probe whether the ``sim2real-run-inputs`` ConfigMap exists in
+       ``<primary>``. Three outcomes:
+
+       - **Probe returns non-zero** (cluster unreachable, RBAC denied,
+         malformed args): warn with kubectl stderr and skip the patch.
+         The on-disk change is still written; live propagation just
+         did not happen. Distinct from "CM absent" so the operator
+         sees an auth/network problem rather than a misleading "no CM
+         found" info line.
+       - **Probe returns empty stdout** (CM absent): info-log the skip.
+         The on-disk change will be picked up on the next
+         ``deploy.py run --remote``'s assemble step.
+       - **Probe returns the CM name**: patch its
+         ``cluster_config--<cluster_id>`` key with the JSON serialization
+         of the current config. Patch failures (TOCTOU CM deletion,
+         mid-command RBAC change, immutable CM) are also non-fatal —
+         warn with kubectl stderr and return. The on-disk change is
+         still authoritative.
 
     Never creates the CM (that is ``build_run_inputs_configmap``'s
     responsibility, called from the run-start path). Never touches Pods:
@@ -207,8 +220,11 @@ def publish_slot_pool(cluster_id: str) -> None:
     directly, so kubelet propagates the update within ~60s and the
     orchestrator's per-cycle ``_refresh_namespaces`` picks it up.
 
-    Idempotent — patching with the same value is a no-op at the API
-    server level. Safe to call from every mutation path.
+    Idempotent — patching with the same value converges to the same
+    final state (kubectl patch --type=merge unconditionally advances
+    resourceVersion, so this DOES re-trigger watchers, but the
+    ConfigMap contents are unchanged). Safe to call from every
+    mutation path.
     """
     cfg = read_cluster_config(cluster_id)
     namespaces = cfg.get("namespaces") or []
@@ -252,13 +268,32 @@ def publish_slot_pool(cluster_id: str) -> None:
 
     key = f"{_CLUSTER_CONFIG_KEY_PREFIX}{cluster_id}"
     payload = json.dumps({"data": {key: json.dumps(cfg, indent=2)}})
-    _run(
+    # Patch is non-fatal: publish_slot_pool's contract is that the
+    # on-disk mutation has already committed by the time we get here,
+    # and the CM patch is best-effort live propagation. A raise from
+    # this call would surface as an uncaught traceback in cmd_init /
+    # cmd_slot_add / cmd_slot_remove AFTER their on-disk mutation has
+    # already succeeded — misleading the operator into thinking the
+    # command failed. The narrow window that matters here: TOCTOU CM
+    # deletion between probe and patch, mid-command RBAC change, or a
+    # CM that has been made immutable. Warn and continue so the
+    # operator sees the problem without discarding the on-disk change.
+    patch_result = _run(
         [
             "kubectl", "patch", "configmap", _RUN_INPUTS_CONFIGMAP_NAME,
             f"-n={primary}", "--type=merge", "-p", payload,
         ],
-        check=True, capture=True,
+        check=False, capture=True,
     )
+    if patch_result.returncode != 0:
+        stderr = (patch_result.stderr or patch_result.stdout or "").strip()
+        warn(
+            f"publish_slot_pool: patch of {_RUN_INPUTS_CONFIGMAP_NAME}/{key} in "
+            f"{primary!r} failed (rc={patch_result.returncode}): {stderr}. "
+            f"On-disk change is written; live orchestrator (if any) will NOT "
+            f"see it until the patch succeeds on a later re-run."
+        )
+        return
     info(
         f"publish_slot_pool: patched {_RUN_INPUTS_CONFIGMAP_NAME}/{key} in "
         f"{primary!r}; running orchestrator (if any) will see the change "
@@ -810,8 +845,12 @@ def apply_cluster_resources(cluster_id: str) -> None:
 
     The manifest path is ``cluster_config['pipeline_yaml']`` when set,
     otherwise the default ``pipeline/pipeline.yaml`` bundled with the
-    framework. Operators pick the override at provision time via
-    ``cluster.py provision --pipeline-yaml PATH``.
+    framework. Operators pick the override at init time via
+    ``cluster.py init <cluster_id> <primary> --pipeline-yaml PATH``
+    (or ``cluster.py provision <cluster_id> --namespaces … --pipeline-yaml PATH``
+    on a fresh cluster). Against an already-initialized cluster,
+    ``--pipeline-yaml`` on the sugar path warns and is ignored — the
+    override is fixed at init time.
 
     Idempotent: ``kubectl apply`` is a no-op when the live object matches
     the supplied manifest; subsequent invocations succeed silently.

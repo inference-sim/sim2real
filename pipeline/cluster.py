@@ -429,9 +429,15 @@ def cmd_init(args: argparse.Namespace) -> int:
     )
     print(_format_summary_line(result))
 
-    # Publish is almost always a no-op skip at init time (no CM yet), but
-    # covers the edge case where the operator re-runs init after a
-    # prior 'deploy.py run --remote' left a dangling ConfigMap.
+    # Publish at init time typically skips (no CM yet — cmd_init refuses
+    # if cluster_config.json already exists, so we only reach here for
+    # fresh clusters). The one scenario where the CM might already exist:
+    # an operator initializing from a workspace directory or machine
+    # where the local cluster_config.json is absent but a prior
+    # 'deploy.py run --remote' left a dangling ConfigMap in the primary
+    # namespace. In that case publish patches the dangling CM so it
+    # matches the freshly-initialized state; a probe / patch failure is
+    # non-fatal and surfaces as a warn.
     cluster_ops.publish_slot_pool(cluster_id)
 
     return 1 if result.steps_failed else 0
@@ -463,15 +469,18 @@ def cmd_slot_add(args: argparse.Namespace) -> int:
         # advertise a slot that isn't usable.
         return 1
 
-    current = list(cluster_config.get("namespaces") or [])
-    if namespace not in current:
-        current.append(namespace)
-        cluster_ops.update_cluster_config(cluster_id, namespaces=current)
-
     # Apply the Pipeline definition to the (possibly newly-provisioned)
-    # namespace. Idempotent kubectl apply — no-op if the Pipeline is
-    # already there. Uses the per-namespace helper so we don't re-apply
-    # to every namespace in the pool.
+    # namespace BEFORE appending to the pool. In local mode the
+    # workstation orchestrator's ``_refresh_namespaces`` reads the same
+    # on-disk file we're about to mutate, so appending first would let
+    # the local dispatch loop pick up a namespace whose Tekton Pipeline
+    # is still missing. Applying first keeps the pool contents in sync
+    # with cluster reality: a Pipeline-apply failure means the on-disk
+    # ``namespaces`` list is unchanged and the CM patch is not fired,
+    # so both local and --remote consumers see the pre-change state.
+    # Idempotent kubectl apply — no-op if the Pipeline is already there.
+    # Uses the per-namespace helper so we don't re-apply to every
+    # namespace in the pool.
     try:
         cluster_ops.apply_pipeline_to_namespace(cluster_id, namespace)
     except FileNotFoundError as exc:
@@ -481,6 +490,11 @@ def cmd_slot_add(args: argparse.Namespace) -> int:
         msg = (exc.stderr or exc.stdout or str(exc)).strip()
         print(f"error: pipeline apply failed for {namespace}: {msg}", file=sys.stderr)
         return 1
+
+    current = list(cluster_config.get("namespaces") or [])
+    if namespace not in current:
+        current.append(namespace)
+        cluster_ops.update_cluster_config(cluster_id, namespaces=current)
 
     cluster_ops.publish_slot_pool(cluster_id)
     return 0

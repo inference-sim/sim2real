@@ -697,6 +697,50 @@ class TestCmdSlotAdd:
         assert "-n=ns-b" in ns_flags
         # Nothing applied to ns-primary — this was a per-namespace apply.
         assert "-n=ns-primary" not in ns_flags
+        # publish_slot_pool fired: probe against primary namespace.
+        assert any(
+            c[:4] == ["kubectl", "get", "configmap", "sim2real-run-inputs"]
+            and "-n=ns-primary" in c
+            for c in fake_run.calls
+        ), "expected publish_slot_pool to probe the run-inputs CM against ns-primary"
+
+    def test_slot_add_skips_append_and_publish_when_provision_fails(
+        self, fake_run, monkeypatch, capsys
+    ):
+        """When provision_namespace's steps_failed is non-empty, cmd_slot_add
+        must NOT (a) append the namespace to the pool on disk and (b) fire
+        publish_slot_pool — advertising a not-usable slot is the whole failure
+        mode this guard exists to prevent (cluster.py:460-464)."""
+        monkeypatch.setattr(cluster_ops, "_which", lambda cmd: False)
+        _install_fs_stubs(monkeypatch)
+        self._init_cluster(monkeypatch, fake_run)
+
+        # Force _step_rbac to fail on ns-b (mirrors the pattern in
+        # TestProvisionOrchestration.test_returns_one_when_any_namespace_failed).
+        def failing_rbac(ns, cfg, sv):
+            return ("failed", "synthetic kubectl forbidden")
+        monkeypatch.setattr(cluster_ops, "_step_rbac", failing_rbac)
+
+        rc = cluster_cmd.main([
+            "slot", "add", "ocp-east", "ns-b",
+            "--hf-token", "hf",
+            "--registry-user", "ru", "--registry-token", "rt",
+        ])
+        assert rc == 1
+        # Pool contents unchanged — ns-b never made it in.
+        cfg = cluster_ops.read_cluster_config("ocp-east")
+        assert cfg["namespaces"] == ["ns-primary"]
+        # No CM probe — publish_slot_pool was never called.
+        assert not any(
+            c[:4] == ["kubectl", "get", "configmap", "sim2real-run-inputs"]
+            for c in fake_run.calls
+        ), "publish_slot_pool must not fire when provisioning diverged"
+        # No pipeline apply either — cmd_slot_add's steps_failed early return
+        # is above the pipeline-apply call site.
+        assert not any(
+            c[:2] == ["kubectl", "apply"] and any("pipeline.yaml" in tok for tok in c)
+            for c in fake_run.calls
+        )
 
     def test_slot_add_idempotent_for_existing_namespace(
         self, fake_run, monkeypatch
@@ -753,6 +797,12 @@ class TestCmdSlotRemove:
         assert "ns-b: removed from pool" in out
         # No cluster-side teardown — no `kubectl delete` calls anywhere.
         assert not any(c[:2] == ["kubectl", "delete"] for c in fake_run.calls)
+        # publish_slot_pool fired: probe against primary namespace.
+        assert any(
+            c[:4] == ["kubectl", "get", "configmap", "sim2real-run-inputs"]
+            and "-n=ns-primary" in c
+            for c in fake_run.calls
+        ), "expected publish_slot_pool to probe the run-inputs CM against ns-primary"
 
     def test_refuses_primary_removal(self, fake_run, capsys):
         self._init_two_slot_cluster()
@@ -886,6 +936,8 @@ class TestPublishSlotPool:
         monkeypatch.setattr(layout, "set_experiment_root", lambda _arg: None)
 
     def test_patches_cm_when_present(self, fake_run):
+        import json as _json
+
         cluster_ops.write_cluster_config("ocp-east", {
             "cluster_id": "ocp-east",
             "namespaces": ["ns-primary", "ns-b"],
@@ -898,17 +950,35 @@ class TestPublishSlotPool:
 
         cluster_ops.publish_slot_pool("ocp-east")
 
+        # The probe uses --ignore-not-found so an absent CM gives rc=0 with
+        # empty stdout instead of rc=1. This flag is what makes the
+        # "warn on rc != 0 / info on empty stdout" split at cluster_ops.py
+        # do the right thing on the CM-absent branch.
+        probe_calls = [
+            c for c in fake_run.calls
+            if c[:4] == ["kubectl", "get", "configmap", "sim2real-run-inputs"]
+        ]
+        assert len(probe_calls) == 1
+        assert "--ignore-not-found" in probe_calls[0]
+
         patch_calls = [c for c in fake_run.calls if c[:3] == ["kubectl", "patch", "configmap"]]
         assert len(patch_calls) == 1
         patch = patch_calls[0]
         assert "sim2real-run-inputs" in patch
         assert "-n=ns-primary" in patch
         assert "--type=merge" in patch
-        # -p payload comes right after --type=merge; carries the config key.
+        # -p payload comes right after --type=merge; verify JSON structure
+        # (not just substring match). The payload is a two-level JSON string:
+        # the outer {"data": {"cluster_config--<id>": <inner>}} is what
+        # kubectl merges, and <inner> is itself a JSON string that
+        # `_configmap_items` will project into the Pod's volume mount.
         p_idx = patch.index("-p")
         payload = patch[p_idx + 1]
-        assert "cluster_config--ocp-east" in payload
-        assert "ns-b" in payload
+        payload_obj = _json.loads(payload)
+        assert list(payload_obj.keys()) == ["data"]
+        assert list(payload_obj["data"].keys()) == ["cluster_config--ocp-east"]
+        inner_config = _json.loads(payload_obj["data"]["cluster_config--ocp-east"])
+        assert inner_config["namespaces"] == ["ns-primary", "ns-b"]
 
     def test_skips_when_cm_absent(self, fake_run):
         cluster_ops.write_cluster_config("ocp-east", {
