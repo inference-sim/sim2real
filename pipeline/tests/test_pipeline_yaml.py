@@ -168,12 +168,66 @@ class TestStreamGpuStatsTask:
         assert s_rd == w_rd, f"resultsDir mismatch: streamer={s_rd!r} workload={w_rd!r}"
 
 
+class TestStreamMetricsTask:
+    """stream-metrics task invocation in pipeline.yaml."""
+
+    def _get_stream_metrics_task(self):
+        pipeline = yaml.safe_load(PIPELINE_YAML.read_text())
+        tasks = pipeline["spec"]["tasks"]
+        s = [t for t in tasks if t["name"] == "stream-metrics"]
+        assert len(s) == 1, "Expected exactly one stream-metrics task"
+        return s[0]
+
+    def test_task_present(self):
+        """stream-metrics must be wired into the pipeline."""
+        self._get_stream_metrics_task()
+
+    def test_task_ref(self):
+        """taskRef points at the stream-metrics Task resource."""
+        task = self._get_stream_metrics_task()
+        assert task["taskRef"]["name"] == "stream-metrics"
+
+    def test_runs_after_standup_and_prepare(self):
+        """Streamer starts as soon as the model stack is up and RESULTS_DIR exists — in parallel with the workload."""
+        task = self._get_stream_metrics_task()
+        run_after = task["runAfter"]
+        assert "llmdbenchmark-standup" in run_after
+        assert "prepare-results-dir" in run_after
+        assert "run-workload-blis-observe-binary" not in run_after, (
+            "Streamer must run in parallel with the workload, not after it."
+        )
+
+    def test_data_workspace_bound(self):
+        """data workspace must be bound to data-storage so the CSV lands on the shared PVC."""
+        task = self._get_stream_metrics_task()
+        ws = {w["name"]: w["workspace"] for w in task["workspaces"]}
+        assert ws.get("data") == "data-storage"
+
+    def test_has_namespace_and_results_dir(self):
+        """stream-metrics needs both params to know where to scrape and where to write."""
+        task = self._get_stream_metrics_task()
+        names = [p["name"] for p in task["params"]]
+        assert "namespace" in names
+        assert "resultsDir" in names
+
+    def test_results_dir_matches_workload(self):
+        """The streamer's resultsDir must be identical to the workload's, so its output sits next to the workload's trace files."""
+        pipeline = yaml.safe_load(PIPELINE_YAML.read_text())
+        tasks = pipeline["spec"]["tasks"]
+        s = next(t for t in tasks if t["name"] == "stream-metrics")
+        w = next(t for t in tasks if t["name"] == "run-workload-blis-observe-binary")
+        s_rd = next(p["value"] for p in s["params"] if p["name"] == "resultsDir")
+        w_rd = next(p["value"] for p in w["params"] if p["name"] == "resultsDir")
+        assert s_rd == w_rd, f"resultsDir mismatch: streamer={s_rd!r} workload={w_rd!r}"
+
+
 class TestPrepareResultsDirTask:
     """prepare-results-dir is the single owner of RESULTS_DIR creation; every writer must runAfter it."""
 
     WRITERS = [
         "stream-epp-logs",
         "stream-gpu-stats",
+        "stream-metrics",
         "run-workload-blis-observe-binary",
         "collect-results",
     ]

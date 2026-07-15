@@ -513,6 +513,33 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 Per phase, the resolved llm-d-benchmark plan YAMLs are also pulled into `workspace/runs/<run>/results/{phase}/plans/{flow}/*.yaml` (top-level numbered manifests + `config.yaml`, no `helm/` subdir). Plans are workload-invariant within a phase, so collect picks one workload's latest `root-*` render to source the phase's plans. Plan extraction is best-effort and non-fatal — failures warn but do not block trace collection.
 
+Sibling streaming sidecars land alongside the trace files under each `i<N>/`:
+
+- `epp_logs/` — EPP pod logs, time-bucketed (produced by `stream-epp-logs`).
+- `gpu_logs/` — per-node `nvidia-smi` samples, one file per node (produced by `stream-gpu-stats`).
+- `metrics/timeseries.csv` — EPP and vLLM `/metrics` scrapes on a 2 s cadence (produced by `stream-metrics`; columns `timestamp_us,target,metric_name,labels,value` — matches `trace_data.csv`'s `_us` convention).
+- `metrics/<target>.discovered.txt` — sorted-unique list of every metric name each target exposed on its first scrape; consult this file to decide what to widen the allowlist to next run.
+- `epp_stream_done` / `gpu_stream_done` / `metrics_stream_done` — sentinel files written by `collect-results` when the workload finishes; each streamer polls its sentinel and exits.
+
+### Metric capture (`stream-metrics`)
+
+The `stream-metrics` sidecar discovers each pipelinerun's EPP and vLLM decode pods via label selectors (`llm-d.ai/igw-mode=llm-d-router-gateway` with `inferencepool` fallback for EPP; `llm-d.ai/role=decode` for vLLM), scrapes `/metrics` on ports `eppPort=9090` and `vllmPort=8000` (both task-param-overridable), and appends one CSV row per (scrape × metric-line) that passes the allowlist.
+
+**Default `metricsAllowlist` (prefix-match):** the EPP SaturationDetector inputs (`vllm:num_requests_waiting`, `vllm:gpu_cache_usage_perc`), the derived saturation value the flow-controller consumes (`flow_control_pool_saturation`), plus queue-time histogram (`vllm:request_queue_time_seconds`), preemption counter (`vllm:num_preemptions_total`), prefix-cache counters (`vllm:gpu_prefix_cache_hits_total` / `_queries_total`), running-request gauge (`vllm:num_requests_running`), and per-iteration throughput (`vllm:iteration_tokens_total`). Prefix-match means histogram `_bucket` / `_sum` / `_count` variants come along automatically. Empty string in the param = capture everything (research escape hatch — expect ~500 metrics/target/scrape).
+
+**Discovering what a target actually exposes.** On the first successful scrape of each target, the sidecar writes `metrics/<target>.discovered.txt` — the sorted-unique list of every metric name it saw, unfiltered. Read this file after any run to widen the allowlist from evidence:
+
+```bash
+cat workspace/runs/<run>/results/<phase>/<workload>/i<N>/metrics/epp:<pod>.discovered.txt
+```
+
+**Live inspection** (outside a run):
+
+```bash
+kubectl port-forward -n <namespace> <epp-or-vllm-pod> 9090:9090
+curl -s http://localhost:9090/metrics | grep -v '^#' | awk '{sub(/\{.*/, ""); print $1}' | sort -u
+```
+
 | Flag | Description |
 |------|-------------|
 | `--only PAIR…` | Scope to specific pair keys — narrows both workload and package (comma or space-separated, `wl-` prefix optional; takes precedence over `--workload`) |
