@@ -1458,7 +1458,7 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                         # only — iterations we skip keep their existing
                         # contents, and iterations from other slots outside
                         # iN_names stay untouched.
-                        for sub in ("server_logs", "epp_logs", "gpu_logs", "resources"):
+                        for sub in ("server_logs", "epp_logs", "gpu_logs", "metrics", "resources"):
                             p = iN_dest / sub
                             if p.exists():
                                 shutil.rmtree(p)
@@ -1469,7 +1469,8 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                         )
                         # Copy trace files
                         for fname in ("trace_data.csv", "trace_header.yaml",
-                                      "epp_stream_done", "gpu_stream_done"):
+                                      "epp_stream_done", "gpu_stream_done",
+                                      "metrics_stream_done"):
                             r = run(
                                 ["kubectl", "cp", f"{remote_prefix}/{fname}",
                                  str(iN_dest / fname), "--retries=3"],
@@ -1502,6 +1503,18 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                         if r.returncode != 0 and "no such file" not in r.stderr.lower():
                             wl_errors.append(
                                 f"{wl_name}/{iN}/gpu_logs: {r.stderr.strip()}"
+                            )
+                        # Copy metrics directory
+                        metrics_dest = iN_dest / "metrics"
+                        metrics_dest.mkdir(exist_ok=True)
+                        r = run(
+                            ["kubectl", "cp", f"{remote_prefix}/metrics/",
+                             str(metrics_dest), "--retries=3"],
+                            check=False, capture=True,
+                        )
+                        if r.returncode != 0 and "no such file" not in r.stderr.lower():
+                            wl_errors.append(
+                                f"{wl_name}/{iN}/metrics: {r.stderr.strip()}"
                             )
                         # Copy resources directory
                         res_dest = iN_dest / "resources"

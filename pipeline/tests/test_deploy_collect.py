@@ -1760,6 +1760,10 @@ def test_collect_skip_logs_clears_stale_log_dirs(tmp_path, monkeypatch):
     stale_gpu.parent.mkdir(parents=True)
     stale_gpu.write_text("stale gpu log")
 
+    stale_metrics = iter_dir / "metrics" / "stale.csv"
+    stale_metrics.parent.mkdir(parents=True)
+    stale_metrics.write_text("stale metrics csv")
+
     data = {
         "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
     }
@@ -1787,6 +1791,7 @@ def test_collect_skip_logs_clears_stale_log_dirs(tmp_path, monkeypatch):
     assert not (iter_dir / "server_logs").exists()
     assert not stale_epp.exists()
     assert not stale_gpu.exists()
+    assert not stale_metrics.exists()
 
 
 def test_collect_skip_logs_invokes_gpu_logs_copy(tmp_path, monkeypatch):
@@ -1828,6 +1833,49 @@ def test_collect_skip_logs_invokes_gpu_logs_copy(tmp_path, monkeypatch):
     assert "/wl-smoke/i1/gpu_logs/" in sources, f"no i1/gpu_logs/ copy issued; saw: {cp_targets}"
     assert "/wl-smoke/i1/epp_logs/" in sources, f"sanity: i1/epp_logs/ copy still issued; saw: {cp_targets}"
     assert "/wl-smoke/i1/gpu_stream_done" in sources, f"no i1/gpu_stream_done sentinel copy; saw: {cp_targets}"
+
+
+def test_collect_skip_logs_invokes_metrics_copy(tmp_path, monkeypatch):
+    """--skip-logs path issues a kubectl cp for metrics/ alongside epp_logs/ and gpu_logs/,
+    scoped to each iteration subdirectory (post step-5 layout), and copies the
+    metrics_stream_done sentinel."""
+    from pipeline import deploy
+    import subprocess
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+
+    data = {
+        "wl-smoke-baseline": {"workload": "smoke", "package": "baseline", "status": "done", "completed_namespace": "ns-0"},
+    }
+    _mock_cm(monkeypatch, data)
+
+    cp_targets = []
+
+    def mock_run(cmd, **kwargs):
+        mock = MagicMock(returncode=0, stdout="", stderr="")
+        cmd_list = cmd if isinstance(cmd, list) else cmd.split()
+        cmd_str = " ".join(cmd_list)
+        if "exec" in cmd_str and "ls " in cmd_str and "/wl-smoke/" in cmd_str:
+            mock.stdout = "i1"
+        elif "exec" in cmd_str and "ls" in cmd_str:
+            mock.stdout = "wl-smoke"
+        if "exec" in cmd_str and "stat" in cmd_str:
+            mock.stdout = ""
+        if "cp" in cmd_list and len(cmd_list) >= 4:
+            cp_targets.append(cmd_list[2])
+        return mock
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    deploy._extract_phases_from_pvc(
+        ["baseline"], "test-run", "ns-0", run_dir, skip_logs=True)
+
+    sources = " ".join(cp_targets)
+    assert "/wl-smoke/i1/metrics/" in sources, (
+        f"no i1/metrics/ copy issued; saw: {cp_targets}")
+    assert "/wl-smoke/i1/metrics_stream_done" in sources, (
+        f"no i1/metrics_stream_done sentinel copy; saw: {cp_targets}")
 
 
 def test_collect_idempotent_no_stale_accumulation(tmp_path, monkeypatch):

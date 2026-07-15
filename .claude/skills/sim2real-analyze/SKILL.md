@@ -175,14 +175,20 @@ Loop until the user says "done", "exit", "quit", "that's all", or similar.
 workspace/runs/<name>/
   results/
     baseline/
-      workload_<name>/
-        trace_data.csv    # columns: send_time_us, first_chunk_time_us, last_chunk_time_us,
-                          #          output_tokens, arrival_time_us, input_tokens, status, ...
+      workload_<name>/                    # legacy shape; replica shape adds an i<N>/ segment
+        trace_data.csv    # per-request; columns: send_time_us, first_chunk_time_us,
+                          #                       last_chunk_time_us, output_tokens,
+                          #                       arrival_time_us, input_tokens, status, ...
         trace_header.yaml # model, time_unit (microseconds), workload_spec, server config
+        metrics/timeseries.csv       # EPP + vLLM Prometheus scrapes (optional — present
+                                     # when stream-metrics ran); columns:
+                                     # timestamp_us, target, metric_name, labels, value
+        metrics/<target>.discovered.txt  # sorted-unique metric names each target exposed
     treatment/
       workload_<name>/
         trace_data.csv
         trace_header.yaml
+        metrics/timeseries.csv
   deploy_comparison_table.txt  # written by analyses/latency_table.py
   results_charts/              # your analysis outputs go here
 ```

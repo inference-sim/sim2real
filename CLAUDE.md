@@ -115,6 +115,8 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). When no `-
 | `runs/<run>/cluster/pipelinerun-*.yaml` | `sim2real assemble` | `deploy.py run` |
 | `runs/<run>/results/{phase}/` | `deploy.py collect` | `/sim2real-analyze` skill, `deploy.py wipe` |
 | `runs/<run>/results/{phase}/<workload>/i<N>/gpu_logs/<node>.log` | `deploy.py collect` (pulled from PVC) | analysis / debugging |
+| `runs/<run>/results/{phase}/<workload>/i<N>/metrics/timeseries.csv` | `deploy.py collect` (pulled from PVC) | analysis — EPP + vLLM `/metrics` time-series, columns `timestamp_us,target,metric_name,labels,value` (allowlist-filtered by `stream-metrics`); see `pipeline/README.md#metric-capture-stream-metrics` for defaults + widening |
+| `runs/<run>/results/{phase}/<workload>/i<N>/metrics/<target>.discovered.txt` | `deploy.py collect` (pulled from PVC) | ops — sorted-unique metric names the target exposed on first scrape; source of truth for widening `metricsAllowlist` |
 | ConfigMap `sim2real-progress-{scenario}-{run}` | `deploy.py run`, `deploy.py reset` | All `deploy.py` subcommands |
 | `runs/<run>/plans/<phase>/<workload>/` | `deploy.py run` | workload tasks |
 
