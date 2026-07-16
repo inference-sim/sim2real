@@ -53,6 +53,8 @@ def _make_run(
     write_manifest: bool = True,
     write_cluster_config: bool = True,
     results_layout: dict[str, list[str]] | None = None,
+    results_shape: str = "flat",
+    replicas: int = 2,
     write_cluster_scenarios: bool = True,
     include_pipelineruns: bool = True,
 ) -> Path:
@@ -139,12 +141,26 @@ def _make_run(
             {"cluster_id": cluster_id, "namespaces": ["ns-0"]},
         )
 
-    # results/<phase>/<workload>/trace_data.csv
+    # results/<phase>/<workload>/... — layout depends on ``results_shape``:
+    #   "flat"    → <workload>/trace_data.csv (legacy)
+    #   "replica" → <workload>/i{1..replicas}/trace_data.csv
+    #   "mixed"   → first workload uses replica, remainder use flat
+    if results_shape not in ("flat", "replica", "mixed"):
+        raise ValueError(f"unknown results_shape: {results_shape!r}")
     for phase, phase_workloads in results_layout.items():
-        for wl in phase_workloads:
+        for idx, wl in enumerate(phase_workloads):
             wl_dir = run_dir / "results" / phase / wl
             wl_dir.mkdir(parents=True, exist_ok=True)
-            (wl_dir / "trace_data.csv").write_text("dummy,csv\n")
+            use_replica = results_shape == "replica" or (
+                results_shape == "mixed" and idx == 0
+            )
+            if use_replica:
+                for i in range(1, replicas + 1):
+                    iter_dir = wl_dir / f"i{i}"
+                    iter_dir.mkdir(parents=True, exist_ok=True)
+                    (iter_dir / "trace_data.csv").write_text("dummy,csv\n")
+            else:
+                (wl_dir / "trace_data.csv").write_text("dummy,csv\n")
 
     # cluster scenario yamls
     if write_cluster_scenarios:
@@ -252,6 +268,66 @@ class TestResolveRunHappyPath:
             "code_generation_10",
             "code_generation_4",
         ]
+
+    def test_populates_results_section_replica_shape(self, tmp_path):
+        """Bug #572: replica-shape runs put trace_data.csv under iN/. The
+        one-level predicate used to miss them and return empty."""
+        _make_run(
+            tmp_path,
+            results_shape="replica",
+            replicas=2,
+            results_layout={
+                "softreflective": ["code_generation_4", "code_generation_10"]
+            },
+        )
+        result = resolve.resolve_run(tmp_path, "trial-1")
+        assert result["results"]["phases_with_data"] == ["softreflective"]
+        assert result["results"]["workloads_by_phase"]["softreflective"] == [
+            "code_generation_10",
+            "code_generation_4",
+        ]
+
+    def test_populates_results_section_mixed_shape(self, tmp_path):
+        """Mixed-shape run: one workload replica, another flat. Both
+        must be reported — the predicate accepts either shape."""
+        _make_run(
+            tmp_path,
+            results_shape="mixed",
+            replicas=2,
+            results_layout={
+                "softreflective": ["code_generation_4", "code_generation_10"]
+            },
+        )
+        result = resolve.resolve_run(tmp_path, "trial-1")
+        assert result["results"]["phases_with_data"] == ["softreflective"]
+        assert result["results"]["workloads_by_phase"]["softreflective"] == [
+            "code_generation_10",
+            "code_generation_4",
+        ]
+
+    def test_results_section_ignores_malformed_iter_dirs(self, tmp_path):
+        """A workload whose only children are non-iN dirs (or malformed iN
+        names like i0, iabc) reports no data. Guards against the naive
+        `any(child/trace_data.csv)` fix that would false-positive on
+        stray dirs like ``plans/`` or ``metrics/``."""
+        _make_run(
+            tmp_path,
+            results_layout={"softreflective": []},
+        )
+        # Materialize a workload dir with only bogus iteration-like children
+        # that DO contain trace_data.csv. The strict predicate must still
+        # report the phase as empty.
+        wl_dir = (
+            tmp_path / "workspace" / "runs" / "trial-1"
+            / "results" / "softreflective" / "code_generation_4"
+        )
+        wl_dir.mkdir(parents=True, exist_ok=True)
+        for bogus in ("i0", "iabc", "plans", "metrics"):
+            (wl_dir / bogus).mkdir()
+            (wl_dir / bogus / "trace_data.csv").write_text("bogus\n")
+        result = resolve.resolve_run(tmp_path, "trial-1")
+        assert result["results"]["phases_with_data"] == []
+        assert result["results"]["workloads_by_phase"] == {}
 
     def test_populates_cluster_scenarios(self, tmp_path):
         _make_run(tmp_path)

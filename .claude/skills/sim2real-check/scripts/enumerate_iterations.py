@@ -278,7 +278,20 @@ def _detect_shape(
 
 
 def _names(items) -> list[str]:
-    """Extract ``name`` field from a list of manifest dicts."""
+    """Extract workload/baseline/algorithm identifiers from a manifest list.
+
+    Two entry shapes are supported so the same helper serves all three
+    manifest sections:
+
+    - Dict entries with a ``name:`` field (baselines, algorithms, and
+      workloads in older/hand-edited manifests) — emit ``name``.
+    - String entries (workloads written by ``sim2real assemble`` as file
+      paths, e.g. ``workloads/code_generation_4.yaml``) — emit
+      ``Path(s).stem`` so the identifier matches the on-disk directory
+      name that ``_detect_shape`` compares against. Bug #572.
+
+    Empty strings and non-str/non-dict entries are silently skipped.
+    """
     if not isinstance(items, list):
         return []
     out = []
@@ -287,6 +300,10 @@ def _names(items) -> list[str]:
             name = it.get("name")
             if isinstance(name, str) and name:
                 out.append(name)
+        elif isinstance(it, str) and it:
+            stem = Path(it).stem
+            if stem:
+                out.append(stem)
     return out
 
 

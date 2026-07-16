@@ -22,6 +22,7 @@ def _make_run(
     workloads: list[str],
     translation_algorithms: list[str] | None = None,
     disk_layout: dict | None = None,
+    workloads_as_paths: bool = False,
 ) -> Path:
     """Materialize a run under ``root/workspace/`` with the given shape.
 
@@ -75,6 +76,7 @@ def _make_run(
             algorithms=algorithms,
             baselines=baselines,
             workloads=workloads,
+            workloads_as_paths=workloads_as_paths,
         )
     )
 
@@ -105,12 +107,22 @@ def _manifest_yaml(
     algorithms: list[str],
     baselines: list[str],
     workloads: list[str],
+    workloads_as_paths: bool = False,
 ) -> str:
-    """Minimal manifest.assembly.yaml the enumerator can read."""
+    """Minimal manifest.assembly.yaml the enumerator can read.
+
+    ``workloads_as_paths=True`` writes workload entries as file-path
+    strings (``workloads/<w>.yaml``) matching what ``sim2real assemble``
+    writes to ``manifest.assembly.yaml`` in v3. Default False keeps the
+    legacy dict shape used by earlier tests.
+    """
     lines = [f"replicas: {replicas}"]
     lines.append("workloads:")
     for w in workloads:
-        lines.append(f"  - name: {w}")
+        if workloads_as_paths:
+            lines.append(f"  - workloads/{w}.yaml")
+        else:
+            lines.append(f"  - name: {w}")
     lines.append("baselines:")
     for b in baselines:
         lines.append(f"  - name: {b}")
@@ -391,3 +403,65 @@ def test_main_exit_code_on_missing_iteration(tmp_path):
     )
     rc = ei.main(["--run", "trial", "--experiment-root", str(tmp_path)])
     assert rc == 1
+
+
+# ── Bug #572: _names accepts string entries + end-to-end path-string case ────
+
+
+def test_names_accepts_dict_entries():
+    """Legacy shape: dict with a ``name:`` field."""
+    assert ei._names([{"name": "a"}, {"name": "b"}]) == ["a", "b"]
+
+
+def test_names_accepts_string_entries():
+    """Bug #572: workload entries in manifest.assembly.yaml written by
+    ``sim2real assemble`` are path strings. ``_names`` must derive the
+    workload identifier from ``Path(s).stem``."""
+    got = ei._names(
+        [
+            "workloads/code_generation_4.yaml",
+            "workloads/interactive_chat_20.yaml",
+        ]
+    )
+    assert got == ["code_generation_4", "interactive_chat_20"]
+
+
+def test_names_accepts_mixed_dict_and_string_entries():
+    """Neither branch shadows the other."""
+    assert ei._names([{"name": "a"}, "workloads/b.yaml"]) == ["a", "b"]
+
+
+def test_names_silently_skips_junk():
+    """Non-str/non-dict entries and empty strings are dropped."""
+    assert ei._names([None, "", 42, {"name": ""}, [], {}]) == []
+
+
+def test_names_bare_string_no_extension():
+    """A bare identifier (no ``.yaml``) still passes through — ``Path.stem``
+    returns the string unchanged when there's no suffix."""
+    assert ei._names(["code_generation_4"]) == ["code_generation_4"]
+
+
+def test_end_to_end_path_string_workloads_replica_shape(tmp_path, capsys):
+    """Bug #572 regression: manifest with workload path strings + replica
+    disk shape used to yield zero rows. Must now enumerate the full grid.
+    """
+    _make_run(
+        tmp_path,
+        run_name="trial",
+        replicas=2,
+        algorithms=["sim2real-ac"],
+        baselines=["baseline"],
+        workloads=["wl-chat", "wl-code"],
+        workloads_as_paths=True,
+    )
+    rc = ei.main(["--run", "trial", "--experiment-root", str(tmp_path)])
+    payload = json.loads(capsys.readouterr().out)
+    # 2 phases (baseline + sim2real-ac) x 2 workloads x 2 iterations = 8 PRESENT
+    assert payload["counts"]["PRESENT"] == 8
+    assert payload["counts"]["MISSING"] == 0
+    assert payload["counts"]["SKIP"] == 0
+    assert rc == 0
+    # Confirm the workload identifiers resolved to stems (not paths).
+    workloads_seen = {r["workload"] for r in payload["rows"]}
+    assert workloads_seen == {"wl-chat", "wl-code"}

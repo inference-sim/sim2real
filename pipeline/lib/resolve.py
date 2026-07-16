@@ -21,6 +21,7 @@ config detail) — those remain the check skill's responsibility.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,36 @@ from pipeline.lib import layout, translation_ref
 
 
 SCHEMA_VERSION = 1
+
+# Same grammar the sim2real-check enumerator uses (i1, i2, i10, ...).
+# Rejects i0, i01, iabc. Kept in sync manually — if the enumerator's
+# _ITER_DIR_RE ever loosens or tightens, mirror the change here.
+_ITER_DIR_RE = re.compile(r"^i[1-9][0-9]*$")
+
+
+def _workload_has_data(wl: Path) -> bool:
+    """Return True if ``wl`` contains ``trace_data.csv`` in either shape.
+
+    - Legacy flat: ``<workload>/trace_data.csv``.
+    - Replica: at least one ``<workload>/iN/trace_data.csv`` with ``iN``
+      matching the iteration-dir grammar.
+
+    Bug #572: prior to this helper the predicate was flat-only, so
+    replica-shape runs (the shape ``sim2real assemble`` produces when
+    ``manifest.assembly.yaml:replicas > 1``) reported zero workloads and
+    fed an empty input list into the ``sim2real-check`` skill.
+    """
+    if (wl / "trace_data.csv").exists():
+        return True
+    try:
+        return any(
+            _ITER_DIR_RE.match(child.name)
+            and (child / "trace_data.csv").exists()
+            for child in wl.iterdir()
+            if child.is_dir()
+        )
+    except OSError:
+        return False
 
 
 class ResolveError(Exception):
@@ -201,9 +232,9 @@ def _build_results_section(run_dir: Path, manifest_assembly: dict | None) -> dic
     ``phases_declared`` is the union of baseline names + algorithm names
     from ``manifest.assembly.yaml``. ``phases_with_data`` filters that
     list to entries whose subdir contains at least one workload with
-    ``trace_data.csv``. Predicate is one-level glob
-    ``results/<phase>/*/trace_data.csv`` (not recursive) — avoids false
-    positives from sibling dirs like ``plans/``.
+    ``trace_data.csv`` in either shape: legacy flat
+    ``<workload>/trace_data.csv`` or replica
+    ``<workload>/iN/trace_data.csv``. See ``_workload_has_data``.
     """
     results_dir = run_dir / "results"
     declared = _phases_declared_from_manifest(manifest_assembly)
@@ -217,7 +248,7 @@ def _build_results_section(run_dir: Path, manifest_assembly: dict | None) -> dic
             phase_workloads = sorted(
                 wl.name
                 for wl in phase_dir.iterdir()
-                if wl.is_dir() and (wl / "trace_data.csv").exists()
+                if wl.is_dir() and _workload_has_data(wl)
             )
             if phase_workloads:
                 with_data.append(phase)
