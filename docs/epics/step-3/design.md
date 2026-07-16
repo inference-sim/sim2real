@@ -161,8 +161,8 @@ sim2real resolve --run <name> [--experiment-root <path>]
 - `cluster_config_path`: composed as `<experiment-root>/workspace/clusters/<cluster_id>/cluster_config.json`. Exists check performed; emitted as-is if present, `null` if the file is absent (partial workspace).
 - `translation.*`: `translation_output.json` (via `pipeline/lib/translation_ref.py:read_translation_output`) + filesystem probes for generated dirs.
 - `results.phases_declared`: union of `baselines[].name` + `algorithms[].name` from `manifest.assembly.yaml`. Represents what SHOULD have run.
-- `results.phases_with_data`: `phases_declared` filtered to entries whose subdir contains at least one workload with `trace_data.csv`. Predicate: `results/<phase>/*/trace_data.csv` — one-level glob (not recursive; avoids false positives from `plans/*.csv` or similar sibling dirs). Invariant: `phases_with_data ⊆ phases_declared`.
-- `results.workloads_by_phase`: filesystem listing of `results/<phase>/*/trace_data.csv` (per-phase). Predicate matches `phases_with_data`'s definition.
+- `results.phases_with_data`: `phases_declared` filtered to entries whose subdir contains at least one workload with `trace_data.csv`. Predicate accepts either shape: `results/<phase>/<workload>/trace_data.csv` (legacy flat) OR `results/<phase>/<workload>/iN/trace_data.csv` where `iN` matches `^i[1-9][0-9]*$` (replica shape written by `sim2real assemble` when `replicas > 1`). See `pipeline/lib/resolve.py:_workload_has_data` (issue #572). Invariant: `phases_with_data ⊆ phases_declared`.
+- `results.workloads_by_phase`: filesystem listing per-phase using the same predicate as `phases_with_data`.
 - `cluster_scenarios.*`: filesystem listing of `cluster/*.yaml`.
 - `manifest_assembly.*`: parsed `manifest.assembly.yaml`.
 
