@@ -567,9 +567,13 @@ def cmd_slot_remove(args: argparse.Namespace) -> int:
 
     new_namespaces = [ns for ns in namespaces if ns != namespace]
     cluster_ops.update_cluster_config(cluster_id, namespaces=new_namespaces)
-    print(f"{namespace}: removed from pool "
-          f"(metrics-reader RBAC + Secret cleaned; other cluster-side "
-          f"resources preserved)")
+    if ok:
+        status_tail = ("metrics-reader RBAC + Secret cleaned; "
+                       "other cluster-side resources preserved")
+    else:
+        status_tail = ("metrics-reader teardown had errors — see stderr; "
+                       "other cluster-side resources preserved")
+    print(f"{namespace}: removed from pool ({status_tail})")
 
     cluster_ops.publish_slot_pool(cluster_id)
     return 0

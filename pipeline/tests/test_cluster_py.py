@@ -940,7 +940,15 @@ class TestCmdSlotRemove:
         namespace from the on-disk pool config. Leaving the namespace in
         the pool while its resources are half-gone would be worse than a
         leaked binding — the pool config should track intent, not partial
-        cluster state."""
+        cluster state.
+
+        Also asserts:
+        - the Secret delete IS still attempted even after the CRB delete
+          fails (the Secret is the more sensitive residual — a bearer
+          token — so we can't short-circuit past it);
+        - stdout does NOT falsely claim success (the "cleaned" phrasing
+          is gated on ok=True and replaced with an errors-summary on the
+          failure path)."""
         self._init_two_slot_cluster()
         fake_run.set(
             ["kubectl", "delete", "clusterrolebinding",
@@ -955,6 +963,27 @@ class TestCmdSlotRemove:
         assert "metrics-reader teardown incomplete" in cap.err
         assert "Forbidden" in cap.err
         assert "ns-b: removed from pool" in cap.out
+        # Secret delete must still be attempted after the CRB failure —
+        # short-circuiting past it would leave the more sensitive residual
+        # (a long-lived SA-token Secret) behind.
+        assert any(
+            c[:4] == ["kubectl", "delete", "secret",
+                      "inference-gateway-sa-metrics-reader-secret"]
+            and "-n=ns-b" in c and "--ignore-not-found" in c
+            for c in fake_run.calls
+        ), (
+            f"expected secret delete to be attempted even after CRB delete "
+            f"failed; saw: {fake_run.calls}"
+        )
+        # stdout on the failure path must not falsely claim the resources
+        # were cleaned. Keep the operator-facing message honest.
+        assert "cleaned" not in cap.out, (
+            f"stdout falsely claims resources were cleaned on failure path: "
+            f"{cap.out!r}"
+        )
+        assert "errors" in cap.out, (
+            f"stdout should indicate errors on the failure path: {cap.out!r}"
+        )
 
     def test_refuses_primary_removal(self, fake_run, capsys):
         self._init_two_slot_cluster()
