@@ -180,15 +180,19 @@ workspace/runs/<name>/
                           #                       last_chunk_time_us, output_tokens,
                           #                       arrival_time_us, input_tokens, status, ...
         trace_header.yaml # model, time_unit (microseconds), workload_spec, server config
-        metrics/timeseries.csv       # EPP + vLLM Prometheus scrapes (optional — present
-                                     # when stream-metrics ran); columns:
-                                     # timestamp_us, target, metric_name, labels, value
-        metrics/<target>.discovered.txt  # sorted-unique metric names each target exposed
+        metrics/raw/<pod>_<ts>_metrics.log   # Prometheus text-exposition dumps, one file
+                                             # per pod per scrape (optional — present when
+                                             # stream-metrics ran). Produced by
+                                             # collect_metrics.sh which stream-metrics wraps.
+        metrics/processed/metrics_summary.json    # post-run percentiles over the metrics
+                                                  # named in process_metrics.py:AGGREGATE_METRICS
+        metrics/processed/replica_status_timeseries.json  # replica state/scale over the run
     treatment/
       workload_<name>/
         trace_data.csv
         trace_header.yaml
-        metrics/timeseries.csv
+        metrics/raw/...
+        metrics/processed/...
   deploy_comparison_table.txt  # written by analyses/latency_table.py
   results_charts/              # your analysis outputs go here
 ```

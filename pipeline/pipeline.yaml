@@ -149,6 +149,14 @@ spec:
           value: "$(params.namespace)"
         - name: resultsDir
           value: "$(params.runName)/$(params.phase)/$(params.workloadName)/i$(params.replica)"
+        # Pin collect_metrics.sh + process_metrics.py to the SHA sim2real
+        # currently vendors in its llm-d-benchmark submodule, so the
+        # scraper in the pod matches what CI has been tested against.
+        # Bump this in lock-step with the submodule pointer whenever the
+        # submodule is updated. Same pattern install-inference-perf.yaml
+        # uses for pinning inference-perf's git commit.
+        - name: harnessSha
+          value: "76473d05a0f546a6bc0c4662ed7e34104da73891"
 
     - name: run-workload-blis-observe-binary
       runAfter: ["llmdbenchmark-standup", "install-blis", "prepare-results-dir"]
