@@ -908,14 +908,53 @@ class TestCmdSlotRemove:
         assert cfg["namespaces"] == ["ns-primary"]
         out = capsys.readouterr().out
         assert "ns-b: removed from pool" in out
-        # No cluster-side teardown — no `kubectl delete` calls anywhere.
-        assert not any(c[:2] == ["kubectl", "delete"] for c in fake_run.calls)
+        # metrics-reader teardown (issue #579 acceptance criterion #6):
+        # slot_remove now deletes the paired ClusterRoleBinding + Secret.
+        # No other kubectl deletes — every other cluster-side resource
+        # (Role, RoleBinding, SA, PVCs, deployed stacks) is preserved.
+        delete_calls = [c for c in fake_run.calls if c[:2] == ["kubectl", "delete"]]
+        assert any(
+            c[:4] == ["kubectl", "delete", "clusterrolebinding",
+                      "sim2real-metrics-reader-ns-b"]
+            and "--ignore-not-found" in c
+            for c in delete_calls
+        ), f"expected CRB delete for ns-b; saw: {delete_calls}"
+        assert any(
+            c[:4] == ["kubectl", "delete", "secret",
+                      "inference-gateway-sa-metrics-reader-secret"]
+            and "-n=ns-b" in c and "--ignore-not-found" in c
+            for c in delete_calls
+        ), f"expected reader-secret delete in ns-b; saw: {delete_calls}"
+        assert len(delete_calls) == 2, (
+            f"exactly two deletes expected (CRB + Secret); saw: {delete_calls}"
+        )
         # publish_slot_pool fired: probe against primary namespace.
         assert any(
             c[:4] == ["kubectl", "get", "configmap", "sim2real-run-inputs"]
             and "-n=ns-primary" in c
             for c in fake_run.calls
         ), "expected publish_slot_pool to probe the run-inputs CM against ns-primary"
+
+    def test_removes_non_primary_survives_partial_teardown_failure(self, fake_run, capsys):
+        """A kubectl delete failure logs a warning but still removes the
+        namespace from the on-disk pool config. Leaving the namespace in
+        the pool while its resources are half-gone would be worse than a
+        leaked binding — the pool config should track intent, not partial
+        cluster state."""
+        self._init_two_slot_cluster()
+        fake_run.set(
+            ["kubectl", "delete", "clusterrolebinding",
+             "sim2real-metrics-reader-ns-b", "--ignore-not-found"],
+            _completed(returncode=1, stderr="Forbidden"),
+        )
+        rc = cluster_cmd.main(["slot", "remove", "ocp-east", "ns-b"])
+        assert rc == 0
+        cfg = cluster_ops.read_cluster_config("ocp-east")
+        assert cfg["namespaces"] == ["ns-primary"]
+        cap = capsys.readouterr()
+        assert "metrics-reader teardown incomplete" in cap.err
+        assert "Forbidden" in cap.err
+        assert "ns-b: removed from pool" in cap.out
 
     def test_refuses_primary_removal(self, fake_run, capsys):
         self._init_two_slot_cluster()

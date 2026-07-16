@@ -513,7 +513,15 @@ def cmd_slot_add(args: argparse.Namespace) -> int:
 
 
 def cmd_slot_remove(args: argparse.Namespace) -> int:
-    """Remove a namespace from the pool. Drain-only; no cluster-side changes."""
+    """Remove a namespace from the pool.
+
+    Removes the paired metrics-reader RBAC (per-namespace ClusterRoleBinding
+    + Secret provisioned in :func:`cluster_ops.deprovision_metrics_rbac`);
+    other in-namespace resources (Roles, RoleBindings, ServiceAccounts,
+    PVCs, deployed model stacks) are left in place — those are shared
+    with any drained but not-yet-torn-down workloads and rebuild cost is
+    high.
+    """
     cluster_id = args.cluster_id
     namespace = args.namespace
 
@@ -548,9 +556,20 @@ def cmd_slot_remove(args: argparse.Namespace) -> int:
         )
         return 1
 
+    # Delete cluster-side metrics-reader resources first, then update the
+    # on-disk pool. A delete failure surfaces but doesn't block the
+    # pool-config update: leaving the namespace in the pool while its
+    # resources are half-gone would be worse than a leaked binding.
+    ok, err = cluster_ops.deprovision_metrics_rbac(namespace)
+    if not ok:
+        print(f"warning: metrics-reader teardown incomplete: {err}",
+              file=sys.stderr)
+
     new_namespaces = [ns for ns in namespaces if ns != namespace]
     cluster_ops.update_cluster_config(cluster_id, namespaces=new_namespaces)
-    print(f"{namespace}: removed from pool (cluster-side resources preserved)")
+    print(f"{namespace}: removed from pool "
+          f"(metrics-reader RBAC + Secret cleaned; other cluster-side "
+          f"resources preserved)")
 
     cluster_ops.publish_slot_pool(cluster_id)
     return 0

@@ -409,6 +409,53 @@ def namespace_provisioned(namespace: str) -> bool:
     ).returncode == 0
 
 
+def deprovision_metrics_rbac(namespace: str) -> tuple[bool, str]:
+    """Delete the per-namespace metrics-reader RBAC + Secret provisioned
+    by :func:`provision_namespace`'s ``_step_rbac`` from roles-cluster.yaml
+    and roles-ns.yaml (see sim2real#579).
+
+    Two resources:
+
+    - ClusterRoleBinding ``sim2real-metrics-reader-<namespace>`` — cluster
+      scoped; without this cleanup, every removed slot leaves a dangling
+      binding that outlives the namespace.
+    - Secret ``inference-gateway-sa-metrics-reader-secret`` in
+      ``<namespace>`` — a long-lived SA token; would go away with the
+      namespace, but we're not deleting the namespace on slot remove so
+      it needs an explicit delete.
+
+    Both deletes use ``--ignore-not-found`` so a partially-provisioned
+    slot is fine to remove. Called by ``cluster.py slot remove`` before
+    updating the pool config on disk.
+
+    Returns ``(True, "")`` on success or ``(False, err)`` on the first
+    kubectl failure encountered. Callers surface failures but treat them
+    as non-fatal — pool config still gets updated so on-disk state
+    catches up.
+    """
+    crb_name = f"sim2real-metrics-reader-{namespace}"
+    proc = _run(
+        ["kubectl", "delete", "clusterrolebinding", crb_name,
+         "--ignore-not-found"],
+        check=False, capture=True,
+    )
+    if proc.returncode != 0:
+        return (False, f"clusterrolebinding/{crb_name}: "
+                       f"{(proc.stderr or proc.stdout).strip()}")
+
+    secret_name = "inference-gateway-sa-metrics-reader-secret"
+    proc = _run(
+        ["kubectl", "delete", "secret", secret_name,
+         f"-n={namespace}", "--ignore-not-found"],
+        check=False, capture=True,
+    )
+    if proc.returncode != 0:
+        return (False, f"secret/{secret_name} in {namespace}: "
+                       f"{(proc.stderr or proc.stdout).strip()}")
+
+    return (True, "")
+
+
 # ── ProvisionResult + provision_namespace ────────────────────────────
 
 
