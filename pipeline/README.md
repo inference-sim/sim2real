@@ -517,28 +517,35 @@ Sibling streaming sidecars land alongside the trace files under each `i<N>/`:
 
 - `epp_logs/` — EPP pod logs, time-bucketed (produced by `stream-epp-logs`).
 - `gpu_logs/` — per-node `nvidia-smi` samples, one file per node (produced by `stream-gpu-stats`).
-- `metrics/timeseries.csv` — EPP and vLLM `/metrics` scrapes on a 2 s cadence (produced by `stream-metrics`; columns `timestamp_us,target,metric_name,labels,value` — matches `trace_data.csv`'s `_us` convention).
-- `metrics/<target>.discovered.txt` — sorted-unique list of every metric name each target exposed on its first scrape; consult this file to decide what to widen the allowlist to next run.
+- `metrics/raw/<pod>_<ts>_metrics.log` — Prometheus text-exposition dumps, one file per pod per scrape (produced by `stream-metrics`, which wraps llm-d-benchmark's `collect_metrics.sh`).
+- `metrics/processed/*.json` — post-run aggregated summaries (`metrics_summary.json`, `replica_status_timeseries.json`, `pod_startup_times.json`) written by `collect_metrics.sh process`.
 - `epp_stream_done` / `gpu_stream_done` / `metrics_stream_done` — sentinel files written by `collect-results` when the workload finishes; each streamer polls its sentinel and exits.
 
 ### Metric capture (`stream-metrics`)
 
-The `stream-metrics` sidecar discovers each pipelinerun's EPP and vLLM decode pods via label selectors (`llm-d.ai/igw-mode=llm-d-router-gateway` with `inferencepool` fallback for EPP; `llm-d.ai/role=decode` for vLLM), scrapes `/metrics` on ports `eppPort=9090` and `vllmPort=8000` (both task-param-overridable), and appends one CSV row per (scrape × metric-line) that passes the allowlist.
+`stream-metrics` is a thin wrapper around `collect_metrics.sh` from `llm-d-benchmark`. The sidecar pod pulls `collect_metrics.sh` + `process_metrics.py` from raw.githubusercontent.com at a pinned git ref (task param `harnessSha`, default `"main"`), then runs the standard `start` / poll-sentinel / `stop` / `process` lifecycle. `collect_metrics.sh` handles pod discovery (EPP + vLLM decode), Prometheus text scraping, bearer-token auth for EPP, and per-run aggregation.
 
-**Default `metricsAllowlist` (prefix-match):** the EPP SaturationDetector inputs (`vllm:num_requests_waiting`, `vllm:gpu_cache_usage_perc`), the derived saturation value the flow-controller consumes (`flow_control_pool_saturation`), plus queue-time histogram (`vllm:request_queue_time_seconds`), preemption counter (`vllm:num_preemptions_total`), prefix-cache counters (`vllm:gpu_prefix_cache_hits_total` / `_queries_total`), running-request gauge (`vllm:num_requests_running`), and per-iteration throughput (`vllm:iteration_tokens_total`). Prefix-match means histogram `_bucket` / `_sum` / `_count` variants come along automatically. Empty string in the param = capture everything (research escape hatch — expect ~500 metrics/target/scrape).
+**Where output lands** (all under the cell dir):
 
-**Discovering what a target actually exposes.** On the first successful scrape of each target, the sidecar writes `metrics/<target>.discovered.txt` — the sorted-unique list of every metric name it saw, unfiltered. Read this file after any run to widen the allowlist from evidence:
+- `metrics/raw/<pod>_<ts>_metrics.log` — one Prometheus text-exposition dump per pod per scrape (default 15 s cadence via `intervalSeconds` task param). Unfiltered — every metric the target exposes lands on disk.
+- `metrics/raw/collection_debug.log` — collector-side errors.
+- `metrics/processed/replica_status.json`, `replica_status_timeseries.json`, `pod_startup_times.json` — infrastructure state collected each iteration.
+- `metrics/processed/metrics_summary.json` — post-run percentiles over the metrics named in `process_metrics.py`'s `AGGREGATE_METRICS` set.
+- `metrics/metrics_collection.log` — stdout+stderr of `start` / `stop` / `process` runs.
 
-```bash
-cat workspace/runs/<run>/results/<phase>/<workload>/i<N>/metrics/epp:<pod>.discovered.txt
-```
+**EPP auth.** GAIE serves `/metrics` on port 9090 with secure-serving on. `collect_metrics.sh` reads a bearer token from the `inference-gateway-sa-metrics-reader-secret` Secret (a `type: kubernetes.io/service-account-token` Secret provisioned per-namespace by `cluster.py provision` / `cluster.py slot add` — see `tektonc-data-collection/tekton/roles-ns.yaml`). The corresponding cluster-scoped RBAC (`sim2real-metrics-reader` ClusterRole + per-namespace ClusterRoleBinding on `system:serviceaccounts:<ns>`) is provisioned by the same admin bootstrap step from `roles-cluster.yaml`. See sim2real#579 for the design rationale.
+
+**Widening the metric-name set.** `metrics/processed/metrics_summary.json` covers only the metrics named in `AGGREGATE_METRICS` in `process_metrics.py` (a hardcoded Python set in llm-d-benchmark). To add or remove metrics from the summary, edit that file upstream and pin `harnessSha` to the commit with your change. The `metrics/raw/*.log` files ALWAYS carry every metric the target exposed, so post-run analysis can extract additional signals without re-running.
 
 **Live inspection** (outside a run):
 
 ```bash
 kubectl port-forward -n <namespace> <epp-or-vllm-pod> 9090:9090
-curl -s http://localhost:9090/metrics | grep -v '^#' | awk '{sub(/\{.*/, ""); print $1}' | sort -u
+curl -s -H "Authorization: Bearer $(kubectl -n <namespace> get secret inference-gateway-sa-metrics-reader-secret -o jsonpath='{.data.token}' | base64 -d)" \
+  http://localhost:9090/metrics | grep -v '^#' | awk '{sub(/\{.*/, ""); print $1}' | sort -u
 ```
+
+vLLM `/metrics` on port 8000 is unauthenticated — drop the `-H` flag when probing it directly.
 
 | Flag | Description |
 |------|-------------|

@@ -1,5 +1,12 @@
 # Issue #574 — stream-metrics Prometheus scraper sidecar
 
+> **Superseded by issue #579 / plan `2026-07-15-issue-579-adopt-collect-metrics.md`.**
+> This plan is preserved as a historical record of the initial sim2real-owned
+> sidecar design (issues #574 / #576, PRs #575 / #577). The current design
+> wraps upstream `collect_metrics.sh` from llm-d-benchmark instead of
+> maintaining our own scraper, and provisions the EPP-side auth RBAC at
+> cluster bootstrap. See the #579 plan for the current shape.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a `stream-metrics` Tekton streaming sidecar that scrapes the EPP and vLLM `/metrics` Prometheus endpoints during each workload iteration and persists the time-series into the cell bundle, giving offline analysis access to `WaitingQueueSize`, `KVCacheUsagePercent`, EPP `flow_control_pool_saturation`, and other engine/router signals that today can only be inferred from trace behaviour.

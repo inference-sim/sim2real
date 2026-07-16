@@ -1837,8 +1837,14 @@ def test_collect_skip_logs_invokes_gpu_logs_copy(tmp_path, monkeypatch):
 
 def test_collect_skip_logs_invokes_metrics_copy(tmp_path, monkeypatch):
     """--skip-logs path issues a kubectl cp for metrics/ alongside epp_logs/ and gpu_logs/,
-    scoped to each iteration subdirectory (post step-5 layout), and copies the
-    metrics_stream_done sentinel."""
+    scoped to each iteration subdirectory, and copies the metrics_stream_done sentinel.
+
+    The recursive cp captures whatever collect_metrics.sh (the upstream scraper
+    the stream-metrics sidecar now wraps — see sim2real#579) writes inside the
+    per-cell metrics/ directory: metrics/raw/*_metrics.log Prometheus text
+    dumps and metrics/processed/*.json aggregated summaries. The specific
+    file names don't need mocking here since the assertion only verifies
+    that the metrics/ dir itself is the cp source."""
     from pipeline import deploy
     import subprocess
 

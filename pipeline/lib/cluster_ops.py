@@ -409,6 +409,63 @@ def namespace_provisioned(namespace: str) -> bool:
     ).returncode == 0
 
 
+def deprovision_metrics_rbac(namespace: str) -> tuple[bool, str]:
+    """Delete the per-namespace metrics-reader RBAC + Secret provisioned
+    by :func:`provision_namespace`'s ``_step_rbac`` from roles-cluster.yaml
+    and roles-ns.yaml (see sim2real#579).
+
+    Two resources:
+
+    - ClusterRoleBinding ``sim2real-metrics-reader-<namespace>`` — cluster
+      scoped; without this cleanup, every removed slot leaves a dangling
+      binding that outlives the namespace.
+    - Secret ``inference-gateway-sa-metrics-reader-secret`` in
+      ``<namespace>`` — a long-lived SA token; would go away with the
+      namespace, but we're not deleting the namespace on slot remove so
+      it needs an explicit delete.
+
+    Both deletes use ``--ignore-not-found`` so a partially-provisioned
+    slot is fine to remove. Called by ``cluster.py slot remove`` before
+    updating the pool config on disk.
+
+    Attempts BOTH deletes regardless of the first one's outcome and
+    accumulates errors — the Secret carries a kubelet-populated bearer
+    token for helm-installer and is the more sensitive residual of the
+    two, so a first-failure short-circuit would leave the more sensitive
+    resource behind on any transient CRB delete error.
+
+    Returns ``(True, "")`` when both deletes succeed, or ``(False, err)``
+    where ``err`` concatenates every failure with ``; `` separators.
+    Callers surface the message but treat the failure as non-fatal —
+    pool config still gets updated so on-disk state catches up.
+    """
+    errors: list[str] = []
+
+    crb_name = f"sim2real-metrics-reader-{namespace}"
+    proc = _run(
+        ["kubectl", "delete", "clusterrolebinding", crb_name,
+         "--ignore-not-found"],
+        check=False, capture=True,
+    )
+    if proc.returncode != 0:
+        errors.append(f"clusterrolebinding/{crb_name}: "
+                      f"{(proc.stderr or proc.stdout).strip()}")
+
+    secret_name = "inference-gateway-sa-metrics-reader-secret"
+    proc = _run(
+        ["kubectl", "delete", "secret", secret_name,
+         f"-n={namespace}", "--ignore-not-found"],
+        check=False, capture=True,
+    )
+    if proc.returncode != 0:
+        errors.append(f"secret/{secret_name} in {namespace}: "
+                      f"{(proc.stderr or proc.stdout).strip()}")
+
+    if errors:
+        return (False, "; ".join(errors))
+    return (True, "")
+
+
 # ── ProvisionResult + provision_namespace ────────────────────────────
 
 
