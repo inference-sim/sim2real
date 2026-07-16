@@ -220,6 +220,22 @@ class TestStreamMetricsTask:
         w_rd = next(p["value"] for p in w["params"] if p["name"] == "resultsDir")
         assert s_rd == w_rd, f"resultsDir mismatch: streamer={s_rd!r} workload={w_rd!r}"
 
+    def test_harness_sha_refs_benchmark_git_commit(self):
+        """harnessSha must reference the pipeline-level benchmarkGitCommit
+        param (which sim2real assemble fills from the current
+        llm-d-benchmark submodule SHA) rather than being a hardcoded
+        literal. See issue #581 — the hardcoded pattern landed in PR #580
+        introduced a manual-sync drift risk; this assertion guards
+        against reintroducing it."""
+        task = self._get_stream_metrics_task()
+        value = next(
+            p["value"] for p in task["params"] if p["name"] == "harnessSha"
+        )
+        assert value == "$(params.benchmarkGitCommit)", (
+            f"harnessSha must be the pipeline-level benchmarkGitCommit "
+            f"reference; got literal or wrong reference: {value!r}"
+        )
+
 
 class TestPrepareResultsDirTask:
     """prepare-results-dir is the single owner of RESULTS_DIR creation; every writer must runAfter it."""
