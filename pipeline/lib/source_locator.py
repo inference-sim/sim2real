@@ -135,9 +135,21 @@ class GitLocation(Location):
 
     @contextlib.contextmanager
     def materialize(self) -> Iterator[Path]:
+        # Clone the RESOLVED sha, not the user-supplied ref. The
+        # translation hash and source_git_ref both point at the sha
+        # identity() returned from its ls-remote probe; if we cloned
+        # ``self.ref`` here (a branch/tag name), a concurrent push to
+        # that branch between ls-remote and clone would leave us
+        # recording sha A in translation_output.json while buildkit
+        # actually built sha B. Passing self.identity() collapses that
+        # window: the shallow ``--branch <sha>`` attempt in
+        # _clone_and_checkout will always fail (git rejects raw shas
+        # under --branch) and the full-clone + checkout fallback path
+        # handles arbitrary commit shas correctly. Slower than
+        # shallow-branch, but correct.
         with tempfile.TemporaryDirectory(prefix="sim2real-git-") as scratch:
             scratch_path = Path(scratch) / "clone"
-            _clone_and_checkout(self.url, self.ref, scratch_path)
+            _clone_and_checkout(self.url, self.identity(), scratch_path)
             yield scratch_path
 
     def provenance(self) -> dict:

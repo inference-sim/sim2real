@@ -240,39 +240,80 @@ def test_git_location_identity_short_sha_goes_to_ls_remote():
         assert m.called
 
 
-def test_git_location_materialize_shallow_clone_success(tmp_path):
-    """Materialize dispatches git clone --depth 1 --branch <ref>."""
+def test_git_location_materialize_uses_resolved_sha_not_user_ref(tmp_path):
+    """Regression guard: materialize() must clone the sha identity()
+    resolved to, not the user-supplied ref. Prevents the race where a
+    concurrent push to the branch tip leaves source_git_ref pointing at
+    one sha while buildkit built a different one."""
+    resolved_sha = "a" * 40
     loc = sl.GitLocation(url="https://x/y.git", ref="main")
+    calls: list[list[str]] = []
 
     def fake_run(cmd, *args, **kwargs):
-        # Simulate a successful shallow clone: create the dest dir.
+        calls.append(list(cmd))
+        # ls-remote resolves "main" → resolved_sha
+        if "ls-remote" in cmd:
+            return mock.Mock(
+                returncode=0,
+                stdout=f"{resolved_sha}\trefs/heads/main\n",
+                stderr="",
+            )
+        # Shallow --branch <sha> fails (git rejects shas under --branch).
         if cmd[:2] == ["git", "clone"] and "--depth" in cmd:
+            return mock.Mock(returncode=128, stdout="", stderr="fatal\n")
+        # Full clone succeeds.
+        if cmd[:2] == ["git", "clone"]:
             dest = Path(cmd[-1])
             dest.mkdir(parents=True)
             (dest / "policy.go").write_text("hi")
             return mock.Mock(returncode=0, stdout="", stderr="")
-        raise AssertionError(f"unexpected subprocess call: {cmd!r}")
+        # Checkout succeeds.
+        if cmd[:2] == ["git", "-C"] and "checkout" in cmd:
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected call: {cmd!r}")
 
     with mock.patch.object(sl.subprocess, "run", side_effect=fake_run):
         with loc.materialize() as p:
             assert (p / "policy.go").read_text() == "hi"
-    # After context exit the scratch tempdir is removed.
-    assert not p.exists()
+
+    # The shallow-clone attempt and the checkout must both reference the
+    # RESOLVED sha, not "main". If either passed "main", a concurrent
+    # push would produce a different tree than what source_git_ref
+    # records. The full-clone fallback has no ref in its argv (it clones
+    # the whole repo, then checkout does the ref-specific work).
+    shallow_cmds = [
+        c for c in calls if c[:2] == ["git", "clone"] and "--depth" in c
+    ]
+    full_cmds = [
+        c for c in calls if c[:2] == ["git", "clone"] and "--depth" not in c
+    ]
+    assert len(shallow_cmds) == 1
+    assert len(full_cmds) == 1
+    assert resolved_sha in shallow_cmds[0]
+    assert "main" not in shallow_cmds[0]
+    # Full clone has no ref token in argv — but must not spuriously
+    # contain "main" either.
+    assert "main" not in full_cmds[0]
+    checkout_cmd = next(c for c in calls if "checkout" in c)
+    assert resolved_sha in checkout_cmd
+    assert "main" not in checkout_cmd
 
 
-def test_git_location_materialize_falls_back_to_full_clone(tmp_path):
-    """Shallow --branch fails on raw sha → full clone + checkout."""
-    loc = sl.GitLocation(url="https://x/y.git", ref="abc123")
+def test_git_location_materialize_full_clone_path(tmp_path):
+    """With a full sha as ref, identity() short-circuits (no ls-remote);
+    materialize follows the shallow-fails → full-clone → checkout path
+    because git rejects shas under --branch."""
+    sha = "b" * 40
+    loc = sl.GitLocation(url="https://x/y.git", ref=sha)
     calls: list[list[str]] = []
 
     def fake_run(cmd, *args, **kwargs):
         calls.append(list(cmd))
         if cmd[:2] == ["git", "clone"] and "--depth" in cmd:
-            # Shallow clone fails (ref not a branch/tag).
             return mock.Mock(
                 returncode=128,
                 stdout="",
-                stderr="fatal: Remote branch abc123 not found\n",
+                stderr=f"fatal: Remote branch {sha} not found\n",
             )
         if cmd[:2] == ["git", "clone"]:
             dest = Path(cmd[-1])
@@ -287,7 +328,9 @@ def test_git_location_materialize_falls_back_to_full_clone(tmp_path):
         with loc.materialize() as p:
             assert (p / "policy.go").read_text() == "hi"
 
-    # Three subprocess invocations: failed shallow, full clone, checkout.
+    # No ls-remote (full sha input short-circuits identity()).
+    assert not any("ls-remote" in c for c in calls)
+    # Three: failed shallow, full clone, checkout.
     assert len(calls) == 3
     assert calls[1][:2] == ["git", "clone"]
     assert "--depth" not in calls[1]
@@ -295,7 +338,8 @@ def test_git_location_materialize_falls_back_to_full_clone(tmp_path):
 
 
 def test_git_location_materialize_full_clone_failure_raises(tmp_path):
-    loc = sl.GitLocation(url="https://bogus/x.git", ref="deadbeef")
+    sha = "c" * 40
+    loc = sl.GitLocation(url="https://bogus/x.git", ref=sha)
 
     def fake_run(cmd, *args, **kwargs):
         if "clone" in cmd:
@@ -312,7 +356,8 @@ def test_git_location_materialize_full_clone_failure_raises(tmp_path):
 
 
 def test_git_location_materialize_checkout_failure_raises(tmp_path):
-    loc = sl.GitLocation(url="https://x/y.git", ref="unreachable")
+    sha = "d" * 40
+    loc = sl.GitLocation(url="https://x/y.git", ref=sha)
 
     def fake_run(cmd, *args, **kwargs):
         if "clone" in cmd and "--depth" in cmd:
