@@ -3206,8 +3206,16 @@ class TestCmdTranslationAppend:
         assert rc == 2
 
     def test_register_then_append_round_trip(self, tmp_path, monkeypatch, capsys):
-        """End-to-end shape: register N=2 → append 1 → total = 3 with
-        append_history[] populated."""
+        """End-to-end: register N=2 → append 1 → assemble picks up all 3.
+
+        Covers issue #585's explicit acceptance criterion: `translation
+        register` 2 → `translation append` 1 → `sim2real assemble
+        --translation <ref>` → all 3 algorithms visible to assemble.
+        `assemble_run.assemble_run` is mocked (same pattern as
+        `TestAssembleResolvesAlias.test_assemble_accepts_alias`) — the
+        goal is to verify the ref resolves through the append and the
+        materialized translation dir is consumable, not to exercise the
+        full assemble pipeline (that's covered separately)."""
         monkeypatch.chdir(tmp_path)
         cfg_a = self._write_config(tmp_path, "a")
         cfg_b = self._write_config(tmp_path, "b")
@@ -3237,6 +3245,285 @@ class TestCmdTranslationAppend:
         assert tout["alias"] is None
         # translation_hash never changes.
         assert tout["translation_hash"] == thash
+
+        # Assemble reads the post-append translation and resolves all
+        # three algorithms — the config file for the appended entry
+        # (generated/c/c_config.yaml) must exist on disk since the
+        # slicer reads it downstream. Mock `assemble_run.assemble_run`
+        # to capture the resolved hash without a real cluster.
+        captured = {}
+        def fake_assemble(*, translation_hash, translation_ref, cluster_id,
+                          run_name, experiment_root, manifest_path,
+                          force, replicas, now_iso):
+            captured["hash"] = translation_hash
+            captured["ref"] = translation_ref
+
+        monkeypatch.setattr(
+            sim2real._assemble_run_lib, "assemble_run", fake_assemble
+        )
+        (tmp_path / "transfer.yaml").write_text(yaml.safe_dump({
+            "kind": "sim2real-transfer",
+            "version": 3,
+            "scenario": "smoke",
+            "baselines": [{"name": "base", "scenario": "baselines/base.yaml"}],
+            "component": {"repo": "example.com/x/y", "kind": "scorer"},
+            "context": {"text": "", "files": []},
+        }))
+        rc = sim2real.main([
+            "--experiment-root", str(tmp_path),
+            "assemble",
+            "--translation", thash,
+            "--cluster", "cX",
+            "--run", "r1",
+        ])
+        assert rc == 0
+        assert captured["hash"] == thash
+        assert captured["ref"] == thash
+        # The appended algorithm's config file is on disk — assemble
+        # can find it via config_path if the manifest declares it.
+        assert (tmp_path / "workspace" / "translations" / thash
+                / "generated" / "c" / "c_config.yaml").exists()
+
+
+class TestCmdTranslationAppendBuild:
+    """End-to-end tests for `translation append --build` via `sim2real.main`.
+
+    Parallel coverage to `TestRegisterBuild` — exercises the append
+    command's prerequisite checks (skopeo, git-when-git-URL,
+    build-context resolution) and the buildkit dispatch handoff.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _mock_check_skopeo(self):
+        with mock.patch("pipeline.lib.build.check_skopeo") as m:
+            yield m
+
+    @pytest.fixture(autouse=True)
+    def _mock_check_git(self):
+        with mock.patch("pipeline.lib.source_locator.check_git") as m:
+            yield m
+
+    def _write_cluster_config(self, tmp_path: Path) -> None:
+        setup = tmp_path / "workspace" / "setup_config.json"
+        setup.parent.mkdir(parents=True, exist_ok=True)
+        setup.write_text(json.dumps({
+            "registry": "ghcr.io/kalantar",
+            "repo_name": "llm-d-router",
+            "sim2real_root": "/fake",
+            "orchestrator_image": "fake:latest",
+        }))
+        cluster_dir = tmp_path / "workspace" / "clusters" / "test"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        (cluster_dir / "cluster_config.json").write_text(json.dumps({
+            "cluster_id": "test",
+            "namespaces": ["ns-0"],
+            "secret_names": {"registry_creds": "registry-creds"},
+        }))
+
+    def _write_config(self, tmp_path: Path, name: str) -> Path:
+        cfg = tmp_path / f"{name}_config.yaml"
+        cfg.write_text(f"scenario:\n  - name: {name}\n")
+        return cfg
+
+    def _write_source_dir(self, tmp_path: Path, name: str) -> Path:
+        src = tmp_path / f"src-{name}"
+        src.mkdir()
+        (src / "policy.go").write_text(f"// {name}\n")
+        return src
+
+    def _register_one(self, tmp_path, name="orig"):
+        """Pre-populate a BYO translation so append has a target.
+
+        Registers without any --build spec so no cluster prereqs are
+        needed at this step. The append call under test provides its
+        own cluster-config fixture via _write_cluster_config."""
+        cfg = self._write_config(tmp_path, name)
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", f"{name}=reg/{name}:v1@{cfg}",
+        ])
+        assert rc == 0
+        tdirs = list((tmp_path / "workspace" / "translations").iterdir())
+        assert len(tdirs) == 1
+        return tdirs[0].name
+
+    def test_append_build_path_end_to_end(
+        self, tmp_path, monkeypatch, _mock_check_skopeo, _mock_check_git
+    ):
+        """`translation append --build <path>` goes through
+        _cmd_translation_append end-to-end: check_skopeo is invoked
+        (fail-fast), check_git is NOT (path build), _resolve_build_context
+        resolves via the workspace's cluster_config, and buildkit is
+        dispatched exactly once for the appended algorithm."""
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        self._write_cluster_config(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build", return_value=0
+        ) as m_dispatch, mock.patch(
+            "pipeline.lib.build.probe_image_digest",
+            side_effect=[None, "sha256:" + "a" * 64],
+        ):
+            rc = sim2real.main([
+                "translation", "append",
+                "--translation", thash,
+                "--build", f"pr1956={src}@{cfg}",
+            ])
+
+        assert _mock_check_skopeo.called
+        assert not _mock_check_git.called
+        assert rc == 0
+        assert m_dispatch.call_count == 1
+        kwargs = m_dispatch.call_args.kwargs
+        assert kwargs["namespace"] == "ns-0"
+        assert kwargs["registry_secret_name"] == "registry-creds"
+        assert kwargs["image_ref"].endswith("-pr1956")
+        assert kwargs["source_dir"] == src
+
+        tout = json.loads(
+            (tmp_path / "workspace" / "translations" / thash
+             / "translation_output.json").read_text()
+        )
+        names = [a["name"] for a in tout["algorithms"]]
+        assert names == ["orig", "pr1956"]
+        appended = next(a for a in tout["algorithms"] if a["name"] == "pr1956")
+        assert appended["image_ref"].endswith("-pr1956")
+        assert appended["image_digest"] == "sha256:" + "a" * 64
+        # Path-based --build records no git provenance on append either.
+        assert "source_git_url" not in appended
+        assert "source_git_ref" not in appended
+        # Append history entry stamped with kind="build".
+        assert len(tout["append_history"]) == 1
+        entry = tout["append_history"][0]
+        assert entry["kind"] == "build"
+        assert entry["algorithms"] == ["pr1956"]
+
+    def test_append_build_git_url_triggers_check_git(
+        self, tmp_path, monkeypatch, _mock_check_skopeo, _mock_check_git
+    ):
+        """A git-URL `--build` on append must fire BOTH prereq checks
+        (skopeo + git). Regression guard against the same off-by-one
+        that TestRegisterBuild.test_build_mixed_path_and_git_calls_both_prereqs
+        exercises for register."""
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        self._write_cluster_config(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956b")
+        resolved_sha = "b" * 40
+
+        def fake_run(cmd, *args, **kwargs):
+            if "ls-remote" in cmd:
+                return mock.Mock(
+                    returncode=0,
+                    stdout=f"{resolved_sha}\trefs/heads/main\n",
+                    stderr="",
+                )
+            if "clone" in cmd and "--depth" in cmd:
+                return mock.Mock(returncode=128, stdout="", stderr="fatal\n")
+            if "clone" in cmd:
+                dest = Path(cmd[-1])
+                dest.mkdir(parents=True)
+                (dest / "policy.go").write_text("// pr1956b\n")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            if "checkout" in cmd:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            raise AssertionError(f"unexpected subprocess call: {cmd!r}")
+
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build", return_value=0
+        ), mock.patch(
+            "pipeline.lib.build.probe_image_digest",
+            side_effect=[None, "sha256:" + "c" * 64],
+        ), mock.patch(
+            "pipeline.lib.source_locator.subprocess.run", side_effect=fake_run
+        ):
+            rc = sim2real.main([
+                "translation", "append",
+                "--translation", thash,
+                "--build",
+                f"pr1956b=git+https://github.com/foo/bar.git#main@{cfg}",
+            ])
+        assert rc == 0
+        assert _mock_check_skopeo.called
+        assert _mock_check_git.called
+
+        tout = json.loads(
+            (tmp_path / "workspace" / "translations" / thash
+             / "translation_output.json").read_text()
+        )
+        b_entry = next(a for a in tout["algorithms"] if a["name"] == "pr1956b")
+        assert b_entry["source_git_url"] == "https://github.com/foo/bar.git"
+        assert b_entry["source_git_ref"] == resolved_sha
+
+    def test_append_build_missing_skopeo_fails_fast(
+        self, tmp_path, monkeypatch, capsys, _mock_check_skopeo
+    ):
+        """If skopeo is missing, `translation append --build` must fail
+        with rc=2 and a clean error BEFORE any buildkit or state
+        change. Prereq-fail-fast regression guard for append (mirrors
+        TestRegisterBuild.test_build_missing_skopeo_fails_fast)."""
+        from pipeline.lib import build as _build
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        self._write_cluster_config(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+
+        _mock_check_skopeo.side_effect = _build.BuildError(
+            "skopeo not on PATH; install with `brew install skopeo`"
+        )
+
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build"
+        ) as m_dispatch:
+            rc = sim2real.main([
+                "translation", "append",
+                "--translation", thash,
+                "--build", f"pr1956={src}@{cfg}",
+            ])
+        assert rc == 2
+        assert m_dispatch.call_count == 0
+        err = capsys.readouterr().err
+        assert "skopeo" in err
+        # translation_output.json still holds only the pre-append state.
+        tout = json.loads(
+            (tmp_path / "workspace" / "translations" / thash
+             / "translation_output.json").read_text()
+        )
+        assert [a["name"] for a in tout["algorithms"]] == ["orig"]
+        assert "append_history" not in tout
+
+    def test_append_build_no_cluster_errors(
+        self, tmp_path, monkeypatch, _mock_check_skopeo
+    ):
+        """`translation append --build` without a provisioned cluster
+        must fail fast (build_context resolution surfaces the missing
+        prereq); no buildkit is dispatched."""
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        # Setup config but NO cluster.
+        setup = tmp_path / "workspace" / "setup_config.json"
+        setup.parent.mkdir(parents=True, exist_ok=True)
+        setup.write_text(json.dumps({
+            "registry": "ghcr.io/x",
+            "repo_name": "llm-d-router",
+        }))
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build"
+        ) as m_dispatch:
+            rc = sim2real.main([
+                "translation", "append",
+                "--translation", thash,
+                "--build", f"pr1956={src}@{cfg}",
+            ])
+        assert rc == 2
+        assert m_dispatch.call_count == 0
 
 
 class TestListTranslationsAppendedCount:
