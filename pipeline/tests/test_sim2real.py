@@ -208,10 +208,23 @@ class TestRegisterBuild:
         """`_cmd_translation_register` calls `build.check_skopeo()` up front
         when any --build spec is present (fail-fast on missing binary). Mock
         it to a no-op so tests don't require skopeo in the test environment.
+        Yields the mock so tests can positively assert on `.called` — the
+        iter-4 review noted the previous shape (no `as m`) meant a refactor
+        removing the check_skopeo() call at sim2real.py would silently
+        pass every test.
+
         Tests that specifically exercise the check_skopeo failure path
-        override this mock inline."""
-        with mock.patch("pipeline.lib.build.check_skopeo"):
-            yield
+        override this mock inline (see test_build_missing_skopeo_fails_fast)."""
+        with mock.patch("pipeline.lib.build.check_skopeo") as m:
+            yield m
+
+    @pytest.fixture(autouse=True)
+    def _mock_check_git(self):
+        """`_cmd_translation_register` calls `source_locator.check_git()`
+        up front when any --build spec is a git-URL (fail-fast on missing
+        binary). Same shape as _mock_check_skopeo above."""
+        with mock.patch("pipeline.lib.source_locator.check_git") as m:
+            yield m
 
     def _write_cluster_config(self, tmp_path: Path) -> None:
         """Materialize the workspace prereqs --build requires."""
@@ -242,9 +255,15 @@ class TestRegisterBuild:
         (src / "policy.go").write_text(f"// {name}\n")
         return src
 
-    def test_build_path_end_to_end(self, tmp_path, monkeypatch):
+    def test_build_path_end_to_end(self, tmp_path, monkeypatch,
+                                   _mock_check_skopeo, _mock_check_git):
         """--build with a filesystem path: identity from content-hash;
-        image_ref composed from hash; buildkit invoked; digest recorded."""
+        image_ref composed from hash; buildkit invoked; digest recorded.
+
+        Positively asserts `check_skopeo()` was called (regression guard
+        against a refactor accidentally removing the iter-3 fail-fast).
+        Also asserts `check_git()` was NOT called — this is a path build,
+        no git needed."""
         monkeypatch.chdir(tmp_path)
         self._write_cluster_config(tmp_path)
         cfg = self._write_config(tmp_path, "pr1956")
@@ -263,6 +282,11 @@ class TestRegisterBuild:
                 "translation", "register",
                 "--build", f"pr1956={src}@{cfg}",
             ])
+
+        # Prereq checks: skopeo required for any --build; git NOT
+        # required for a path-only --build.
+        assert _mock_check_skopeo.called
+        assert not _mock_check_git.called
         assert rc == 0
         assert m_dispatch.call_count == 1
 
@@ -566,6 +590,52 @@ class TestRegisterBuild:
         assert "skopeo" in stderr
         assert "Traceback" not in stderr
 
+    def test_build_git_missing_git_fails_fast(self, tmp_path, monkeypatch, capsys):
+        """iter-4 fix: git-URL --build must fail-fast with an actionable
+        install hint when git is not on PATH — symmetric with check_skopeo.
+        Overrides the class-level check_git mock to raise."""
+        monkeypatch.chdir(tmp_path)
+        self._write_cluster_config(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956b")
+        from pipeline.lib import source_locator as _sl
+        with mock.patch(
+            "pipeline.lib.source_locator.check_git",
+            side_effect=_sl.SourceLocatorError("git not found on PATH — ..."),
+        ), mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build"
+        ) as m_dispatch:
+            rc = sim2real.main([
+                "translation", "register",
+                "--build",
+                f"pr1956b=git+https://github.com/foo/bar.git#main@{cfg}",
+            ])
+        assert rc == 2
+        assert m_dispatch.call_count == 0
+        stderr = capsys.readouterr().err
+        assert "git not found" in stderr
+        assert "Traceback" not in stderr
+
+    def test_build_path_only_does_not_check_git(self, tmp_path, monkeypatch,
+                                                 _mock_check_git):
+        """Path-only --build must NOT invoke check_git — git is only needed
+        for git-URL specs. Guards the isinstance(loc, GitLocation) gate."""
+        monkeypatch.chdir(tmp_path)
+        self._write_cluster_config(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build", return_value=0
+        ), mock.patch(
+            "pipeline.lib.build.probe_image_digest",
+            side_effect=[None, "sha256:" + "a" * 64],
+        ):
+            rc = sim2real.main([
+                "translation", "register",
+                "--build", f"pr1956={src}@{cfg}",
+            ])
+        assert rc == 0
+        assert not _mock_check_git.called
+
     def test_build_multi_cluster_errors(self, tmp_path, monkeypatch, capsys):
         """--build with two provisioned clusters: fail-fast with 'multiple
         clusters found' before any buildkit work."""
@@ -659,6 +729,77 @@ class TestRegisterBuild:
         assert rc == 2
         stderr = capsys.readouterr().err
         assert "registry" in stderr or "repo_name" in stderr
+
+    def test_build_null_digest_post_probe_warns(self, tmp_path, monkeypatch, capsys):
+        """iter-3 added a warning in _dispatch_build when the POST-build
+        skopeo probe returns None (dispatch succeeded but the digest can't
+        be resolved — transient network / auth flake). All existing tests
+        either short-circuit on the pre-build probe or return a real digest
+        post-build; this test exercises the new warning branch.
+
+        Sequence: side_effect=[None, None] → pre-build probe returns None
+        (image not yet built, so dispatch runs) → dispatch returns 0 (build
+        successful) → post-build probe returns None (probe failed) →
+        warning fires, image_digest recorded as null, rc=0."""
+        monkeypatch.chdir(tmp_path)
+        self._write_cluster_config(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build", return_value=0
+        ), mock.patch(
+            "pipeline.lib.build.probe_image_digest",
+            side_effect=[None, None],
+        ):
+            rc = sim2real.main([
+                "translation", "register",
+                "--build", f"pr1956={src}@{cfg}",
+            ])
+
+        assert rc == 0
+        stderr = capsys.readouterr().err
+        assert "digest not recorded" in stderr
+        assert "pr1956" in stderr
+        # image_digest recorded as null in translation_output.json.
+        tdirs = list((tmp_path / "workspace" / "translations").iterdir())
+        tout = json.loads((tdirs[0] / "translation_output.json").read_text())
+        assert tout["algorithms"][0]["image_digest"] is None
+
+    def test_build_dispatch_raises_builderror(self, tmp_path, monkeypatch, capsys):
+        """iter-3 added `build.BuildError` to the outer except tuple. The
+        existing test_build_dispatch_failure_aborts_translation only
+        exercises the return_value=42 path (RuntimeError raised inside
+        _dispatch_build). This test raises BuildError directly, which is
+        the case the iter-3 fix was actually addressing (missing
+        build-epp.sh at pipeline/lib/build.py:120-121)."""
+        monkeypatch.chdir(tmp_path)
+        self._write_cluster_config(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+
+        from pipeline.lib import build as _build_mod
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build",
+            side_effect=_build_mod.BuildError(
+                "build-epp.sh not found at /fake/path"
+            ),
+        ), mock.patch(
+            "pipeline.lib.build.probe_image_digest", return_value=None,
+        ):
+            rc = sim2real.main([
+                "translation", "register",
+                "--build", f"pr1956={src}@{cfg}",
+            ])
+
+        assert rc == 2
+        stderr = capsys.readouterr().err
+        assert "build-epp.sh not found" in stderr
+        assert "Traceback" not in stderr
+        # No translation_output.json written on build failure.
+        tdirs = list((tmp_path / "workspace" / "translations").iterdir())
+        for d in tdirs:
+            assert not (d / "translation_output.json").exists()
 
     def test_build_idempotent_full_rerun(self, tmp_path, monkeypatch, capsys):
         """Full-rerun idempotency: register --build the same inputs twice.

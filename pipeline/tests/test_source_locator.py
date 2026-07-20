@@ -150,6 +150,25 @@ def test_hash_path_contents_symlink_recorded_by_target(tmp_path):
     assert sl.hash_path_contents(a) == sl.hash_path_contents(b)
 
 
+def test_hash_path_contents_symlink_different_target_differs(tmp_path):
+    """Documents the checkout-path-sensitivity constraint the docstring
+    calls out: identical trees whose only difference is a symlink target
+    hash differently. iter-4 review flagged this as a determinism gap
+    for absolute-path symlinks; the docstring now describes the behavior
+    honestly and this test locks it in as intentional."""
+    a = tmp_path / "a"
+    a.mkdir()
+    (a / "link").symlink_to("/home/alice/x")
+    b = tmp_path / "b"
+    b.mkdir()
+    (b / "link").symlink_to("/home/bob/x")
+    # Same tree shape, same file content (nothing else), but the symlink
+    # targets differ → hashes differ. Would be a bug if the intent were
+    # "same content = same hash"; documented as a known limitation for
+    # absolute-path symlinks specifically.
+    assert sl.hash_path_contents(a) != sl.hash_path_contents(b)
+
+
 def test_hash_path_contents_not_a_dir_raises(tmp_path):
     f = tmp_path / "file.txt"
     f.write_text("hi")
@@ -403,6 +422,56 @@ def test_git_location_identity_memoizes_across_calls():
     assert first == second == third == resolved
     # Exactly one ls-remote subprocess despite three logical resolutions.
     assert m.call_count == 1
+
+
+def test_check_git_available_is_noop():
+    """When git is on PATH, check_git() returns without raising. Assumes
+    the test env has git — safe assumption for a Python project's CI."""
+    import shutil as _shutil
+    if _shutil.which("git") is None:
+        pytest.skip("git not on PATH in this environment")
+    sl.check_git()  # must not raise
+
+
+def test_check_git_missing_raises_with_install_hint():
+    """iter-4 fix: mirrors check_skopeo. Missing git → SourceLocatorError
+    with an actionable install hint (brew / apt / dnf install git)."""
+    with mock.patch("shutil.which", return_value=None):
+        with pytest.raises(sl.SourceLocatorError) as ei:
+            sl.check_git()
+    msg = str(ei.value)
+    assert "git not found on PATH" in msg
+    assert "install" in msg.lower()
+
+
+def test_git_ls_remote_timeout_raises_source_locator_error():
+    """iter-4 fix: subprocess.TimeoutExpired from ls-remote is caught and
+    re-raised as SourceLocatorError with a clear message including the
+    URL, ref, and the timeout value. Prevents silent indefinite hang."""
+    loc = sl.GitLocation(url="https://x/y.git", ref="main")
+    with mock.patch.object(
+        sl.subprocess, "run",
+        side_effect=sl.subprocess.TimeoutExpired(cmd="git", timeout=30),
+    ):
+        with pytest.raises(sl.SourceLocatorError, match="timed out") as ei:
+            loc.identity()
+    assert "ls-remote" in str(ei.value)
+    assert "network/host" in str(ei.value)
+
+
+def test_git_clone_timeout_raises_source_locator_error(tmp_path):
+    """iter-4 fix: subprocess.TimeoutExpired from clone is caught. Uses a
+    full-sha ref so identity() short-circuits and only clone/checkout
+    subprocesses fire."""
+    sha = "a" * 40
+    loc = sl.GitLocation(url="https://x/y.git", ref=sha)
+    with mock.patch.object(
+        sl.subprocess, "run",
+        side_effect=sl.subprocess.TimeoutExpired(cmd="git", timeout=60),
+    ):
+        with pytest.raises(sl.SourceLocatorError, match="timed out"):
+            with loc.materialize():
+                pass
 
 
 def test_git_location_memoized_identity_survives_race_scenario():

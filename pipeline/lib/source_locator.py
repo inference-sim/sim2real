@@ -49,6 +49,34 @@ class SourceLocatorError(Exception):
 
 _GIT_PREFIX_RE = re.compile(r"^git\+(https?|ssh)://", re.IGNORECASE)
 
+# Timeouts for git subprocess invocations (seconds). Prevents an
+# unreachable host from freezing the CLI indefinitely with no output.
+# ls-remote is refs-only (fast); shallow clone should be fast when it
+# works; full clone can legitimately take a while for a router-sized
+# repo over a slow link; checkout is local.
+_GIT_LSREMOTE_TIMEOUT = 30.0
+_GIT_SHALLOW_TIMEOUT = 60.0
+_GIT_FULL_CLONE_TIMEOUT = 600.0
+_GIT_CHECKOUT_TIMEOUT = 60.0
+
+
+def check_git() -> None:
+    """Raise ``SourceLocatorError`` with an install hint if ``git`` is not
+    on ``PATH``.
+
+    Mirrors :func:`pipeline.lib.build.check_skopeo`. Called by
+    ``_cmd_translation_register`` when any ``--build`` spec is a
+    :class:`GitLocation`. Without this fail-fast, a missing git binary
+    surfaces later as a cryptic ``[Errno 2] No such file or directory:
+    'git'`` from deep inside :func:`_resolve_git_ref` /
+    :func:`_clone_and_checkout`.
+    """
+    if shutil.which("git") is None:
+        raise SourceLocatorError(
+            "git not found on PATH — required for --build git+<url>#<ref>. "
+            "Install: brew install git, apt install git, or dnf install git"
+        )
+
 
 class Location(ABC):
     """Base class for a ``--build <location>`` value."""
@@ -193,9 +221,19 @@ def hash_path_contents(path: Path) -> str:
     (relative-path, file-sha256) into a top-level SHA-256. ``.git/`` is
     skipped — cloned repos and dev checkouts should hash to the same
     identity if the checked-out tree is identical, regardless of local
-    git metadata. Symlinks are followed only when they point inside
-    ``path``; symlinks that escape are recorded as their target string
-    (deterministic without leaking outside-tree bytes).
+    git metadata.
+
+    **Symlinks are always recorded by target string** (``symlink:<target>``
+    fed into the hash) — the symlink is never followed. This keeps the
+    walk finite and side-effect-free but has one important consequence:
+    an ABSOLUTE-path symlink target (e.g. ``foo -> /home/alice/x``) bakes
+    the absolute path into the hash. Two checkouts with identical
+    content but the symlink retargeted to a different absolute path will
+    hash differently. Relative-path symlinks (e.g. ``foo -> ../vendor/x``)
+    are checkout-path-agnostic and hash consistently across machines.
+    In practice, source trees this feature is designed for (a router
+    repo at a pinned ref) contain no absolute-path symlinks, so this
+    constraint is inert; documented here as a known limitation.
 
     Raises :class:`SourceLocatorError` if ``path`` is not an existing
     directory.
@@ -274,12 +312,19 @@ def _resolve_git_ref(url: str, ref: str) -> str:
         # subsequent clone/checkout will fail loud if the sha is not
         # on the remote.
         return ref
-    result = subprocess.run(
-        ["git", "ls-remote", "--exit-code", url, ref],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "--exit-code", url, ref],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_GIT_LSREMOTE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SourceLocatorError(
+            f"git ls-remote {url}#{ref} timed out after "
+            f"{_GIT_LSREMOTE_TIMEOUT}s — check network/host reachability"
+        ) from exc
     if result.returncode != 0:
         raise SourceLocatorError(
             f"git ls-remote failed for {url}#{ref}: "
@@ -321,41 +366,62 @@ def _clone_and_checkout(url: str, ref: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     # Shallow-clone --branch works for branches and tags.
-    shallow = subprocess.run(
-        [
-            "git", "clone",
-            "--depth", "1",
-            "--branch", ref,
-            "--single-branch",
-            url, str(dest),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        shallow = subprocess.run(
+            [
+                "git", "clone",
+                "--depth", "1",
+                "--branch", ref,
+                "--single-branch",
+                url, str(dest),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_GIT_SHALLOW_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SourceLocatorError(
+            f"git shallow clone of {url}#{ref} timed out after "
+            f"{_GIT_SHALLOW_TIMEOUT}s — check network/host reachability"
+        ) from exc
     if shallow.returncode == 0:
         return
     # Shallow-clone failed (most likely because ref is a raw sha, which
     # --branch cannot accept). Retry with a full clone + checkout.
     if dest.exists():
         shutil.rmtree(dest, ignore_errors=True)
-    full = subprocess.run(
-        ["git", "clone", url, str(dest)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        full = subprocess.run(
+            ["git", "clone", url, str(dest)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_GIT_FULL_CLONE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SourceLocatorError(
+            f"git full clone of {url} timed out after "
+            f"{_GIT_FULL_CLONE_TIMEOUT}s — check network/host reachability"
+        ) from exc
     if full.returncode != 0:
         raise SourceLocatorError(
             f"git clone failed for {url}: "
             f"{full.stderr.strip() or 'unknown error'}"
         )
-    checkout = subprocess.run(
-        ["git", "-C", str(dest), "checkout", "--detach", ref],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        checkout = subprocess.run(
+            ["git", "-C", str(dest), "checkout", "--detach", ref],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_GIT_CHECKOUT_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SourceLocatorError(
+            f"git checkout {ref} in {dest} timed out after "
+            f"{_GIT_CHECKOUT_TIMEOUT}s"
+        ) from exc
     if checkout.returncode != 0:
         raise SourceLocatorError(
             f"git checkout {ref} failed in {dest}: "

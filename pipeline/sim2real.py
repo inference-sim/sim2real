@@ -1023,6 +1023,12 @@ def _cmd_translation_register(args) -> int:
     # we fail fast before touching any translation directory. Pure-BYO
     # invocations (no --build) skip this — no build needed, no cluster
     # required.
+    # Import once at the top of the register command so both the
+    # prereq-check block (below) and the outer try/except (further
+    # down) reference the same module aliases.
+    from pipeline.lib import build as _build
+    from pipeline.lib import source_locator as _source_locator
+
     build_context: dict | None = None
     if any(a["kind"] == "build" for a in algorithms):
         # Fail-fast prereq checks for the --build path — same shape as
@@ -1032,20 +1038,30 @@ def _cmd_translation_register(args) -> int:
         # swallows FileNotFoundError and returns None, disabling the
         # idempotency short-circuit and recording image_digest as null
         # with no user-visible signal.
-        from pipeline.lib import build as _build_mod
         try:
-            _build_mod.check_skopeo()
-        except _build_mod.BuildError as exc:
+            _build.check_skopeo()
+        except _build.BuildError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
+        # If any --build spec is a git-URL, also check for git. Path-based
+        # --build specs don't invoke git. Symmetric with skopeo's install-
+        # hint surface.
+        if any(
+            isinstance(a.get("location"), _source_locator.GitLocation)
+            for a in algorithms
+            if a["kind"] == "build"
+        ):
+            try:
+                _source_locator.check_git()
+            except _source_locator.SourceLocatorError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
         try:
             build_context = _resolve_build_context()
         except RuntimeError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
 
-    from pipeline.lib import build as _build
-    from pipeline.lib import source_locator as _source_locator
     try:
         thash, status = _register_translation(
             algorithms=algorithms,
