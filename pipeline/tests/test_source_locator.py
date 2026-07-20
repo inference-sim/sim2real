@@ -341,3 +341,40 @@ def test_git_location_provenance_returns_url_and_resolved_ref():
         "source_git_url": "https://x/y.git",
         "source_git_ref": "a" * 40,
     }
+
+
+def test_git_location_identity_memoizes_across_calls():
+    """PR #588 review fix: identity() must not re-invoke ls-remote when
+    called more than once on the same instance (previously provenance()
+    triggered a second network call, creating a race window if the branch
+    tip shifted between calls)."""
+    resolved = "9" * 40
+    fake = mock.Mock(returncode=0, stdout=f"{resolved}\trefs/heads/main\n", stderr="")
+    loc = sl.GitLocation(url="https://x/y.git", ref="main")
+    with mock.patch.object(sl.subprocess, "run", return_value=fake) as m:
+        first = loc.identity()
+        second = loc.identity()
+        third = loc.provenance()["source_git_ref"]
+    assert first == second == third == resolved
+    # Exactly one ls-remote subprocess despite three logical resolutions.
+    assert m.call_count == 1
+
+
+def test_git_location_memoized_identity_survives_race_scenario():
+    """Even if the remote's ref-tip changed between the identity() call
+    used for the translation hash and the provenance() call used for the
+    on-disk record, the memoized value keeps them consistent."""
+    tip_1 = "1" * 40
+    tip_2 = "2" * 40
+    # If the mock returned tip_1 first and tip_2 second, an unmemoized
+    # implementation would produce divergent values. Memoized: both
+    # observers see tip_1.
+    responses = [
+        mock.Mock(returncode=0, stdout=f"{tip_1}\trefs/heads/main\n", stderr=""),
+        mock.Mock(returncode=0, stdout=f"{tip_2}\trefs/heads/main\n", stderr=""),
+    ]
+    loc = sl.GitLocation(url="https://x/y.git", ref="main")
+    with mock.patch.object(sl.subprocess, "run", side_effect=responses):
+        identity = loc.identity()
+        prov_ref = loc.provenance()["source_git_ref"]
+    assert identity == prov_ref == tip_1

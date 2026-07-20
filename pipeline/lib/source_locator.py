@@ -38,7 +38,7 @@ import shutil
 import subprocess
 import tempfile
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
@@ -103,20 +103,35 @@ class PathLocation(Location):
 
 @dataclass(frozen=True)
 class GitLocation(Location):
-    """A ``git+<url>#<ref>`` URL. Cloned into a scratch dir on materialize."""
+    """A ``git+<url>#<ref>`` URL. Cloned into a scratch dir on materialize.
+
+    ``identity()`` resolves the ref via ``git ls-remote`` and memoizes the
+    result on the instance so a second call (e.g. from ``provenance()``)
+    doesn't reissue the network round-trip. The memoization also removes
+    a race window where the remote's branch tip could shift between the
+    identity-call (which feeds the translation hash) and the provenance-
+    call (which records the ref on disk) — after this change, both reads
+    return the same resolved sha for the lifetime of the instance.
+    """
 
     url: str
     ref: str
+    # Mutable memoization slot. ``frozen=True`` blocks assignment to
+    # top-level dataclass fields but not mutation of nested containers,
+    # which is exactly what we need here. Never reassigned; only its
+    # single-key ``sha`` slot is populated on first identity() call.
+    _cache: dict = field(default_factory=dict, compare=False, repr=False)
 
     def identity(self) -> str:
         # Resolve the user-supplied ref to a full commit sha via
-        # ``git ls-remote`` — no clone needed and no network round-trip
-        # beyond the remote-refs read. If the user supplied a bare
-        # commit sha, ls-remote won't match (refs are branches / tags),
-        # so we return the sha unchanged. Short shas (< 40 hex chars)
-        # cannot be resolved without a clone; require full 40-char shas
-        # so identity remains deterministic without networking twice.
-        return _resolve_git_ref(self.url, self.ref)
+        # ``git ls-remote`` on first call; memoize for subsequent calls.
+        # If the user supplied a bare commit sha, ls-remote won't match
+        # (refs are branches / tags), so we return the sha unchanged.
+        # Short shas (< 40 hex chars) cannot be resolved without a clone;
+        # require full 40-char shas so identity remains deterministic.
+        if "sha" not in self._cache:
+            self._cache["sha"] = _resolve_git_ref(self.url, self.ref)
+        return self._cache["sha"]
 
     @contextlib.contextmanager
     def materialize(self) -> Iterator[Path]:

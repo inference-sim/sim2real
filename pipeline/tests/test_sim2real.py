@@ -436,6 +436,29 @@ class TestRegisterBuild:
         assert rc == 2
         assert m_d.call_count == 0
 
+    def test_build_missing_path_clean_error(self, tmp_path, monkeypatch, capsys):
+        """Non-existent --build source path surfaces as a clean 'error: ...'
+        line (rc=2), not an uncaught SourceLocatorError traceback. Regression
+        guard for #588 review — with cluster + registry prereqs present,
+        SourceLocatorError used to escape the outer catch in
+        _cmd_translation_register and print a Python traceback."""
+        monkeypatch.chdir(tmp_path)
+        self._write_cluster_config(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956")
+        # Never call the buildkit dispatch — the identity() step should
+        # fail before we reach it.
+        with mock.patch("pipeline.lib.build.dispatch_buildkit_build") as m_d:
+            rc = sim2real.main([
+                "translation", "register",
+                "--build", f"pr1956=/does/not/exist@{cfg}",
+            ])
+        assert rc == 2
+        assert m_d.call_count == 0
+        stderr = capsys.readouterr().err
+        assert "error:" in stderr
+        assert "Traceback" not in stderr
+        assert "not a directory" in stderr
+
     def test_neither_algorithm_nor_build_errors(self, tmp_path, monkeypatch):
         """register requires at least one of --algorithm or --build."""
         monkeypatch.chdir(tmp_path)

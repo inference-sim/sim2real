@@ -1019,6 +1019,7 @@ def _cmd_translation_register(args) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 2
 
+    from pipeline.lib import source_locator as _source_locator
     try:
         thash, status = _register_translation(
             algorithms=algorithms,
@@ -1028,7 +1029,12 @@ def _cmd_translation_register(args) -> int:
             force=args.force,
             build_context=build_context,
         )
-    except (RuntimeError, ValueError, OSError) as e:
+    except (
+        RuntimeError,
+        ValueError,
+        OSError,
+        _source_locator.SourceLocatorError,
+    ) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
