@@ -874,6 +874,13 @@ _build_parser = build_parser
 
 
 def _cmd_translation_register(args) -> int:
+    # Imports scoped to this command are hoisted here so every downstream
+    # reference (spec parsing, prereq checks, outer except tuple) uses
+    # the same aliases. Prior iterations left duplicate imports inside
+    # nested scopes; consolidating avoids the maintenance hazard.
+    from pipeline.lib import build as _build
+    from pipeline.lib import source_locator as _source_locator
+
     # Normalize CLI forms into a list of AlgorithmSpec dicts. Each entry
     # carries a ``kind`` marker: ``"byo"`` for --algorithm (pre-built image
     # already in the registry) or ``"build"`` for --build (framework builds
@@ -956,7 +963,6 @@ def _cmd_translation_register(args) -> int:
     # locations (empty git ref, missing '#', etc.) fail here before any
     # cluster or build work.
     if build_values:
-        from pipeline.lib import source_locator
         for val in build_values:
             try:
                 name, loc_str, config_path_str = _parse_build_triple(val)
@@ -964,8 +970,8 @@ def _cmd_translation_register(args) -> int:
                 print(f"error: {exc}", file=sys.stderr)
                 return 2
             try:
-                location = source_locator.parse_location(loc_str)
-            except source_locator.SourceLocatorError as exc:
+                location = _source_locator.parse_location(loc_str)
+            except _source_locator.SourceLocatorError as exc:
                 print(
                     f"error: --build value {val!r}: {exc}", file=sys.stderr
                 )
@@ -1023,12 +1029,6 @@ def _cmd_translation_register(args) -> int:
     # we fail fast before touching any translation directory. Pure-BYO
     # invocations (no --build) skip this — no build needed, no cluster
     # required.
-    # Import once at the top of the register command so both the
-    # prereq-check block (below) and the outer try/except (further
-    # down) reference the same module aliases.
-    from pipeline.lib import build as _build
-    from pipeline.lib import source_locator as _source_locator
-
     build_context: dict | None = None
     if any(a["kind"] == "build" for a in algorithms):
         # Fail-fast prereq checks for the --build path — same shape as

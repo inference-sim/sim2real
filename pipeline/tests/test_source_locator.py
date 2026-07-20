@@ -474,6 +474,169 @@ def test_git_clone_timeout_raises_source_locator_error(tmp_path):
                 pass
 
 
+def test_redact_url_strips_password_but_keeps_bare_user():
+    """iter-5 fix: PAT-in-URL credentials are stripped before they land in
+    translation_output.json or stderr. Bare-user forms (ssh://git@host)
+    pass through because 'git' is a conventional identifier, not a
+    secret."""
+    # https with user:password → stripped
+    assert (
+        sl._redact_url("https://user:token@github.com/foo/bar.git")
+        == "https://github.com/foo/bar.git"
+    )
+    # https with only user (no password) → kept — no secret to redact
+    assert (
+        sl._redact_url("https://user@github.com/foo/bar.git")
+        == "https://user@github.com/foo/bar.git"
+    )
+    # ssh with bare 'git' user (the ssh access convention) → kept
+    assert (
+        sl._redact_url("ssh://git@github.com/foo/bar.git")
+        == "ssh://git@github.com/foo/bar.git"
+    )
+    # No credentials at all → unchanged
+    assert (
+        sl._redact_url("https://github.com/foo/bar.git")
+        == "https://github.com/foo/bar.git"
+    )
+    # Non-URL / path → unchanged (helper is idempotent for these)
+    assert sl._redact_url("/local/path") == "/local/path"
+    assert sl._redact_url("") == ""
+    # Port preserved through the redaction
+    assert (
+        sl._redact_url("https://user:secret@host.example.com:8080/path")
+        == "https://host.example.com:8080/path"
+    )
+    # Path, query, fragment preserved
+    assert (
+        sl._redact_url("https://u:p@host/a/b?q=1#frag")
+        == "https://host/a/b?q=1#frag"
+    )
+
+
+def test_git_provenance_redacts_credentials():
+    """iter-5 must-fix: source_git_url on disk must not contain
+    embedded credentials. A PAT-in-URL clone spec is a common CI
+    shortcut; we must not persist the token."""
+    loc = sl.GitLocation(
+        url="https://x-access-token:ghp_SECRET@github.com/foo/bar.git",
+        ref="a" * 40,
+    )
+    prov = loc.provenance()
+    assert prov["source_git_url"] == "https://github.com/foo/bar.git"
+    # Explicit guard against every credential substring landing on disk.
+    assert "x-access-token" not in prov["source_git_url"]
+    assert "ghp_SECRET" not in prov["source_git_url"]
+    assert ":" not in prov["source_git_url"].split("//", 1)[1].split("/", 1)[0]
+
+
+def test_git_error_messages_redact_credentials():
+    """iter-5 must-fix: SourceLocatorError messages must not leak
+    credentials to stderr. All eight error-formatting sites use
+    _redact_url; this test verifies the primary path (ls-remote
+    failure) and asserts the raised exception message is clean."""
+    credential_url = "https://user:s3cret@host.example.com/foo/bar.git"
+    fake = mock.Mock(returncode=2, stdout="", stderr="fatal: unknown ref\n")
+    loc = sl.GitLocation(url=credential_url, ref="main")
+    with mock.patch.object(sl.subprocess, "run", return_value=fake):
+        with pytest.raises(sl.SourceLocatorError) as ei:
+            loc.identity()
+    msg = str(ei.value)
+    assert "s3cret" not in msg
+    assert "user:s3cret" not in msg
+    # But the redacted URL still appears so operators can diagnose.
+    assert "host.example.com" in msg
+
+
+def test_git_ls_remote_timeout_message_redacts_credentials():
+    """iter-5 must-fix: timeout error path also redacts credentials."""
+    credential_url = "https://user:s3cret@host/foo/bar.git"
+    loc = sl.GitLocation(url=credential_url, ref="main")
+    with mock.patch.object(
+        sl.subprocess, "run",
+        side_effect=sl.subprocess.TimeoutExpired(cmd="git", timeout=30),
+    ):
+        with pytest.raises(sl.SourceLocatorError) as ei:
+            loc.identity()
+    msg = str(ei.value)
+    assert "s3cret" not in msg
+
+
+def test_parse_location_bare_https_url_rejected():
+    """iter-5 fix: a bare `https://` (missing git+ prefix) is a user
+    typo — surface it with a helpful hint instead of silently treating
+    the string as a filesystem path."""
+    with pytest.raises(sl.SourceLocatorError, match="git\\+<scheme>://"):
+        sl.parse_location("https://github.com/foo/bar.git#main")
+
+
+def test_parse_location_git_scheme_without_prefix_rejected():
+    """Similar: `git://host/repo` is an obsolete/unsupported scheme; hint
+    at the supported form."""
+    with pytest.raises(sl.SourceLocatorError, match="git\\+<scheme>://"):
+        sl.parse_location("git://host/repo.git#main")
+
+
+def test_parse_location_scp_ssh_form_rejected():
+    """SCP-style SSH URLs (git@host:path) are common in .gitconfig-driven
+    workflows but not supported here — surface with hint."""
+    with pytest.raises(sl.SourceLocatorError, match="git\\+<scheme>://"):
+        sl.parse_location("git@github.com:foo/bar.git#main")
+
+
+def test_git_full_clone_timeout_raises_source_locator_error(tmp_path):
+    """iter-5 fix: full-clone timeout is a distinct code path from the
+    shallow-clone timeout. Shallow fails with returncode=128 (raw sha
+    rejected by --branch), then full clone hits TimeoutExpired.
+    Assertion pins the phase substring so message consolidation can't
+    silently drop the phase-specific branch."""
+    sha = "a" * 40
+    loc = sl.GitLocation(url="https://x/y.git", ref=sha)
+    calls: list[str] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append("shallow" if "--depth" in cmd else "full")
+        if "--depth" in cmd:
+            return mock.Mock(returncode=128, stdout="", stderr="fatal\n")
+        # Full clone times out.
+        raise sl.subprocess.TimeoutExpired(cmd="git", timeout=600)
+
+    with mock.patch.object(sl.subprocess, "run", side_effect=fake_run):
+        with pytest.raises(sl.SourceLocatorError, match="full clone") as ei:
+            with loc.materialize():
+                pass
+    assert "timed out" in str(ei.value)
+    assert calls == ["shallow", "full"]
+
+
+def test_git_checkout_timeout_raises_source_locator_error(tmp_path):
+    """iter-5 fix: checkout timeout is yet a distinct code path.
+    Shallow fails, full clone succeeds, checkout hits TimeoutExpired."""
+    sha = "b" * 40
+    loc = sl.GitLocation(url="https://x/y.git", ref=sha)
+    calls: list[str] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        if "--depth" in cmd:
+            calls.append("shallow")
+            return mock.Mock(returncode=128, stdout="", stderr="fatal\n")
+        if "clone" in cmd:
+            calls.append("full")
+            Path(cmd[-1]).mkdir(parents=True)
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        if "checkout" in cmd:
+            calls.append("checkout")
+            raise sl.subprocess.TimeoutExpired(cmd="git", timeout=60)
+        raise AssertionError(f"unexpected: {cmd!r}")
+
+    with mock.patch.object(sl.subprocess, "run", side_effect=fake_run):
+        with pytest.raises(sl.SourceLocatorError, match="checkout") as ei:
+            with loc.materialize():
+                pass
+    assert "timed out" in str(ei.value)
+    assert calls == ["shallow", "full", "checkout"]
+
+
 def test_git_location_memoized_identity_survives_race_scenario():
     """Even if the remote's ref-tip changed between the identity() call
     used for the translation hash and the provenance() call used for the

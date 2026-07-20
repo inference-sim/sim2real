@@ -41,6 +41,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
+from urllib.parse import urlsplit, urlunsplit
 
 
 class SourceLocatorError(Exception):
@@ -58,6 +59,43 @@ _GIT_LSREMOTE_TIMEOUT = 30.0
 _GIT_SHALLOW_TIMEOUT = 60.0
 _GIT_FULL_CLONE_TIMEOUT = 600.0
 _GIT_CHECKOUT_TIMEOUT = 60.0
+
+
+def _redact_url(url: str) -> str:
+    """Return ``url`` with any userinfo (``user:password@``) component
+    stripped. Prevents PAT-in-URL credentials from leaking to on-disk
+    ``translation_output.json`` and to stderr error messages.
+
+    Non-URLs (paths, empty strings, malformed inputs) are returned
+    unchanged — the helper only rewrites URLs whose ``urlsplit`` yields
+    a non-empty username or password. Ports are preserved.
+
+    Examples:
+        >>> _redact_url("https://user:token@github.com/foo/bar.git")
+        'https://github.com/foo/bar.git'
+        >>> _redact_url("https://github.com/foo/bar.git")
+        'https://github.com/foo/bar.git'
+        >>> _redact_url("ssh://git@github.com/foo/bar.git")
+        'ssh://git@github.com/foo/bar.git'  # git-user is not a secret
+
+    The ssh-style ``git@host`` idiom is preserved — the ``git`` username
+    is a conventional identifier for SSH access, not a secret. Only
+    username-with-password (``user:password@``) forms are redacted.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    if not parts.password:
+        # No password → nothing to redact. Bare-user forms like
+        # ``ssh://git@host`` (SSH access convention) pass through.
+        return url
+    netloc = parts.hostname or ""
+    if parts.port is not None:
+        netloc = f"{netloc}:{parts.port}"
+    return urlunsplit((
+        parts.scheme, netloc, parts.path, parts.query, parts.fragment
+    ))
 
 
 def check_git() -> None:
@@ -181,8 +219,15 @@ class GitLocation(Location):
             yield scratch_path
 
     def provenance(self) -> dict:
+        # Redact userinfo from the URL before persisting to disk. A
+        # PAT-in-URL clone spec (e.g. `git+https://user:token@host/…`)
+        # would otherwise write the token verbatim to
+        # translation_output.json:source_git_url, which is checked by
+        # every downstream consumer and surfaced by `sim2real list
+        # translations`. The bare-user ssh idiom (`git@host`) is
+        # preserved — `git` is a conventional identifier, not a secret.
         return {
-            "source_git_url": self.url,
+            "source_git_url": _redact_url(self.url),
             "source_git_ref": self.identity(),
         }
 
@@ -211,6 +256,17 @@ def parse_location(spec: str) -> Location:
         if not ref:
             raise SourceLocatorError(f"git URL has empty ref: {spec!r}")
         return GitLocation(url=url, ref=ref)
+    # Detect obviously-URL-shaped strings that didn't match the git+
+    # prefix. Silently treating these as filesystem paths yields a
+    # confusing "not a directory" error at hash time. Surface the
+    # prefix requirement instead.
+    if "://" in spec or spec.startswith("git@"):
+        raise SourceLocatorError(
+            f"unsupported --build location: {spec!r} — looks like a git "
+            "URL but doesn't use the 'git+<scheme>://' prefix. Supported "
+            "shapes: 'git+https://host/repo.git#<ref>' or "
+            "'git+ssh://git@host/repo.git#<ref>'."
+        )
     return PathLocation(path=Path(spec))
 
 
@@ -322,12 +378,12 @@ def _resolve_git_ref(url: str, ref: str) -> str:
         )
     except subprocess.TimeoutExpired as exc:
         raise SourceLocatorError(
-            f"git ls-remote {url}#{ref} timed out after "
+            f"git ls-remote {_redact_url(url)}#{ref} timed out after "
             f"{_GIT_LSREMOTE_TIMEOUT}s — check network/host reachability"
         ) from exc
     if result.returncode != 0:
         raise SourceLocatorError(
-            f"git ls-remote failed for {url}#{ref}: "
+            f"git ls-remote failed for {_redact_url(url)}#{ref}: "
             f"{result.stderr.strip() or 'ref not found'}"
         )
     # ls-remote output: "<sha>\t<refname>\n" possibly multiple lines
@@ -340,8 +396,8 @@ def _resolve_git_ref(url: str, ref: str) -> str:
     sha = chosen.split("\t", 1)[0].strip()
     if not _SHA1_RE.match(sha):
         raise SourceLocatorError(
-            f"git ls-remote returned unexpected sha for {url}#{ref}: "
-            f"{sha!r}"
+            f"git ls-remote returned unexpected sha for "
+            f"{_redact_url(url)}#{ref}: {sha!r}"
         )
     return sha
 
@@ -352,12 +408,25 @@ def _clone_and_checkout(url: str, ref: str, dest: Path) -> None:
     Strategy:
       1. Try a shallow clone with ``--branch <ref>``. Works when ``ref``
          is a branch or tag name.
-      2. On failure, fall back to a full clone plus ``git checkout <ref>``.
-         Handles arbitrary commit shas.
+      2. On non-zero exit, fall back to a full clone plus ``git checkout
+         <ref>``. Handles arbitrary commit shas.
+
+    **TimeoutExpired short-circuits the fallback.** If the shallow-clone
+    attempt hits its timeout (``_GIT_SHALLOW_TIMEOUT``), the caller sees
+    a ``SourceLocatorError`` immediately — the full-clone fallback is
+    NOT tried, because the same underlying network / host issue would
+    almost certainly time out again at ``_GIT_FULL_CLONE_TIMEOUT``
+    (10× larger). Recovery is a re-invocation, not automatic. If a
+    caller specifically wants the fallback path even after a
+    shallow-clone timeout, they can pass a full commit sha as ``ref``
+    (which makes ``--branch <ref>`` fail with returncode=128 fast —
+    git rejects raw shas under ``--branch`` — dropping straight into
+    the fallback without a timeout window).
 
     ``dest`` is created by ``git clone`` itself; parents must exist.
 
-    Raises :class:`SourceLocatorError` on unrecoverable clone failure.
+    Raises :class:`SourceLocatorError` on unrecoverable clone failure
+    (including any ``TimeoutExpired``).
     """
     if dest.exists():
         raise SourceLocatorError(
@@ -382,8 +451,8 @@ def _clone_and_checkout(url: str, ref: str, dest: Path) -> None:
         )
     except subprocess.TimeoutExpired as exc:
         raise SourceLocatorError(
-            f"git shallow clone of {url}#{ref} timed out after "
-            f"{_GIT_SHALLOW_TIMEOUT}s — check network/host reachability"
+            f"git shallow clone of {_redact_url(url)}#{ref} timed out "
+            f"after {_GIT_SHALLOW_TIMEOUT}s — check network/host reachability"
         ) from exc
     if shallow.returncode == 0:
         return
@@ -401,12 +470,12 @@ def _clone_and_checkout(url: str, ref: str, dest: Path) -> None:
         )
     except subprocess.TimeoutExpired as exc:
         raise SourceLocatorError(
-            f"git full clone of {url} timed out after "
+            f"git full clone of {_redact_url(url)} timed out after "
             f"{_GIT_FULL_CLONE_TIMEOUT}s — check network/host reachability"
         ) from exc
     if full.returncode != 0:
         raise SourceLocatorError(
-            f"git clone failed for {url}: "
+            f"git clone failed for {_redact_url(url)}: "
             f"{full.stderr.strip() or 'unknown error'}"
         )
     try:

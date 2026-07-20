@@ -320,7 +320,8 @@ class TestRegisterBuild:
         # Config file materialized under generated/<name>/.
         assert (tdirs[0] / "generated" / "pr1956" / "pr1956_config.yaml").read_text() == cfg.read_text()
 
-    def test_build_git_end_to_end(self, tmp_path, monkeypatch):
+    def test_build_git_end_to_end(self, tmp_path, monkeypatch,
+                                  _mock_check_skopeo, _mock_check_git):
         """--build with a git-URL: identity resolves via ls-remote; clone +
         buildkit dispatched; source_git_url/ref recorded."""
         monkeypatch.chdir(tmp_path)
@@ -377,6 +378,13 @@ class TestRegisterBuild:
             ])
         assert rc == 0
         assert m_dispatch.call_count == 1
+        # Prereq checks on the git happy-path: BOTH skopeo AND git must
+        # have been called. iter-5 review flagged this positive-assertion
+        # gap — the failure test proved check_git was invoked at all,
+        # but a refactor bypassing check_git on the non-failure branch
+        # would have slipped through.
+        assert _mock_check_skopeo.called
+        assert _mock_check_git.called
 
         # Dispatch argv assertions. For a git-URL build, source_dir must
         # be the ephemeral scratch clone containing the fake policy.go
@@ -434,6 +442,77 @@ class TestRegisterBuild:
         # BYO entry keeps its supplied image_ref verbatim.
         byo = next(a for a in tout["algorithms"] if a["name"] == "baseline")
         assert byo["image_ref"] == "ghcr.io/foo/baseline:v1"
+
+    def test_build_mixed_path_and_git_calls_both_prereqs(
+        self, tmp_path, monkeypatch, _mock_check_skopeo, _mock_check_git
+    ):
+        """iter-5 fix: one path --build + one git --build in one call.
+        Both check_skopeo() and check_git() must fire (the git-URL
+        entry triggers check_git); both algorithms land in
+        translation_output.json; only the git entry records
+        source_git_url/source_git_ref. Regression guard against an
+        off-by-one in the `any(isinstance(loc, GitLocation))` predicate
+        at sim2real.py."""
+        monkeypatch.chdir(tmp_path)
+        self._write_cluster_config(tmp_path)
+        cfg_p = self._write_config(tmp_path, "pr1956")
+        cfg_g = self._write_config(tmp_path, "pr1956b")
+        src = self._write_source_dir(tmp_path, "pr1956")
+        resolved_sha = "e" * 40
+
+        def fake_run(cmd, *args, **kwargs):
+            if "ls-remote" in cmd:
+                return mock.Mock(
+                    returncode=0,
+                    stdout=f"{resolved_sha}\trefs/heads/main\n",
+                    stderr="",
+                )
+            if "clone" in cmd and "--depth" in cmd:
+                return mock.Mock(returncode=128, stdout="", stderr="fatal\n")
+            if "clone" in cmd:
+                dest = Path(cmd[-1])
+                dest.mkdir(parents=True)
+                (dest / "policy.go").write_text("// pr1956b\n")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            if "checkout" in cmd:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            raise AssertionError(f"unexpected: {cmd!r}")
+
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build", return_value=0
+        ) as m_dispatch, mock.patch(
+            "pipeline.lib.build.probe_image_digest",
+            # Two --build entries: 2 pre-probes + 2 post-probes = 4.
+            # side_effect list ordered: pre1, post1, pre2, post2.
+            side_effect=[None, "sha256:" + "1" * 64, None, "sha256:" + "2" * 64],
+        ), mock.patch(
+            "pipeline.lib.source_locator.subprocess.run", side_effect=fake_run
+        ):
+            rc = sim2real.main([
+                "translation", "register",
+                "--build", f"pr1956={src}@{cfg_p}",
+                "--build",
+                f"pr1956b=git+https://github.com/foo/bar.git#main@{cfg_g}",
+            ])
+
+        assert rc == 0
+        # BOTH prereqs fire on the mixed invocation.
+        assert _mock_check_skopeo.called
+        assert _mock_check_git.called
+        # Both algorithms end up in the translation.
+        assert m_dispatch.call_count == 2
+        tdirs = list((tmp_path / "workspace" / "translations").iterdir())
+        assert len(tdirs) == 1
+        tout = json.loads((tdirs[0] / "translation_output.json").read_text())
+        by_name = {a["name"]: a for a in tout["algorithms"]}
+        assert set(by_name) == {"pr1956", "pr1956b"}
+        # Path entry: NO git provenance recorded.
+        assert "source_git_url" not in by_name["pr1956"]
+        assert "source_git_ref" not in by_name["pr1956"]
+        # Git entry: provenance recorded.
+        assert by_name["pr1956b"]["source_git_url"] == \
+            "https://github.com/foo/bar.git"
+        assert by_name["pr1956b"]["source_git_ref"] == resolved_sha
 
     def test_build_pre_build_probe_short_circuits_dispatch(self, tmp_path, monkeypatch):
         """When the composed image_ref already exists in the registry with a
