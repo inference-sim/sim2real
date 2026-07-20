@@ -468,6 +468,18 @@ def _dispatch_build(entry: dict, *, thash: str, build_context: dict) -> None:
             f"(image_ref={image_ref}, rc={rc})"
         )
     entry["image_digest"] = build.probe_image_digest(image_ref)
+    if entry["image_digest"] is None:
+        # Buildkit push succeeded but the post-build skopeo probe couldn't
+        # resolve a digest (transient network, auth flake, missing skopeo).
+        # image_digest lands as null in translation_output.json; surface a
+        # warning so operators can `skopeo inspect` and diagnose. Mirrors
+        # `sim2real build`'s post-probe null-digest warning.
+        print(
+            f"warning: built {image_ref}; digest not recorded "
+            f"(post-build skopeo probe returned no digest — "
+            f"image_digest for {entry['name']!r} recorded as null)",
+            file=sys.stderr,
+        )
 
 
 def _register_translation(
@@ -1013,12 +1025,26 @@ def _cmd_translation_register(args) -> int:
     # required.
     build_context: dict | None = None
     if any(a["kind"] == "build" for a in algorithms):
+        # Fail-fast prereq checks for the --build path — same shape as
+        # `sim2real build`. check_skopeo() surfaces a missing binary with
+        # an actionable install hint before any translation dir or
+        # buildkit work happens; without it, probe_image_digest silently
+        # swallows FileNotFoundError and returns None, disabling the
+        # idempotency short-circuit and recording image_digest as null
+        # with no user-visible signal.
+        from pipeline.lib import build as _build_mod
+        try:
+            _build_mod.check_skopeo()
+        except _build_mod.BuildError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         try:
             build_context = _resolve_build_context()
         except RuntimeError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
 
+    from pipeline.lib import build as _build
     from pipeline.lib import source_locator as _source_locator
     try:
         thash, status = _register_translation(
@@ -1034,6 +1060,7 @@ def _cmd_translation_register(args) -> int:
         ValueError,
         OSError,
         _source_locator.SourceLocatorError,
+        _build.BuildError,
     ) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
