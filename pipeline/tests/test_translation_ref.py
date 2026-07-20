@@ -191,6 +191,52 @@ class TestReadTranslationOutput:
         assert "source_git_ref" not in e
         assert e["image_ref"] == "ghcr.io/x/y:v1"
 
+    def test_append_history_preserved(self, tmp_path):
+        """Issue #585: `append_history[]` is passed through untouched by
+        the reader. The optional field is a plain list of entries and
+        does not affect any per-algorithm normalization."""
+        payload = {
+            "version": 1,
+            "translation_hash": "1" * 64,
+            "source": "byo",
+            "alias": "softr",
+            "algorithms": [
+                {"name": "a", "image_ref": "reg/a:v1", "image_digest": "sha256:aa"},
+                {"name": "b", "image_ref": "reg/b:v1", "image_digest": "sha256:bb"},
+            ],
+            "append_history": [
+                {
+                    "appended_at": "2026-07-20T14:32:11Z",
+                    "algorithms": ["b"],
+                    "kind": "byo",
+                },
+            ],
+            "created_at": "2026-07-09T00:01:43Z",
+        }
+        p = tmp_path / "translation_output.json"
+        p.write_text(json.dumps(payload))
+        data = translation_ref.read_translation_output(p)
+        assert data["append_history"] == payload["append_history"]
+
+    def test_missing_append_history_is_optional(self, tmp_path):
+        """Legacy translations (pre-#585) don't carry append_history[].
+        The reader does not synthesize the key — consumers should treat
+        its absence as an empty list."""
+        payload = {
+            "version": 1,
+            "translation_hash": "2" * 64,
+            "source": "byo",
+            "alias": "solo",
+            "algorithms": [
+                {"name": "solo", "image_ref": "reg:v1", "image_digest": "sha256:cc"},
+            ],
+            "created_at": "2026-07-05T10:00:00Z",
+        }
+        p = tmp_path / "translation_output.json"
+        p.write_text(json.dumps(payload))
+        data = translation_ref.read_translation_output(p)
+        assert "append_history" not in data
+
 
 def _write_translation(base: Path, thash: str, payload: dict) -> None:
     tdir = base / thash

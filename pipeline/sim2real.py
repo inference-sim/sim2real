@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """sim2real top-level CLI.
 
-Subcommands: ``translation register`` (BYO), ``translate`` (skill-driven
-checkpoint + ``--resume``), ``build`` (per-algorithm image build against
-a checkpointed translation), ``assemble`` (materialize a run from a
-translation), ``use`` (flip active run), ``list runs`` /
-``list translations``.
+Subcommands: ``translation register`` (BYO), ``translation append``
+(extend an existing translation with more algorithms; see #585),
+``translate`` (skill-driven checkpoint + ``--resume``), ``build``
+(per-algorithm image build against a checkpointed translation),
+``assemble`` (materialize a run from a translation), ``use`` (flip
+active run), ``list runs`` / ``list translations``.
 """
 
 from __future__ import annotations
@@ -687,6 +688,168 @@ def _register_translation(
     return thash, "created"
 
 
+def _append_translation(
+    *,
+    translation_hash: str,
+    algorithms: list[dict],
+    now_iso: str,
+    build_context: dict | None = None,
+) -> list[dict]:
+    """Append new algorithm entries to an existing translation.
+
+    ``algorithms`` uses the same ``AlgorithmSpec`` shape as
+    :func:`_register_translation`: each entry carries a ``kind`` marker
+    (``"byo"`` or ``"build"``) plus the kind-specific payload. Caller has
+    already validated names and confirmed each config file exists +
+    parses as YAML.
+
+    Contract:
+      * ``translation_hash`` must already exist on disk. Read + shape
+        normalization is done via ``translation_ref.read_translation_output``.
+      * New algorithm names must not collide with any name already in the
+        translation, and must not collide with any *other* translation's
+        top-level alias (mirrors register's alias-collision check).
+      * The translation hash is NOT recomputed. It remains the hash at
+        first registration (design call: renaming the directory on each
+        append would break every prior run's reference to it).
+      * ``append_history[]`` is extended. Mixed-kind appends produce one
+        entry per kind (both timestamped ``now_iso``) so the history
+        remains a clean ``(when, algorithms, kind)`` triple.
+      * The updated ``translation_output.json`` is written atomically
+        after all builds succeed. Any build failure raises and no state
+        is persisted (the file on disk retains its pre-append content).
+
+    Returns the list of ``append_history[]`` entries created by this call
+    (one or two, depending on kind mix). Caller uses these for logging.
+    """
+    from pipeline.lib import translation_ref
+
+    for a in algorithms:
+        a.setdefault("kind", "byo")
+    if any(a["kind"] == "build" for a in algorithms) and build_context is None:
+        raise RuntimeError(
+            "internal error: _append_translation called with build "
+            "entries but no build_context"
+        )
+
+    out_path = layout.translation_output_path(translation_hash)
+    if not out_path.exists():
+        raise RuntimeError(
+            f"translation {translation_hash} not found on disk "
+            f"(expected {out_path})"
+        )
+    existing = translation_ref.read_translation_output(out_path)
+
+    existing_names = {
+        a.get("name") for a in existing.get("algorithms", []) or []
+    }
+    new_names = [a["name"] for a in algorithms]
+    dupes = sorted(n for n in new_names if n in existing_names)
+    if dupes:
+        raise RuntimeError(
+            f"algorithm name(s) already in translation {translation_hash}: "
+            f"{', '.join(dupes)}"
+        )
+
+    # Alias-collision check per new algorithm — mirrors register.
+    # Skip our own translation (a name already present in this translation
+    # would have been caught above; we're only guarding against another
+    # translation's alias).
+    for p in algorithms:
+        other = translation_ref.find_by_alias(p["name"], layout.translations_dir())
+        if other is not None and other != translation_hash:
+            raise RuntimeError(
+                f"alias {p['name']!r} already assigned to translation "
+                f"{other}"
+            )
+
+    # Prepare per-algorithm derived fields (mirrors _register_translation's
+    # ``prepared`` build). Kind-agnostic ``config_bytes``; kind-specific
+    # image_ref/digest handling.
+    prepared: list[dict] = []
+    for a in algorithms:
+        cfg_bytes = a["config_path"].read_bytes()
+        entry: dict = {
+            "kind": a["kind"],
+            "name": a["name"],
+            "config_bytes": cfg_bytes,
+            "image_ref": None,
+            "image_digest": None,
+            "location": None,
+            "provenance": {},
+        }
+        if a["kind"] == "byo":
+            digest = _extract_digest_from_ref(a["image_ref"])
+            entry["image_ref"] = a["image_ref"]
+            entry["image_digest"] = digest
+        else:
+            entry["location"] = a["location"]
+            entry["provenance"] = a["location"].provenance()
+        prepared.append(entry)
+
+    # Materialize per-algo generated/ directories before build dispatch
+    # (buildkit doesn't need them, but the config-write step at the end
+    # does). Build phase runs BEFORE the atomic write of
+    # translation_output.json so recorded image_ref/image_digest reflect
+    # the actual build result.
+    tdir = layout.translation_dir(translation_hash)
+    for p in prepared:
+        (tdir / "generated" / p["name"]).mkdir(parents=True, exist_ok=True)
+
+    for p in prepared:
+        if p["kind"] != "build":
+            continue
+        _dispatch_build(p, thash=translation_hash, build_context=build_context)
+
+    # Compose the new algorithm entries in the on-disk shape. We mimic
+    # `_build_translation_output`'s per-entry keys so a translation
+    # written by register and one extended by append are indistinguishable
+    # in downstream reads.
+    appended_entries = [
+        {
+            "name": p["name"],
+            "source_path": None,
+            "source_sha256": None,
+            "config_path": f"generated/{p['name']}/{p['name']}_config.yaml",
+            "image_ref": p["image_ref"],
+            "image_digest": p["image_digest"],
+            **(p["provenance"] or {}),
+        }
+        for p in prepared
+    ]
+
+    # Build the new append_history[] entries — one per kind so the
+    # history stays a clean (when, algorithms, kind) triple. Preserves
+    # the order in which the algorithms appear in this call within each
+    # kind group.
+    history_entries: list[dict] = []
+    for kind in ("byo", "build"):
+        names_in_kind = [p["name"] for p in prepared if p["kind"] == kind]
+        if names_in_kind:
+            history_entries.append({
+                "appended_at": now_iso,
+                "algorithms": names_in_kind,
+                "kind": kind,
+            })
+
+    # Read-modify-write on the existing dict preserves any top-level
+    # fields we don't know about (defensive against schema drift).
+    updated = dict(existing)
+    updated["algorithms"] = list(existing.get("algorithms") or []) + appended_entries
+    updated["append_history"] = list(existing.get("append_history") or []) + history_entries
+
+    _atomic_write_json(out_path, updated)
+
+    # Materialize per-algo config overlays LAST so the on-disk shape and
+    # the JSON stay in sync — mirrors _register_translation.
+    for p in prepared:
+        layout.generated_config_path(translation_hash, p["name"]).write_bytes(
+            p["config_bytes"]
+        )
+
+    return history_entries
+
+
 # ── Argparse ──────────────────────────────────────────────────────────
 
 
@@ -774,6 +937,45 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Reassign an alias from a previous translation.",
+    )
+
+    app = tsub.add_parser(
+        "append",
+        help="Append one or more algorithms to an existing translation",
+    )
+    app.add_argument(
+        "--translation",
+        required=True,
+        metavar="REF",
+        help="alias, hash prefix, or full translation hash to append to",
+    )
+    app.add_argument(
+        "--algorithm",
+        required=False,
+        default=None,
+        action="append",
+        metavar="ALG",
+        help=(
+            "Pre-built (BYO) algorithm spec — repeatable, mixable with --build. "
+            "Form: '<name>=<image-ref>@<config-path>'. Names match "
+            "[A-Za-z0-9][A-Za-z0-9._-]*, max 128 chars. At least one of "
+            "--algorithm or --build must be supplied."
+        ),
+    )
+    app.add_argument(
+        "--build",
+        default=None,
+        action="append",
+        metavar="SPEC",
+        dest="build",
+        help=(
+            "Assisted-BYO source spec — repeatable, mixable with --algorithm. "
+            "Form: '<name>=<location>@<config-path>'. <location> is a "
+            "filesystem path or 'git+<url>#<ref>'. Framework materializes "
+            "the source, dispatches buildkit, records image_ref/digest "
+            "(and source_git_url/source_git_ref for git locations). "
+            "Requires a provisioned cluster (see 'cluster.py provision')."
+        ),
     )
 
     asm = sub.add_parser(
@@ -1122,6 +1324,159 @@ def _cmd_translation_register(args) -> int:
                     file=sys.stderr,
                 )
     print(f"registered translation {thash}")
+    return 0
+
+
+def _cmd_translation_append(args) -> int:
+    """Append additional algorithms to an existing translation.
+
+    Same spec grammar as `translation register` — mixable ``--algorithm``
+    and ``--build``. Refuses if any new-algorithm name collides with an
+    existing entry or with another translation's alias. Appends a new
+    entry to ``translation_output.json:append_history[]``; the
+    translation directory is NOT renamed and the top-level
+    ``translation_hash`` remains the hash at first registration (see
+    #584 / #585 for the design rationale).
+    """
+    from pipeline.lib import build as _build
+    from pipeline.lib import source_locator as _source_locator
+    from pipeline.lib import translation_ref
+
+    algo_values: list[str] = args.algorithm or []
+    build_values: list[str] = args.build or []
+    if not algo_values and not build_values:
+        print(
+            "error: at least one of --algorithm or --build must be supplied",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        thash = translation_ref.resolve_translation_ref(
+            args.translation, layout.translations_dir()
+        )
+    except translation_ref.ResolveError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    algorithms: list[dict] = []
+    for val in algo_values:
+        try:
+            name, image_ref, config_path_str = _parse_algorithm_triple(val)
+        except argparse.ArgumentTypeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        algorithms.append({
+            "kind": "byo",
+            "name": name,
+            "image_ref": image_ref,
+            "config_path": Path(config_path_str),
+        })
+
+    for val in build_values:
+        try:
+            name, loc_str, config_path_str = _parse_build_triple(val)
+        except argparse.ArgumentTypeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        try:
+            location = _source_locator.parse_location(loc_str)
+        except _source_locator.SourceLocatorError as exc:
+            safe_val = _source_locator.redact_url(val)
+            print(
+                f"error: --build value {safe_val!r}: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+        algorithms.append({
+            "kind": "build",
+            "name": name,
+            "location": location,
+            "config_path": Path(config_path_str),
+        })
+
+    # Duplicate-name check within this invocation (separate from the
+    # collision check against the on-disk translation, which happens in
+    # _append_translation).
+    seen: dict[str, int] = {}
+    for a in algorithms:
+        seen[a["name"]] = seen.get(a["name"], 0) + 1
+    dupes = sorted(n for n, c in seen.items() if c > 1)
+    if dupes:
+        print(
+            f"error: duplicate algorithm name(s) in one append call: "
+            f"{', '.join(dupes)}",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Existence + YAML validation for every config file (fail-fast, no writes).
+    for a in algorithms:
+        cp: Path = a["config_path"]
+        if not cp.exists():
+            print(f"error: config file not found: {cp}", file=sys.stderr)
+            return 2
+        try:
+            yaml.safe_load(cp.read_text())
+        except yaml.YAMLError as exc:
+            print(f"error: {cp} is not valid YAML: {exc}", file=sys.stderr)
+            return 2
+
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    build_context: dict | None = None
+    if any(a["kind"] == "build" for a in algorithms):
+        try:
+            _build.check_skopeo()
+        except _build.BuildError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if any(
+            isinstance(a.get("location"), _source_locator.GitLocation)
+            for a in algorithms
+            if a["kind"] == "build"
+        ):
+            try:
+                _source_locator.check_git()
+            except _source_locator.SourceLocatorError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+        try:
+            build_context = _resolve_build_context()
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
+    try:
+        history = _append_translation(
+            translation_hash=thash,
+            algorithms=algorithms,
+            now_iso=now_iso,
+            build_context=build_context,
+        )
+    except (
+        RuntimeError,
+        ValueError,
+        OSError,
+        _source_locator.SourceLocatorError,
+        _build.BuildError,
+    ) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    # Emit the same digest warning register uses for BYO entries whose
+    # image ref did not carry a @sha256: digest.
+    for a in algorithms:
+        if a["kind"] != "byo":
+            continue
+        if _extract_digest_from_ref(a["image_ref"]) is None:
+            print(
+                f"warning: image_digest for {a['name']!r} recorded as null "
+                f"(no @sha256: in image)",
+                file=sys.stderr,
+            )
+    total = sum(len(e["algorithms"]) for e in history)
+    print(f"appended {total} algorithm(s) to translation {thash}")
     return 0
 
 
@@ -1981,19 +2336,20 @@ def _cmd_list_translations(_args) -> int:
 
     entries.sort(key=sort_key, reverse=True)
 
-    fmt = "{alias:<20} {hash:<12} {source:<8} {images:<15} {created}"
+    fmt = "{alias:<20} {hash:<12} {source:<8} {images:<15} {appends:<8} {created}"
     print(fmt.format(
         alias="ALIAS", hash="HASH", source="SOURCE",
-        images="IMAGES", created="CREATED",
+        images="IMAGES", appends="APPENDS", created="CREATED",
     ))
     for thash, data in entries:
         alias = data.get("alias") or "-"
         source = data.get("source") or "?"
         images = _summarize_images(source, data.get("algorithms") or [])
+        appends = str(len(data.get("append_history") or []))
         created = _format_assembled(data.get("created_at") or "")
         print(fmt.format(
             alias=alias, hash=thash[:12], source=source,
-            images=images, created=created,
+            images=images, appends=appends, created=created,
         ))
     return 0
 
@@ -2053,6 +2409,8 @@ def main(argv: list[str] | None = None) -> int:
     layout.set_experiment_root(args.experiment_root)
     if args.command == "translation" and args.subcommand == "register":
         return _cmd_translation_register(args)
+    if args.command == "translation" and args.subcommand == "append":
+        return _cmd_translation_append(args)
     if args.command == "assemble":
         return _cmd_assemble(args)
     if args.command == "use":
