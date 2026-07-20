@@ -187,8 +187,9 @@ python pipeline/sim2real.py translation register \
 
 | Flag | Required | Notes |
 |------|----------|-------|
-| `--algorithm NAME=IMAGE@CONFIG` | at least one of `--algorithm` / `--build` (repeatable) | `NAME` follows `[A-Za-z0-9][A-Za-z0-9._-]*`, max 128 chars, no `.` / `..`. `IMAGE` is the registry ref. `CONFIG` is the treatment overlay YAML path. Rightmost `@` is the split point, so digest refs (e.g. `image@sha256:abc`) work. **Overlay paths containing `@` cannot be represented** (structural constraint — the `@` would be misread as part of the image ref). Overlay paths containing `=` are supported. |
-| `--build NAME=LOCATION@CONFIG` | at least one of `--algorithm` / `--build` (repeatable) | Assisted-BYO: framework materializes `LOCATION`, dispatches buildkit, records `image_ref`/`image_digest`. `LOCATION` is either a filesystem path or a `git+<url>#<ref>` URL. See "**`--build`: assisted-BYO**" below. Mixable with `--algorithm` in one invocation. |
+| `--algorithm NAME=IMAGE@CONFIG` | at least one of `--algorithm` / `--build` (repeatable) | `NAME` follows `[A-Za-z0-9][A-Za-z0-9._-]*`, max 128 chars, no `.` / `..`. `IMAGE` is the registry ref. `CONFIG` is the treatment overlay YAML path. Rightmost `@` is the split point, so digest refs (e.g. `image@sha256:abc`) work. **Overlay paths containing `@` cannot be represented** (structural constraint — the `@` would be misread as part of the image ref). Overlay paths containing `=` are supported. When `--like` follows, the `@CONFIG` part may be omitted — the config is copied from the referenced algorithm. |
+| `--build NAME=LOCATION@CONFIG` | at least one of `--algorithm` / `--build` (repeatable) | Assisted-BYO: framework materializes `LOCATION`, dispatches buildkit, records `image_ref`/`image_digest`. `LOCATION` is either a filesystem path or a `git+<url>#<ref>` URL. See "**`--build`: assisted-BYO**" below. Mixable with `--algorithm` in one invocation. When `--like` follows, the `@CONFIG` part may be omitted. |
+| `--like NAME` | no (repeatable, per-spec) | Copy the config from an existing algorithm as the starting point for the immediately preceding `--algorithm` or `--build` spec. `NAME` must match another algorithm in this invocation (forward-refs OK). Mutually exclusive with the `@<config>` part of the spec. See "**`--like`: config-copy sugar**" below. |
 | `--baseline-config PATH` | no | Baseline overlay YAML, if the translation needs one. |
 | `--registered-hash HASH` | no | Assert the computed `translation_hash` equals this value; error if not. |
 | `--force` | no | Reassign an alias if another translation already owns it. Applies per-algorithm for any N — use `--force` whenever any algorithm name in the batch was previously used as an alias by a different translation. For N>1 the newly-registered translation itself has `alias=null` (batched translations are referenced by hash); `--force` only clears the colliding aliases on the previous owners. |
@@ -229,6 +230,40 @@ python pipeline/sim2real.py translation register \
 
 - Path-based `--build`: nothing beyond `image_ref` + `image_digest` (working-tree state is not reproducible; no honest identifier to capture).
 - Git-URL `--build`: `source_git_url` (with any `user:password@` userinfo stripped — PAT-in-URL clone specs are safe to persist; bare `git@` ssh-style users are kept because `git` is a conventional identifier, not a secret) and `source_git_ref` (full commit sha, resolved via `git ls-remote` at register time). These land as optional fields on the algorithm entry in `translation_output.json`.
+
+#### `--like`: config-copy sugar
+
+For iterative refinement of an algorithm — typically as it evolves through upstream PR review — the treatment overlay is almost always unchanged from revision to revision; hand-copying YAML is friction. `--like <existing-algorithm-name>` copies another algorithm's `<name>_config.yaml` byte-for-byte as the starting point for the new algorithm, replacing the need to supply an inline `@<config>`.
+
+`--like` binds to the immediately preceding `--algorithm` or `--build` spec on the command line. Repeatable — one `--like` per spec.
+
+```bash
+# Register a baseline + a --build that borrows the baseline's config.
+python pipeline/sim2real.py translation register \
+    --algorithm baseline=ghcr.io/foo/baseline:v1@overlays/baseline.yaml \
+    --build     pr1956=./llm-d-router \
+    --like      baseline
+
+# Iterate: on the next revision, append pr1956b and reuse pr1956's config
+# (which is on disk from the previous register call).
+python pipeline/sim2real.py translation append --translation softr \
+    --build pr1956b=./llm-d-router \
+    --like  pr1956
+```
+
+**Rules:**
+
+- Applies to the immediately preceding `--algorithm` or `--build` spec. `--like` before any spec is an error.
+- At most one `--like` per spec.
+- Mutually exclusive with the `@<config>` portion of the spec: `--build A=<src>@<cfg> --like X` is rejected.
+- `<NAME>` accepts only algorithm names (`[A-Za-z0-9][A-Za-z0-9._-]*`), not paths or hashes.
+- `--like → --like` chains are unsupported: the target algorithm must itself supply its config via an inline `@<config>` (for `register`, within the same invocation) or must already be registered in the target translation (for `append`).
+- Self-reference (`--like` targeting the spec it's attached to) is rejected.
+
+**Resolution scope:**
+
+- `translation register` — the target must be another spec in the same invocation with an inline `@<config>`. Forward-references are allowed: the target may appear later on the command line.
+- `translation append` — the target may be another spec in the same invocation (with an inline `@<config>`) OR any already-registered algorithm in the target translation (its `generated/<target>/<target>_config.yaml` on disk is read verbatim).
 
 #### Deprecated form: `--algorithm NAME --image REF --config PATH`
 
@@ -282,8 +317,9 @@ python pipeline/sim2real.py translation append \
 | Flag | Required | Notes |
 |------|----------|-------|
 | `--translation REF` | yes | alias, hash prefix (min 4 chars), or full 64-char hash — same resolver as `assemble --translation`. |
-| `--algorithm NAME=IMAGE@CONFIG` | at least one of `--algorithm` / `--build` (repeatable) | Same shape as `register`. |
-| `--build NAME=LOCATION@CONFIG` | at least one of `--algorithm` / `--build` (repeatable) | Same shape as `register`. Prerequisites (skopeo, cluster + registry-creds Secret) are checked before any state change. |
+| `--algorithm NAME=IMAGE@CONFIG` | at least one of `--algorithm` / `--build` (repeatable) | Same shape as `register`. When `--like` follows, `@CONFIG` may be omitted. |
+| `--build NAME=LOCATION@CONFIG` | at least one of `--algorithm` / `--build` (repeatable) | Same shape as `register`. Prerequisites (skopeo, cluster + registry-creds Secret) are checked before any state change. When `--like` follows, `@CONFIG` may be omitted. |
+| `--like NAME` | no (repeatable, per-spec) | Copy the config from an existing algorithm. `NAME` may resolve to another spec in this invocation (with an inline `@<config>`) OR any algorithm already registered in the target translation. See "**`--like`: config-copy sugar**" under `translation register` for the full rule set. |
 
 **Design notes** (see #584 for full rationale):
 
