@@ -76,7 +76,41 @@ def _extract_digest_from_ref(image_ref: str) -> str | None:
     return digest
 
 
-def _parse_algorithm_triple(value: str) -> tuple[str, str, str]:
+class _OrderedSpecAction(argparse._AppendAction):
+    """Append action that ALSO records invocation order across
+    ``--algorithm`` / ``--build`` / ``--like``.
+
+    Argparse's default ``action="append"`` gives back per-flag lists but
+    loses the cross-flag ordering — with ``--algorithm A --like X
+    --build B --like Y`` you get ``algorithm=[A]``, ``build=[B]``,
+    ``like=[X, Y]`` and no way to know which ``--like`` binds to which
+    spec. The ``--like`` design in #586 requires per-spec binding
+    ("applies to the immediately preceding ``--algorithm`` or
+    ``--build`` spec"), so we shadow ``append`` with an action that
+    also pushes ``{"kind": "algorithm"|"build"|"like", "value": <raw>}``
+    onto ``namespace._specs`` in the order flags appear on the command
+    line. Callers walk that list to pair ``--like`` with its target.
+
+    Backward compat: the per-flag ``args.algorithm`` / ``args.build`` /
+    ``args.like`` lists still populate identically to the vanilla
+    ``append`` action — existing consumers (and tests) don't have to
+    change.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        super().__call__(parser, namespace, values, option_string)
+        specs = getattr(namespace, "_specs", None)
+        if specs is None:
+            specs = []
+            namespace._specs = specs
+        # option_string is one of "--algorithm", "--build", "--like".
+        kind = option_string.lstrip("-") if option_string else "?"
+        specs.append({"kind": kind, "value": values})
+
+
+def _parse_algorithm_triple(
+    value: str, *, allow_no_config: bool = False
+) -> tuple[str, str, str | None]:
     """Parse ``<name>=<image-ref>@<config-path>`` into ``(name, image_ref, config_path)``.
 
     Splits on the first ``=`` (names cannot contain ``=`` by regex) and
@@ -84,6 +118,13 @@ def _parse_algorithm_triple(value: str) -> tuple[str, str, str]:
     overlay paths must not contain ``@`` — enforced by rejecting image
     refs with more than one ``@`` after the split). Config paths
     containing ``=`` are supported.
+
+    When ``allow_no_config`` is ``True`` (issue #586: ``--like`` supplies
+    the config), the two-part form ``<name>=<image-ref>`` is also
+    accepted and the returned ``config_path`` is ``None``. The caller
+    is responsible for resolving the config from another source
+    (typically ``--like <existing-algorithm>``) and for rejecting the
+    case where neither is present.
 
     Raises ``argparse.ArgumentTypeError`` on any parse failure.
     """
@@ -105,19 +146,25 @@ def _parse_algorithm_triple(value: str) -> tuple[str, str, str]:
     rhs = value[eq_idx + 1:]
     at_idx = rhs.rfind("@")
     if at_idx < 0:
-        raise argparse.ArgumentTypeError(
-            f"--algorithm value {safe!r} missing '@' after '=' "
-            "(expected '<name>=<image-ref>@<config-path>')"
-        )
-    image_ref = rhs[:at_idx]
-    config_path = rhs[at_idx + 1:]
+        if not allow_no_config:
+            raise argparse.ArgumentTypeError(
+                f"--algorithm value {safe!r} missing '@' after '=' "
+                "(expected '<name>=<image-ref>@<config-path>')"
+            )
+        # Two-part form: <name>=<image-ref>. Config supplied elsewhere
+        # (--like). Image ref must be non-empty.
+        image_ref = rhs
+        config_path: str | None = None
+    else:
+        image_ref = rhs[:at_idx]
+        config_path = rhs[at_idx + 1:]
+        if not config_path:
+            raise argparse.ArgumentTypeError(
+                f"--algorithm value {safe!r} has empty config-path"
+            )
     if not image_ref:
         raise argparse.ArgumentTypeError(
             f"--algorithm value {safe!r} has empty image-ref"
-        )
-    if not config_path:
-        raise argparse.ArgumentTypeError(
-            f"--algorithm value {safe!r} has empty config-path"
         )
     # Valid image refs have at most one '@' (the digest suffix). More than
     # one '@' in the parsed image ref means the config path likely had a
@@ -137,7 +184,9 @@ def _parse_algorithm_triple(value: str) -> tuple[str, str, str]:
     return name, image_ref, config_path
 
 
-def _parse_build_triple(value: str) -> tuple[str, str, str]:
+def _parse_build_triple(
+    value: str, *, allow_no_config: bool = False
+) -> tuple[str, str, str | None]:
     """Parse ``<name>=<location>@<config-path>`` into ``(name, location, config_path)``.
 
     ``<location>`` is either a filesystem path or a ``git+<url>#<ref>`` string.
@@ -151,6 +200,15 @@ def _parse_build_triple(value: str) -> tuple[str, str, str]:
     (``git+ssh://git@host/...``); the rightmost-@ split keeps that ``@``
     with the location, which is correct as long as the config path does
     not itself contain ``@``.
+
+    When ``allow_no_config`` is ``True`` (issue #586: ``--like`` supplies
+    the config), the two-part form ``<name>=<location>`` is also accepted
+    and the returned ``config_path`` is ``None``. Because git-URL
+    locations already contain ``@`` in their userinfo segment
+    (``git+ssh://git@host/...``), the two-part detection here is content-
+    aware: locations that PARSE as ``git+*`` URLs with no trailing
+    ``@<path>`` are accepted intact; all other trailing-``@`` values are
+    treated as inline configs the way the three-part form does.
 
     Raises ``argparse.ArgumentTypeError`` on any parse failure.
     """
@@ -171,20 +229,52 @@ def _parse_build_triple(value: str) -> tuple[str, str, str]:
     name = value[:eq_idx]
     rhs = value[eq_idx + 1:]
     at_idx = rhs.rfind("@")
+
+    # Two-part form disambiguation (issue #586):
+    #   * Filesystem path ``<name>=./llm-d-router`` — no ``@`` in rhs at
+    #     all → clearly two-part.
+    #   * Git URL ``<name>=git+ssh://git@host/repo#ref`` — rightmost
+    #     ``@`` is INSIDE the location's userinfo, not a config
+    #     separator. Detect by checking if rhs (with the ``@<tail>``
+    #     stripped) still starts with ``git+``: if yes, the ``@`` is
+    #     part of the URL; treat as two-part with the whole rhs as the
+    #     location.
+    #   * Git URL with an inline config
+    #     ``<name>=git+ssh://git@host/repo#ref@overlay.yaml`` — rightmost
+    #     ``@`` follows the ref-fragment. Three-part; location is
+    #     rhs[:at_idx].
+    two_part = False
     if at_idx < 0:
-        raise argparse.ArgumentTypeError(
-            f"--build value {safe!r} missing '@' after '=' "
-            "(expected '<name>=<location>@<config-path>')"
-        )
-    location = rhs[:at_idx]
-    config_path = rhs[at_idx + 1:]
+        two_part = True
+    elif allow_no_config and rhs.startswith("git+"):
+        # Distinguish "git URL only, no trailing config" from "git URL +
+        # trailing @<config>": if the substring before the rightmost @
+        # does NOT itself contain a ``#`` fragment marker, then the
+        # rightmost @ is inside the userinfo (no ref yet). If it DOES
+        # contain ``#``, the ref is between # and @, so the trailing @
+        # is the config separator.
+        before_at = rhs[:at_idx]
+        if "#" not in before_at:
+            two_part = True
+
+    if two_part:
+        if not allow_no_config:
+            raise argparse.ArgumentTypeError(
+                f"--build value {safe!r} missing '@' after '=' "
+                "(expected '<name>=<location>@<config-path>')"
+            )
+        location = rhs
+        config_path: str | None = None
+    else:
+        location = rhs[:at_idx]
+        config_path = rhs[at_idx + 1:]
+        if not config_path:
+            raise argparse.ArgumentTypeError(
+                f"--build value {safe!r} has empty config-path"
+            )
     if not location:
         raise argparse.ArgumentTypeError(
             f"--build value {safe!r} has empty location"
-        )
-    if not config_path:
-        raise argparse.ArgumentTypeError(
-            f"--build value {safe!r} has empty config-path"
         )
     try:
         translation_ref.validate_name(name)
@@ -193,6 +283,63 @@ def _parse_build_triple(value: str) -> tuple[str, str, str]:
             f"--build value {safe!r} has invalid name: {exc}"
         ) from exc
     return name, location, config_path
+
+
+def _validate_like_target(value: str) -> str:
+    """Argparse ``type=`` wrapper: ``--like`` accepts algorithm names only.
+
+    Per #586: ``<existing-algorithm-name>`` — no paths, no hashes, no
+    prefixes. Enforced by ``translation_ref.validate_name`` (same rule
+    as every other name in the CLI).
+    """
+    from pipeline.lib import translation_ref
+    try:
+        return translation_ref.validate_name(value)
+    except translation_ref.ValidationError as exc:
+        raise argparse.ArgumentTypeError(
+            f"--like value {value!r}: {exc} "
+            "(--like accepts algorithm names only; not paths or hashes)"
+        ) from exc
+
+
+def _resolve_like_bindings(
+    specs: list[dict],
+) -> dict[int, str]:
+    """Pair each ``--like`` with its immediately preceding spec.
+
+    ``specs`` is the raw ``args._specs`` list built by
+    :class:`_OrderedSpecAction` — one entry per ``--algorithm`` /
+    ``--build`` / ``--like`` on the command line, in order.
+
+    Returns a dict mapping the SPEC index (position within the
+    algorithm+build subset of ``specs``, ignoring ``--like`` entries)
+    to the target algorithm name the spec is ``--like``-of.
+
+    Raises ``RuntimeError`` when:
+      * a ``--like`` appears before any ``--algorithm`` / ``--build``
+      * a single spec is followed by more than one ``--like``
+    """
+    bindings: dict[int, str] = {}
+    spec_idx = -1  # index into the algorithm+build subsequence
+    for entry in specs:
+        kind = entry["kind"]
+        if kind == "like":
+            if spec_idx < 0:
+                raise RuntimeError(
+                    f"--like {entry['value']!r} appears before any "
+                    "--algorithm or --build spec"
+                )
+            if spec_idx in bindings:
+                raise RuntimeError(
+                    f"--like given twice for the same spec: previous "
+                    f"target {bindings[spec_idx]!r}, new target "
+                    f"{entry['value']!r} (each spec accepts at most "
+                    "one --like)"
+                )
+            bindings[spec_idx] = entry["value"]
+        else:
+            spec_idx += 1
+    return bindings
 
 
 def _clear_alias_on(other_hash: str) -> None:
@@ -877,15 +1024,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--algorithm",
         required=False,
         default=None,
-        action="append",
+        action=_OrderedSpecAction,
         metavar="ALG",
         help=(
             "Pre-built (BYO) algorithm spec — repeatable, mixable with --build. "
             "Preferred form: '<name>=<image-ref>@<config-path>' (all fields "
-            "inline). Deprecated form: '<name>' alone, with --image and "
-            "--config supplied separately (N=1 only; emits deprecation "
-            "warning). Names match [A-Za-z0-9][A-Za-z0-9._-]*, max 128 chars. "
-            "At least one of --algorithm or --build must be supplied."
+            "inline). With --like following, the '@<config-path>' portion may "
+            "be omitted — the config is copied from the referenced algorithm. "
+            "Deprecated form: '<name>' alone, with --image and --config "
+            "supplied separately (N=1 only; emits deprecation warning). Names "
+            "match [A-Za-z0-9][A-Za-z0-9._-]*, max 128 chars. At least one of "
+            "--algorithm or --build must be supplied."
         ),
     )
     reg.add_argument(
@@ -909,16 +1058,33 @@ def build_parser() -> argparse.ArgumentParser:
     reg.add_argument(
         "--build",
         default=None,
-        action="append",
+        action=_OrderedSpecAction,
         metavar="SPEC",
         dest="build",
         help=(
             "Assisted-BYO source spec — repeatable, mixable with --algorithm. "
             "Form: '<name>=<location>@<config-path>'. <location> is a "
-            "filesystem path or 'git+<url>#<ref>'. Framework materializes "
-            "the source, dispatches buildkit, records image_ref/digest "
-            "(and source_git_url/source_git_ref for git locations). "
-            "Requires a provisioned cluster (see 'cluster.py provision')."
+            "filesystem path or 'git+<url>#<ref>'. With --like following, "
+            "'@<config-path>' may be omitted — the config is copied from the "
+            "referenced algorithm. Framework materializes the source, "
+            "dispatches buildkit, records image_ref/digest (and "
+            "source_git_url/source_git_ref for git locations). Requires a "
+            "provisioned cluster (see 'cluster.py provision')."
+        ),
+    )
+    reg.add_argument(
+        "--like",
+        default=None,
+        action=_OrderedSpecAction,
+        metavar="NAME",
+        dest="like",
+        type=_validate_like_target,
+        help=(
+            "Copy the config from an existing algorithm as the starting "
+            "point for the immediately preceding --algorithm or --build "
+            "spec. NAME must match another algorithm in this invocation "
+            "(forward-refs OK). Mutually exclusive with the '@<config>' "
+            "portion of the spec's triple. Repeatable (one per spec)."
         ),
     )
     reg.add_argument(
@@ -953,28 +1119,48 @@ def build_parser() -> argparse.ArgumentParser:
         "--algorithm",
         required=False,
         default=None,
-        action="append",
+        action=_OrderedSpecAction,
         metavar="ALG",
         help=(
             "Pre-built (BYO) algorithm spec — repeatable, mixable with --build. "
-            "Form: '<name>=<image-ref>@<config-path>'. Names match "
-            "[A-Za-z0-9][A-Za-z0-9._-]*, max 128 chars. At least one of "
-            "--algorithm or --build must be supplied."
+            "Form: '<name>=<image-ref>@<config-path>'. With --like following, "
+            "'@<config-path>' may be omitted — the config is copied from the "
+            "referenced algorithm. Names match [A-Za-z0-9][A-Za-z0-9._-]*, "
+            "max 128 chars. At least one of --algorithm or --build must be "
+            "supplied."
         ),
     )
     app.add_argument(
         "--build",
         default=None,
-        action="append",
+        action=_OrderedSpecAction,
         metavar="SPEC",
         dest="build",
         help=(
             "Assisted-BYO source spec — repeatable, mixable with --algorithm. "
             "Form: '<name>=<location>@<config-path>'. <location> is a "
-            "filesystem path or 'git+<url>#<ref>'. Framework materializes "
-            "the source, dispatches buildkit, records image_ref/digest "
-            "(and source_git_url/source_git_ref for git locations). "
-            "Requires a provisioned cluster (see 'cluster.py provision')."
+            "filesystem path or 'git+<url>#<ref>'. With --like following, "
+            "'@<config-path>' may be omitted — the config is copied from the "
+            "referenced algorithm. Framework materializes the source, "
+            "dispatches buildkit, records image_ref/digest (and "
+            "source_git_url/source_git_ref for git locations). Requires a "
+            "provisioned cluster (see 'cluster.py provision')."
+        ),
+    )
+    app.add_argument(
+        "--like",
+        default=None,
+        action=_OrderedSpecAction,
+        metavar="NAME",
+        dest="like",
+        type=_validate_like_target,
+        help=(
+            "Copy the config from an existing algorithm as the starting "
+            "point for the immediately preceding --algorithm or --build "
+            "spec. NAME must resolve to another algorithm — either "
+            "already in the target translation, or another spec in this "
+            "invocation. Mutually exclusive with the '@<config>' portion "
+            "of the spec's triple. Repeatable (one per spec)."
         ),
     )
 
@@ -1105,12 +1291,37 @@ def _cmd_translation_register(args) -> int:
     # invocation order (--algorithm first, then --build).
     algo_values: list[str] = args.algorithm or []
     build_values: list[str] = args.build or []
+    like_values: list[str] = args.like or []
+    specs: list[dict] = getattr(args, "_specs", None) or []
     if not algo_values and not build_values:
         print(
             "error: at least one of --algorithm or --build must be supplied",
             file=sys.stderr,
         )
         return 2
+
+    # --like binding resolution. `_specs` records the exact order of
+    # --algorithm/--build/--like flags on the command line; walk it to
+    # pair each --like with its immediately preceding spec (index into
+    # the algorithm+build subsequence). #586 forbids --like with the
+    # deprecated --image/--config form.
+    like_bindings: dict[int, str] = {}
+    if like_values:
+        if args.image is not None or args.config is not None:
+            print(
+                "error: --like is not supported with the deprecated "
+                "--image/--config form; use inline "
+                "'--algorithm <name>=<image>@<config>' (or omit @<config> "
+                "when using --like) instead",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            like_bindings = _resolve_like_bindings(specs)
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
     algorithms: list[dict] = []
     if args.image is not None or args.config is not None:
         # Deprecated form: single --algorithm plus separate --image/--config.
@@ -1160,51 +1371,81 @@ def _cmd_translation_register(args) -> int:
             file=sys.stderr,
         )
     else:
-        # New form: each --algorithm value is an inline triple.
-        for val in algo_values:
-            try:
-                name, image_ref, config_path_str = _parse_algorithm_triple(val)
-            except argparse.ArgumentTypeError as exc:
-                print(f"error: {exc}", file=sys.stderr)
-                return 2
-            algorithms.append({
-                "kind": "byo",
-                "name": name,
-                "image_ref": image_ref,
-                "config_path": Path(config_path_str),
-            })
-
-    # --build specs: parse to (name, location string, config path) and
-    # resolve the location string into a Location object. Malformed
-    # locations (empty git ref, missing '#', etc.) fail here before any
-    # cluster or build work.
-    if build_values:
-        for val in build_values:
-            try:
-                name, loc_str, config_path_str = _parse_build_triple(val)
-            except argparse.ArgumentTypeError as exc:
-                print(f"error: {exc}", file=sys.stderr)
-                return 2
-            try:
-                location = _source_locator.parse_location(loc_str)
-            except _source_locator.SourceLocatorError as exc:
-                # Redact `val` before printing — the exception message
-                # is already redacted at raise time inside
-                # parse_location, but this outer echo would otherwise
-                # print the raw CLI argument (which may embed a PAT-in-
-                # URL) to stderr AND shell history / CI logs.
-                safe_val = _source_locator.redact_url(val)
-                print(
-                    f"error: --build value {safe_val!r}: {exc}",
-                    file=sys.stderr,
-                )
-                return 2
-            algorithms.append({
-                "kind": "build",
-                "name": name,
-                "location": location,
-                "config_path": Path(config_path_str),
-            })
+        # New form: walk args._specs in invocation order so --algorithm
+        # and --build entries interleave the same way they appeared on
+        # the CLI. Each spec's index in the algorithm+build subsequence
+        # is what --like's binding table uses.
+        spec_idx = -1
+        for entry in specs:
+            kind = entry["kind"]
+            val = entry["value"]
+            if kind == "like":
+                continue
+            spec_idx += 1
+            allow_no_config = spec_idx in like_bindings
+            if kind == "algorithm":
+                try:
+                    name, image_ref, config_path_str = _parse_algorithm_triple(
+                        val, allow_no_config=allow_no_config,
+                    )
+                except argparse.ArgumentTypeError as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                    return 2
+                if config_path_str is not None and allow_no_config:
+                    print(
+                        f"error: --algorithm value {val!r} has an inline "
+                        f"'@<config>' but is followed by "
+                        f"'--like {like_bindings[spec_idx]!r}'; the two are "
+                        "mutually exclusive (drop one)",
+                        file=sys.stderr,
+                    )
+                    return 2
+                algorithms.append({
+                    "kind": "byo",
+                    "name": name,
+                    "image_ref": image_ref,
+                    "config_path": Path(config_path_str) if config_path_str else None,
+                    "like_of": like_bindings.get(spec_idx),
+                })
+            elif kind == "build":
+                try:
+                    name, loc_str, config_path_str = _parse_build_triple(
+                        val, allow_no_config=allow_no_config,
+                    )
+                except argparse.ArgumentTypeError as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                    return 2
+                if config_path_str is not None and allow_no_config:
+                    safe_val = _source_locator.redact_url(val)
+                    print(
+                        f"error: --build value {safe_val!r} has an inline "
+                        f"'@<config>' but is followed by "
+                        f"'--like {like_bindings[spec_idx]!r}'; the two are "
+                        "mutually exclusive (drop one)",
+                        file=sys.stderr,
+                    )
+                    return 2
+                try:
+                    location = _source_locator.parse_location(loc_str)
+                except _source_locator.SourceLocatorError as exc:
+                    # Redact `val` before printing — the exception message
+                    # is already redacted at raise time inside
+                    # parse_location, but this outer echo would otherwise
+                    # print the raw CLI argument (which may embed a PAT-in-
+                    # URL) to stderr AND shell history / CI logs.
+                    safe_val = _source_locator.redact_url(val)
+                    print(
+                        f"error: --build value {safe_val!r}: {exc}",
+                        file=sys.stderr,
+                    )
+                    return 2
+                algorithms.append({
+                    "kind": "build",
+                    "name": name,
+                    "location": location,
+                    "config_path": Path(config_path_str) if config_path_str else None,
+                    "like_of": like_bindings.get(spec_idx),
+                })
 
     # Duplicate-name check (either form).
     seen: dict[str, int] = {}
@@ -1218,6 +1459,37 @@ def _cmd_translation_register(args) -> int:
             file=sys.stderr,
         )
         return 2
+
+    # Resolve every `--like` reference to a concrete config Path. Register
+    # can only source from another spec in the same invocation — the
+    # target must have an inline @<config> (no `--like → --like` chains).
+    name_to_inline_config: dict[str, Path] = {
+        a["name"]: a["config_path"]
+        for a in algorithms
+        if a.get("config_path") is not None
+    }
+    for a in algorithms:
+        target = a.get("like_of")
+        if target is None:
+            continue
+        if target == a["name"]:
+            print(
+                f"error: --like {target!r} refers to the same algorithm "
+                "being defined (self-reference)",
+                file=sys.stderr,
+            )
+            return 2
+        source_cfg = name_to_inline_config.get(target)
+        if source_cfg is None:
+            print(
+                f"error: --like {target!r}: no algorithm named {target!r} "
+                "with an inline '@<config>' in this invocation "
+                "(--like targets must supply their own '@<config>'; "
+                "--like → --like chains are not supported)",
+                file=sys.stderr,
+            )
+            return 2
+        a["config_path"] = source_cfg
 
     # Existence + YAML validation for every config file (fail-fast, no writes).
     for a in algorithms:
@@ -1344,6 +1616,8 @@ def _cmd_translation_append(args) -> int:
 
     algo_values: list[str] = args.algorithm or []
     build_values: list[str] = args.build or []
+    like_values: list[str] = args.like or []
+    specs: list[dict] = getattr(args, "_specs", None) or []
     if not algo_values and not build_values:
         print(
             "error: at least one of --algorithm or --build must be supplied",
@@ -1359,41 +1633,82 @@ def _cmd_translation_append(args) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    algorithms: list[dict] = []
-    for val in algo_values:
+    # --like binding resolution — same shape as `_cmd_translation_register`.
+    like_bindings: dict[int, str] = {}
+    if like_values:
         try:
-            name, image_ref, config_path_str = _parse_algorithm_triple(val)
-        except argparse.ArgumentTypeError as exc:
+            like_bindings = _resolve_like_bindings(specs)
+        except RuntimeError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
-        algorithms.append({
-            "kind": "byo",
-            "name": name,
-            "image_ref": image_ref,
-            "config_path": Path(config_path_str),
-        })
 
-    for val in build_values:
-        try:
-            name, loc_str, config_path_str = _parse_build_triple(val)
-        except argparse.ArgumentTypeError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
-        try:
-            location = _source_locator.parse_location(loc_str)
-        except _source_locator.SourceLocatorError as exc:
-            safe_val = _source_locator.redact_url(val)
-            print(
-                f"error: --build value {safe_val!r}: {exc}",
-                file=sys.stderr,
-            )
-            return 2
-        algorithms.append({
-            "kind": "build",
-            "name": name,
-            "location": location,
-            "config_path": Path(config_path_str),
-        })
+    algorithms: list[dict] = []
+    spec_idx = -1
+    for entry in specs:
+        kind = entry["kind"]
+        val = entry["value"]
+        if kind == "like":
+            continue
+        spec_idx += 1
+        allow_no_config = spec_idx in like_bindings
+        if kind == "algorithm":
+            try:
+                name, image_ref, config_path_str = _parse_algorithm_triple(
+                    val, allow_no_config=allow_no_config,
+                )
+            except argparse.ArgumentTypeError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            if config_path_str is not None and allow_no_config:
+                print(
+                    f"error: --algorithm value {val!r} has an inline "
+                    f"'@<config>' but is followed by "
+                    f"'--like {like_bindings[spec_idx]!r}'; the two are "
+                    "mutually exclusive (drop one)",
+                    file=sys.stderr,
+                )
+                return 2
+            algorithms.append({
+                "kind": "byo",
+                "name": name,
+                "image_ref": image_ref,
+                "config_path": Path(config_path_str) if config_path_str else None,
+                "like_of": like_bindings.get(spec_idx),
+            })
+        elif kind == "build":
+            try:
+                name, loc_str, config_path_str = _parse_build_triple(
+                    val, allow_no_config=allow_no_config,
+                )
+            except argparse.ArgumentTypeError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            if config_path_str is not None and allow_no_config:
+                safe_val = _source_locator.redact_url(val)
+                print(
+                    f"error: --build value {safe_val!r} has an inline "
+                    f"'@<config>' but is followed by "
+                    f"'--like {like_bindings[spec_idx]!r}'; the two are "
+                    "mutually exclusive (drop one)",
+                    file=sys.stderr,
+                )
+                return 2
+            try:
+                location = _source_locator.parse_location(loc_str)
+            except _source_locator.SourceLocatorError as exc:
+                safe_val = _source_locator.redact_url(val)
+                print(
+                    f"error: --build value {safe_val!r}: {exc}",
+                    file=sys.stderr,
+                )
+                return 2
+            algorithms.append({
+                "kind": "build",
+                "name": name,
+                "location": location,
+                "config_path": Path(config_path_str) if config_path_str else None,
+                "like_of": like_bindings.get(spec_idx),
+            })
 
     # Duplicate-name check within this invocation (separate from the
     # collision check against the on-disk translation, which happens in
@@ -1409,6 +1724,47 @@ def _cmd_translation_append(args) -> int:
             file=sys.stderr,
         )
         return 2
+
+    # Resolve every `--like` reference to a concrete config Path.
+    # Append can source from EITHER (a) another spec in the same
+    # invocation with an inline @<config>, OR (b) an already-registered
+    # algorithm in the target translation.
+    name_to_inline_config: dict[str, Path] = {
+        a["name"]: a["config_path"]
+        for a in algorithms
+        if a.get("config_path") is not None
+    }
+    existing_config_dir = layout.translation_dir(thash) / "generated"
+    for a in algorithms:
+        target = a.get("like_of")
+        if target is None:
+            continue
+        if target == a["name"]:
+            print(
+                f"error: --like {target!r} refers to the same algorithm "
+                "being defined (self-reference)",
+                file=sys.stderr,
+            )
+            return 2
+        # (a) In-invocation source with inline config.
+        source_cfg = name_to_inline_config.get(target)
+        if source_cfg is None:
+            # (b) Already-registered algorithm in the target translation.
+            candidate = existing_config_dir / target / f"{target}_config.yaml"
+            if candidate.exists():
+                source_cfg = candidate
+        if source_cfg is None:
+            print(
+                f"error: --like {target!r}: no algorithm named {target!r} "
+                "found in the target translation, and no spec named "
+                f"{target!r} with an inline '@<config>' in this invocation "
+                "(--like → --like chains are not supported; provide an "
+                "inline '@<config>' on the target spec, or reference an "
+                "already-registered algorithm)",
+                file=sys.stderr,
+            )
+            return 2
+        a["config_path"] = source_cfg
 
     # Existence + YAML validation for every config file (fail-fast, no writes).
     for a in algorithms:

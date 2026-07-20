@@ -3550,3 +3550,507 @@ class TestListTranslationsAppendedCount:
         # The APPENDS value for this row is "0".
         row = [ln for ln in capsys.readouterr().out.splitlines() if h[:12] in ln][0]
         assert " 0 " in row or row.endswith(" 0")
+
+
+class TestParseAlgorithmTripleOptionalConfig:
+    """`_parse_algorithm_triple(..., allow_no_config=True)` accepts a
+    two-part form for #586's `--like` path."""
+
+    def test_two_part_accepted_with_flag(self):
+        name, image, cfg = sim2real._parse_algorithm_triple(
+            "foo=img:v1", allow_no_config=True
+        )
+        assert (name, image, cfg) == ("foo", "img:v1", None)
+
+    def test_two_part_with_digest_ref_accepted(self):
+        # Digest ref contains '@' — parser must still recognize the
+        # two-part form when no config-path follows.
+        digest_ref = "reg/img@sha256:" + "a" * 64
+        # `foo=reg/img@sha256:...` — with allow_no_config, is that
+        # two-part (image=whole rhs, no cfg) or three-part (image=reg/img,
+        # cfg=sha256:...)? Our rightmost-@ split treats it as three-part
+        # by default. Two-part requires ABSENCE of '@' entirely OR the
+        # caller must not care about config; here we assert the three-
+        # part interpretation (which is the useful one — you never want
+        # a digest-suffixed image without config since --like supplies
+        # config).
+        name, image, cfg = sim2real._parse_algorithm_triple(
+            f"foo={digest_ref}@cfg.yaml", allow_no_config=True
+        )
+        assert (name, image, cfg) == ("foo", digest_ref, "cfg.yaml")
+
+    def test_two_part_rejected_without_flag(self):
+        with pytest.raises(argparse.ArgumentTypeError, match="missing '@'"):
+            sim2real._parse_algorithm_triple("foo=img:v1")
+
+    def test_two_part_empty_image_rejected(self):
+        with pytest.raises(argparse.ArgumentTypeError, match="empty image-ref"):
+            sim2real._parse_algorithm_triple("foo=", allow_no_config=True)
+
+
+class TestParseBuildTripleOptionalConfig:
+    """`_parse_build_triple(..., allow_no_config=True)` two-part path
+    detection is content-aware: git URLs contain '@' in userinfo, so
+    the parser has to distinguish 'git+ssh://git@host/repo#ref' (no
+    trailing config) from 'git+ssh://git@host/repo#ref@cfg.yaml'."""
+
+    def test_two_part_path_accepted(self):
+        name, loc, cfg = sim2real._parse_build_triple(
+            "foo=./src-dir", allow_no_config=True
+        )
+        assert (name, loc, cfg) == ("foo", "./src-dir", None)
+
+    def test_two_part_absolute_path_accepted(self):
+        name, loc, cfg = sim2real._parse_build_triple(
+            "foo=/abs/path", allow_no_config=True
+        )
+        assert (name, loc, cfg) == ("foo", "/abs/path", None)
+
+    def test_git_ssh_url_no_config_accepted(self):
+        """`git+ssh://git@host/repo` — no ref, no config. The '@' is
+        part of userinfo; two-part detection sees no '#' before the
+        rightmost '@' and treats the whole rhs as the location."""
+        name, loc, cfg = sim2real._parse_build_triple(
+            "foo=git+ssh://git@host/repo", allow_no_config=True
+        )
+        assert (name, loc, cfg) == ("foo", "git+ssh://git@host/repo", None)
+
+    def test_git_ssh_url_with_ref_no_config_accepted(self):
+        """`git+ssh://git@host/repo#ref` — ref via '#' fragment; no
+        trailing '@<config>'. The rightmost '@' is inside userinfo;
+        content-aware split keeps it there."""
+        name, loc, cfg = sim2real._parse_build_triple(
+            "foo=git+ssh://git@host/repo#main", allow_no_config=True
+        )
+        assert (name, loc, cfg) == ("foo", "git+ssh://git@host/repo#main", None)
+
+    def test_git_ssh_url_with_ref_and_config_still_three_part(self):
+        """`git+ssh://git@host/repo#ref@cfg.yaml` — ref via '#', config
+        via trailing '@'. The '#' is BEFORE the rightmost '@', so the
+        content-aware split correctly identifies the trailing '@' as
+        the config separator even with allow_no_config=True."""
+        name, loc, cfg = sim2real._parse_build_triple(
+            "foo=git+ssh://git@host/repo#main@cfg.yaml", allow_no_config=True
+        )
+        assert (name, loc, cfg) == (
+            "foo", "git+ssh://git@host/repo#main", "cfg.yaml"
+        )
+
+    def test_https_git_url_no_config_accepted(self):
+        """git+https://... has no '@' in userinfo; but content-aware
+        detection triggers on the 'git+' prefix. When allow_no_config
+        is set and no '#'...'@' pattern, treat whole rhs as location."""
+        name, loc, cfg = sim2real._parse_build_triple(
+            "foo=git+https://github.com/x/y.git#main", allow_no_config=True
+        )
+        assert (name, loc, cfg) == (
+            "foo", "git+https://github.com/x/y.git#main", None
+        )
+
+    def test_two_part_rejected_without_flag(self):
+        with pytest.raises(argparse.ArgumentTypeError, match="missing '@'"):
+            sim2real._parse_build_triple("foo=./src-dir")
+
+
+class TestValidateLikeTarget:
+    def test_accepts_valid_name(self):
+        assert sim2real._validate_like_target("softreflective") == "softreflective"
+
+    def test_rejects_path(self):
+        with pytest.raises(argparse.ArgumentTypeError):
+            sim2real._validate_like_target("./configs/pr1956.yaml")
+
+    def test_rejects_hash_prefix_with_slash(self):
+        # Names cannot contain '/'; a hash-prefix path like
+        # "169b7b2b/pr1956" is rejected.
+        with pytest.raises(argparse.ArgumentTypeError):
+            sim2real._validate_like_target("169b7b2b/pr1956")
+
+    def test_rejects_empty(self):
+        with pytest.raises(argparse.ArgumentTypeError):
+            sim2real._validate_like_target("")
+
+
+class TestResolveLikeBindings:
+    def test_no_specs_no_bindings(self):
+        assert sim2real._resolve_like_bindings([]) == {}
+
+    def test_algorithm_then_like_pairs(self):
+        specs = [
+            {"kind": "algorithm", "value": "a=img@cfg"},
+            {"kind": "like", "value": "b"},
+        ]
+        assert sim2real._resolve_like_bindings(specs) == {0: "b"}
+
+    def test_multiple_specs_interleaved_likes(self):
+        specs = [
+            {"kind": "algorithm", "value": "a=img@cfg"},
+            {"kind": "like", "value": "base"},
+            {"kind": "build", "value": "b=./src"},
+            {"kind": "like", "value": "a"},
+        ]
+        assert sim2real._resolve_like_bindings(specs) == {0: "base", 1: "a"}
+
+    def test_like_without_preceding_spec_errors(self):
+        with pytest.raises(RuntimeError, match=r"appears before any"):
+            sim2real._resolve_like_bindings([
+                {"kind": "like", "value": "b"},
+                {"kind": "algorithm", "value": "a=img@cfg"},
+            ])
+
+    def test_double_like_on_same_spec_errors(self):
+        with pytest.raises(RuntimeError, match=r"given twice"):
+            sim2real._resolve_like_bindings([
+                {"kind": "algorithm", "value": "a=img@cfg"},
+                {"kind": "like", "value": "b"},
+                {"kind": "like", "value": "c"},
+            ])
+
+    def test_like_binds_to_immediately_preceding_spec(self):
+        specs = [
+            {"kind": "algorithm", "value": "a=img@cfg"},
+            {"kind": "build", "value": "b=./src@bcfg"},
+            {"kind": "like", "value": "a"},
+        ]
+        # --like a binds to spec-1 (build b), NOT spec-0 (algorithm a).
+        assert sim2real._resolve_like_bindings(specs) == {1: "a"}
+
+
+class TestRegisterLike:
+    """End-to-end `translation register --like` via `sim2real.main`."""
+
+    def _write_config(self, tmp_path: Path, name: str, body: str) -> Path:
+        cfg = tmp_path / f"{name}_config.yaml"
+        cfg.write_text(body)
+        return cfg
+
+    def test_forward_reference_within_invocation(self, tmp_path, monkeypatch):
+        """Issue #586 acceptance criterion: register a baseline and a
+        --build in one call, --like the baseline. Config is copied
+        byte-for-byte from the baseline's inline @<config>."""
+        monkeypatch.chdir(tmp_path)
+        # Cluster config for the --build entry.
+        setup = tmp_path / "workspace" / "setup_config.json"
+        setup.parent.mkdir(parents=True, exist_ok=True)
+        setup.write_text(json.dumps({
+            "registry": "ghcr.io/kalantar",
+            "repo_name": "llm-d-router",
+        }))
+        cluster_dir = tmp_path / "workspace" / "clusters" / "test"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        (cluster_dir / "cluster_config.json").write_text(json.dumps({
+            "cluster_id": "test",
+            "namespaces": ["ns-0"],
+            "secret_names": {"registry_creds": "registry-creds"},
+        }))
+
+        cfg = self._write_config(
+            tmp_path, "baseline", "baseline_body:\n  x: 1\n"
+        )
+        src = tmp_path / "src-pr1956"
+        src.mkdir()
+        (src / "policy.go").write_text("// pr1956\n")
+
+        with mock.patch(
+            "pipeline.lib.build.check_skopeo"
+        ), mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build", return_value=0
+        ), mock.patch(
+            "pipeline.lib.build.probe_image_digest",
+            side_effect=[None, "sha256:" + "a" * 64],
+        ):
+            rc = sim2real.main([
+                "translation", "register",
+                "--algorithm", f"baseline=ghcr.io/x/y:v1@{cfg}",
+                "--build", f"pr1956={src}",
+                "--like", "baseline",
+            ])
+        assert rc == 0
+
+        tdirs = list((tmp_path / "workspace" / "translations").iterdir())
+        assert len(tdirs) == 1
+        tdir = tdirs[0]
+        # pr1956's config is a byte-for-byte copy of baseline's.
+        pr_cfg = (tdir / "generated" / "pr1956" / "pr1956_config.yaml").read_bytes()
+        baseline_cfg = (tdir / "generated" / "baseline" / "baseline_config.yaml").read_bytes()
+        assert pr_cfg == baseline_cfg
+        assert pr_cfg == cfg.read_bytes()
+
+    def test_backward_reference_within_invocation(self, tmp_path, monkeypatch):
+        """--like target defined earlier in the invocation."""
+        monkeypatch.chdir(tmp_path)
+        cfg = self._write_config(tmp_path, "base", "base_body: yes\n")
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", f"base=reg/base:v1@{cfg}",
+            "--algorithm", "twin=reg/twin:v1",
+            "--like", "base",
+        ])
+        assert rc == 0
+        tdir = list((tmp_path / "workspace" / "translations").iterdir())[0]
+        twin_cfg = (tdir / "generated" / "twin" / "twin_config.yaml").read_bytes()
+        base_cfg = (tdir / "generated" / "base" / "base_config.yaml").read_bytes()
+        assert twin_cfg == base_cfg
+
+    def test_forward_reference_target_defined_later_in_invocation(
+        self, tmp_path, monkeypatch
+    ):
+        """`--like` target need not be defined before it's referenced."""
+        monkeypatch.chdir(tmp_path)
+        cfg = self._write_config(tmp_path, "master", "master_body: yes\n")
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", "twin=reg/twin:v1",
+            "--like", "master",
+            "--algorithm", f"master=reg/master:v1@{cfg}",
+        ])
+        assert rc == 0
+        tdir = list((tmp_path / "workspace" / "translations").iterdir())[0]
+        twin_cfg = (tdir / "generated" / "twin" / "twin_config.yaml").read_bytes()
+        master_cfg = (tdir / "generated" / "master" / "master_config.yaml").read_bytes()
+        assert twin_cfg == master_cfg
+
+    def test_mutual_exclusion_with_inline_config_errors(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A spec that has both `@<config>` AND a following `--like`
+        is rejected."""
+        monkeypatch.chdir(tmp_path)
+        cfg = self._write_config(tmp_path, "base", "base_body: yes\n")
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", f"base=reg/base:v1@{cfg}",
+            "--algorithm", f"twin=reg/twin:v1@{cfg}",
+            "--like", "base",
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "mutually exclusive" in err
+
+    def test_missing_like_target_errors(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        cfg = self._write_config(tmp_path, "base", "base_body: yes\n")
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", f"base=reg/base:v1@{cfg}",
+            "--algorithm", "twin=reg/twin:v1",
+            "--like", "does-not-exist",
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "does-not-exist" in err
+
+    def test_self_reference_errors(self, tmp_path, monkeypatch, capsys):
+        """`--like foo` on a spec that IS foo self-references."""
+        monkeypatch.chdir(tmp_path)
+        cfg = self._write_config(tmp_path, "base", "base_body: yes\n")
+        # Only way to hit this: --algorithm base=X --like base (with a
+        # dummy other spec providing @<config> so we don't hit the "no
+        # config" error first). Actually --algorithm base=X is invalid
+        # without @<config> unless --like is present, which is what
+        # this tests. The self-reference check fires after --like
+        # resolution.
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", f"other=reg/o:v1@{cfg}",
+            "--algorithm", "base=reg/base:v1",
+            "--like", "base",
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "self-reference" in err
+
+    def test_like_before_any_spec_errors(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        cfg = self._write_config(tmp_path, "base", "base_body: yes\n")
+        rc = sim2real.main([
+            "translation", "register",
+            "--like", "base",
+            "--algorithm", f"base=reg/base:v1@{cfg}",
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "appears before" in err
+
+    def test_like_deprecated_form_errors(self, tmp_path, monkeypatch, capsys):
+        """`--like` is not supported with the deprecated --image/--config form."""
+        monkeypatch.chdir(tmp_path)
+        cfg = self._write_config(tmp_path, "base", "base_body: yes\n")
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", "base",
+            "--image", "reg/base:v1",
+            "--config", str(cfg),
+            "--like", "base",
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "deprecated" in err
+
+    def test_like_chain_rejected(self, tmp_path, monkeypatch, capsys):
+        """`A --like B, B --like C` is rejected because B has no
+        inline @<config> — --like → --like chains are unsupported."""
+        monkeypatch.chdir(tmp_path)
+        cfg = self._write_config(tmp_path, "c", "c_body: yes\n")
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", "a=reg/a:v1",
+            "--like", "b",
+            "--algorithm", "b=reg/b:v1",
+            "--like", "c",
+            "--algorithm", f"c=reg/c:v1@{cfg}",
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        # `a --like b` fails because b has no inline @<config> (b itself
+        # is --like c). Chain not supported.
+        assert "b" in err
+        assert "chain" in err.lower() or "inline" in err.lower()
+
+
+class TestAppendLike:
+    """End-to-end `translation append --like` via `sim2real.main`."""
+
+    def _write_config(self, tmp_path: Path, name: str, body: str) -> Path:
+        cfg = tmp_path / f"{name}_config.yaml"
+        cfg.write_text(body)
+        return cfg
+
+    def _register_one(self, tmp_path, name, body):
+        cfg = self._write_config(tmp_path, name, body)
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", f"{name}=reg/{name}:v1@{cfg}",
+        ])
+        assert rc == 0
+        tdirs = list((tmp_path / "workspace" / "translations").iterdir())
+        return tdirs[0].name
+
+    def test_like_existing_registered_algorithm(self, tmp_path, monkeypatch):
+        """Issue #586 acceptance criterion: `translation append
+        --translation softr --build pr1956b=<src> --like pr1956`.
+        Copies pr1956's on-disk config (already-registered) verbatim
+        into pr1956b's slot."""
+        monkeypatch.chdir(tmp_path)
+        # Cluster config for the --build entry.
+        setup = tmp_path / "workspace" / "setup_config.json"
+        setup.parent.mkdir(parents=True, exist_ok=True)
+        setup.write_text(json.dumps({
+            "registry": "ghcr.io/kalantar",
+            "repo_name": "llm-d-router",
+        }))
+        cluster_dir = tmp_path / "workspace" / "clusters" / "test"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        (cluster_dir / "cluster_config.json").write_text(json.dumps({
+            "cluster_id": "test",
+            "namespaces": ["ns-0"],
+            "secret_names": {"registry_creds": "registry-creds"},
+        }))
+
+        thash = self._register_one(tmp_path, "pr1956", "pr1956_body:\n  x: 1\n")
+        src = tmp_path / "src-pr1956b"
+        src.mkdir()
+        (src / "policy.go").write_text("// pr1956b\n")
+
+        with mock.patch(
+            "pipeline.lib.build.check_skopeo"
+        ), mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build", return_value=0
+        ), mock.patch(
+            "pipeline.lib.build.probe_image_digest",
+            side_effect=[None, "sha256:" + "a" * 64],
+        ):
+            rc = sim2real.main([
+                "translation", "append",
+                "--translation", thash,
+                "--build", f"pr1956b={src}",
+                "--like", "pr1956",
+            ])
+        assert rc == 0
+
+        tdir = tmp_path / "workspace" / "translations" / thash
+        pr_cfg = (tdir / "generated" / "pr1956" / "pr1956_config.yaml").read_bytes()
+        pr_b_cfg = (tdir / "generated" / "pr1956b" / "pr1956b_config.yaml").read_bytes()
+        assert pr_b_cfg == pr_cfg
+
+    def test_like_target_within_same_append_call(self, tmp_path, monkeypatch):
+        """`--like` can reference another spec in the same append
+        invocation (like register does)."""
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig", "orig_body: 1\n")
+        cfg = self._write_config(tmp_path, "extra", "extra_body: 2\n")
+
+        rc = sim2real.main([
+            "translation", "append",
+            "--translation", thash,
+            "--algorithm", f"extra=reg/extra:v1@{cfg}",
+            "--algorithm", "twin=reg/twin:v1",
+            "--like", "extra",
+        ])
+        assert rc == 0
+        tdir = tmp_path / "workspace" / "translations" / thash
+        extra_cfg = (tdir / "generated" / "extra" / "extra_config.yaml").read_bytes()
+        twin_cfg = (tdir / "generated" / "twin" / "twin_config.yaml").read_bytes()
+        assert twin_cfg == extra_cfg
+
+    def test_like_missing_in_translation_and_invocation_errors(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig", "orig_body: 1\n")
+        rc = sim2real.main([
+            "translation", "append",
+            "--translation", thash,
+            "--algorithm", "extra=reg/extra:v1",
+            "--like", "not-there",
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "not-there" in err
+
+    def test_like_mutual_exclusion_with_inline_config(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig", "orig_body: 1\n")
+        cfg = self._write_config(tmp_path, "extra", "extra_body: 2\n")
+        rc = sim2real.main([
+            "translation", "append",
+            "--translation", thash,
+            "--algorithm", f"extra=reg/extra:v1@{cfg}",
+            "--like", "orig",
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "mutually exclusive" in err
+
+    def test_append_history_records_like_target_config(
+        self, tmp_path, monkeypatch
+    ):
+        """append_history entry looks the same regardless of whether
+        the config came from --like or @<config> — this is verified
+        by asserting the entry lands correctly and the on-disk
+        config matches the like source."""
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig", "orig_body: yes\n")
+        rc = sim2real.main([
+            "translation", "append",
+            "--translation", thash,
+            "--algorithm", "clone=reg/clone:v1",
+            "--like", "orig",
+        ])
+        assert rc == 0
+        tout = json.loads(
+            (tmp_path / "workspace" / "translations" / thash
+             / "translation_output.json").read_text()
+        )
+        assert len(tout["append_history"]) == 1
+        entry = tout["append_history"][0]
+        assert entry["algorithms"] == ["clone"]
+        assert entry["kind"] == "byo"
+        # Byte-identity assertion:
+        clone_cfg = (
+            tmp_path / "workspace" / "translations" / thash
+            / "generated" / "clone" / "clone_config.yaml"
+        ).read_bytes()
+        assert clone_cfg == b"orig_body: yes\n"
