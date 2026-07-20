@@ -129,6 +129,57 @@ def _parse_algorithm_triple(value: str) -> tuple[str, str, str]:
     return name, image_ref, config_path
 
 
+def _parse_build_triple(value: str) -> tuple[str, str, str]:
+    """Parse ``<name>=<location>@<config-path>`` into ``(name, location, config_path)``.
+
+    ``<location>`` is either a filesystem path or a ``git+<url>#<ref>`` string.
+    The parser is content-agnostic — it just splits on ``=`` and the rightmost
+    ``@``. Location interpretation is delegated to
+    :func:`pipeline.lib.source_locator.parse_location`.
+
+    Split rules mirror :func:`_parse_algorithm_triple`: first ``=`` separates
+    name from the rest; the RIGHTMOST ``@`` separates location from config
+    path. Git-SSH URLs contain ``@`` in their host segment
+    (``git+ssh://git@host/...``); the rightmost-@ split keeps that ``@``
+    with the location, which is correct as long as the config path does
+    not itself contain ``@``.
+
+    Raises ``argparse.ArgumentTypeError`` on any parse failure.
+    """
+    from pipeline.lib import translation_ref
+    eq_idx = value.find("=")
+    if eq_idx < 0:
+        raise argparse.ArgumentTypeError(
+            f"--build value {value!r} missing '=' "
+            "(expected '<name>=<location>@<config-path>')"
+        )
+    name = value[:eq_idx]
+    rhs = value[eq_idx + 1:]
+    at_idx = rhs.rfind("@")
+    if at_idx < 0:
+        raise argparse.ArgumentTypeError(
+            f"--build value {value!r} missing '@' after '=' "
+            "(expected '<name>=<location>@<config-path>')"
+        )
+    location = rhs[:at_idx]
+    config_path = rhs[at_idx + 1:]
+    if not location:
+        raise argparse.ArgumentTypeError(
+            f"--build value {value!r} has empty location"
+        )
+    if not config_path:
+        raise argparse.ArgumentTypeError(
+            f"--build value {value!r} has empty config-path"
+        )
+    try:
+        translation_ref.validate_name(name)
+    except translation_ref.ValidationError as exc:
+        raise argparse.ArgumentTypeError(
+            f"--build value {value!r} has invalid name: {exc}"
+        ) from exc
+    return name, location, config_path
+
+
 def _clear_alias_on(other_hash: str) -> None:
     """Rewrite ``translations/<other_hash>/translation_output.json`` with ``alias=null``.
 
@@ -189,6 +240,12 @@ def _build_translation_output(
     ``generated/<name>/<name>_config.yaml``). ``source_path``/``source_sha256``
     are ``None`` for BYO. ``alias`` is the shared translation-level alias
     (algorithm name when N==1, ``None`` when N>1).
+
+    An optional ``provenance`` dict on an input entry is merged into the
+    output algorithm entry. Used by ``--build`` git-URL entries to carry
+    ``source_git_url`` and ``source_git_ref``. Empty / missing provenance
+    contributes no extra keys — BYO entries and path-based ``--build``
+    entries record nothing beyond the standard fields.
     """
     return {
         "version": 1,
@@ -203,6 +260,7 @@ def _build_translation_output(
                 "config_path": a["config_path"],
                 "image_ref": a["image_ref"],
                 "image_digest": a["image_digest"],
+                **(a.get("provenance") or {}),
             }
             for a in algorithms
         ],
@@ -354,6 +412,64 @@ def _build_registered(
     }
 
 
+def _dispatch_build(entry: dict, *, thash: str, build_context: dict) -> None:
+    """Build the image for one ``--build`` entry and record ref+digest.
+
+    Mutates ``entry`` in place: sets ``image_ref`` (composed as
+    ``<registry>/<repo>:<thash[:12]>-<name>``) and ``image_digest`` (from
+    a post-build ``skopeo inspect`` probe; ``None`` if the probe fails
+    but the build succeeded — recorded so the caller can surface a
+    warning).
+
+    Uses :func:`pipeline.lib.build.dispatch_buildkit_build` — the same
+    path ``sim2real build`` uses for the skill-driven flow. Source is
+    obtained via ``entry["location"].materialize()`` (a context manager
+    that clones a git repo into a scratch dir for :class:`GitLocation`,
+    or passes the path through for :class:`PathLocation`). Any failure
+    is surfaced as :class:`RuntimeError` — the caller aborts before
+    writing ``translation_output.json``.
+
+    Idempotency: if the image tag already exists in the registry with a
+    resolvable digest, skips buildkit and records the pre-existing digest
+    (matches ``sim2real build``'s pre-build probe path). This lets a
+    re-run with the same source (same identity → same ``thash``) short-
+    circuit the buildkit step.
+    """
+    from pipeline.lib import build
+    image_ref = build.compose_image_ref(
+        registry=build_context["registry"],
+        repo=build_context["repo_name"],
+        tag=f"{thash[:12]}-{entry['name']}",
+    )
+    entry["image_ref"] = image_ref
+
+    # Pre-build probe: if the image already exists in the registry with
+    # a resolvable digest, skip the build. Matches sim2real build's
+    # idempotency path for previously-built algorithms.
+    prior_digest = build.probe_image_digest(image_ref)
+    if prior_digest is not None:
+        entry["image_digest"] = prior_digest
+        return
+
+    with entry["location"].materialize() as source_dir:
+        build_id = f"sim2real-register-{thash[:8]}-{entry['name']}"
+        rc = build.dispatch_buildkit_build(
+            image_ref=image_ref,
+            build_id=build_id,
+            namespace=build_context["build_namespace"],
+            source_dir=source_dir,
+            run_dir=layout.translation_dir(thash),
+            repo_root=_REPO_ROOT,
+            registry_secret_name=build_context["registry_secret_name"],
+        )
+    if rc != 0:
+        raise RuntimeError(
+            f"buildkit dispatch failed for --build {entry['name']!r} "
+            f"(image_ref={image_ref}, rc={rc})"
+        )
+    entry["image_digest"] = build.probe_image_digest(image_ref)
+
+
 def _register_translation(
     *,
     algorithms: list[dict],
@@ -361,13 +477,25 @@ def _register_translation(
     registered_hash: str | None,
     now_iso: str,
     force: bool = False,
+    build_context: dict | None = None,
 ) -> tuple[str, str]:
-    """Register a BYO translation on disk (single or batched).
+    """Register a translation on disk — BYO, assisted-build, or a mix.
 
-    ``algorithms`` is a list of ``AlgorithmSpec`` dicts:
-    ``{"name": str, "image_ref": str, "config_path": Path}``. Caller has
-    already validated names and confirmed each config file exists and
-    parses as YAML — this function does not re-validate.
+    ``algorithms`` is a list of ``AlgorithmSpec`` dicts. Each carries a
+    ``kind`` marker (``"byo"`` or ``"build"``):
+      • BYO: ``{"kind": "byo", "name": str, "image_ref": str,
+        "config_path": Path}``. Image already exists in the registry.
+      • Build: ``{"kind": "build", "name": str, "location": Location,
+        "config_path": Path}``. Framework materializes the source,
+        composes ``image_ref``, dispatches buildkit, records
+        ``image_ref`` + ``image_digest``.
+
+    Caller has already validated names and confirmed each config file
+    exists and parses as YAML — this function does not re-validate.
+
+    When any entry has ``kind == "build"``, ``build_context`` must be a
+    dict with ``registry``, ``repo_name``, ``build_namespace``, and
+    ``registry_secret_name`` — resolved by :func:`_resolve_build_context`.
 
     Alias policy: when ``len(algorithms) == 1``, the translation's
     top-level ``alias`` is the sole algorithm's name (matches step-1
@@ -384,21 +512,57 @@ def _register_translation(
     """
     from pipeline.lib import translation_ref
 
-    # Prepare per-algorithm derived fields: config bytes, digest, digest_or_ref.
+    # Default kind to "byo" when unset — preserves the pre-#587 caller
+    # contract where algorithm entries carried only image_ref/config_path.
+    # New callers set kind explicitly.
+    for a in algorithms:
+        a.setdefault("kind", "byo")
+
+    if any(a["kind"] == "build" for a in algorithms) and build_context is None:
+        raise RuntimeError(
+            "internal error: _register_translation called with build "
+            "entries but no build_context"
+        )
+
+    # Prepare per-algorithm derived fields. Both kinds carry config_bytes
+    # + config_sha; identity (the string fed to _compute_translation_hash
+    # as the ``image`` component) diverges by kind:
+    #   BYO   → skopeo-probed digest if present in the ref, else raw ref
+    #   Build → source-content identity (path-content-hash or resolved
+    #           git commit sha); the actual image_ref/digest are filled
+    #           in AFTER the hash is computed and the translation dir is
+    #           reserved.
+    # ``location`` is preserved on build entries so the build phase can
+    # materialize the source once ``thash`` is known.
     prepared: list[dict] = []
     for a in algorithms:
         cfg_bytes = a["config_path"].read_bytes()
-        digest = _extract_digest_from_ref(a["image_ref"])
-        prepared.append({
+        entry: dict = {
+            "kind": a["kind"],
             "name": a["name"],
-            "image_ref": a["image_ref"],
-            "image_digest": digest,
-            "digest_or_ref": digest if digest is not None else a["image_ref"],
             "config_bytes": cfg_bytes,
             "config_sha": hashlib.sha256(cfg_bytes).hexdigest(),
-        })
+            # Populated below based on kind:
+            "image_ref": None,
+            "image_digest": None,
+            "digest_or_ref": None,
+            "location": None,
+            "provenance": {},
+        }
+        if a["kind"] == "byo":
+            digest = _extract_digest_from_ref(a["image_ref"])
+            entry["image_ref"] = a["image_ref"]
+            entry["image_digest"] = digest
+            entry["digest_or_ref"] = digest if digest is not None else a["image_ref"]
+        else:  # build
+            location = a["location"]
+            entry["location"] = location
+            entry["digest_or_ref"] = location.identity()
+            entry["provenance"] = location.provenance()
+        prepared.append(entry)
 
-    # Compute the batched translation hash.
+    # Compute the batched translation hash. Same formula regardless of
+    # kind — the identity input just varies (see prepared[i]["digest_or_ref"]).
     thash = _compute_translation_hash([
         {"name": p["name"], "image": p["digest_or_ref"], "config_sha": p["config_sha"]}
         for p in prepared
@@ -451,6 +615,19 @@ def _register_translation(
     for p in prepared:
         (tdir / "generated" / p["name"]).mkdir(parents=True, exist_ok=True)
 
+    # Build phase for --build entries. Runs BEFORE the atomic write of
+    # translation_output.json so recorded image_ref/image_digest reflect
+    # the actual build result. Failure here raises RuntimeError, which
+    # bubbles up to _cmd_translation_register — the partially-materialized
+    # generated/<name>/ directories are left on disk (empty of contents;
+    # the config file write happens later in this function). If any
+    # build fails, the caller sees the error and the translation is not
+    # recorded — no translation_output.json is written.
+    for p in prepared:
+        if p["kind"] != "build":
+            continue
+        _dispatch_build(p, thash=thash, build_context=build_context)
+
     alias = prepared[0]["name"] if len(prepared) == 1 else None
     tout = _build_translation_output(
         algorithms=[
@@ -459,6 +636,7 @@ def _register_translation(
                 "image_ref": p["image_ref"],
                 "image_digest": p["image_digest"],
                 "config_path": f"generated/{p['name']}/{p['name']}_config.yaml",
+                "provenance": p["provenance"],
             }
             for p in prepared
         ],
@@ -508,15 +686,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reg.add_argument(
         "--algorithm",
-        required=True,
+        required=False,
+        default=None,
         action="append",
         metavar="ALG",
         help=(
-            "Algorithm spec — repeatable. Preferred form: "
-            "'<name>=<image-ref>@<config-path>' (all fields inline). "
-            "Deprecated form: '<name>' alone, with --image and --config "
-            "supplied separately (N=1 only; emits deprecation warning). "
-            "Names match [A-Za-z0-9][A-Za-z0-9._-]*, max 128 chars."
+            "Pre-built (BYO) algorithm spec — repeatable, mixable with --build. "
+            "Preferred form: '<name>=<image-ref>@<config-path>' (all fields "
+            "inline). Deprecated form: '<name>' alone, with --image and "
+            "--config supplied separately (N=1 only; emits deprecation "
+            "warning). Names match [A-Za-z0-9][A-Za-z0-9._-]*, max 128 chars. "
+            "At least one of --algorithm or --build must be supplied."
         ),
     )
     reg.add_argument(
@@ -535,6 +715,21 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "DEPRECATED: Treatment overlay YAML path. Use the "
             "'<name>=<image>@<config>' form of --algorithm instead."
+        ),
+    )
+    reg.add_argument(
+        "--build",
+        default=None,
+        action="append",
+        metavar="SPEC",
+        dest="build",
+        help=(
+            "Assisted-BYO source spec — repeatable, mixable with --algorithm. "
+            "Form: '<name>=<location>@<config-path>'. <location> is a "
+            "filesystem path or 'git+<url>#<ref>'. Framework materializes "
+            "the source, dispatches buildkit, records image_ref/digest "
+            "(and source_git_url/source_git_ref for git locations). "
+            "Requires a provisioned cluster (see 'cluster.py provision')."
         ),
     )
     reg.add_argument(
@@ -667,11 +862,30 @@ _build_parser = build_parser
 
 
 def _cmd_translation_register(args) -> int:
-    # Normalize CLI forms into a list of AlgorithmSpec dicts.
-    algo_values: list[str] = args.algorithm  # action='append' guarantees list
+    # Normalize CLI forms into a list of AlgorithmSpec dicts. Each entry
+    # carries a ``kind`` marker: ``"byo"`` for --algorithm (pre-built image
+    # already in the registry) or ``"build"`` for --build (framework builds
+    # source before registering the resulting image). Order within each
+    # source is preserved; the final list interleaves both kinds in
+    # invocation order (--algorithm first, then --build).
+    algo_values: list[str] = args.algorithm or []
+    build_values: list[str] = args.build or []
+    if not algo_values and not build_values:
+        print(
+            "error: at least one of --algorithm or --build must be supplied",
+            file=sys.stderr,
+        )
+        return 2
     algorithms: list[dict] = []
     if args.image is not None or args.config is not None:
         # Deprecated form: single --algorithm plus separate --image/--config.
+        if build_values:
+            print(
+                "error: --image/--config (deprecated form) cannot be combined "
+                "with --build; use inline '<name>=<image>@<config>' on --algorithm",
+                file=sys.stderr,
+            )
+            return 2
         if len(algo_values) != 1:
             print(
                 "error: --image/--config are only valid with a single --algorithm "
@@ -700,6 +914,7 @@ def _cmd_translation_register(args) -> int:
             print(f"error: --algorithm: {exc}", file=sys.stderr)
             return 2
         algorithms.append({
+            "kind": "byo",
             "name": name,
             "image_ref": args.image,
             "config_path": Path(args.config),
@@ -718,8 +933,35 @@ def _cmd_translation_register(args) -> int:
                 print(f"error: {exc}", file=sys.stderr)
                 return 2
             algorithms.append({
+                "kind": "byo",
                 "name": name,
                 "image_ref": image_ref,
+                "config_path": Path(config_path_str),
+            })
+
+    # --build specs: parse to (name, location string, config path) and
+    # resolve the location string into a Location object. Malformed
+    # locations (empty git ref, missing '#', etc.) fail here before any
+    # cluster or build work.
+    if build_values:
+        from pipeline.lib import source_locator
+        for val in build_values:
+            try:
+                name, loc_str, config_path_str = _parse_build_triple(val)
+            except argparse.ArgumentTypeError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            try:
+                location = source_locator.parse_location(loc_str)
+            except source_locator.SourceLocatorError as exc:
+                print(
+                    f"error: --build value {val!r}: {exc}", file=sys.stderr
+                )
+                return 2
+            algorithms.append({
+                "kind": "build",
+                "name": name,
+                "location": location,
                 "config_path": Path(config_path_str),
             })
 
@@ -764,6 +1006,19 @@ def _cmd_translation_register(args) -> int:
 
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # If any --build spec is present, resolve the workspace's registry
+    # (setup_config.json) and cluster (cluster_config.json) up-front so
+    # we fail fast before touching any translation directory. Pure-BYO
+    # invocations (no --build) skip this — no build needed, no cluster
+    # required.
+    build_context: dict | None = None
+    if any(a["kind"] == "build" for a in algorithms):
+        try:
+            build_context = _resolve_build_context()
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
     try:
         thash, status = _register_translation(
             algorithms=algorithms,
@@ -771,6 +1026,7 @@ def _cmd_translation_register(args) -> int:
             registered_hash=args.registered_hash,
             now_iso=now_iso,
             force=args.force,
+            build_context=build_context,
         )
     except (RuntimeError, ValueError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
@@ -782,7 +1038,13 @@ def _cmd_translation_register(args) -> int:
             file=sys.stderr,
         )
     else:
+        # Digest warning applies only to BYO entries (user supplied the
+        # image ref, may not have carried an @sha256:... digest). Build
+        # entries have their digest populated by the post-build probe;
+        # a null digest there is a probe-side issue reported separately.
         for a in algorithms:
+            if a["kind"] != "byo":
+                continue
             if _extract_digest_from_ref(a["image_ref"]) is None:
                 print(
                     f"warning: image_digest for {a['name']!r} recorded as null "
@@ -791,6 +1053,70 @@ def _cmd_translation_register(args) -> int:
                 )
     print(f"registered translation {thash}")
     return 0
+
+
+def _resolve_build_context() -> dict:
+    """Resolve cluster + registry info needed for ``--build`` specs.
+
+    Returns a dict with ``registry``, ``repo_name``, ``build_namespace``,
+    ``registry_secret_name``. Raises :class:`RuntimeError` with a
+    user-facing message on any missing prerequisite. Mirrors the shape
+    ``sim2real build`` uses (see ``_cmd_build`` for the same lookups)
+    so behavior is consistent across the two entry points.
+    """
+    from pipeline.lib import cluster_ops
+    setup_cfg_path = layout.setup_config_path()
+    if not setup_cfg_path.exists():
+        raise RuntimeError(
+            "workspace/setup_config.json not found — "
+            "run setup.py first (needed for --build)"
+        )
+    try:
+        setup_cfg = json.loads(setup_cfg_path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        raise RuntimeError(f"reading setup_config.json: {exc}") from exc
+    registry = setup_cfg.get("registry") or ""
+    repo_name = setup_cfg.get("repo_name") or ""
+    if not registry or not repo_name:
+        raise RuntimeError(
+            "workspace/setup_config.json is missing 'registry' or "
+            "'repo_name' — re-run setup.py with --registry (needed for --build)"
+        )
+    cluster_ids = layout.list_cluster_ids()
+    if not cluster_ids:
+        raise RuntimeError(
+            "no cluster provisioned; run "
+            "'cluster.py provision <cluster_id>' first (needed for --build)"
+        )
+    if len(cluster_ids) > 1:
+        raise RuntimeError(
+            f"multiple clusters found ({cluster_ids}); "
+            "sim2real assumes a single cluster per workspace"
+        )
+    try:
+        cluster_config = cluster_ops.read_cluster_config(cluster_ids[0])
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"reading cluster_config.json: {exc}") from exc
+    namespaces = cluster_config.get("namespaces") or []
+    if not namespaces:
+        raise RuntimeError(
+            "cluster_config.json has no namespaces; "
+            "re-run 'cluster.py provision --namespaces NS1,...'"
+        )
+    registry_secret_name = (
+        (cluster_config.get("secret_names") or {}).get("registry_creds") or ""
+    )
+    if not registry_secret_name:
+        raise RuntimeError(
+            "cluster_config.json has no secret_names.registry_creds; "
+            "re-run 'cluster.py provision --registry-user U --registry-token T'"
+        )
+    return {
+        "registry": registry,
+        "repo_name": repo_name,
+        "build_namespace": namespaces[0],
+        "registry_secret_name": registry_secret_name,
+    }
 
 
 def _cmd_translate(args) -> int:
