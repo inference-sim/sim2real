@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from unittest import mock
 from unittest.mock import patch
 
 import pytest
@@ -138,6 +139,863 @@ class TestParseAlgorithmTriple:
         with pytest.raises(argparse.ArgumentTypeError) as ei:
             sim2real._parse_algorithm_triple("foo=img:tag@path@with@ats/overlay.yaml")
         assert "overlay path cannot contain" in str(ei.value)
+
+
+class TestParseBuildTriple:
+    """CLI parser for the ``--build <name>=<location>@<config-path>`` spec."""
+
+    def test_path_location(self):
+        name, loc, cfg = sim2real._parse_build_triple(
+            "pr1956=./llm-d-router@configs/pr1956.yaml"
+        )
+        assert name == "pr1956"
+        assert loc == "./llm-d-router"
+        assert cfg == "configs/pr1956.yaml"
+
+    def test_absolute_path(self):
+        name, loc, cfg = sim2real._parse_build_triple(
+            "x=/abs/path/to/repo@cfg.yaml"
+        )
+        assert loc == "/abs/path/to/repo"
+        assert cfg == "cfg.yaml"
+
+    def test_git_https_url(self):
+        name, loc, cfg = sim2real._parse_build_triple(
+            "pr1956=git+https://github.com/foo/bar.git#main@configs/pr1956.yaml"
+        )
+        assert name == "pr1956"
+        assert loc == "git+https://github.com/foo/bar.git#main"
+        assert cfg == "configs/pr1956.yaml"
+
+    def test_git_ssh_url_with_at_in_host(self):
+        """Rightmost-@ split rule keeps the git-ssh 'git@host' with location."""
+        name, loc, cfg = sim2real._parse_build_triple(
+            "pr1956=git+ssh://git@github.com/foo/bar.git#abc@cfg.yaml"
+        )
+        assert name == "pr1956"
+        assert loc == "git+ssh://git@github.com/foo/bar.git#abc"
+        assert cfg == "cfg.yaml"
+
+    def test_missing_equals_rejected(self):
+        with pytest.raises(argparse.ArgumentTypeError) as ei:
+            sim2real._parse_build_triple("pr1956@cfg.yaml")
+        assert "=" in str(ei.value)
+
+    def test_missing_at_rejected(self):
+        with pytest.raises(argparse.ArgumentTypeError) as ei:
+            sim2real._parse_build_triple("pr1956=./src")
+        assert "@" in str(ei.value)
+
+    def test_empty_location_rejected(self):
+        with pytest.raises(argparse.ArgumentTypeError):
+            sim2real._parse_build_triple("pr1956=@cfg.yaml")
+
+    def test_empty_config_rejected(self):
+        with pytest.raises(argparse.ArgumentTypeError):
+            sim2real._parse_build_triple("pr1956=./src@")
+
+    def test_invalid_name_rejected(self):
+        with pytest.raises(argparse.ArgumentTypeError) as ei:
+            sim2real._parse_build_triple("bad name=./src@cfg.yaml")
+        assert "name" in str(ei.value).lower()
+
+
+class TestRegisterBuild:
+    """End-to-end register with --build (mocked cluster + build.dispatch)."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_check_skopeo(self):
+        """`_cmd_translation_register` calls `build.check_skopeo()` up front
+        when any --build spec is present (fail-fast on missing binary). Mock
+        it to a no-op so tests don't require skopeo in the test environment.
+        Yields the mock so tests can positively assert on `.called` — the
+        iter-4 review noted the previous shape (no `as m`) meant a refactor
+        removing the check_skopeo() call at sim2real.py would silently
+        pass every test.
+
+        Tests that specifically exercise the check_skopeo failure path
+        override this mock inline (see test_build_missing_skopeo_fails_fast)."""
+        with mock.patch("pipeline.lib.build.check_skopeo") as m:
+            yield m
+
+    @pytest.fixture(autouse=True)
+    def _mock_check_git(self):
+        """`_cmd_translation_register` calls `source_locator.check_git()`
+        up front when any --build spec is a git-URL (fail-fast on missing
+        binary). Same shape as _mock_check_skopeo above."""
+        with mock.patch("pipeline.lib.source_locator.check_git") as m:
+            yield m
+
+    def _write_cluster_config(self, tmp_path: Path) -> None:
+        """Materialize the workspace prereqs --build requires."""
+        setup = tmp_path / "workspace" / "setup_config.json"
+        setup.parent.mkdir(parents=True, exist_ok=True)
+        setup.write_text(json.dumps({
+            "registry": "ghcr.io/kalantar",
+            "repo_name": "llm-d-router",
+            "sim2real_root": "/fake",
+            "orchestrator_image": "fake:latest",
+        }))
+        cluster_dir = tmp_path / "workspace" / "clusters" / "test"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        (cluster_dir / "cluster_config.json").write_text(json.dumps({
+            "cluster_id": "test",
+            "namespaces": ["ns-0"],
+            "secret_names": {"registry_creds": "registry-creds"},
+        }))
+
+    def _write_config(self, tmp_path: Path, name: str) -> Path:
+        cfg = tmp_path / f"{name}_config.yaml"
+        cfg.write_text(f"scenario:\n  - name: {name}\n")
+        return cfg
+
+    def _write_source_dir(self, tmp_path: Path, name: str) -> Path:
+        src = tmp_path / f"src-{name}"
+        src.mkdir()
+        (src / "policy.go").write_text(f"// {name}\n")
+        return src
+
+    def test_build_path_end_to_end(self, tmp_path, monkeypatch,
+                                   _mock_check_skopeo, _mock_check_git):
+        """--build with a filesystem path: identity from content-hash;
+        image_ref composed from hash; buildkit invoked; digest recorded.
+
+        Positively asserts `check_skopeo()` was called (regression guard
+        against a refactor accidentally removing the iter-3 fail-fast).
+        Also asserts `check_git()` was NOT called — this is a path build,
+        no git needed."""
+        monkeypatch.chdir(tmp_path)
+        self._write_cluster_config(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+
+        # Mock buildkit dispatch (success) and skopeo digest probe.
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build", return_value=0
+        ) as m_dispatch, mock.patch(
+            "pipeline.lib.build.probe_image_digest",
+            # First call: pre-build probe → None (not yet built).
+            # Second call: post-build probe → real digest.
+            side_effect=[None, "sha256:" + "a" * 64],
+        ):
+            rc = sim2real.main([
+                "translation", "register",
+                "--build", f"pr1956={src}@{cfg}",
+            ])
+
+        # Prereq checks: skopeo required for any --build; git NOT
+        # required for a path-only --build.
+        assert _mock_check_skopeo.called
+        assert not _mock_check_git.called
+        assert rc == 0
+        assert m_dispatch.call_count == 1
+
+        # Assert dispatch call args (guards against passing the wrong
+        # source_dir / secret / namespace to buildkit — the class of bug
+        # iter-2 fixed for materialize()).
+        kwargs = m_dispatch.call_args.kwargs
+        assert kwargs["namespace"] == "ns-0"
+        assert kwargs["registry_secret_name"] == "registry-creds"
+        assert kwargs["image_ref"].startswith("ghcr.io/kalantar/llm-d-router:")
+        assert kwargs["image_ref"].endswith("-pr1956")
+        # Path builds pass the caller's dir through unchanged.
+        assert kwargs["source_dir"] == src
+
+        # translation_output.json shape.
+        tdirs = list((tmp_path / "workspace" / "translations").iterdir())
+        assert len(tdirs) == 1
+        tout = json.loads((tdirs[0] / "translation_output.json").read_text())
+        assert tout["source"] == "byo"
+        assert len(tout["algorithms"]) == 1
+        e = tout["algorithms"][0]
+        assert e["name"] == "pr1956"
+        assert e["image_ref"].startswith(
+            "ghcr.io/kalantar/llm-d-router:"
+        )
+        assert e["image_ref"].endswith("-pr1956")
+        assert e["image_digest"] == "sha256:" + "a" * 64
+        # Path-based --build records NO git provenance.
+        assert "source_git_url" not in e
+        assert "source_git_ref" not in e
+        # Config file materialized under generated/<name>/.
+        assert (tdirs[0] / "generated" / "pr1956" / "pr1956_config.yaml").read_text() == cfg.read_text()
+
+    def test_build_git_end_to_end(self, tmp_path, monkeypatch,
+                                  _mock_check_skopeo, _mock_check_git):
+        """--build with a git-URL: identity resolves via ls-remote; clone +
+        buildkit dispatched; source_git_url/ref recorded."""
+        monkeypatch.chdir(tmp_path)
+        self._write_cluster_config(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956b")
+
+        resolved_sha = "b" * 40
+
+        # Shallow --branch <sha> always fails post-iter-2 (git rejects raw
+        # shas under --branch); materialize falls through to full clone +
+        # checkout.
+        def fake_run(cmd, *args, **kwargs):
+            if "ls-remote" in cmd:
+                return mock.Mock(
+                    returncode=0,
+                    stdout=f"{resolved_sha}\trefs/heads/main\n",
+                    stderr="",
+                )
+            if "clone" in cmd and "--depth" in cmd:
+                return mock.Mock(returncode=128, stdout="", stderr="fatal\n")
+            if "clone" in cmd:
+                dest = Path(cmd[-1])
+                dest.mkdir(parents=True)
+                (dest / "policy.go").write_text("// pr1956b\n")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            if "checkout" in cmd:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            raise AssertionError(f"unexpected subprocess call: {cmd!r}")
+
+        # Capture the git scratch source_dir contents INSIDE the dispatch
+        # call, before materialize()'s TemporaryDirectory context exits
+        # and cleans up the scratch tree. Post-hoc reads would race with
+        # cleanup.
+        captured = {}
+
+        def capturing_dispatch(**kwargs):
+            captured["kwargs"] = kwargs
+            src_dir = kwargs["source_dir"]
+            captured["policy_go"] = (src_dir / "policy.go").read_text()
+            return 0
+
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build",
+            side_effect=capturing_dispatch,
+        ) as m_dispatch, mock.patch(
+            "pipeline.lib.build.probe_image_digest",
+            side_effect=[None, "sha256:" + "c" * 64],
+        ), mock.patch(
+            "pipeline.lib.source_locator.subprocess.run", side_effect=fake_run
+        ):
+            rc = sim2real.main([
+                "translation", "register",
+                "--build", f"pr1956b=git+https://github.com/foo/bar.git#main@{cfg}",
+            ])
+        assert rc == 0
+        assert m_dispatch.call_count == 1
+        # Prereq checks on the git happy-path: BOTH skopeo AND git must
+        # have been called. iter-5 review flagged this positive-assertion
+        # gap — the failure test proved check_git was invoked at all,
+        # but a refactor bypassing check_git on the non-failure branch
+        # would have slipped through.
+        assert _mock_check_skopeo.called
+        assert _mock_check_git.called
+
+        # Dispatch argv assertions. For a git-URL build, source_dir must
+        # be the ephemeral scratch clone containing the fake policy.go
+        # we materialized, NOT the git URL string. Regression guard for
+        # iter-2-class bugs.
+        k = captured["kwargs"]
+        assert k["namespace"] == "ns-0"
+        assert k["registry_secret_name"] == "registry-creds"
+        assert k["image_ref"].startswith("ghcr.io/kalantar/llm-d-router:")
+        assert k["image_ref"].endswith("-pr1956b")
+        assert isinstance(k["source_dir"], Path)
+        assert captured["policy_go"] == "// pr1956b\n"
+
+        tdirs = list((tmp_path / "workspace" / "translations").iterdir())
+        tout = json.loads((tdirs[0] / "translation_output.json").read_text())
+        e = tout["algorithms"][0]
+        assert e["source_git_url"] == "https://github.com/foo/bar.git"
+        assert e["source_git_ref"] == resolved_sha
+        assert e["image_digest"] == "sha256:" + "c" * 64
+
+    def test_mixed_algorithm_and_build(self, tmp_path, monkeypatch):
+        """One --algorithm + one --build in one invocation: both land in the
+        same translation directory; only --build entry triggers buildkit."""
+        monkeypatch.chdir(tmp_path)
+        self._write_cluster_config(tmp_path)
+        cfg_a = self._write_config(tmp_path, "baseline")
+        cfg_b = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build", return_value=0
+        ) as m_dispatch, mock.patch(
+            "pipeline.lib.build.probe_image_digest",
+            side_effect=[None, "sha256:" + "d" * 64],
+        ):
+            rc = sim2real.main([
+                "translation", "register",
+                "--algorithm", f"baseline=ghcr.io/foo/baseline:v1@{cfg_a}",
+                "--build",     f"pr1956={src}@{cfg_b}",
+            ])
+        assert rc == 0
+        # Buildkit is only invoked for the --build entry.
+        assert m_dispatch.call_count == 1
+
+        # The one dispatch call is for the --build entry (pr1956), not
+        # the --algorithm entry (baseline). Argv confirms.
+        kwargs = m_dispatch.call_args.kwargs
+        assert kwargs["image_ref"].endswith("-pr1956")
+        assert kwargs["source_dir"] == src
+
+        tdirs = list((tmp_path / "workspace" / "translations").iterdir())
+        tout = json.loads((tdirs[0] / "translation_output.json").read_text())
+        names = {a["name"] for a in tout["algorithms"]}
+        assert names == {"baseline", "pr1956"}
+        # BYO entry keeps its supplied image_ref verbatim.
+        byo = next(a for a in tout["algorithms"] if a["name"] == "baseline")
+        assert byo["image_ref"] == "ghcr.io/foo/baseline:v1"
+
+    def test_build_mixed_path_and_git_calls_both_prereqs(
+        self, tmp_path, monkeypatch, _mock_check_skopeo, _mock_check_git
+    ):
+        """iter-5 fix: one path --build + one git --build in one call.
+        Both check_skopeo() and check_git() must fire (the git-URL
+        entry triggers check_git); both algorithms land in
+        translation_output.json; only the git entry records
+        source_git_url/source_git_ref. Regression guard against an
+        off-by-one in the `any(isinstance(loc, GitLocation))` predicate
+        at sim2real.py."""
+        monkeypatch.chdir(tmp_path)
+        self._write_cluster_config(tmp_path)
+        cfg_p = self._write_config(tmp_path, "pr1956")
+        cfg_g = self._write_config(tmp_path, "pr1956b")
+        src = self._write_source_dir(tmp_path, "pr1956")
+        resolved_sha = "e" * 40
+
+        def fake_run(cmd, *args, **kwargs):
+            if "ls-remote" in cmd:
+                return mock.Mock(
+                    returncode=0,
+                    stdout=f"{resolved_sha}\trefs/heads/main\n",
+                    stderr="",
+                )
+            if "clone" in cmd and "--depth" in cmd:
+                return mock.Mock(returncode=128, stdout="", stderr="fatal\n")
+            if "clone" in cmd:
+                dest = Path(cmd[-1])
+                dest.mkdir(parents=True)
+                (dest / "policy.go").write_text("// pr1956b\n")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            if "checkout" in cmd:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            raise AssertionError(f"unexpected: {cmd!r}")
+
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build", return_value=0
+        ) as m_dispatch, mock.patch(
+            "pipeline.lib.build.probe_image_digest",
+            # Two --build entries: 2 pre-probes + 2 post-probes = 4.
+            # side_effect list ordered: pre1, post1, pre2, post2.
+            side_effect=[None, "sha256:" + "1" * 64, None, "sha256:" + "2" * 64],
+        ), mock.patch(
+            "pipeline.lib.source_locator.subprocess.run", side_effect=fake_run
+        ):
+            rc = sim2real.main([
+                "translation", "register",
+                "--build", f"pr1956={src}@{cfg_p}",
+                "--build",
+                f"pr1956b=git+https://github.com/foo/bar.git#main@{cfg_g}",
+            ])
+
+        assert rc == 0
+        # BOTH prereqs fire on the mixed invocation.
+        assert _mock_check_skopeo.called
+        assert _mock_check_git.called
+        # Both algorithms end up in the translation.
+        assert m_dispatch.call_count == 2
+        tdirs = list((tmp_path / "workspace" / "translations").iterdir())
+        assert len(tdirs) == 1
+        tout = json.loads((tdirs[0] / "translation_output.json").read_text())
+        by_name = {a["name"]: a for a in tout["algorithms"]}
+        assert set(by_name) == {"pr1956", "pr1956b"}
+        # Path entry: NO git provenance recorded.
+        assert "source_git_url" not in by_name["pr1956"]
+        assert "source_git_ref" not in by_name["pr1956"]
+        # Git entry: provenance recorded.
+        assert by_name["pr1956b"]["source_git_url"] == \
+            "https://github.com/foo/bar.git"
+        assert by_name["pr1956b"]["source_git_ref"] == resolved_sha
+
+    def test_build_pre_build_probe_short_circuits_dispatch(self, tmp_path, monkeypatch):
+        """When the composed image_ref already exists in the registry with a
+        digest, buildkit is not invoked (idempotency for repeat runs)."""
+        monkeypatch.chdir(tmp_path)
+        self._write_cluster_config(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build", return_value=0
+        ) as m_dispatch, mock.patch(
+            "pipeline.lib.build.probe_image_digest",
+            return_value="sha256:" + "e" * 64,
+        ):
+            rc = sim2real.main([
+                "translation", "register",
+                "--build", f"pr1956={src}@{cfg}",
+            ])
+        assert rc == 0
+        assert m_dispatch.call_count == 0  # skipped — image already present
+
+    def test_build_dispatch_failure_aborts_translation(self, tmp_path, monkeypatch):
+        """buildkit non-zero rc → error surfaced, no translation_output.json
+        written (partial materialization is left as-is for debug, but the
+        run is refused)."""
+        monkeypatch.chdir(tmp_path)
+        self._write_cluster_config(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build", return_value=42
+        ), mock.patch(
+            "pipeline.lib.build.probe_image_digest", return_value=None,
+        ):
+            rc = sim2real.main([
+                "translation", "register",
+                "--build", f"pr1956={src}@{cfg}",
+            ])
+        assert rc == 2
+        # translation_output.json is NOT written on build failure.
+        tdirs = list((tmp_path / "workspace" / "translations").iterdir())
+        # Directory may have been created (mkdir for generated/) but no
+        # translation_output.json inside.
+        for d in tdirs:
+            assert not (d / "translation_output.json").exists()
+
+    def test_build_no_cluster_errors(self, tmp_path, monkeypatch):
+        """--build without a provisioned cluster fails fast with a clear
+        error and does not touch the registry."""
+        monkeypatch.chdir(tmp_path)
+        # Do NOT write cluster_config.json.
+        setup = tmp_path / "workspace" / "setup_config.json"
+        setup.parent.mkdir(parents=True, exist_ok=True)
+        setup.write_text(json.dumps({
+            "registry": "ghcr.io/x",
+            "repo_name": "llm-d-router",
+        }))
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+
+        with mock.patch("pipeline.lib.build.dispatch_buildkit_build") as m_d:
+            rc = sim2real.main([
+                "translation", "register",
+                "--build", f"pr1956={src}@{cfg}",
+            ])
+        assert rc == 2
+        assert m_d.call_count == 0
+
+    def test_build_no_setup_config_errors(self, tmp_path, monkeypatch):
+        """--build without setup_config.json (no registry configured)."""
+        monkeypatch.chdir(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+
+        with mock.patch("pipeline.lib.build.dispatch_buildkit_build") as m_d:
+            rc = sim2real.main([
+                "translation", "register",
+                "--build", f"pr1956={src}@{cfg}",
+            ])
+        assert rc == 2
+        assert m_d.call_count == 0
+
+    def test_build_missing_path_clean_error(self, tmp_path, monkeypatch, capsys):
+        """Non-existent --build source path surfaces as a clean 'error: ...'
+        line (rc=2), not an uncaught SourceLocatorError traceback. Regression
+        guard for #588 review — with cluster + registry prereqs present,
+        SourceLocatorError used to escape the outer catch in
+        _cmd_translation_register and print a Python traceback."""
+        monkeypatch.chdir(tmp_path)
+        self._write_cluster_config(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956")
+        # Never call the buildkit dispatch — the identity() step should
+        # fail before we reach it.
+        with mock.patch("pipeline.lib.build.dispatch_buildkit_build") as m_d:
+            rc = sim2real.main([
+                "translation", "register",
+                "--build", f"pr1956=/does/not/exist@{cfg}",
+            ])
+        assert rc == 2
+        assert m_d.call_count == 0
+        stderr = capsys.readouterr().err
+        assert "error:" in stderr
+        assert "Traceback" not in stderr
+        assert "not a directory" in stderr
+
+    def test_neither_algorithm_nor_build_errors(self, tmp_path, monkeypatch):
+        """register requires at least one of --algorithm or --build."""
+        monkeypatch.chdir(tmp_path)
+        rc = sim2real.main(["translation", "register"])
+        assert rc == 2
+
+    def test_deprecated_form_rejects_build_combo(self, tmp_path, monkeypatch):
+        """--image/--config (deprecated) cannot be combined with --build."""
+        monkeypatch.chdir(tmp_path)
+        cfg = self._write_config(tmp_path, "old")
+        src = self._write_source_dir(tmp_path, "new")
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", "old",
+            "--image", "img:v1",
+            "--config", str(cfg),
+            "--build", f"new={src}@{cfg}",
+        ])
+        assert rc == 2
+
+    # ── Review iter-3 fixes: fail-fast + branch coverage + full-rerun ────
+
+    def test_build_missing_skopeo_fails_fast(self, tmp_path, monkeypatch, capsys):
+        """When skopeo is not on PATH, --build must fail with a clean
+        install-hint error before any workspace or buildkit work happens.
+        Overrides the class-level check_skopeo mock to raise, then asserts
+        rc=2 and buildkit is never invoked."""
+        monkeypatch.chdir(tmp_path)
+        self._write_cluster_config(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+        # BuildError import lives on the module namespace; grab it.
+        from pipeline.lib import build as _build_mod
+        with mock.patch(
+            "pipeline.lib.build.check_skopeo",
+            side_effect=_build_mod.BuildError("skopeo not found on PATH"),
+        ), mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build"
+        ) as m_dispatch:
+            rc = sim2real.main([
+                "translation", "register",
+                "--build", f"pr1956={src}@{cfg}",
+            ])
+        assert rc == 2
+        assert m_dispatch.call_count == 0
+        stderr = capsys.readouterr().err
+        assert "skopeo" in stderr
+        assert "Traceback" not in stderr
+
+    def test_build_git_missing_git_fails_fast(self, tmp_path, monkeypatch, capsys):
+        """iter-4 fix: git-URL --build must fail-fast with an actionable
+        install hint when git is not on PATH — symmetric with check_skopeo.
+        Overrides the class-level check_git mock to raise."""
+        monkeypatch.chdir(tmp_path)
+        self._write_cluster_config(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956b")
+        from pipeline.lib import source_locator as _sl
+        with mock.patch(
+            "pipeline.lib.source_locator.check_git",
+            side_effect=_sl.SourceLocatorError("git not found on PATH — ..."),
+        ), mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build"
+        ) as m_dispatch:
+            rc = sim2real.main([
+                "translation", "register",
+                "--build",
+                f"pr1956b=git+https://github.com/foo/bar.git#main@{cfg}",
+            ])
+        assert rc == 2
+        assert m_dispatch.call_count == 0
+        stderr = capsys.readouterr().err
+        assert "git not found" in stderr
+        assert "Traceback" not in stderr
+
+    def test_build_path_only_does_not_check_git(self, tmp_path, monkeypatch,
+                                                 _mock_check_git):
+        """Path-only --build must NOT invoke check_git — git is only needed
+        for git-URL specs. Guards the isinstance(loc, GitLocation) gate."""
+        monkeypatch.chdir(tmp_path)
+        self._write_cluster_config(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build", return_value=0
+        ), mock.patch(
+            "pipeline.lib.build.probe_image_digest",
+            side_effect=[None, "sha256:" + "a" * 64],
+        ):
+            rc = sim2real.main([
+                "translation", "register",
+                "--build", f"pr1956={src}@{cfg}",
+            ])
+        assert rc == 0
+        assert not _mock_check_git.called
+
+    def test_build_multi_cluster_errors(self, tmp_path, monkeypatch, capsys):
+        """--build with two provisioned clusters: fail-fast with 'multiple
+        clusters found' before any buildkit work."""
+        monkeypatch.chdir(tmp_path)
+        self._write_cluster_config(tmp_path)
+        # Add a second cluster dir.
+        second = tmp_path / "workspace" / "clusters" / "other"
+        second.mkdir(parents=True, exist_ok=True)
+        (second / "cluster_config.json").write_text(json.dumps({
+            "cluster_id": "other", "namespaces": ["ns-1"],
+        }))
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build"
+        ) as m_dispatch:
+            rc = sim2real.main([
+                "translation", "register",
+                "--build", f"pr1956={src}@{cfg}",
+            ])
+        assert rc == 2
+        assert m_dispatch.call_count == 0
+        assert "multiple clusters" in capsys.readouterr().err
+
+    def test_build_empty_namespaces_errors(self, tmp_path, monkeypatch, capsys):
+        """--build against a cluster whose cluster_config.json has an empty
+        namespaces list: fail-fast with 'no namespaces'. Guards against a
+        regression that would blow up with IndexError on namespaces[0]."""
+        monkeypatch.chdir(tmp_path)
+        setup = tmp_path / "workspace" / "setup_config.json"
+        setup.parent.mkdir(parents=True, exist_ok=True)
+        setup.write_text(json.dumps({
+            "registry": "ghcr.io/x", "repo_name": "y",
+        }))
+        cluster_dir = tmp_path / "workspace" / "clusters" / "test"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        (cluster_dir / "cluster_config.json").write_text(json.dumps({
+            "cluster_id": "test", "namespaces": [],
+            "secret_names": {"registry_creds": "rc"},
+        }))
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+        rc = sim2real.main([
+            "translation", "register",
+            "--build", f"pr1956={src}@{cfg}",
+        ])
+        assert rc == 2
+        assert "no namespaces" in capsys.readouterr().err
+
+    def test_build_missing_registry_creds_errors(self, tmp_path, monkeypatch, capsys):
+        """--build against a cluster whose cluster_config.json has empty
+        secret_names.registry_creds: fail-fast with the actionable
+        re-provision hint."""
+        monkeypatch.chdir(tmp_path)
+        setup = tmp_path / "workspace" / "setup_config.json"
+        setup.parent.mkdir(parents=True, exist_ok=True)
+        setup.write_text(json.dumps({
+            "registry": "ghcr.io/x", "repo_name": "y",
+        }))
+        cluster_dir = tmp_path / "workspace" / "clusters" / "test"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        (cluster_dir / "cluster_config.json").write_text(json.dumps({
+            "cluster_id": "test", "namespaces": ["ns-0"],
+            "secret_names": {},   # missing registry_creds
+        }))
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+        rc = sim2real.main([
+            "translation", "register",
+            "--build", f"pr1956={src}@{cfg}",
+        ])
+        assert rc == 2
+        assert "registry_creds" in capsys.readouterr().err
+
+    def test_build_empty_registry_in_setup_config_errors(self, tmp_path, monkeypatch, capsys):
+        """--build with setup_config.json present but empty-string registry:
+        fail-fast with re-run-setup hint. Guards the 'or' predicate branch
+        that missing-file tests don't hit."""
+        monkeypatch.chdir(tmp_path)
+        self._write_cluster_config(tmp_path)
+        # Overwrite with empty registry.
+        (tmp_path / "workspace" / "setup_config.json").write_text(json.dumps({
+            "registry": "", "repo_name": "y",
+        }))
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+        rc = sim2real.main([
+            "translation", "register",
+            "--build", f"pr1956={src}@{cfg}",
+        ])
+        assert rc == 2
+        stderr = capsys.readouterr().err
+        assert "registry" in stderr or "repo_name" in stderr
+
+    def test_build_argparse_error_redacts_credentials_missing_equals(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """iter-7 must-fix: `_parse_build_triple` echoed the raw `value`
+        in five ArgumentTypeError messages. Iter-6's outer redaction
+        only covered the SourceLocatorError path. Repro: forget the
+        `NAME=` prefix; the token appears in stderr."""
+        monkeypatch.chdir(tmp_path)
+        rc = sim2real.main([
+            "translation", "register",
+            "--build",
+            "git+https://user:GHP_LEAK@github.com/foo/bar.git#main@/tmp/cfg",
+        ])
+        assert rc == 2
+        stderr = capsys.readouterr().err
+        assert "GHP_LEAK" not in stderr
+        # And the redacted host still appears for diagnosability.
+        assert "github.com" in stderr
+
+    def test_build_argparse_error_redacts_credentials_missing_config_path(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Another _parse_build_triple branch: trailing `@` with empty
+        config-path. Regression guard for the 'has empty config-path'
+        raise site specifically."""
+        monkeypatch.chdir(tmp_path)
+        rc = sim2real.main([
+            "translation", "register",
+            "--build",
+            "foo=git+https://user:GHP_LEAK@github.com/foo/bar.git#main@",
+        ])
+        assert rc == 2
+        stderr = capsys.readouterr().err
+        assert "GHP_LEAK" not in stderr
+
+    def test_algorithm_argparse_error_redacts_credentials(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """iter-7 important (mirror): `_parse_algorithm_triple` has
+        the same shape. An operator mispaste of a git URL into
+        --algorithm (both flags accept NAME=X@CONFIG) leaks the same
+        way. Repro: git URL without `=`."""
+        monkeypatch.chdir(tmp_path)
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm",
+            "git+https://user:GHP_LEAK@github.com/foo/bar.git#main",
+        ])
+        assert rc == 2
+        stderr = capsys.readouterr().err
+        assert "GHP_LEAK" not in stderr
+
+    def test_build_cli_error_redacts_credentials_in_val_echo(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """iter-6 must-fix: `_cmd_translation_register`'s parse-error
+        echo `error: --build value {val!r}: {exc}` must redact the raw
+        CLI argument. Reproduces the leak scenario: user forgets `#ref`
+        on a PAT-in-URL --build spec; before the fix, the token appeared
+        TWICE in stderr (once in `val!r`, once in the exception message)."""
+        monkeypatch.chdir(tmp_path)
+        # Note: no `#ref` in the git URL — triggers the parse-time
+        # "missing '#<ref>' suffix" error before any cluster/prereq
+        # work runs. The `@cfg.yaml` is the config-path separator,
+        # which register-side rightmost-@ split will consume correctly
+        # and hand parse_location a bare URL with no `#`.
+        cfg = self._write_config(tmp_path, "pr1956b")
+        rc = sim2real.main([
+            "translation", "register",
+            "--build",
+            f"pr1956b=git+https://user:GHP_LEAK@github.com/foo/bar.git@{cfg}",
+        ])
+        assert rc == 2
+        stderr = capsys.readouterr().err
+        assert "GHP_LEAK" not in stderr
+        assert "user:GHP_LEAK" not in stderr
+        # And the redacted host still surfaces so the operator can
+        # identify which spec failed.
+        assert "github.com" in stderr
+
+    def test_build_null_digest_post_probe_warns(self, tmp_path, monkeypatch, capsys):
+        """iter-3 added a warning in _dispatch_build when the POST-build
+        skopeo probe returns None (dispatch succeeded but the digest can't
+        be resolved — transient network / auth flake). All existing tests
+        either short-circuit on the pre-build probe or return a real digest
+        post-build; this test exercises the new warning branch.
+
+        Sequence: side_effect=[None, None] → pre-build probe returns None
+        (image not yet built, so dispatch runs) → dispatch returns 0 (build
+        successful) → post-build probe returns None (probe failed) →
+        warning fires, image_digest recorded as null, rc=0."""
+        monkeypatch.chdir(tmp_path)
+        self._write_cluster_config(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build", return_value=0
+        ), mock.patch(
+            "pipeline.lib.build.probe_image_digest",
+            side_effect=[None, None],
+        ):
+            rc = sim2real.main([
+                "translation", "register",
+                "--build", f"pr1956={src}@{cfg}",
+            ])
+
+        assert rc == 0
+        stderr = capsys.readouterr().err
+        assert "digest not recorded" in stderr
+        assert "pr1956" in stderr
+        # image_digest recorded as null in translation_output.json.
+        tdirs = list((tmp_path / "workspace" / "translations").iterdir())
+        tout = json.loads((tdirs[0] / "translation_output.json").read_text())
+        assert tout["algorithms"][0]["image_digest"] is None
+
+    def test_build_dispatch_raises_builderror(self, tmp_path, monkeypatch, capsys):
+        """iter-3 added `build.BuildError` to the outer except tuple. The
+        existing test_build_dispatch_failure_aborts_translation only
+        exercises the return_value=42 path (RuntimeError raised inside
+        _dispatch_build). This test raises BuildError directly, which is
+        the case the iter-3 fix was actually addressing (missing
+        build-epp.sh at pipeline/lib/build.py:120-121)."""
+        monkeypatch.chdir(tmp_path)
+        self._write_cluster_config(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+
+        from pipeline.lib import build as _build_mod
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build",
+            side_effect=_build_mod.BuildError(
+                "build-epp.sh not found at /fake/path"
+            ),
+        ), mock.patch(
+            "pipeline.lib.build.probe_image_digest", return_value=None,
+        ):
+            rc = sim2real.main([
+                "translation", "register",
+                "--build", f"pr1956={src}@{cfg}",
+            ])
+
+        assert rc == 2
+        stderr = capsys.readouterr().err
+        assert "build-epp.sh not found" in stderr
+        assert "Traceback" not in stderr
+        # No translation_output.json written on build failure.
+        tdirs = list((tmp_path / "workspace" / "translations").iterdir())
+        for d in tdirs:
+            assert not (d / "translation_output.json").exists()
+
+    def test_build_idempotent_full_rerun(self, tmp_path, monkeypatch, capsys):
+        """Full-rerun idempotency: register --build the same inputs twice.
+        Second call short-circuits at the translation_output.json-exists
+        check (structurally distinct from the pre-build registry-probe
+        short-circuit tested in test_build_pre_build_probe_short_circuits_dispatch)."""
+        monkeypatch.chdir(tmp_path)
+        self._write_cluster_config(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build", return_value=0
+        ) as m_dispatch, mock.patch(
+            "pipeline.lib.build.probe_image_digest",
+            # First-run: pre-build probe → None, post-build probe → digest.
+            # Second-run: SHOULD short-circuit before any probe is called
+            # (translation_output.json already exists). If any probe fires,
+            # the mock returns the sentinel below and the assert fails.
+            side_effect=[None, "sha256:" + "f" * 64],
+        ) as m_probe:
+            rc1 = sim2real.main([
+                "translation", "register",
+                "--build", f"pr1956={src}@{cfg}",
+            ])
+            assert rc1 == 0
+            first_dispatch_count = m_dispatch.call_count
+            first_probe_count = m_probe.call_count
+            # Second identical invocation.
+            rc2 = sim2real.main([
+                "translation", "register",
+                "--build", f"pr1956={src}@{cfg}",
+            ])
+            assert rc2 == 0
+            assert m_dispatch.call_count == first_dispatch_count  # no new build
+            assert m_probe.call_count == first_probe_count        # no new probe
+        assert "already registered" in capsys.readouterr().err
 
 
 class TestComputeTranslationHash:

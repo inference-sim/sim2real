@@ -138,6 +138,59 @@ class TestReadTranslationOutput:
         data = translation_ref.read_translation_output(p)
         assert data["alias"] is None
 
+    def test_optional_git_provenance_fields_preserved(self, tmp_path):
+        """Issue #587: algorithm entries from --build git-URL specs carry
+        optional source_git_url + source_git_ref. Reader passes them through
+        untouched; consumers that don't reference them are unaffected."""
+        payload = {
+            "version": 1,
+            "translation_hash": "e" * 64,
+            "source": "byo",
+            "alias": None,
+            "algorithms": [
+                {
+                    "name": "pr1956b",
+                    "image_ref": "ghcr.io/x/y:169b7b2bbbbf-pr1956b",
+                    "image_digest": "sha256:cc",
+                    "source_git_url": "https://github.com/x/y.git",
+                    "source_git_ref": "a" * 40,
+                },
+            ],
+            "created_at": "2026-07-20T14:00:00Z",
+        }
+        p = tmp_path / "translation_output.json"
+        p.write_text(json.dumps(payload))
+        data = translation_ref.read_translation_output(p)
+        e = data["algorithms"][0]
+        assert e["source_git_url"] == "https://github.com/x/y.git"
+        assert e["source_git_ref"] == "a" * 40
+        assert e["image_ref"] == "ghcr.io/x/y:169b7b2bbbbf-pr1956b"
+
+    def test_entries_without_git_provenance_still_parse(self, tmp_path):
+        """Algorithm entries without source_git_url/ref (BYO classic +
+        path-based --build) parse unchanged — the fields are optional."""
+        payload = {
+            "version": 1,
+            "translation_hash": "f" * 64,
+            "source": "byo",
+            "alias": "solo",
+            "algorithms": [
+                {
+                    "name": "solo",
+                    "image_ref": "ghcr.io/x/y:v1",
+                    "image_digest": "sha256:dd",
+                },
+            ],
+            "created_at": "2026-07-20T14:00:00Z",
+        }
+        p = tmp_path / "translation_output.json"
+        p.write_text(json.dumps(payload))
+        data = translation_ref.read_translation_output(p)
+        e = data["algorithms"][0]
+        assert "source_git_url" not in e
+        assert "source_git_ref" not in e
+        assert e["image_ref"] == "ghcr.io/x/y:v1"
+
 
 def _write_translation(base: Path, thash: str, payload: dict) -> None:
     tdir = base / thash

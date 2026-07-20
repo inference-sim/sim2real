@@ -163,11 +163,11 @@ Cluster-scoped fields (`namespaces`, `is_openshift`, `storage_class`, `secret_na
 
 ## sim2real.py
 
-Top-level CLI introduced in step-1 of the v2 refactor. Subcommands: `translation register` (BYO), `translate` and `translate --resume` (skill-driven checkpoint), `build` (per-algorithm image build against a checkpointed translation), `assemble` (materialize a run), `use`, `list runs`, `list translations`.
+Top-level CLI introduced in step-1 of the v2 refactor. Subcommands: `translation register` (BYO + assisted-BYO via `--build`), `translate` and `translate --resume` (skill-driven checkpoint), `build` (per-algorithm image build against a checkpointed translation), `assemble` (materialize a run), `use`, `list runs`, `list translations`.
 
 ### Register a translation (BYO)
 
-`sim2real.py translation register` imports one or more pre-built EPP images and their treatment overlay YAMLs as a single registered translation. Downstream commands (`assemble`, `deploy.py run`) treat a BYO-registered translation identically to a skill-produced one.
+`sim2real.py translation register` imports one or more algorithms as a single registered translation. Each `--algorithm` spec attaches a pre-built EPP image (classic BYO); each `--build` spec hands source (a local path or a `git+<url>#<ref>`) to buildkit and registers the resulting image (assisted-BYO). The two spec kinds are mixable in one invocation. Downstream commands (`assemble`, `deploy.py run`) treat every entry uniformly regardless of how the image was produced.
 
 The `/sim2real-bootstrap --byo` skill scaffolds a BYO experiment repo and emits a ready-to-run `translation register` command with all algorithms batched into a single call — see [`.claude/skills/sim2real-bootstrap/SKILL.md`](../.claude/skills/sim2real-bootstrap/SKILL.md#--byo-mode).
 
@@ -187,11 +187,48 @@ python pipeline/sim2real.py translation register \
 
 | Flag | Required | Notes |
 |------|----------|-------|
-| `--algorithm NAME=IMAGE@CONFIG` | yes (repeatable) | `NAME` follows `[A-Za-z0-9][A-Za-z0-9._-]*`, max 128 chars, no `.` / `..`. `IMAGE` is the registry ref. `CONFIG` is the treatment overlay YAML path. Rightmost `@` is the split point, so digest refs (e.g. `image@sha256:abc`) work. **Overlay paths containing `@` cannot be represented** (structural constraint — the `@` would be misread as part of the image ref). Overlay paths containing `=` are supported. |
+| `--algorithm NAME=IMAGE@CONFIG` | at least one of `--algorithm` / `--build` (repeatable) | `NAME` follows `[A-Za-z0-9][A-Za-z0-9._-]*`, max 128 chars, no `.` / `..`. `IMAGE` is the registry ref. `CONFIG` is the treatment overlay YAML path. Rightmost `@` is the split point, so digest refs (e.g. `image@sha256:abc`) work. **Overlay paths containing `@` cannot be represented** (structural constraint — the `@` would be misread as part of the image ref). Overlay paths containing `=` are supported. |
+| `--build NAME=LOCATION@CONFIG` | at least one of `--algorithm` / `--build` (repeatable) | Assisted-BYO: framework materializes `LOCATION`, dispatches buildkit, records `image_ref`/`image_digest`. `LOCATION` is either a filesystem path or a `git+<url>#<ref>` URL. See "**`--build`: assisted-BYO**" below. Mixable with `--algorithm` in one invocation. |
 | `--baseline-config PATH` | no | Baseline overlay YAML, if the translation needs one. |
 | `--registered-hash HASH` | no | Assert the computed `translation_hash` equals this value; error if not. |
 | `--force` | no | Reassign an alias if another translation already owns it. Applies per-algorithm for any N — use `--force` whenever any algorithm name in the batch was previously used as an alias by a different translation. For N>1 the newly-registered translation itself has `alias=null` (batched translations are referenced by hash); `--force` only clears the colliding aliases on the previous owners. |
 | `--experiment-root PATH` | no | Defaults to cwd. |
+
+#### `--build`: assisted-BYO source builds
+
+For revisions of an algorithm that aren't yet a pre-built image — typically iterative refinements during upstream PR review — `--build` accepts a source location and hands off to the existing buildkit dispatch. The resulting image is registered exactly like a classic BYO entry; no source metadata is tracked beyond the git ref when applicable.
+
+Two location shapes are supported. Framework auto-detects by prefix:
+
+- **Filesystem path** — buildkit consumes the directory verbatim. No copy, no snapshot. The path's identity (for the translation hash) is a canonical SHA-256 over the directory contents (skipping `.git/`).
+- **Git URL** (`git+https://…#<ref>` or `git+ssh://…#<ref>`) — framework shallow-clones into a scratch directory, checks out `<ref>` (commit sha, branch, or tag), then hands the scratch dir to buildkit. Records `source_git_url` and the resolved full commit sha as `source_git_ref` on the algorithm entry.
+
+```bash
+# Path-based --build: build from a local working tree.
+python pipeline/sim2real.py translation register \
+    --build pr1956=./llm-d-router@overlays/pr1956.yaml
+
+# Git-URL --build: build from a specific commit/branch/tag.
+python pipeline/sim2real.py translation register \
+    --build pr1956b=git+https://github.com/kalantar/llm-d-router.git#pr/1956@overlays/pr1956b.yaml
+
+# Mixable with --algorithm in one invocation.
+python pipeline/sim2real.py translation register \
+    --algorithm baseline=ghcr.io/foo/baseline:v1@overlays/baseline.yaml \
+    --build pr1956=./llm-d-router@overlays/pr1956.yaml
+```
+
+**Prerequisites** (`--build` only — pure `--algorithm` invocations don't need these):
+
+- `workspace/setup_config.json` must have `registry` and `repo_name` set (run `setup.py --registry <ref>`).
+- A cluster must be provisioned with `cluster.py provision <cluster_id>` — `--build` uses the primary namespace and its registry-credentials Secret.
+
+**Idempotency:** if the composed image ref (`<registry>/<repo>:<translation_hash[:12]>-<name>`) already exists in the registry with a resolvable digest, buildkit is skipped and the existing digest is recorded. Re-running the same command against the same source therefore short-circuits to a no-op after the first successful build.
+
+**Recorded provenance:**
+
+- Path-based `--build`: nothing beyond `image_ref` + `image_digest` (working-tree state is not reproducible; no honest identifier to capture).
+- Git-URL `--build`: `source_git_url` (with any `user:password@` userinfo stripped — PAT-in-URL clone specs are safe to persist; bare `git@` ssh-style users are kept because `git` is a conventional identifier, not a secret) and `source_git_ref` (full commit sha, resolved via `git ls-remote` at register time). These land as optional fields on the algorithm entry in `translation_output.json`.
 
 #### Deprecated form: `--algorithm NAME --image REF --config PATH`
 
