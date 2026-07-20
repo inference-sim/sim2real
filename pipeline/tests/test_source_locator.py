@@ -474,6 +474,54 @@ def test_git_clone_timeout_raises_source_locator_error(tmp_path):
                 pass
 
 
+def test_redact_url_ipv6_host_preserves_brackets():
+    """iter-6 regression: the iter-5 urlsplit-based helper stripped
+    IPv6 brackets, producing malformed URLs. The regex-based helper
+    leaves the netloc structure untouched — only the userinfo goes."""
+    assert (
+        sl._redact_url("https://u:t@[::1]:8080/x.git")
+        == "https://[::1]:8080/x.git"
+    )
+    assert (
+        sl._redact_url("https://u:t@[2001:db8::1]/repo.git")
+        == "https://[2001:db8::1]/repo.git"
+    )
+
+
+def test_redact_url_non_numeric_port_does_not_raise():
+    """iter-6 regression: iter-5's `.port` accessor raised ValueError
+    on non-numeric ports (`host:abc`), orphaning the SourceLocatorError
+    exception chain. The regex-based helper never inspects the port."""
+    # Regex doesn't parse — passes through cleanly, stripping only
+    # the userinfo. The malformed port stays; that's git's problem to
+    # complain about later, not ours.
+    result = sl._redact_url("https://s3cret_user:s3cret_pw@host:abc/path")
+    assert "s3cret_user" not in result
+    assert "s3cret_pw" not in result
+    assert result == "https://host:abc/path"
+
+
+def test_redact_url_malformed_ipv6_still_redacts():
+    """iter-6 regression: iter-5's `except ValueError: return url`
+    fallback returned credentials verbatim when urlsplit rejected the
+    input. The regex-based helper always redacts if it matches."""
+    # Unclosed IPv6 bracket — urlsplit would have raised. Regex just
+    # matches the //user:pass@ prefix and strips it.
+    result = sl._redact_url("https://user:s3cret@[bad")
+    assert "s3cret" not in result
+    assert result == "https://[bad"
+
+
+def test_redact_url_empty_password_untouched():
+    """`https://:@host` has empty user AND empty password. No secret
+    to redact; the regex doesn't match (requires at least one non-@
+    char after the colon-user boundary — the pattern is
+    `://[^/@\\s:]+:[^/@\\s]*@` which needs 1+ chars before the colon).
+    So this string passes through unchanged. Not a leak either way."""
+    result = sl._redact_url("https://:@host/x")
+    assert result == "https://:@host/x"
+
+
 def test_redact_url_strips_password_but_keeps_bare_user():
     """iter-5 fix: PAT-in-URL credentials are stripped before they land in
     translation_output.json or stderr. Bare-user forms (ssh://git@host)
@@ -560,6 +608,82 @@ def test_git_ls_remote_timeout_message_redacts_credentials():
             loc.identity()
     msg = str(ei.value)
     assert "s3cret" not in msg
+
+
+def test_parse_location_error_messages_redact_credentials():
+    """iter-6 must-fix: parse-error messages must not echo the raw
+    `spec` when it contains PAT-in-URL credentials. A user typo
+    (missing `#ref`) would otherwise write the token to stderr."""
+    cred_spec = (
+        "git+https://user:GHP_SECRET@github.com/foo/bar.git"
+        # Note: no `#ref` — triggers the "missing '#<ref>' suffix" error.
+    )
+    with pytest.raises(sl.SourceLocatorError) as ei:
+        sl.parse_location(cred_spec)
+    msg = str(ei.value)
+    assert "GHP_SECRET" not in msg
+    assert "user:GHP_SECRET" not in msg
+    # But the redacted URL still appears so operators can diagnose.
+    assert "github.com" in msg
+
+
+def test_parse_location_unsupported_scheme_error_redacts_credentials():
+    """The unsupported-scheme branch (URL-shaped but no git+ prefix)
+    also echoes `spec` — must redact."""
+    cred_spec = "https://user:tok3n@github.com/foo/bar.git#main"
+    with pytest.raises(sl.SourceLocatorError) as ei:
+        sl.parse_location(cred_spec)
+    assert "tok3n" not in str(ei.value)
+
+
+def test_parse_location_empty_ref_error_redacts_credentials():
+    cred_spec = "git+https://user:tok3n@github.com/foo/bar.git#"
+    with pytest.raises(sl.SourceLocatorError) as ei:
+        sl.parse_location(cred_spec)
+    assert "tok3n" not in str(ei.value)
+
+
+def test_git_ls_remote_stderr_scrubbed_for_credentials():
+    """iter-6 must-fix: git stderr echoed in SourceLocatorError messages
+    must be scrubbed for credentials. Modern git redacts, but older git
+    and DNS-failure paths still emit `user:password@` in stderr."""
+    # Simulate an older git that echoes the credentialed URL in stderr.
+    stderr_leak = (
+        "fatal: unable to access 'https://user:l3ak@bogushost/foo.git/'"
+        ": Could not resolve host: bogushost\n"
+    )
+    fake = mock.Mock(returncode=128, stdout="", stderr=stderr_leak)
+    loc = sl.GitLocation(url="https://user:l3ak@bogushost/foo.git", ref="main")
+    with mock.patch.object(sl.subprocess, "run", return_value=fake):
+        with pytest.raises(sl.SourceLocatorError) as ei:
+            loc.identity()
+    msg = str(ei.value)
+    assert "l3ak" not in msg
+    assert "user:l3ak" not in msg
+
+
+def test_git_clone_stderr_scrubbed_for_credentials(tmp_path):
+    """Full-clone failure also scrubs stderr for credentials."""
+    sha = "e" * 40
+    stderr_leak = (
+        "fatal: unable to access 'https://user:l3ak@bogushost/x.git/':"
+        " Could not resolve host\n"
+    )
+    loc = sl.GitLocation(url="https://user:l3ak@bogushost/x.git", ref=sha)
+
+    def fake_run(cmd, *args, **kwargs):
+        if "clone" in cmd and "--depth" in cmd:
+            return mock.Mock(returncode=128, stdout="", stderr="fatal\n")
+        if "clone" in cmd:
+            return mock.Mock(returncode=128, stdout="", stderr=stderr_leak)
+        raise AssertionError(f"unexpected: {cmd!r}")
+
+    with mock.patch.object(sl.subprocess, "run", side_effect=fake_run):
+        with pytest.raises(sl.SourceLocatorError) as ei:
+            with loc.materialize():
+                pass
+    msg = str(ei.value)
+    assert "l3ak" not in msg
 
 
 def test_parse_location_bare_https_url_rejected():

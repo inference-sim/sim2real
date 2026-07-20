@@ -41,7 +41,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
-from urllib.parse import urlsplit, urlunsplit
 
 
 class SourceLocatorError(Exception):
@@ -61,41 +60,47 @@ _GIT_FULL_CLONE_TIMEOUT = 600.0
 _GIT_CHECKOUT_TIMEOUT = 60.0
 
 
-def _redact_url(url: str) -> str:
-    """Return ``url`` with any userinfo (``user:password@``) component
-    stripped. Prevents PAT-in-URL credentials from leaking to on-disk
-    ``translation_output.json`` and to stderr error messages.
+# Matches ``://<user>:<password>@`` embedded in any URL substring.
+# Character classes exclude ``/@\s`` so the match cannot span into a
+# path or across whitespace, and exclude ``:`` in the user segment so
+# bare-user forms (``ssh://git@host``) — where there's no colon before
+# ``@`` — do NOT match and pass through unchanged. Regex-based
+# specifically to avoid urlsplit's fragility on malformed inputs
+# (unclosed IPv6 brackets, non-numeric ports, etc.) — the iter-5
+# urlsplit-based helper had three separate edge-case bugs.
+_URL_USERINFO_RE = re.compile(r"://[^/@\s:]+:[^/@\s]*@")
 
-    Non-URLs (paths, empty strings, malformed inputs) are returned
-    unchanged — the helper only rewrites URLs whose ``urlsplit`` yields
-    a non-empty username or password. Ports are preserved.
+
+def _redact_url(url: str) -> str:
+    """Strip ``user:password@`` userinfo from any URL substring in ``url``.
+
+    Bare-user forms (``ssh://git@host``) are preserved — ``git`` is a
+    conventional SSH access identifier, not a secret; the regex only
+    matches when a colon appears between the scheme and the ``@``.
+    Non-URL inputs and URLs without userinfo pass through unchanged.
+    IPv6 bracketed hosts and non-numeric ports pass through cleanly.
 
     Examples:
         >>> _redact_url("https://user:token@github.com/foo/bar.git")
         'https://github.com/foo/bar.git'
-        >>> _redact_url("https://github.com/foo/bar.git")
-        'https://github.com/foo/bar.git'
         >>> _redact_url("ssh://git@github.com/foo/bar.git")
-        'ssh://git@github.com/foo/bar.git'  # git-user is not a secret
-
-    The ssh-style ``git@host`` idiom is preserved — the ``git`` username
-    is a conventional identifier for SSH access, not a secret. Only
-    username-with-password (``user:password@``) forms are redacted.
+        'ssh://git@github.com/foo/bar.git'
+        >>> _redact_url("https://u:t@[::1]:8080/x")
+        'https://[::1]:8080/x'
+        >>> _redact_url("/local/path")
+        '/local/path'
     """
-    try:
-        parts = urlsplit(url)
-    except ValueError:
-        return url
-    if not parts.password:
-        # No password → nothing to redact. Bare-user forms like
-        # ``ssh://git@host`` (SSH access convention) pass through.
-        return url
-    netloc = parts.hostname or ""
-    if parts.port is not None:
-        netloc = f"{netloc}:{parts.port}"
-    return urlunsplit((
-        parts.scheme, netloc, parts.path, parts.query, parts.fragment
-    ))
+    return _URL_USERINFO_RE.sub("://", url)
+
+
+def _redact_stderr(text: str) -> str:
+    """Scrub embedded ``user:password@`` from free-form text (subprocess
+    stderr). Defense-in-depth for the git-subprocess-stderr echo sites —
+    modern git redacts credentials in its own error output, but older
+    versions and certain error paths (DNS resolution failures) do not.
+    Same regex as ``_redact_url``, applied globally across the text.
+    """
+    return _URL_USERINFO_RE.sub("://", text)
 
 
 def check_git() -> None:
@@ -241,20 +246,26 @@ def parse_location(spec: str) -> Location:
     here because tests may construct paths that don't yet exist on disk).
     """
     if not isinstance(spec, str) or not spec:
+        # `!r` here is safe: an empty/non-str spec cannot contain
+        # credentials. Every OTHER site below redacts before !r.
         raise SourceLocatorError(f"empty --build location: {spec!r}")
+    # Any parse-error message that echoes `spec` must redact first —
+    # a user typo (missing `#ref`, wrong prefix) would otherwise leak
+    # a PAT-in-URL to stderr, shell history, CI logs.
+    safe = _redact_url(spec)
     if _GIT_PREFIX_RE.match(spec):
         url_ref = spec[len("git+"):]
         if "#" not in url_ref:
             raise SourceLocatorError(
-                f"git URL missing '#<ref>' suffix: {spec!r} "
+                f"git URL missing '#<ref>' suffix: {safe!r} "
                 "(expected e.g. 'git+https://host/repo.git#main' or "
                 "'git+ssh://git@host/repo.git#<sha>')"
             )
         url, ref = url_ref.rsplit("#", 1)
         if not url:
-            raise SourceLocatorError(f"git URL has empty host+path: {spec!r}")
+            raise SourceLocatorError(f"git URL has empty host+path: {safe!r}")
         if not ref:
-            raise SourceLocatorError(f"git URL has empty ref: {spec!r}")
+            raise SourceLocatorError(f"git URL has empty ref: {safe!r}")
         return GitLocation(url=url, ref=ref)
     # Detect obviously-URL-shaped strings that didn't match the git+
     # prefix. Silently treating these as filesystem paths yields a
@@ -262,7 +273,7 @@ def parse_location(spec: str) -> Location:
     # prefix requirement instead.
     if "://" in spec or spec.startswith("git@"):
         raise SourceLocatorError(
-            f"unsupported --build location: {spec!r} — looks like a git "
+            f"unsupported --build location: {safe!r} — looks like a git "
             "URL but doesn't use the 'git+<scheme>://' prefix. Supported "
             "shapes: 'git+https://host/repo.git#<ref>' or "
             "'git+ssh://git@host/repo.git#<ref>'."
@@ -382,9 +393,12 @@ def _resolve_git_ref(url: str, ref: str) -> str:
             f"{_GIT_LSREMOTE_TIMEOUT}s — check network/host reachability"
         ) from exc
     if result.returncode != 0:
+        # Defense-in-depth: modern git redacts credentials in its own
+        # stderr, but older versions and certain error paths (DNS
+        # failures) still emit user:password@... — scrub before echo.
         raise SourceLocatorError(
             f"git ls-remote failed for {_redact_url(url)}#{ref}: "
-            f"{result.stderr.strip() or 'ref not found'}"
+            f"{_redact_stderr(result.stderr.strip()) or 'ref not found'}"
         )
     # ls-remote output: "<sha>\t<refname>\n" possibly multiple lines
     # (e.g., a tag and its dereferenced commit as `refs/tags/x^{}`).
@@ -474,9 +488,10 @@ def _clone_and_checkout(url: str, ref: str, dest: Path) -> None:
             f"{_GIT_FULL_CLONE_TIMEOUT}s — check network/host reachability"
         ) from exc
     if full.returncode != 0:
+        # Same defense-in-depth scrub as _resolve_git_ref above.
         raise SourceLocatorError(
             f"git clone failed for {_redact_url(url)}: "
-            f"{full.stderr.strip() or 'unknown error'}"
+            f"{_redact_stderr(full.stderr.strip()) or 'unknown error'}"
         )
     try:
         checkout = subprocess.run(

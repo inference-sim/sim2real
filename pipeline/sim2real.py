@@ -972,8 +972,15 @@ def _cmd_translation_register(args) -> int:
             try:
                 location = _source_locator.parse_location(loc_str)
             except _source_locator.SourceLocatorError as exc:
+                # Redact `val` before printing — the exception message
+                # is already redacted at raise time inside
+                # parse_location, but this outer echo would otherwise
+                # print the raw CLI argument (which may embed a PAT-in-
+                # URL) to stderr AND shell history / CI logs.
+                safe_val = _source_locator._redact_url(val)
                 print(
-                    f"error: --build value {val!r}: {exc}", file=sys.stderr
+                    f"error: --build value {safe_val!r}: {exc}",
+                    file=sys.stderr,
                 )
                 return 2
             algorithms.append({

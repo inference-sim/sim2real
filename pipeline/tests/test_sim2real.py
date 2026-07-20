@@ -809,6 +809,34 @@ class TestRegisterBuild:
         stderr = capsys.readouterr().err
         assert "registry" in stderr or "repo_name" in stderr
 
+    def test_build_cli_error_redacts_credentials_in_val_echo(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """iter-6 must-fix: `_cmd_translation_register`'s parse-error
+        echo `error: --build value {val!r}: {exc}` must redact the raw
+        CLI argument. Reproduces the leak scenario: user forgets `#ref`
+        on a PAT-in-URL --build spec; before the fix, the token appeared
+        TWICE in stderr (once in `val!r`, once in the exception message)."""
+        monkeypatch.chdir(tmp_path)
+        # Note: no `#ref` in the git URL — triggers the parse-time
+        # "missing '#<ref>' suffix" error before any cluster/prereq
+        # work runs. The `@cfg.yaml` is the config-path separator,
+        # which register-side rightmost-@ split will consume correctly
+        # and hand parse_location a bare URL with no `#`.
+        cfg = self._write_config(tmp_path, "pr1956b")
+        rc = sim2real.main([
+            "translation", "register",
+            "--build",
+            f"pr1956b=git+https://user:GHP_LEAK@github.com/foo/bar.git@{cfg}",
+        ])
+        assert rc == 2
+        stderr = capsys.readouterr().err
+        assert "GHP_LEAK" not in stderr
+        assert "user:GHP_LEAK" not in stderr
+        # And the redacted host still surfaces so the operator can
+        # identify which spec failed.
+        assert "github.com" in stderr
+
     def test_build_null_digest_post_probe_warns(self, tmp_path, monkeypatch, capsys):
         """iter-3 added a warning in _dispatch_build when the POST-build
         skopeo probe returns None (dispatch succeeded but the digest can't

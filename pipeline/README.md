@@ -228,7 +228,7 @@ python pipeline/sim2real.py translation register \
 **Recorded provenance:**
 
 - Path-based `--build`: nothing beyond `image_ref` + `image_digest` (working-tree state is not reproducible; no honest identifier to capture).
-- Git-URL `--build`: `source_git_url` (the URL verbatim) and `source_git_ref` (full commit sha, resolved via `git ls-remote` at register time). These land as optional fields on the algorithm entry in `translation_output.json`.
+- Git-URL `--build`: `source_git_url` (with any `user:password@` userinfo stripped — PAT-in-URL clone specs are safe to persist; bare `git@` ssh-style users are kept because `git` is a conventional identifier, not a secret) and `source_git_ref` (full commit sha, resolved via `git ls-remote` at register time). These land as optional fields on the algorithm entry in `translation_output.json`.
 
 #### Deprecated form: `--algorithm NAME --image REF --config PATH`
 
