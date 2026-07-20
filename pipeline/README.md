@@ -163,7 +163,7 @@ Cluster-scoped fields (`namespaces`, `is_openshift`, `storage_class`, `secret_na
 
 ## sim2real.py
 
-Top-level CLI introduced in step-1 of the v2 refactor. Subcommands: `translation register` (BYO + assisted-BYO via `--build`), `translate` and `translate --resume` (skill-driven checkpoint), `build` (per-algorithm image build against a checkpointed translation), `assemble` (materialize a run), `use`, `list runs`, `list translations`.
+Top-level CLI introduced in step-1 of the v2 refactor. Subcommands: `translation register` (BYO + assisted-BYO via `--build`), `translation append` (extend an existing translation with more algorithms), `translate` and `translate --resume` (skill-driven checkpoint), `build` (per-algorithm image build against a checkpointed translation), `assemble` (materialize a run), `use`, `list runs`, `list translations`.
 
 ### Register a translation (BYO)
 
@@ -267,6 +267,48 @@ sha256(canonical-json(sorted-by-name list of {name, image, config}))
 - `--registered-hash` given and does not match computed → exit 2, no writes.
 - Another translation already owns an `--algorithm` alias (an algorithm name from the batch collides with an existing translation's alias, on any N) → exit 2, no writes; re-run with `--force` to clear the previous owners' aliases before proceeding.
 - Duplicate algorithm names within a single invocation → exit 2, no writes.
+
+### Append to a translation
+
+For iterative refinement of an existing translation — typically as an algorithm evolves through upstream PR review — `sim2real.py translation append` adds one or more algorithms to a translation already on disk. Same spec grammar as `translation register` (`--algorithm` for pre-built images, `--build` for source builds; mixable in one call). Reuses the same buildkit dispatch, name-validation, and atomic-write machinery.
+
+```bash
+python pipeline/sim2real.py translation append \
+    --translation <alias|hash-prefix|hash> \
+    --algorithm pr1956b=ghcr.io/kalantar/llm-d-router:v2@overlays/pr1956b.yaml \
+    --build     pr1956c=git+https://github.com/kalantar/llm-d-router.git#pr/1956@overlays/pr1956c.yaml
+```
+
+| Flag | Required | Notes |
+|------|----------|-------|
+| `--translation REF` | yes | alias, hash prefix (min 4 chars), or full 64-char hash — same resolver as `assemble --translation`. |
+| `--algorithm NAME=IMAGE@CONFIG` | at least one of `--algorithm` / `--build` (repeatable) | Same shape as `register`. |
+| `--build NAME=LOCATION@CONFIG` | at least one of `--algorithm` / `--build` (repeatable) | Same shape as `register`. Prerequisites (skopeo, cluster + registry-creds Secret) are checked before any state change. |
+
+**Design notes** (see #584 for full rationale):
+
+- **`translation_hash` is NOT recomputed.** It remains the hash at first registration. Renaming the directory on each append would break every prior run's reference to the hash — worse than the drift. `list translations` surfaces the drift with an `APPENDS` column showing the number of append events.
+- **Additive only.** Each call appends algorithms; there is no removal, no history editing, no rollback. Re-running the same append fails on the name-collision check (algorithm names are unique within a translation).
+- **Atomic append.** Build dispatch runs before `translation_output.json` is rewritten. Any build failure raises with no state change — the on-disk file retains its pre-append content.
+- **`append_history[]` audit trail.** Each call appends one entry per kind (`byo` or `build`) to a new optional `append_history[]` field in `translation_output.json`. Mixed-kind appends produce two entries (one per kind), both stamped with the same `appended_at` timestamp:
+
+  ```json
+  {
+    "append_history": [
+      { "appended_at": "2026-07-20T14:32:11Z", "algorithms": ["pr1956b"], "kind": "byo" },
+      { "appended_at": "2026-07-20T14:32:11Z", "algorithms": ["pr1956c"], "kind": "build" }
+    ]
+  }
+  ```
+
+**Failure modes:**
+
+- `--translation` does not resolve (unknown alias / hash prefix / full hash) → exit 2, no writes.
+- Any new-algorithm name is already in the target translation → exit 2, no writes.
+- Any new-algorithm name shadows another translation's alias → exit 2, no writes.
+- Duplicate algorithm names within a single invocation → exit 2, no writes.
+- `--build` prerequisites missing (skopeo binary, cluster + registry-creds Secret, `setup_config.json` with `registry` + `repo_name`) → exit 2, no writes.
+- Buildkit dispatch failure → exit 2; prior on-disk `translation_output.json` is unchanged.
 
 ---
 
@@ -647,7 +689,7 @@ python pipeline/sim2real.py --experiment-root ../admission-control use --run <na
 
 `--experiment-root` defaults to the current working directory; omit it when running from the experiment repo root.
 
-**`sim2real list translations`** — Walks `workspace/translations/*/translation_output.json` and prints one row per translation, newest first (by `created_at`). Columns: `ALIAS` (`-` if the translation has none), `HASH` (first 12 chars), `SOURCE` (`skill` or `byo`), `IMAGES` (`N built` when every algorithm has an `image_ref`, `N pending` when none, `N/M built` mixed, `N registered` for BYO), `CREATED`. Prints `no translations yet` and exits 0 if the directory is empty or missing. Malformed `translation_output.json` files are logged as warnings and skipped, so a stray file doesn't break the listing.
+**`sim2real list translations`** — Walks `workspace/translations/*/translation_output.json` and prints one row per translation, newest first (by `created_at`). Columns: `ALIAS` (`-` if the translation has none), `HASH` (first 12 chars), `SOURCE` (`skill` or `byo`), `IMAGES` (`N built` when every algorithm has an `image_ref`, `N pending` when none, `N/M built` mixed, `N registered` for BYO), `APPENDS` (number of `translation append` events recorded in `append_history[]`; `0` for translations that have never been appended to), `CREATED`. Prints `no translations yet` and exits 0 if the directory is empty or missing. Malformed `translation_output.json` files are logged as warnings and skipped, so a stray file doesn't break the listing.
 
 **`sim2real list runs`** — Walks `workspace/runs/*/run_metadata.json` and prints one row per run, newest first (mtime desc). Columns: `RUN_NAME`, `TRANSLATION` (first 8 chars of the translation hash), `CLUSTER`, `ASSEMBLED`. The active run (`current_run` in `setup_config.json`) is marked with `*`. Prints `no runs yet` and exits 0 if `workspace/runs/` is empty or missing. A subdirectory without `run_metadata.json` is skipped; a corrupt `run_metadata.json` renders `?` cells instead of aborting the listing.
 

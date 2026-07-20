@@ -2301,6 +2301,7 @@ class TestListTranslations:
         assert "HASH" in lines[0]
         assert "SOURCE" in lines[0]
         assert "IMAGES" in lines[0]
+        assert "APPENDS" in lines[0]
         assert "CREATED" in lines[0]
         # h2 is newest by created_at; h1 middle; h3 oldest.
         assert "compare-a-b" in lines[1]
@@ -2310,6 +2311,64 @@ class TestListTranslations:
         assert "2 pending" in out
         assert "1 built" in out
         assert "1 registered" in out
+
+    def test_appends_column_reflects_history_length(self, capsys, tmp_path):
+        """APPENDS shows the count of append_history entries. Absent /
+        empty history renders as '0'."""
+        from pipeline.lib import layout
+        layout.set_experiment_root(tmp_path)
+        base = layout.translations_dir()
+        base.mkdir(parents=True)
+
+        h1 = "a" * 64
+        (base / h1).mkdir()
+        (base / h1 / "translation_output.json").write_text(json.dumps({
+            "version": 1,
+            "translation_hash": h1,
+            "source": "byo",
+            "alias": "twice-appended",
+            "algorithms": [
+                {"name": "a", "image_ref": "reg/a:v1"},
+                {"name": "b", "image_ref": "reg/b:v1"},
+                {"name": "c", "image_ref": "reg/c:v1"},
+            ],
+            "append_history": [
+                {"appended_at": "2026-07-20T10:00:00Z",
+                 "algorithms": ["b"], "kind": "byo"},
+                {"appended_at": "2026-07-21T10:00:00Z",
+                 "algorithms": ["c"], "kind": "byo"},
+            ],
+            "created_at": "2026-07-19T10:00:00Z",
+        }))
+
+        h2 = "b" * 64
+        (base / h2).mkdir()
+        (base / h2 / "translation_output.json").write_text(json.dumps({
+            "version": 1,
+            "translation_hash": h2,
+            "source": "byo",
+            "alias": "never-appended",
+            "algorithms": [{"name": "a", "image_ref": "reg/a:v1"}],
+            "created_at": "2026-07-20T09:00:00Z",
+        }))
+
+        rc = sim2real._cmd_list_translations(
+            sim2real.build_parser().parse_args(["list", "translations"])
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        lines = out.strip().splitlines()
+        # Row order: twice-appended (newer created_at) first, then never.
+        twice_row = next(ln for ln in lines if "twice-appended" in ln)
+        never_row = next(ln for ln in lines if "never-appended" in ln)
+        # APPENDS column position: split by whitespace, index 4 (after
+        # ALIAS, HASH, SOURCE, IMAGES). The IMAGES value can be a single
+        # token like "3 registered" — so it occupies TWO whitespace-
+        # separated tokens. Robust check: look for the exact value.
+        twice_tokens = twice_row.split()
+        never_tokens = never_row.split()
+        assert "2" in twice_tokens
+        assert "0" in never_tokens
 
 
 class TestAssembleIncompleteTranslationCheck:
@@ -2682,3 +2741,812 @@ class TestCmdBuildOverlayLifecycle:
         assert rc == 2
         err = capsys.readouterr().err
         assert "algo1" in err
+
+
+class TestAppendTranslation:
+    """Direct tests for `_append_translation` (BYO path — buildkit
+    dispatch has its own coverage in TestCmdTranslationAppend)."""
+
+    def _algo(self, tmp_path, name: str, image: str = None, config: str = None) -> dict:
+        cfg = tmp_path / f"{name}_config.yaml"
+        cfg.write_text(config if config else f"scorers:\n  - name: {name}\n")
+        return {
+            "kind": "byo",
+            "name": name,
+            "image_ref": image or "ghcr.io/foo/bar:v1",
+            "config_path": cfg,
+        }
+
+    def _register_one(self, tmp_path, name="orig"):
+        algo = self._algo(tmp_path, name)
+        thash, _ = sim2real._register_translation(
+            algorithms=[algo],
+            baseline_config_path=None,
+            registered_hash=None,
+            now_iso="2026-07-05T10:00:00Z",
+        )
+        return thash
+
+    def test_appends_new_algorithm_entry(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        new_algo = self._algo(tmp_path, "extra", image="reg/extra:v1")
+        history = sim2real._append_translation(
+            translation_hash=thash,
+            algorithms=[new_algo],
+            now_iso="2026-07-20T10:00:00Z",
+        )
+        assert len(history) == 1
+        assert history[0]["kind"] == "byo"
+        assert history[0]["algorithms"] == ["extra"]
+
+        tout = json.loads(
+            (Path("workspace") / "translations" / thash / "translation_output.json").read_text()
+        )
+        names = [a["name"] for a in tout["algorithms"]]
+        assert names == ["orig", "extra"]
+        assert tout["append_history"][0]["algorithms"] == ["extra"]
+        assert tout["append_history"][0]["kind"] == "byo"
+        # translation_hash unchanged (design call — stability over drift).
+        assert tout["translation_hash"] == thash
+
+    def test_preserves_existing_algorithm_shape(self, tmp_path, monkeypatch):
+        """Original algorithm entries are untouched by append."""
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        before = json.loads(
+            (Path("workspace") / "translations" / thash / "translation_output.json").read_text()
+        )
+        original = before["algorithms"][0]
+
+        new_algo = self._algo(tmp_path, "extra")
+        sim2real._append_translation(
+            translation_hash=thash,
+            algorithms=[new_algo],
+            now_iso="2026-07-20T10:00:00Z",
+        )
+        after = json.loads(
+            (Path("workspace") / "translations" / thash / "translation_output.json").read_text()
+        )
+        assert after["algorithms"][0] == original
+        # Alias unchanged (register set it to "orig"; append never mutates).
+        assert after["alias"] == before["alias"]
+
+    def test_writes_generated_config(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        new_algo = self._algo(
+            tmp_path, "extra", config="extra_body: yes\n"
+        )
+        sim2real._append_translation(
+            translation_hash=thash,
+            algorithms=[new_algo],
+            now_iso="2026-07-20T10:00:00Z",
+        )
+        cfg_path = (
+            Path("workspace") / "translations" / thash
+            / "generated" / "extra" / "extra_config.yaml"
+        )
+        assert cfg_path.read_text() == "extra_body: yes\n"
+
+    def test_name_collision_with_existing_algo_errors(self, tmp_path, monkeypatch):
+        """Appending an algorithm whose name is already in the
+        translation is refused BEFORE any writes."""
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        dup = self._algo(tmp_path, "orig", image="reg/other:v2")
+        before_tout = (
+            Path("workspace") / "translations" / thash / "translation_output.json"
+        ).read_text()
+        with pytest.raises(RuntimeError, match=r"already in translation"):
+            sim2real._append_translation(
+                translation_hash=thash,
+                algorithms=[dup],
+                now_iso="2026-07-20T10:00:00Z",
+            )
+        # No writes on collision.
+        after_tout = (
+            Path("workspace") / "translations" / thash / "translation_output.json"
+        ).read_text()
+        assert before_tout == after_tout
+
+    def test_name_collision_with_other_translation_alias_errors(
+        self, tmp_path, monkeypatch
+    ):
+        """A new algorithm whose name shadows another translation's
+        alias is refused (mirrors register's alias-collision check)."""
+        monkeypatch.chdir(tmp_path)
+        thash_a = self._register_one(tmp_path, "orig-a")
+        # Second translation with alias "b" (N=1 -> alias equals algo name).
+        thash_b = sim2real._register_translation(
+            algorithms=[self._algo(tmp_path, "solo-b")],
+            baseline_config_path=None,
+            registered_hash=None,
+            now_iso="2026-07-05T11:00:00Z",
+        )[0]
+        assert thash_b  # sanity
+        # Now try to append an algo named "solo-b" onto thash_a; that
+        # name is already an alias on thash_b.
+        with pytest.raises(RuntimeError, match=r"alias 'solo-b' already assigned"):
+            sim2real._append_translation(
+                translation_hash=thash_a,
+                algorithms=[self._algo(tmp_path, "solo-b")],
+                now_iso="2026-07-20T10:00:00Z",
+            )
+
+    def test_missing_translation_errors(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (Path("workspace") / "translations").mkdir(parents=True)
+        with pytest.raises(RuntimeError, match=r"not found on disk"):
+            sim2real._append_translation(
+                translation_hash="0" * 64,
+                algorithms=[self._algo(tmp_path, "extra")],
+                now_iso="2026-07-20T10:00:00Z",
+            )
+
+    def test_multiple_appends_accumulate_history(self, tmp_path, monkeypatch):
+        """Two successive append calls each add their own entry to
+        append_history[]."""
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        sim2real._append_translation(
+            translation_hash=thash,
+            algorithms=[self._algo(tmp_path, "e1")],
+            now_iso="2026-07-20T10:00:00Z",
+        )
+        sim2real._append_translation(
+            translation_hash=thash,
+            algorithms=[self._algo(tmp_path, "e2")],
+            now_iso="2026-07-21T10:00:00Z",
+        )
+        tout = json.loads(
+            (Path("workspace") / "translations" / thash / "translation_output.json").read_text()
+        )
+        assert [e["algorithms"] for e in tout["append_history"]] == [["e1"], ["e2"]]
+        assert [a["name"] for a in tout["algorithms"]] == ["orig", "e1", "e2"]
+
+    def test_extends_existing_append_history(self, tmp_path, monkeypatch):
+        """A translation that already carries append_history[] gets
+        extended, not overwritten."""
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        tout_path = Path("workspace") / "translations" / thash / "translation_output.json"
+        data = json.loads(tout_path.read_text())
+        data["append_history"] = [{
+            "appended_at": "2026-06-01T00:00:00Z",
+            "algorithms": ["ghost"],
+            "kind": "byo",
+        }]
+        tout_path.write_text(json.dumps(data))
+        sim2real._append_translation(
+            translation_hash=thash,
+            algorithms=[self._algo(tmp_path, "real")],
+            now_iso="2026-07-20T10:00:00Z",
+        )
+        final = json.loads(tout_path.read_text())
+        assert len(final["append_history"]) == 2
+        assert final["append_history"][0]["algorithms"] == ["ghost"]
+        assert final["append_history"][1]["algorithms"] == ["real"]
+
+    def test_mixed_kinds_produce_two_history_entries(self, tmp_path, monkeypatch):
+        """When one append call mixes --algorithm (byo) and --build,
+        two append_history entries are recorded (one per kind), both
+        stamped with the same appended_at."""
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        # Fake a "build" AlgorithmSpec with a mocked location + provenance.
+        cfg_build = tmp_path / "b_config.yaml"
+        cfg_build.write_text("build_body: yes\n")
+
+        class FakeLocation:
+            def provenance(self):
+                return {}
+            def materialize(self):
+                raise AssertionError("should not be called — dispatch is mocked")
+
+        build_spec = {
+            "kind": "build",
+            "name": "b",
+            "location": FakeLocation(),
+            "config_path": cfg_build,
+        }
+
+        # Mock _dispatch_build to skip buildkit + digest probes.
+        def fake_dispatch(entry, *, thash, build_context):
+            entry["image_ref"] = f"reg/repo:{thash[:12]}-{entry['name']}"
+            entry["image_digest"] = "sha256:" + "1" * 64
+
+        with mock.patch.object(sim2real, "_dispatch_build", side_effect=fake_dispatch):
+            history = sim2real._append_translation(
+                translation_hash=thash,
+                algorithms=[self._algo(tmp_path, "a"), build_spec],
+                now_iso="2026-07-20T10:00:00Z",
+                build_context={"registry": "reg", "repo_name": "repo",
+                               "build_namespace": "ns",
+                               "registry_secret_name": "sec"},
+            )
+        assert len(history) == 2
+        by_kind = {e["kind"]: e for e in history}
+        assert by_kind["byo"]["algorithms"] == ["a"]
+        assert by_kind["build"]["algorithms"] == ["b"]
+        # Both stamped with the same appended_at.
+        assert by_kind["byo"]["appended_at"] == by_kind["build"]["appended_at"]
+
+    def test_build_dispatch_failure_preserves_prior_state(
+        self, tmp_path, monkeypatch
+    ):
+        """If buildkit dispatch raises mid-append, translation_output.json
+        must retain its pre-append content. Atomic-append guarantee."""
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        tout_path = Path("workspace") / "translations" / thash / "translation_output.json"
+        before = tout_path.read_text()
+
+        class FakeLocation:
+            def provenance(self):
+                return {}
+            def materialize(self):
+                raise AssertionError
+
+        cfg = tmp_path / "b_config.yaml"
+        cfg.write_text("build_body: yes\n")
+        build_spec = {
+            "kind": "build",
+            "name": "b",
+            "location": FakeLocation(),
+            "config_path": cfg,
+        }
+
+        def failing_dispatch(entry, *, thash, build_context):
+            raise RuntimeError("simulated buildkit failure")
+
+        with mock.patch.object(sim2real, "_dispatch_build", side_effect=failing_dispatch):
+            with pytest.raises(RuntimeError, match=r"simulated buildkit"):
+                sim2real._append_translation(
+                    translation_hash=thash,
+                    algorithms=[build_spec],
+                    now_iso="2026-07-20T10:00:00Z",
+                    build_context={"registry": "reg", "repo_name": "repo",
+                                   "build_namespace": "ns",
+                                   "registry_secret_name": "sec"},
+                )
+        # Prior state untouched.
+        assert tout_path.read_text() == before
+
+    def test_records_provenance_for_build_entries(self, tmp_path, monkeypatch):
+        """Git-URL --build entries record their source_git_url / source_git_ref
+        provenance on the per-algorithm entry."""
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+
+        class FakeLocation:
+            def provenance(self):
+                return {
+                    "source_git_url": "https://github.com/foo/bar.git",
+                    "source_git_ref": "d" * 40,
+                }
+
+        cfg = tmp_path / "b_config.yaml"
+        cfg.write_text("build_body: yes\n")
+        build_spec = {
+            "kind": "build",
+            "name": "b",
+            "location": FakeLocation(),
+            "config_path": cfg,
+        }
+
+        def fake_dispatch(entry, *, thash, build_context):
+            entry["image_ref"] = "reg/repo:x-b"
+            entry["image_digest"] = "sha256:" + "2" * 64
+
+        with mock.patch.object(sim2real, "_dispatch_build", side_effect=fake_dispatch):
+            sim2real._append_translation(
+                translation_hash=thash,
+                algorithms=[build_spec],
+                now_iso="2026-07-20T10:00:00Z",
+                build_context={"registry": "reg", "repo_name": "repo",
+                               "build_namespace": "ns",
+                               "registry_secret_name": "sec"},
+            )
+
+        tout = json.loads(
+            (Path("workspace") / "translations" / thash / "translation_output.json").read_text()
+        )
+        b_entry = next(a for a in tout["algorithms"] if a["name"] == "b")
+        assert b_entry["source_git_url"] == "https://github.com/foo/bar.git"
+        assert b_entry["source_git_ref"] == "d" * 40
+
+
+class TestCmdTranslationAppend:
+    """End-to-end tests for `translation append` via `sim2real.main`."""
+
+    def _write_config(self, tmp_path: Path, name: str) -> Path:
+        cfg = tmp_path / f"{name}_config.yaml"
+        cfg.write_text(f"scorers:\n  - name: {name}\n")
+        return cfg
+
+    def _register_one(self, tmp_path, name="orig"):
+        cfg = self._write_config(tmp_path, name)
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", f"{name}=reg/{name}:v1@{cfg}",
+        ])
+        assert rc == 0
+        tdirs = list((tmp_path / "workspace" / "translations").iterdir())
+        assert len(tdirs) == 1
+        return tdirs[0].name
+
+    def test_append_by_alias(self, tmp_path, monkeypatch, capsys):
+        """N=1 register sets alias=name; append can use that alias to
+        target the translation."""
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        cfg_new = self._write_config(tmp_path, "extra")
+        rc = sim2real.main([
+            "translation", "append",
+            "--translation", "orig",
+            "--algorithm", f"extra=reg/extra:v1@{cfg_new}",
+        ])
+        assert rc == 0
+        tout = json.loads(
+            (tmp_path / "workspace" / "translations" / thash
+             / "translation_output.json").read_text()
+        )
+        assert [a["name"] for a in tout["algorithms"]] == ["orig", "extra"]
+
+    def test_append_by_hash_prefix(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        cfg_new = self._write_config(tmp_path, "extra")
+        rc = sim2real.main([
+            "translation", "append",
+            "--translation", thash[:8],
+            "--algorithm", f"extra=reg/extra:v1@{cfg_new}",
+        ])
+        assert rc == 0
+
+    def test_append_without_specs_errors(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        rc = sim2real.main([
+            "translation", "append",
+            "--translation", thash,
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "at least one of --algorithm or --build" in err
+
+    def test_append_missing_translation_errors(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        cfg = self._write_config(tmp_path, "extra")
+        rc = sim2real.main([
+            "translation", "append",
+            "--translation", "nonexistent",
+            "--algorithm", f"extra=reg/extra:v1@{cfg}",
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "no translations" in err or "no such translation" in err
+
+    def test_append_duplicate_within_call_errors(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        cfg_a = self._write_config(tmp_path, "a")
+        cfg_b = self._write_config(tmp_path, "a2")
+        rc = sim2real.main([
+            "translation", "append",
+            "--translation", thash,
+            "--algorithm", f"same=reg/one:v1@{cfg_a}",
+            "--algorithm", f"same=reg/two:v1@{cfg_b}",
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "duplicate algorithm name" in err
+
+    def test_append_name_collides_with_existing_errors(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        cfg = self._write_config(tmp_path, "orig-again")
+        rc = sim2real.main([
+            "translation", "append",
+            "--translation", thash,
+            "--algorithm", f"orig=reg/orig-again:v1@{cfg}",
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "already in translation" in err
+
+    def test_append_records_history_entry(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        cfg_new = self._write_config(tmp_path, "extra")
+        rc = sim2real.main([
+            "translation", "append",
+            "--translation", thash,
+            "--algorithm", f"extra=reg/extra:v1@{cfg_new}",
+        ])
+        assert rc == 0
+        tout = json.loads(
+            (tmp_path / "workspace" / "translations" / thash
+             / "translation_output.json").read_text()
+        )
+        assert len(tout["append_history"]) == 1
+        entry = tout["append_history"][0]
+        assert entry["algorithms"] == ["extra"]
+        assert entry["kind"] == "byo"
+        # ISO-8601-ish "YYYY-MM-DDTHH:MM:SSZ" — cheap format check.
+        assert entry["appended_at"].endswith("Z")
+
+    def test_append_config_missing_errors(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        rc = sim2real.main([
+            "translation", "append",
+            "--translation", thash,
+            "--algorithm", "extra=reg/extra:v1@/does/not/exist.yaml",
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "config file not found" in err
+
+    def test_append_malformed_algorithm_spec_errors(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        rc = sim2real.main([
+            "translation", "append",
+            "--translation", thash,
+            "--algorithm", "no-equals-here",
+        ])
+        assert rc == 2
+
+    def test_register_then_append_round_trip(self, tmp_path, monkeypatch, capsys):
+        """End-to-end: register N=2 → append 1 → assemble picks up all 3.
+
+        Covers issue #585's explicit acceptance criterion: `translation
+        register` 2 → `translation append` 1 → `sim2real assemble
+        --translation <ref>` → all 3 algorithms visible to assemble.
+        `assemble_run.assemble_run` is mocked (same pattern as
+        `TestAssembleResolvesAlias.test_assemble_accepts_alias`) — the
+        goal is to verify the ref resolves through the append and the
+        materialized translation dir is consumable, not to exercise the
+        full assemble pipeline (that's covered separately)."""
+        monkeypatch.chdir(tmp_path)
+        cfg_a = self._write_config(tmp_path, "a")
+        cfg_b = self._write_config(tmp_path, "b")
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", f"a=reg/a:v1@{cfg_a}",
+            "--algorithm", f"b=reg/b:v1@{cfg_b}",
+        ])
+        assert rc == 0
+        tdirs = list((tmp_path / "workspace" / "translations").iterdir())
+        thash = tdirs[0].name
+
+        cfg_c = self._write_config(tmp_path, "c")
+        rc = sim2real.main([
+            "translation", "append",
+            "--translation", thash,
+            "--algorithm", f"c=reg/c:v1@{cfg_c}",
+        ])
+        assert rc == 0
+        tout = json.loads(
+            (tmp_path / "workspace" / "translations" / thash
+             / "translation_output.json").read_text()
+        )
+        assert [a["name"] for a in tout["algorithms"]] == ["a", "b", "c"]
+        assert len(tout["append_history"]) == 1
+        # Alias for N=2 batched register is None; append does not modify it.
+        assert tout["alias"] is None
+        # translation_hash never changes.
+        assert tout["translation_hash"] == thash
+
+        # Assemble reads the post-append translation and resolves all
+        # three algorithms — the config file for the appended entry
+        # (generated/c/c_config.yaml) must exist on disk since the
+        # slicer reads it downstream. Mock `assemble_run.assemble_run`
+        # to capture the resolved hash without a real cluster.
+        captured = {}
+        def fake_assemble(*, translation_hash, translation_ref, cluster_id,
+                          run_name, experiment_root, manifest_path,
+                          force, replicas, now_iso):
+            captured["hash"] = translation_hash
+            captured["ref"] = translation_ref
+
+        monkeypatch.setattr(
+            sim2real._assemble_run_lib, "assemble_run", fake_assemble
+        )
+        (tmp_path / "transfer.yaml").write_text(yaml.safe_dump({
+            "kind": "sim2real-transfer",
+            "version": 3,
+            "scenario": "smoke",
+            "baselines": [{"name": "base", "scenario": "baselines/base.yaml"}],
+            "component": {"repo": "example.com/x/y", "kind": "scorer"},
+            "context": {"text": "", "files": []},
+        }))
+        rc = sim2real.main([
+            "--experiment-root", str(tmp_path),
+            "assemble",
+            "--translation", thash,
+            "--cluster", "cX",
+            "--run", "r1",
+        ])
+        assert rc == 0
+        assert captured["hash"] == thash
+        assert captured["ref"] == thash
+        # The appended algorithm's config file is on disk — assemble
+        # can find it via config_path if the manifest declares it.
+        assert (tmp_path / "workspace" / "translations" / thash
+                / "generated" / "c" / "c_config.yaml").exists()
+
+
+class TestCmdTranslationAppendBuild:
+    """End-to-end tests for `translation append --build` via `sim2real.main`.
+
+    Parallel coverage to `TestRegisterBuild` — exercises the append
+    command's prerequisite checks (skopeo, git-when-git-URL,
+    build-context resolution) and the buildkit dispatch handoff.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _mock_check_skopeo(self):
+        with mock.patch("pipeline.lib.build.check_skopeo") as m:
+            yield m
+
+    @pytest.fixture(autouse=True)
+    def _mock_check_git(self):
+        with mock.patch("pipeline.lib.source_locator.check_git") as m:
+            yield m
+
+    def _write_cluster_config(self, tmp_path: Path) -> None:
+        setup = tmp_path / "workspace" / "setup_config.json"
+        setup.parent.mkdir(parents=True, exist_ok=True)
+        setup.write_text(json.dumps({
+            "registry": "ghcr.io/kalantar",
+            "repo_name": "llm-d-router",
+            "sim2real_root": "/fake",
+            "orchestrator_image": "fake:latest",
+        }))
+        cluster_dir = tmp_path / "workspace" / "clusters" / "test"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        (cluster_dir / "cluster_config.json").write_text(json.dumps({
+            "cluster_id": "test",
+            "namespaces": ["ns-0"],
+            "secret_names": {"registry_creds": "registry-creds"},
+        }))
+
+    def _write_config(self, tmp_path: Path, name: str) -> Path:
+        cfg = tmp_path / f"{name}_config.yaml"
+        cfg.write_text(f"scenario:\n  - name: {name}\n")
+        return cfg
+
+    def _write_source_dir(self, tmp_path: Path, name: str) -> Path:
+        src = tmp_path / f"src-{name}"
+        src.mkdir()
+        (src / "policy.go").write_text(f"// {name}\n")
+        return src
+
+    def _register_one(self, tmp_path, name="orig"):
+        """Pre-populate a BYO translation so append has a target.
+
+        Registers without any --build spec so no cluster prereqs are
+        needed at this step. The append call under test provides its
+        own cluster-config fixture via _write_cluster_config."""
+        cfg = self._write_config(tmp_path, name)
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm", f"{name}=reg/{name}:v1@{cfg}",
+        ])
+        assert rc == 0
+        tdirs = list((tmp_path / "workspace" / "translations").iterdir())
+        assert len(tdirs) == 1
+        return tdirs[0].name
+
+    def test_append_build_path_end_to_end(
+        self, tmp_path, monkeypatch, _mock_check_skopeo, _mock_check_git
+    ):
+        """`translation append --build <path>` goes through
+        _cmd_translation_append end-to-end: check_skopeo is invoked
+        (fail-fast), check_git is NOT (path build), _resolve_build_context
+        resolves via the workspace's cluster_config, and buildkit is
+        dispatched exactly once for the appended algorithm."""
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        self._write_cluster_config(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build", return_value=0
+        ) as m_dispatch, mock.patch(
+            "pipeline.lib.build.probe_image_digest",
+            side_effect=[None, "sha256:" + "a" * 64],
+        ):
+            rc = sim2real.main([
+                "translation", "append",
+                "--translation", thash,
+                "--build", f"pr1956={src}@{cfg}",
+            ])
+
+        assert _mock_check_skopeo.called
+        assert not _mock_check_git.called
+        assert rc == 0
+        assert m_dispatch.call_count == 1
+        kwargs = m_dispatch.call_args.kwargs
+        assert kwargs["namespace"] == "ns-0"
+        assert kwargs["registry_secret_name"] == "registry-creds"
+        assert kwargs["image_ref"].endswith("-pr1956")
+        assert kwargs["source_dir"] == src
+
+        tout = json.loads(
+            (tmp_path / "workspace" / "translations" / thash
+             / "translation_output.json").read_text()
+        )
+        names = [a["name"] for a in tout["algorithms"]]
+        assert names == ["orig", "pr1956"]
+        appended = next(a for a in tout["algorithms"] if a["name"] == "pr1956")
+        assert appended["image_ref"].endswith("-pr1956")
+        assert appended["image_digest"] == "sha256:" + "a" * 64
+        # Path-based --build records no git provenance on append either.
+        assert "source_git_url" not in appended
+        assert "source_git_ref" not in appended
+        # Append history entry stamped with kind="build".
+        assert len(tout["append_history"]) == 1
+        entry = tout["append_history"][0]
+        assert entry["kind"] == "build"
+        assert entry["algorithms"] == ["pr1956"]
+
+    def test_append_build_git_url_triggers_check_git(
+        self, tmp_path, monkeypatch, _mock_check_skopeo, _mock_check_git
+    ):
+        """A git-URL `--build` on append must fire BOTH prereq checks
+        (skopeo + git). Regression guard against the same off-by-one
+        that TestRegisterBuild.test_build_mixed_path_and_git_calls_both_prereqs
+        exercises for register."""
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        self._write_cluster_config(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956b")
+        resolved_sha = "b" * 40
+
+        def fake_run(cmd, *args, **kwargs):
+            if "ls-remote" in cmd:
+                return mock.Mock(
+                    returncode=0,
+                    stdout=f"{resolved_sha}\trefs/heads/main\n",
+                    stderr="",
+                )
+            if "clone" in cmd and "--depth" in cmd:
+                return mock.Mock(returncode=128, stdout="", stderr="fatal\n")
+            if "clone" in cmd:
+                dest = Path(cmd[-1])
+                dest.mkdir(parents=True)
+                (dest / "policy.go").write_text("// pr1956b\n")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            if "checkout" in cmd:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            raise AssertionError(f"unexpected subprocess call: {cmd!r}")
+
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build", return_value=0
+        ), mock.patch(
+            "pipeline.lib.build.probe_image_digest",
+            side_effect=[None, "sha256:" + "c" * 64],
+        ), mock.patch(
+            "pipeline.lib.source_locator.subprocess.run", side_effect=fake_run
+        ):
+            rc = sim2real.main([
+                "translation", "append",
+                "--translation", thash,
+                "--build",
+                f"pr1956b=git+https://github.com/foo/bar.git#main@{cfg}",
+            ])
+        assert rc == 0
+        assert _mock_check_skopeo.called
+        assert _mock_check_git.called
+
+        tout = json.loads(
+            (tmp_path / "workspace" / "translations" / thash
+             / "translation_output.json").read_text()
+        )
+        b_entry = next(a for a in tout["algorithms"] if a["name"] == "pr1956b")
+        assert b_entry["source_git_url"] == "https://github.com/foo/bar.git"
+        assert b_entry["source_git_ref"] == resolved_sha
+
+    def test_append_build_missing_skopeo_fails_fast(
+        self, tmp_path, monkeypatch, capsys, _mock_check_skopeo
+    ):
+        """If skopeo is missing, `translation append --build` must fail
+        with rc=2 and a clean error BEFORE any buildkit or state
+        change. Prereq-fail-fast regression guard for append (mirrors
+        TestRegisterBuild.test_build_missing_skopeo_fails_fast)."""
+        from pipeline.lib import build as _build
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        self._write_cluster_config(tmp_path)
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+
+        _mock_check_skopeo.side_effect = _build.BuildError(
+            "skopeo not on PATH; install with `brew install skopeo`"
+        )
+
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build"
+        ) as m_dispatch:
+            rc = sim2real.main([
+                "translation", "append",
+                "--translation", thash,
+                "--build", f"pr1956={src}@{cfg}",
+            ])
+        assert rc == 2
+        assert m_dispatch.call_count == 0
+        err = capsys.readouterr().err
+        assert "skopeo" in err
+        # translation_output.json still holds only the pre-append state.
+        tout = json.loads(
+            (tmp_path / "workspace" / "translations" / thash
+             / "translation_output.json").read_text()
+        )
+        assert [a["name"] for a in tout["algorithms"]] == ["orig"]
+        assert "append_history" not in tout
+
+    def test_append_build_no_cluster_errors(
+        self, tmp_path, monkeypatch, _mock_check_skopeo
+    ):
+        """`translation append --build` without a provisioned cluster
+        must fail fast (build_context resolution surfaces the missing
+        prereq); no buildkit is dispatched."""
+        monkeypatch.chdir(tmp_path)
+        thash = self._register_one(tmp_path, "orig")
+        # Setup config but NO cluster.
+        setup = tmp_path / "workspace" / "setup_config.json"
+        setup.parent.mkdir(parents=True, exist_ok=True)
+        setup.write_text(json.dumps({
+            "registry": "ghcr.io/x",
+            "repo_name": "llm-d-router",
+        }))
+        cfg = self._write_config(tmp_path, "pr1956")
+        src = self._write_source_dir(tmp_path, "pr1956")
+
+        with mock.patch(
+            "pipeline.lib.build.dispatch_buildkit_build"
+        ) as m_dispatch:
+            rc = sim2real.main([
+                "translation", "append",
+                "--translation", thash,
+                "--build", f"pr1956={src}@{cfg}",
+            ])
+        assert rc == 2
+        assert m_dispatch.call_count == 0
+
+
+class TestListTranslationsAppendedCount:
+    """The APPENDS column reflects len(append_history)."""
+
+    def test_zero_when_missing(self, capsys, tmp_path):
+        from pipeline.lib import layout
+        layout.set_experiment_root(tmp_path)
+        base = layout.translations_dir()
+        base.mkdir(parents=True)
+        h = "a" * 64
+        (base / h).mkdir()
+        (base / h / "translation_output.json").write_text(json.dumps({
+            "version": 1, "translation_hash": h, "source": "byo",
+            "alias": None,
+            "algorithms": [{"name": "x", "image_ref": "reg:v1"}],
+            "created_at": "2026-07-05T10:00:00Z",
+            # No append_history key.
+        }))
+        rc = sim2real._cmd_list_translations(
+            sim2real.build_parser().parse_args(["list", "translations"])
+        )
+        assert rc == 0
+        # The APPENDS value for this row is "0".
+        row = [ln for ln in capsys.readouterr().out.splitlines() if h[:12] in ln][0]
+        assert " 0 " in row or row.endswith(" 0")
