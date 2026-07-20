@@ -809,6 +809,58 @@ class TestRegisterBuild:
         stderr = capsys.readouterr().err
         assert "registry" in stderr or "repo_name" in stderr
 
+    def test_build_argparse_error_redacts_credentials_missing_equals(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """iter-7 must-fix: `_parse_build_triple` echoed the raw `value`
+        in five ArgumentTypeError messages. Iter-6's outer redaction
+        only covered the SourceLocatorError path. Repro: forget the
+        `NAME=` prefix; the token appears in stderr."""
+        monkeypatch.chdir(tmp_path)
+        rc = sim2real.main([
+            "translation", "register",
+            "--build",
+            "git+https://user:GHP_LEAK@github.com/foo/bar.git#main@/tmp/cfg",
+        ])
+        assert rc == 2
+        stderr = capsys.readouterr().err
+        assert "GHP_LEAK" not in stderr
+        # And the redacted host still appears for diagnosability.
+        assert "github.com" in stderr
+
+    def test_build_argparse_error_redacts_credentials_missing_config_path(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Another _parse_build_triple branch: trailing `@` with empty
+        config-path. Regression guard for the 'has empty config-path'
+        raise site specifically."""
+        monkeypatch.chdir(tmp_path)
+        rc = sim2real.main([
+            "translation", "register",
+            "--build",
+            "foo=git+https://user:GHP_LEAK@github.com/foo/bar.git#main@",
+        ])
+        assert rc == 2
+        stderr = capsys.readouterr().err
+        assert "GHP_LEAK" not in stderr
+
+    def test_algorithm_argparse_error_redacts_credentials(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """iter-7 important (mirror): `_parse_algorithm_triple` has
+        the same shape. An operator mispaste of a git URL into
+        --algorithm (both flags accept NAME=X@CONFIG) leaks the same
+        way. Repro: git URL without `=`."""
+        monkeypatch.chdir(tmp_path)
+        rc = sim2real.main([
+            "translation", "register",
+            "--algorithm",
+            "git+https://user:GHP_LEAK@github.com/foo/bar.git#main",
+        ])
+        assert rc == 2
+        stderr = capsys.readouterr().err
+        assert "GHP_LEAK" not in stderr
+
     def test_build_cli_error_redacts_credentials_in_val_echo(
         self, tmp_path, monkeypatch, capsys
     ):

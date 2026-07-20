@@ -86,11 +86,18 @@ def _parse_algorithm_triple(value: str) -> tuple[str, str, str]:
 
     Raises ``argparse.ArgumentTypeError`` on any parse failure.
     """
+    from pipeline.lib import source_locator as _source_locator
     from pipeline.lib import translation_ref
+    # Redact once so every error-message interpolation is credential-safe.
+    # An operator mispaste of a git URL into --algorithm (both --algorithm
+    # and --build accept NAME=X@CONFIG; easy to confuse) would otherwise
+    # leak a PAT-in-URL to stderr via the outer catch. Mirrors the
+    # _parse_build_triple treatment below.
+    safe = _source_locator.redact_url(value)
     eq_idx = value.find("=")
     if eq_idx < 0:
         raise argparse.ArgumentTypeError(
-            f"--algorithm value {value!r} missing '=' "
+            f"--algorithm value {safe!r} missing '=' "
             "(expected '<name>=<image-ref>@<config-path>')"
         )
     name = value[:eq_idx]
@@ -98,25 +105,25 @@ def _parse_algorithm_triple(value: str) -> tuple[str, str, str]:
     at_idx = rhs.rfind("@")
     if at_idx < 0:
         raise argparse.ArgumentTypeError(
-            f"--algorithm value {value!r} missing '@' after '=' "
+            f"--algorithm value {safe!r} missing '@' after '=' "
             "(expected '<name>=<image-ref>@<config-path>')"
         )
     image_ref = rhs[:at_idx]
     config_path = rhs[at_idx + 1:]
     if not image_ref:
         raise argparse.ArgumentTypeError(
-            f"--algorithm value {value!r} has empty image-ref"
+            f"--algorithm value {safe!r} has empty image-ref"
         )
     if not config_path:
         raise argparse.ArgumentTypeError(
-            f"--algorithm value {value!r} has empty config-path"
+            f"--algorithm value {safe!r} has empty config-path"
         )
     # Valid image refs have at most one '@' (the digest suffix). More than
     # one '@' in the parsed image ref means the config path likely had a
     # '@' that rightmost-@ split cannot disambiguate — reject.
     if image_ref.count("@") > 1:
         raise argparse.ArgumentTypeError(
-            f"--algorithm value {value!r}: overlay path cannot contain '@' "
+            f"--algorithm value {safe!r}: overlay path cannot contain '@' "
             "(parsed image ref has multiple '@'; the rightmost-@ split rule "
             "cannot distinguish a digest '@' from a path '@')"
         )
@@ -124,7 +131,7 @@ def _parse_algorithm_triple(value: str) -> tuple[str, str, str]:
         translation_ref.validate_name(name)
     except translation_ref.ValidationError as exc:
         raise argparse.ArgumentTypeError(
-            f"--algorithm value {value!r} has invalid name: {exc}"
+            f"--algorithm value {safe!r} has invalid name: {exc}"
         ) from exc
     return name, image_ref, config_path
 
@@ -146,11 +153,18 @@ def _parse_build_triple(value: str) -> tuple[str, str, str]:
 
     Raises ``argparse.ArgumentTypeError`` on any parse failure.
     """
+    from pipeline.lib import source_locator as _source_locator
     from pipeline.lib import translation_ref
+    # Redact once so every error-message interpolation is credential-safe.
+    # A user typo (missing '=', empty config-path, etc.) on a PAT-in-URL
+    # --build spec would otherwise leak the token to stderr via the outer
+    # argparse.ArgumentTypeError catch — iter-6's outer redaction only
+    # covered the SourceLocatorError side of the parse.
+    safe = _source_locator.redact_url(value)
     eq_idx = value.find("=")
     if eq_idx < 0:
         raise argparse.ArgumentTypeError(
-            f"--build value {value!r} missing '=' "
+            f"--build value {safe!r} missing '=' "
             "(expected '<name>=<location>@<config-path>')"
         )
     name = value[:eq_idx]
@@ -158,24 +172,24 @@ def _parse_build_triple(value: str) -> tuple[str, str, str]:
     at_idx = rhs.rfind("@")
     if at_idx < 0:
         raise argparse.ArgumentTypeError(
-            f"--build value {value!r} missing '@' after '=' "
+            f"--build value {safe!r} missing '@' after '=' "
             "(expected '<name>=<location>@<config-path>')"
         )
     location = rhs[:at_idx]
     config_path = rhs[at_idx + 1:]
     if not location:
         raise argparse.ArgumentTypeError(
-            f"--build value {value!r} has empty location"
+            f"--build value {safe!r} has empty location"
         )
     if not config_path:
         raise argparse.ArgumentTypeError(
-            f"--build value {value!r} has empty config-path"
+            f"--build value {safe!r} has empty config-path"
         )
     try:
         translation_ref.validate_name(name)
     except translation_ref.ValidationError as exc:
         raise argparse.ArgumentTypeError(
-            f"--build value {value!r} has invalid name: {exc}"
+            f"--build value {safe!r} has invalid name: {exc}"
         ) from exc
     return name, location, config_path
 
@@ -977,7 +991,7 @@ def _cmd_translation_register(args) -> int:
                 # parse_location, but this outer echo would otherwise
                 # print the raw CLI argument (which may embed a PAT-in-
                 # URL) to stderr AND shell history / CI logs.
-                safe_val = _source_locator._redact_url(val)
+                safe_val = _source_locator.redact_url(val)
                 print(
                     f"error: --build value {safe_val!r}: {exc}",
                     file=sys.stderr,

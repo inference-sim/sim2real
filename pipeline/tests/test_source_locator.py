@@ -479,11 +479,11 @@ def test_redact_url_ipv6_host_preserves_brackets():
     IPv6 brackets, producing malformed URLs. The regex-based helper
     leaves the netloc structure untouched — only the userinfo goes."""
     assert (
-        sl._redact_url("https://u:t@[::1]:8080/x.git")
+        sl.redact_url("https://u:t@[::1]:8080/x.git")
         == "https://[::1]:8080/x.git"
     )
     assert (
-        sl._redact_url("https://u:t@[2001:db8::1]/repo.git")
+        sl.redact_url("https://u:t@[2001:db8::1]/repo.git")
         == "https://[2001:db8::1]/repo.git"
     )
 
@@ -495,7 +495,7 @@ def test_redact_url_non_numeric_port_does_not_raise():
     # Regex doesn't parse — passes through cleanly, stripping only
     # the userinfo. The malformed port stays; that's git's problem to
     # complain about later, not ours.
-    result = sl._redact_url("https://s3cret_user:s3cret_pw@host:abc/path")
+    result = sl.redact_url("https://s3cret_user:s3cret_pw@host:abc/path")
     assert "s3cret_user" not in result
     assert "s3cret_pw" not in result
     assert result == "https://host:abc/path"
@@ -507,19 +507,42 @@ def test_redact_url_malformed_ipv6_still_redacts():
     input. The regex-based helper always redacts if it matches."""
     # Unclosed IPv6 bracket — urlsplit would have raised. Regex just
     # matches the //user:pass@ prefix and strips it.
-    result = sl._redact_url("https://user:s3cret@[bad")
+    result = sl.redact_url("https://user:s3cret@[bad")
     assert "s3cret" not in result
     assert result == "https://[bad"
 
 
-def test_redact_url_empty_password_untouched():
-    """`https://:@host` has empty user AND empty password. No secret
-    to redact; the regex doesn't match (requires at least one non-@
-    char after the colon-user boundary — the pattern is
-    `://[^/@\\s:]+:[^/@\\s]*@` which needs 1+ chars before the colon).
-    So this string passes through unchanged. Not a leak either way."""
-    result = sl._redact_url("https://:@host/x")
-    assert result == "https://:@host/x"
+def test_redact_url_empty_both_normalizes_shape():
+    """iter-7: after loosening the regex to close the empty-user leak
+    (`https://:token@host`), the previously-untouched `https://:@host`
+    (empty both) now matches and normalizes to `https://host`. Not a
+    leak either way — there's no secret in either form — but the shape
+    gets cleaned up consistently."""
+    result = sl.redact_url("https://:@host/x")
+    assert result == "https://host/x"
+
+
+def test_redact_url_empty_user_non_empty_password_still_redacts():
+    """iter-7 must-fix: `https://:${TOKEN}@host` is the documented
+    GitHub/GitLab CI shortcut for PAT injection (empty user, PAT as
+    password, .netrc-style auth). iter-6's regex required 1+ user chars
+    and missed this — leaking the token to disk in source_git_url."""
+    result = sl.redact_url("https://:ghp_TOKEN@github.com/foo/bar.git")
+    assert "ghp_TOKEN" not in result
+    assert result == "https://github.com/foo/bar.git"
+
+
+def test_redact_url_x_access_token_form_redacts():
+    """The GitHub Actions `x-access-token` idiom (non-empty user, PAT
+    as password). This form always redacted correctly under iter-6 —
+    included as a regression guard for the wide-user form now that
+    iter-7 loosened the user quantifier."""
+    result = sl.redact_url(
+        "https://x-access-token:GHP_ABC@github.com/foo/bar.git"
+    )
+    assert "GHP_ABC" not in result
+    assert "x-access-token" not in result
+    assert result == "https://github.com/foo/bar.git"
 
 
 def test_redact_url_strips_password_but_keeps_bare_user():
@@ -529,35 +552,35 @@ def test_redact_url_strips_password_but_keeps_bare_user():
     secret."""
     # https with user:password → stripped
     assert (
-        sl._redact_url("https://user:token@github.com/foo/bar.git")
+        sl.redact_url("https://user:token@github.com/foo/bar.git")
         == "https://github.com/foo/bar.git"
     )
     # https with only user (no password) → kept — no secret to redact
     assert (
-        sl._redact_url("https://user@github.com/foo/bar.git")
+        sl.redact_url("https://user@github.com/foo/bar.git")
         == "https://user@github.com/foo/bar.git"
     )
     # ssh with bare 'git' user (the ssh access convention) → kept
     assert (
-        sl._redact_url("ssh://git@github.com/foo/bar.git")
+        sl.redact_url("ssh://git@github.com/foo/bar.git")
         == "ssh://git@github.com/foo/bar.git"
     )
     # No credentials at all → unchanged
     assert (
-        sl._redact_url("https://github.com/foo/bar.git")
+        sl.redact_url("https://github.com/foo/bar.git")
         == "https://github.com/foo/bar.git"
     )
     # Non-URL / path → unchanged (helper is idempotent for these)
-    assert sl._redact_url("/local/path") == "/local/path"
-    assert sl._redact_url("") == ""
+    assert sl.redact_url("/local/path") == "/local/path"
+    assert sl.redact_url("") == ""
     # Port preserved through the redaction
     assert (
-        sl._redact_url("https://user:secret@host.example.com:8080/path")
+        sl.redact_url("https://user:secret@host.example.com:8080/path")
         == "https://host.example.com:8080/path"
     )
     # Path, query, fragment preserved
     assert (
-        sl._redact_url("https://u:p@host/a/b?q=1#frag")
+        sl.redact_url("https://u:p@host/a/b?q=1#frag")
         == "https://host/a/b?q=1#frag"
     )
 
