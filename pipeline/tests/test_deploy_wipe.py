@@ -430,6 +430,237 @@ def test_wipe_does_not_save_progress(tmp_path, monkeypatch):
     assert save_called == [], "wipe must not call store.save()"
 
 
+# ---------------------------------------------------------------------------
+# --iteration scoping (issue #525): wipe must delete only i<N>/ subdirs when
+# iteration scope is active. Pair keys are per-iteration under step-5, so on-
+# disk results live at results/<pkg>/<wl>/i<N>/. Legacy dash-shape keys retain
+# the single-replica shape (results/<pkg>/<wl>/) and are handled by fallback.
+# ---------------------------------------------------------------------------
+
+_PROGRESS_ITER = {
+    "wl-smoke|baseline|i1":   {"workload": "smoke",  "package": "baseline",  "status": "done",    "namespace": None, "retries": 0, "pending_stalls": 0, "pending_since": None},
+    "wl-smoke|baseline|i2":   {"workload": "smoke",  "package": "baseline",  "status": "done",    "namespace": None, "retries": 0, "pending_stalls": 0, "pending_since": None},
+    "wl-smoke|baseline|i3":   {"workload": "smoke",  "package": "baseline",  "status": "done",    "namespace": None, "retries": 0, "pending_stalls": 0, "pending_since": None},
+    "wl-load|baseline|i1":    {"workload": "load",   "package": "baseline",  "status": "done",    "namespace": None, "retries": 0, "pending_stalls": 0, "pending_since": None},
+    "wl-load|baseline|i2":    {"workload": "load",   "package": "baseline",  "status": "done",    "namespace": None, "retries": 0, "pending_stalls": 0, "pending_since": None},
+    "wl-load|baseline|i3":    {"workload": "load",   "package": "baseline",  "status": "done",    "namespace": None, "retries": 0, "pending_stalls": 0, "pending_since": None},
+}
+
+
+def _setup_iN_results(run_dir: Path, iterations=(1, 2, 3), workloads=("smoke", "load"),
+                      pkgs=("baseline",)) -> None:
+    """Create a step-5 per-iteration results tree under run_dir."""
+    for pkg in pkgs:
+        for wl in workloads:
+            for n in iterations:
+                d = run_dir / "results" / pkg / wl / f"i{n}"
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "trace_header.yaml").write_text("header")
+                (d / "trace_data.csv").write_text("data")
+
+
+def test_wipe_scoped_by_iteration_deletes_only_iN(tmp_path, monkeypatch):
+    """--iteration 2 deletes only i2/ subdirs; sibling iterations survive."""
+    import pipeline.deploy as mod
+
+    run_dir = tmp_path / "run1"
+    run_dir.mkdir()
+    _mock_cm(monkeypatch, _PROGRESS_ITER)
+    _setup_iN_results(run_dir)
+
+    class _Args:
+        only = None; workload = None; package = None; iteration = "2"; dry_run = False; yes = True
+
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
+
+    for wl in ("smoke", "load"):
+        assert not (run_dir / "results" / "baseline" / wl / "i2").exists(), \
+            f"i2 for {wl} should be wiped"
+        assert (run_dir / "results" / "baseline" / wl / "i1").exists(), \
+            f"i1 for {wl} should survive"
+        assert (run_dir / "results" / "baseline" / wl / "i3").exists(), \
+            f"i3 for {wl} should survive"
+
+
+def test_wipe_iteration_list_spec(tmp_path, monkeypatch):
+    """--iteration '1,3' deletes i1 and i3; i2 survives."""
+    import pipeline.deploy as mod
+
+    run_dir = tmp_path / "run1"
+    run_dir.mkdir()
+    _mock_cm(monkeypatch, _PROGRESS_ITER)
+    _setup_iN_results(run_dir)
+
+    class _Args:
+        only = None; workload = None; package = None; iteration = "1,3"; dry_run = False; yes = True
+
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
+
+    assert not (run_dir / "results" / "baseline" / "smoke" / "i1").exists()
+    assert (run_dir / "results" / "baseline" / "smoke" / "i2").exists()
+    assert not (run_dir / "results" / "baseline" / "smoke" / "i3").exists()
+
+
+def test_wipe_iteration_range_spec(tmp_path, monkeypatch):
+    """--iteration '1-2' deletes i1 and i2; i3 survives."""
+    import pipeline.deploy as mod
+
+    run_dir = tmp_path / "run1"
+    run_dir.mkdir()
+    _mock_cm(monkeypatch, _PROGRESS_ITER)
+    _setup_iN_results(run_dir)
+
+    class _Args:
+        only = None; workload = None; package = None; iteration = "1-2"; dry_run = False; yes = True
+
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
+
+    assert not (run_dir / "results" / "baseline" / "smoke" / "i1").exists()
+    assert not (run_dir / "results" / "baseline" / "smoke" / "i2").exists()
+    assert (run_dir / "results" / "baseline" / "smoke" / "i3").exists()
+
+
+def test_wipe_iteration_dry_run_shows_iN_path(tmp_path, monkeypatch, capsys):
+    """Dry-run output includes the per-iteration path, not the workload path."""
+    import pipeline.deploy as mod
+
+    run_dir = tmp_path / "run1"
+    run_dir.mkdir()
+    _mock_cm(monkeypatch, _PROGRESS_ITER)
+    _setup_iN_results(run_dir)
+
+    class _Args:
+        only = None; workload = None; package = None; iteration = "2"; dry_run = True; yes = False
+
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
+
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "results/baseline/smoke/i2/" in combined
+    # Must NOT list a workload-level path for a scoped iteration.
+    assert "results/baseline/smoke/ " not in combined  # trailing space guard
+    assert "would delete results/baseline/smoke/\n" not in combined
+    # Nothing deleted
+    assert (run_dir / "results" / "baseline" / "smoke" / "i2").exists()
+
+
+def test_wipe_no_iteration_scoped_wipes_all_iN_subdirs(tmp_path, monkeypatch):
+    """Unscoped wipe with the iN layout deletes every iN subdir per pair key.
+
+    Each pair key (iteration) resolves to its own iN dir, so all iterations
+    of a workload are removed. The empty workload dir is then reclaimed by
+    the parent-cleanup pass.
+    """
+    import pipeline.deploy as mod
+
+    run_dir = tmp_path / "run1"
+    run_dir.mkdir()
+    _mock_cm(monkeypatch, _PROGRESS_ITER)
+    _setup_iN_results(run_dir)
+
+    class _Args:
+        only = None; workload = None; package = None; iteration = None; dry_run = False; yes = True
+
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
+
+    assert not (run_dir / "results" / "baseline" / "smoke").exists()
+    assert not (run_dir / "results" / "baseline" / "load").exists()
+    assert not (run_dir / "results" / "baseline").exists()
+
+
+def test_wipe_iteration_removes_empty_workload_dir(tmp_path, monkeypatch):
+    """After wiping the last iN under a workload, the workload dir is reclaimed."""
+    import pipeline.deploy as mod
+
+    run_dir = tmp_path / "run1"
+    run_dir.mkdir()
+    progress = {
+        "wl-only|baseline|i1": {"workload": "only", "package": "baseline", "status": "done",
+                                "namespace": None, "retries": 0, "pending_stalls": 0, "pending_since": None},
+    }
+    _mock_cm(monkeypatch, progress)
+    _setup_iN_results(run_dir, iterations=(1,), workloads=("only",), pkgs=("baseline",))
+
+    class _Args:
+        only = None; workload = None; package = None; iteration = None; dry_run = False; yes = True
+
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
+
+    # Both the iN dir and its parents removed (workload dir empty, then pkg dir).
+    assert not (run_dir / "results" / "baseline").exists()
+
+
+def test_wipe_iteration_legacy_single_replica(tmp_path, monkeypatch):
+    """Legacy dash-shape keys with --iteration 1 wipe the workload dir (no iN).
+
+    Legacy runs pre-date the step-5 iN layout — trace files live directly
+    at results/<pkg>/<wl>/. Legacy keys parse to iteration=1 and the fix
+    falls back to the workload dir when no iN subdirs exist.
+    """
+    import pipeline.deploy as mod
+
+    run_dir = tmp_path / "run1"
+    run_dir.mkdir()
+    # Dash-shape (legacy) pair key
+    progress = {
+        "wl-smoke-baseline": {"workload": "wl-smoke", "package": "baseline", "status": "done",
+                              "namespace": None, "retries": 0, "pending_stalls": 0, "pending_since": None},
+    }
+    _mock_cm(monkeypatch, progress)
+    d = run_dir / "results" / "baseline" / "wl-smoke"
+    d.mkdir(parents=True)
+    (d / "trace.csv").write_text("data")
+
+    class _Args:
+        only = None; workload = None; package = None; iteration = "1"; dry_run = False; yes = True
+
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
+
+    assert not (run_dir / "results" / "baseline" / "wl-smoke").exists()
+
+
+def test_wipe_iteration_no_results_on_disk(tmp_path, monkeypatch, capsys):
+    """--iteration N with no matching iN subdirs reports skip and points at iN path."""
+    import pipeline.deploy as mod
+
+    run_dir = tmp_path / "run1"
+    run_dir.mkdir()
+    _mock_cm(monkeypatch, _PROGRESS_ITER)
+    # Set up only i1/i3; --iteration 2 should hit no results on disk.
+    _setup_iN_results(run_dir, iterations=(1, 3))
+
+    class _Args:
+        only = None; workload = None; package = None; iteration = "2"; dry_run = False; yes = True
+
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
+
+    captured = capsys.readouterr()
+    assert "no results on disk" in (captured.out + captured.err).lower()
+    # i1/i3 must survive.
+    assert (run_dir / "results" / "baseline" / "smoke" / "i1").exists()
+    assert (run_dir / "results" / "baseline" / "smoke" / "i3").exists()
+
+
+def test_wipe_iteration_leaves_siblings_and_reclaims_only_iN(tmp_path, monkeypatch):
+    """When --iteration N wipes one iN, sibling iN subdirs and workload dir survive."""
+    import pipeline.deploy as mod
+
+    run_dir = tmp_path / "run1"
+    run_dir.mkdir()
+    _mock_cm(monkeypatch, _PROGRESS_ITER)
+    _setup_iN_results(run_dir)
+
+    class _Args:
+        only = None; workload = None; package = None; iteration = "2"; dry_run = False; yes = True
+
+    mod._cmd_wipe(_Args(), run_dir, cluster_config={"namespaces": ["ns-0"]})
+
+    # Workload dirs retained because i1/i3 still occupy them.
+    assert (run_dir / "results" / "baseline" / "smoke").exists()
+    assert (run_dir / "results" / "baseline" / "load").exists()
+    assert (run_dir / "results" / "baseline").exists()
+
+
 def test_main_dispatches_wipe(tmp_path, monkeypatch):
     """main() routes 'wipe' with the per-run cluster_config (#449).
 

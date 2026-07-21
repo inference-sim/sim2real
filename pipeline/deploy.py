@@ -17,6 +17,7 @@ import fnmatch
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -3347,6 +3348,21 @@ def _cmd_wipe(args, run_dir: Path,
     total_pairs = sum(1 for k in progress if _is_pair_key(k))
     results_dir = run_dir / "results"
 
+    # A pair key encodes its iteration; the on-disk shape under step-5 is
+    # results/<pkg>/<wl>/i<N>/. When the per-iteration dir is present, wipe
+    # scoped to that key must delete only i<N>/ — not the whole workload
+    # tree, which would silently destroy sibling iterations (issue #525).
+    # Legacy single-replica runs whose files live directly under
+    # results/<pkg>/<wl>/ have no i<N>/ subdirs; fall back to the workload
+    # dir for those.
+    _ITER_DIR_RE = re.compile(r"i[1-9][0-9]*")
+
+    def _has_iN_subdirs(wl_dir: Path) -> bool:
+        if not wl_dir.is_dir():
+            return False
+        return any(p.is_dir() and _ITER_DIR_RE.fullmatch(p.name)
+                   for p in wl_dir.iterdir())
+
     targets = []
     for key in sorted(_scope):
         entry = progress[key]
@@ -3355,21 +3371,37 @@ def _cmd_wipe(args, run_dir: Path,
         if not pkg or not wl:
             warn(f"{key}: missing package/workload fields — skipping")
             continue
-        target_dir = results_dir / pkg / wl
-        targets.append((key, pkg, wl, target_dir))
+        n = _key_iteration(key)
+        wl_dir = results_dir / pkg / wl
+        iN_dir = wl_dir / f"i{n}"
+        if iN_dir.exists():
+            target_dir = iN_dir
+            display = f"results/{pkg}/{wl}/i{n}/"
+        elif wl_dir.exists() and not _has_iN_subdirs(wl_dir):
+            # Legacy single-replica layout — the workload dir holds the
+            # trace files directly. Wipe the whole workload dir.
+            target_dir = wl_dir
+            display = f"results/{pkg}/{wl}/"
+        else:
+            # Step-5 layout with no matching i<N>/ (or nothing on disk).
+            # Point at iN_dir so the "no results on disk" branch below
+            # reports the specific path that was expected.
+            target_dir = iN_dir
+            display = f"results/{pkg}/{wl}/i{n}/"
+        targets.append((key, pkg, wl, target_dir, display))
 
     info(f"Scope: {len(_scope)}/{total_pairs} pairs"
          + (" [DRY-RUN]" if args.dry_run else ""))
 
     if args.dry_run:
-        for key, pkg, wl, target_dir in targets:
+        for key, pkg, wl, target_dir, display in targets:
             exists = target_dir.exists()
-            info(f"[DRY-RUN] {key}: would delete results/{pkg}/{wl}/"
+            info(f"[DRY-RUN] {key}: would delete {display}"
                  + (" (exists)" if exists else " (not on disk)"))
         return
 
     if not args.yes:
-        dirs_on_disk = sum(1 for _, _, _, p in targets if p.exists())
+        dirs_on_disk = sum(1 for _, _, _, p, _ in targets if p.exists())
         prompt = f"Wipe {len(targets)} pair(s) ({dirs_on_disk} with results on disk)? [y/N] "
         try:
             answer = input(prompt).strip().lower()
@@ -3382,15 +3414,22 @@ def _cmd_wipe(args, run_dir: Path,
 
     wiped = 0
     errors = 0
-    for key, pkg, wl, target_dir in targets:
+    for key, pkg, wl, target_dir, display in targets:
         if target_dir.exists():
             try:
                 shutil.rmtree(target_dir)
             except OSError as e:
-                warn(f"{key}: failed to delete results/{pkg}/{wl}/: {e}")
+                warn(f"{key}: failed to delete {display}: {e}")
                 errors += 1
                 continue
-            ok(f"Deleted: results/{pkg}/{wl}/")
+            ok(f"Deleted: {display}")
+            # Best-effort cleanup of empty parents (workload dir, then
+            # package dir). rmdir is a no-op if siblings remain.
+            wl_dir = results_dir / pkg / wl
+            try:
+                wl_dir.rmdir()
+            except OSError:
+                pass
             pkg_dir = results_dir / pkg
             try:
                 pkg_dir.rmdir()
