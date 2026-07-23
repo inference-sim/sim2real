@@ -27,7 +27,7 @@ import yaml
 
 from pipeline.lib import cluster_ops, layout, slicer, translation_ref as _translation_ref
 from pipeline.lib.manifest import ManifestError, load_manifest
-from pipeline.lib.tekton import make_pipelinerun_scenario
+from pipeline.lib.tekton import is_trace_workload, make_pipelinerun_scenario
 from pipeline.lib.values import deep_merge
 
 
@@ -459,6 +459,48 @@ def generate_pipelineruns(
                 )
 
 
+def _validate_workload(data: dict, wl_path: Path) -> None:
+    """Validate a loaded workload's kind and (for trace workloads) shape.
+
+    A workload is exactly one kind: TRACE (non-empty ``trace`` mapping) or
+    GENERATIVE (``clients:``/``version:`` WorkloadSpec). Declaring both
+    ``trace:`` and ``clients:`` is an error. When a workload is a trace
+    workload, ``trace.source`` (non-empty str), ``trace.pool.concurrent_sessions``
+    (int >= 1) and ``trace.pool.total_sessions`` (int >= 0) are required.
+    Raises :class:`AssembleError` on any violation.
+    """
+    trace_mode = is_trace_workload(data)
+    if trace_mode and "clients" in data:
+        raise AssembleError(
+            f"workload {wl_path} declares both 'trace' and 'clients'; a "
+            f"workload must be exactly one kind (trace or generative)"
+        )
+    if not trace_mode:
+        return
+    trace = data["trace"]
+    source = trace.get("source")
+    if not isinstance(source, str) or not source:
+        raise AssembleError(
+            f"workload {wl_path}: trace.source must be a non-empty string"
+        )
+    pool = trace.get("pool")
+    if not isinstance(pool, dict):
+        raise AssembleError(f"workload {wl_path}: trace.pool is required")
+    # bool is a subclass of int — reject it explicitly so `true`/`false` in
+    # YAML don't slip through the int checks below.
+    cs = pool.get("concurrent_sessions")
+    if isinstance(cs, bool) or not isinstance(cs, int) or cs < 1:
+        raise AssembleError(
+            f"workload {wl_path}: trace.pool.concurrent_sessions must be an "
+            f"int >= 1"
+        )
+    ts = pool.get("total_sessions")
+    if isinstance(ts, bool) or not isinstance(ts, int) or ts < 0:
+        raise AssembleError(
+            f"workload {wl_path}: trace.pool.total_sessions must be an int >= 0"
+        )
+
+
 def _load_workload(exp_root: Path, wl_path_str: str) -> dict:
     """Load a workload YAML relative to the experiment root."""
     wl_path = exp_root / wl_path_str
@@ -472,6 +514,7 @@ def _load_workload(exp_root: Path, wl_path_str: str) -> dict:
         raise AssembleError(f"workload {wl_path} is not a YAML mapping")
     if "name" not in data and "workload_name" not in data:
         data["workload_name"] = Path(wl_path_str).stem
+    _validate_workload(data, wl_path)
     return data
 
 

@@ -1,4 +1,7 @@
 """Tekton PipelineRun generation for sim2real."""
+import hashlib
+import json
+
 import yaml
 
 _SPEC_BASE_DIR = "/workspace/source/llm-d-benchmark"
@@ -81,6 +84,33 @@ _OBSERVE_PARAM_ORDER = (
 )
 
 
+def is_trace_workload(workload: dict) -> bool:
+    """Return True iff ``workload`` declares a non-empty ``trace`` mapping.
+
+    A trace workload sources its request stream from a recorded trace
+    (prepare-trace + a session pool) rather than a generative WorkloadSpec.
+    Any workload without a non-empty ``trace`` block is generative and flows
+    through the existing ``workloadSpec`` path unchanged.
+    """
+    trace = workload.get("trace")
+    return isinstance(trace, dict) and bool(trace)
+
+
+def trace_path(wl_name: str, trace: dict) -> str:
+    """Return the deterministic relative path ``traces/<safe_wl_name>-<sha12>``
+    for a trace descriptor.
+
+    ``<sha12>`` is the first 12 hex chars of sha256 over a CANONICAL JSON
+    serialization of ``trace`` (``sort_keys=True``, no whitespace) so the path
+    is STABLE across runs for identical descriptors and CHANGES when the
+    descriptor changes. ``<safe_wl_name>`` is the workload name with ``_`` → ``-``.
+    """
+    canonical = json.dumps(trace, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    sha12 = hashlib.sha256(canonical).hexdigest()[:12]
+    safe = wl_name.replace("_", "-")
+    return f"traces/{safe}-{sha12}"
+
+
 def make_pipelinerun_scenario(
     phase: str,
     workload: dict,
@@ -107,8 +137,22 @@ def make_pipelinerun_scenario(
     pr_name = f"{safe_phase}-{safe_name}-{run_name}-i{iteration}"
     validate_pipelinerun_name(pr_name)
 
-    wl_spec = {k: v for k, v in workload.items() if k != "workload_name"}
-    wl_spec_str = yaml.dump(wl_spec, default_flow_style=True).strip()
+    # A trace workload emits a locked set of trace params (traceSpec/tracePath/
+    # session counts) and an EMPTY workloadSpec — observe must NOT source
+    # requests from a generative WorkloadSpec in trace mode. Generative
+    # workloads keep the historical workloadSpec path byte-for-byte unchanged.
+    trace_mode = is_trace_workload(workload)
+    if trace_mode:
+        trace = workload["trace"]
+        wl_spec_str = ""
+        trace_spec_str = yaml.dump(trace, default_flow_style=True).strip()
+        t_path = trace_path(wl_name, trace)
+        pool = trace.get("pool", {})
+        concurrent_sessions = str(pool.get("concurrent_sessions"))
+        total_sessions = str(pool.get("total_sessions"))
+    else:
+        wl_spec = {k: v for k, v in workload.items() if k != "workload_name"}
+        wl_spec_str = yaml.dump(wl_spec, default_flow_style=True).strip()
 
     params: list[dict] = [
         {"name": "experimentId",      "value": run_name},
@@ -126,6 +170,16 @@ def make_pipelinerun_scenario(
         {"name": "model",            "value": model},
         {"name": "replica",          "value": str(iteration)},
     ]
+    if trace_mode:
+        # Trace-only params, adjacent to workloadSpec. Generative workloads
+        # deliberately do NOT emit these so their param list stays identical
+        # to prior releases.
+        params += [
+            {"name": "traceSpec",          "value": trace_spec_str},
+            {"name": "tracePath",          "value": t_path},
+            {"name": "concurrentSessions", "value": concurrent_sessions},
+            {"name": "totalSessions",      "value": total_sessions},
+        ]
     if observe:
         # Emit only specified keys; omitted ones fall through to Pipeline-level
         # defaults declared in pipeline/pipeline.yaml. Tekton params are strings.

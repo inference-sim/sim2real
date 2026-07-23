@@ -1,6 +1,12 @@
 """Tests for Tekton PipelineRun generation."""
 
-from pipeline.lib.tekton import make_pipelinerun_scenario
+import yaml
+
+from pipeline.lib.tekton import (
+    is_trace_workload,
+    make_pipelinerun_scenario,
+    trace_path,
+)
 
 
 # ── Tests for make_pipelinerun_scenario ──────────────────────────────────────
@@ -359,3 +365,112 @@ def test_make_pipelinerun_scenario_emits_replica_param_explicit():
     )
     params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
     assert params["replica"] == "5"
+
+
+# ── Tests for trace workloads ───────────────────────────────────────────────
+
+_TRACE_WORKLOAD = {
+    "name": "exgentic_agentic_trace",
+    "trace": {
+        "source": "hf:Exgentic/agent-llm-traces",
+        "shards": 39,
+        "filters": {"min_rounds": 2, "skip_branching": True},
+        "convert": {"context_growth": "accumulate", "max_think_time": "15s"},
+        "pool": {"concurrent_sessions": 128, "total_sessions": 192},
+    },
+}
+
+
+def test_is_trace_workload_detects_trace_block():
+    assert is_trace_workload(_TRACE_WORKLOAD) is True
+
+
+def test_is_trace_workload_false_for_generative():
+    assert is_trace_workload({"name": "wl", "clients": [], "version": 1}) is False
+
+
+def test_is_trace_workload_false_for_empty_trace():
+    """An empty (or absent) trace mapping is not a trace workload."""
+    assert is_trace_workload({"name": "wl", "trace": {}}) is False
+    assert is_trace_workload({"name": "wl"}) is False
+
+
+def test_trace_path_shape_and_prefix():
+    """tracePath is traces/<safe_wl_name>-<12hex>."""
+    p = trace_path("exgentic_agentic_trace", _TRACE_WORKLOAD["trace"])
+    assert p.startswith("traces/exgentic-agentic-trace-")
+    sha = p.rsplit("-", 1)[-1]
+    assert len(sha) == 12
+    assert all(c in "0123456789abcdef" for c in sha)
+
+
+def test_trace_path_deterministic_for_same_descriptor():
+    a = trace_path("wl", _TRACE_WORKLOAD["trace"])
+    b = trace_path("wl", dict(_TRACE_WORKLOAD["trace"]))
+    assert a == b
+
+
+def test_trace_path_changes_when_descriptor_changes():
+    changed = dict(_TRACE_WORKLOAD["trace"])
+    changed["shards"] = 40
+    assert trace_path("wl", changed) != trace_path("wl", _TRACE_WORKLOAD["trace"])
+
+
+def test_trace_path_independent_of_key_order():
+    """Canonical serialization means key ordering does not affect the hash."""
+    reordered = {
+        "pool": {"total_sessions": 192, "concurrent_sessions": 128},
+        "shards": 39,
+        "source": "hf:Exgentic/agent-llm-traces",
+        "filters": {"skip_branching": True, "min_rounds": 2},
+        "convert": {"max_think_time": "15s", "context_growth": "accumulate"},
+    }
+    assert trace_path("wl", reordered) == trace_path("wl", _TRACE_WORKLOAD["trace"])
+
+
+def test_trace_workload_emits_locked_params():
+    pr = make_pipelinerun_scenario(
+        phase="baseline", workload=_TRACE_WORKLOAD, run_name="r",
+        namespace="ns", pipeline_name="sim2real",
+        scenario_content="scenario: []",
+    )
+    params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
+    # workloadSpec is empty in trace mode — observe must not use --workload-spec.
+    assert params["workloadSpec"] == ""
+    # traceSpec is the trace block as compact single-line YAML.
+    assert params["traceSpec"] == yaml.dump(
+        _TRACE_WORKLOAD["trace"], default_flow_style=True
+    ).strip()
+    assert params["tracePath"] == trace_path(
+        "exgentic_agentic_trace", _TRACE_WORKLOAD["trace"]
+    )
+    assert params["concurrentSessions"] == "128"
+    assert params["totalSessions"] == "192"
+
+
+def test_trace_workload_path_is_deterministic_across_calls():
+    pr1 = make_pipelinerun_scenario(
+        phase="baseline", workload=_TRACE_WORKLOAD, run_name="r",
+        namespace="ns", pipeline_name="sim2real", scenario_content="{}",
+    )
+    pr2 = make_pipelinerun_scenario(
+        phase="baseline", workload=_TRACE_WORKLOAD, run_name="r",
+        namespace="ns", pipeline_name="sim2real", scenario_content="{}",
+    )
+    p1 = {p["name"]: p["value"] for p in pr1["spec"]["params"]}["tracePath"]
+    p2 = {p["name"]: p["value"] for p in pr2["spec"]["params"]}["tracePath"]
+    assert p1 == p2
+
+
+def test_generative_workload_unchanged_param_set():
+    """Generative workloads emit a non-empty workloadSpec and NO trace params."""
+    pr = make_pipelinerun_scenario(
+        phase="baseline", workload={"name": "wl-a", "num_requests": 10},
+        run_name="r", namespace="ns", pipeline_name="sim2real",
+        scenario_content="{}",
+    )
+    params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
+    assert params["workloadSpec"] != ""
+    names = _names(pr)
+    for k in ("traceSpec", "tracePath", "concurrentSessions", "totalSessions"):
+        assert k not in names
