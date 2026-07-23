@@ -164,7 +164,7 @@ spec:
           value: "$(params.runName)/$(params.phase)/$(params.workloadName)/i$(params.replica)"
 
     - name: stream-epp-logs
-      runAfter: ["llmdbenchmark-standup", "prepare-results-dir"]
+      runAfter: ["llmdbenchmark-standup", "prepare-results-dir", "prepare-trace"]
       taskRef:
         name: stream-epp-logs
       workspaces:
@@ -177,7 +177,7 @@ spec:
           value: "$(params.runName)/$(params.phase)/$(params.workloadName)/i$(params.replica)"
 
     - name: stream-gpu-stats
-      runAfter: ["llmdbenchmark-standup", "prepare-results-dir"]
+      runAfter: ["llmdbenchmark-standup", "prepare-results-dir", "prepare-trace"]
       taskRef:
         name: stream-gpu-stats
       workspaces:
@@ -190,7 +190,7 @@ spec:
           value: "$(params.runName)/$(params.phase)/$(params.workloadName)/i$(params.replica)"
 
     - name: stream-metrics
-      runAfter: ["llmdbenchmark-standup", "prepare-results-dir"]
+      runAfter: ["llmdbenchmark-standup", "prepare-results-dir", "prepare-trace"]
       taskRef:
         name: stream-metrics
       workspaces:
