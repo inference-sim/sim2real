@@ -150,6 +150,17 @@ def make_pipelinerun_scenario(
         pool = trace.get("pool", {})
         concurrent_sessions = str(pool.get("concurrent_sessions"))
         total_sessions = str(pool.get("total_sessions"))
+        # Scalar projections of the trace descriptor. The prepare-trace task
+        # steps consume these directly so no in-container YAML parsing of the
+        # compact traceSpec is needed (line-based sed on single-line flow YAML
+        # was fragile and could extract an empty source → 404 on download).
+        trace_source = trace["source"]
+        trace_shards = str(trace.get("shards", 39))
+        trace_min_rounds = str((trace.get("filters") or {}).get("min_rounds", 2))
+        trace_split = str(trace.get("split", "test"))
+        trace_context_growth = str(
+            (trace.get("convert") or {}).get("context_growth", "accumulate")
+        )
     else:
         wl_spec = {k: v for k, v in workload.items() if k != "workload_name"}
         wl_spec_str = yaml.dump(wl_spec, default_flow_style=True).strip()
@@ -179,6 +190,13 @@ def make_pipelinerun_scenario(
             {"name": "tracePath",          "value": t_path},
             {"name": "concurrentSessions", "value": concurrent_sessions},
             {"name": "totalSessions",      "value": total_sessions},
+            # Scalar fields the prepare-trace steps read directly (no in-pod
+            # YAML parsing of traceSpec). Emitted only for trace workloads.
+            {"name": "traceSource",        "value": trace_source},
+            {"name": "traceShards",        "value": trace_shards},
+            {"name": "traceMinRounds",     "value": trace_min_rounds},
+            {"name": "traceSplit",         "value": trace_split},
+            {"name": "traceContextGrowth", "value": trace_context_growth},
         ]
     if observe:
         # Emit only specified keys; omitted ones fall through to Pipeline-level

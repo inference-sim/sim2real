@@ -63,6 +63,21 @@ spec:
     - name: totalSessions
       type: string
       default: ""
+    - name: traceSource
+      type: string
+      default: ""
+    - name: traceShards
+      type: string
+      default: ""
+    - name: traceMinRounds
+      type: string
+      default: ""
+    - name: traceSplit
+      type: string
+      default: ""
+    - name: traceContextGrowth
+      type: string
+      default: ""
   workspaces:
     - name: source
     - name: data-storage
@@ -106,6 +121,16 @@ spec:
           value: "$(params.traceSpec)"
         - name: tracePath
           value: "$(params.tracePath)"
+        - name: traceSource
+          value: "$(params.traceSource)"
+        - name: traceShards
+          value: "$(params.traceShards)"
+        - name: traceMinRounds
+          value: "$(params.traceMinRounds)"
+        - name: traceSplit
+          value: "$(params.traceSplit)"
+        - name: traceContextGrowth
+          value: "$(params.traceContextGrowth)"
 
     - name: llmdbenchmark-standup
       runAfter: ["install-llmdbenchmark"]

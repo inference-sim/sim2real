@@ -446,6 +446,36 @@ def test_trace_workload_emits_locked_params():
     )
     assert params["concurrentSessions"] == "128"
     assert params["totalSessions"] == "192"
+    # Scalar projections of the trace descriptor — the prepare-trace steps
+    # consume these directly (no in-pod YAML parsing of traceSpec).
+    assert params["traceSource"] == "hf:Exgentic/agent-llm-traces"
+    assert params["traceShards"] == "39"
+    assert params["traceMinRounds"] == "2"
+    assert params["traceSplit"] == "test"
+    assert params["traceContextGrowth"] == "accumulate"
+
+
+def test_trace_workload_scalar_params_use_defaults_when_absent():
+    """When the descriptor omits shards/filters/split/convert, the scalar
+    params fall back to the documented defaults (39/2/test/accumulate)."""
+    wl = {
+        "name": "minimal-trace",
+        "trace": {
+            "source": "hf:Org/dataset",
+            "pool": {"concurrent_sessions": 4, "total_sessions": 8},
+        },
+    }
+    pr = make_pipelinerun_scenario(
+        phase="baseline", workload=wl, run_name="r",
+        namespace="ns", pipeline_name="sim2real",
+        scenario_content="scenario: []",
+    )
+    params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
+    assert params["traceSource"] == "hf:Org/dataset"
+    assert params["traceShards"] == "39"
+    assert params["traceMinRounds"] == "2"
+    assert params["traceSplit"] == "test"
+    assert params["traceContextGrowth"] == "accumulate"
 
 
 def test_trace_workload_path_is_deterministic_across_calls():
@@ -472,5 +502,7 @@ def test_generative_workload_unchanged_param_set():
     params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
     assert params["workloadSpec"] != ""
     names = _names(pr)
-    for k in ("traceSpec", "tracePath", "concurrentSessions", "totalSessions"):
+    for k in ("traceSpec", "tracePath", "concurrentSessions", "totalSessions",
+              "traceSource", "traceShards", "traceMinRounds", "traceSplit",
+              "traceContextGrowth"):
         assert k not in names
