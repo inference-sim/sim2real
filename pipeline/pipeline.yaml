@@ -51,6 +51,18 @@ spec:
     - name: replica
       type: string
       default: "1"
+    - name: traceSpec
+      type: string
+      default: ""
+    - name: tracePath
+      type: string
+      default: ""
+    - name: concurrentSessions
+      type: string
+      default: ""
+    - name: totalSessions
+      type: string
+      default: ""
   workspaces:
     - name: source
     - name: data-storage
@@ -79,6 +91,21 @@ spec:
           value: "$(params.blisGitRepoUrl)"
         - name: git_commit
           value: "$(params.blisGitCommit)"
+
+    - name: prepare-trace
+      runAfter: ["install-blis"]
+      taskRef:
+        name: prepare-trace
+      workspaces:
+        - name: source
+          workspace: source
+        - name: data
+          workspace: data-storage
+      params:
+        - name: traceSpec
+          value: "$(params.traceSpec)"
+        - name: tracePath
+          value: "$(params.tracePath)"
 
     - name: llmdbenchmark-standup
       runAfter: ["install-llmdbenchmark"]
@@ -162,7 +189,7 @@ spec:
           value: "$(params.benchmarkGitCommit)"
 
     - name: run-workload-blis-observe-binary
-      runAfter: ["llmdbenchmark-standup", "install-blis", "prepare-results-dir"]
+      runAfter: ["llmdbenchmark-standup", "install-blis", "prepare-results-dir", "prepare-trace"]
       taskRef:
         name: run-workload-blis-observe-binary
       workspaces:
@@ -189,6 +216,12 @@ spec:
           value: "$(params.prewarmDuration)"
         - name: extraArgs
           value: "$(params.extraArgs)"
+        - name: tracePath
+          value: "$(params.tracePath)"
+        - name: concurrentSessions
+          value: "$(params.concurrentSessions)"
+        - name: totalSessions
+          value: "$(params.totalSessions)"
 
     - name: collect-results
       runAfter: ["run-workload-blis-observe-binary"]
