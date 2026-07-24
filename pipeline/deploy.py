@@ -2214,6 +2214,62 @@ def _uninstall_orphaned_helm(key: str, namespace: str) -> None:
                 warn(f"Failed to uninstall {release} in {namespace}")
 
 
+def _sweep_orphaned_httproutes(namespace: str) -> None:
+    """Delete HTTPRoutes whose backend InferencePool no longer exists (issue #603).
+
+    Model HTTPRoutes are rendered by llm-d-benchmark's 08_httproute template and
+    applied directly to the cluster — they carry no ``meta.helm.sh/release-name``
+    annotation and no ownerReference to their InferencePool. So when a model is
+    torn down, ``helm uninstall`` cannot remove them (helm does not own them) and
+    Kubernetes garbage collection cannot either (no ownerReference to the deleted
+    InferencePool). The route is stranded on the shared gateway with a catch-all
+    '/'; Gateway API resolves '/'-vs-'/' by oldest-wins, so an accumulated stale
+    route eventually steals traffic and returns 500 (breaks the next standup's
+    smoketest health check).
+
+    We sweep them after helm uninstall, keyed on a DANGLING InferencePool
+    backendRef so a route whose backend is still live (e.g. a concurrent pair in
+    the same namespace) is never touched. If the InferencePool API is unavailable
+    we no-op rather than risk over-deleting.
+    """
+    pools = run(["kubectl", "get", "inferencepool", "-n", namespace,
+                 "-o", "jsonpath={.items[*].metadata.name}"], check=False, capture=True)
+    if pools.returncode != 0:
+        # CRD/API unavailable: cannot tell live from dead — do nothing.
+        return
+    live = set(pools.stdout.split())
+
+    got = run(["kubectl", "get", "httproute", "-n", namespace, "-o", "json"],
+              check=False, capture=True)
+    if got.returncode != 0:
+        return
+    try:
+        routes = json.loads(got.stdout).get("items", [])
+    except (ValueError, TypeError):
+        return
+
+    for r in routes:
+        name = (r.get("metadata") or {}).get("name", "")
+        if not name:
+            continue
+        pool_backends = [
+            b.get("name")
+            for rule in (r.get("spec") or {}).get("rules", []) or []
+            for b in (rule.get("backendRefs") or []) or []
+            if b.get("kind") == "InferencePool"
+        ]
+        # Only sweep routes that reference at least one InferencePool AND have no
+        # live one — i.e. genuinely dangling. Routes to a live pool, or to plain
+        # Services (no InferencePool backend), are left untouched.
+        if pool_backends and all(b not in live for b in pool_backends):
+            dr = run(["kubectl", "delete", "httproute", name, "-n", namespace,
+                      "--ignore-not-found"], check=False, capture=True)
+            if dr.returncode == 0:
+                ok(f"Swept orphaned HTTPRoute {name} (dead InferencePool backend) in {namespace}")
+            else:
+                warn(f"Failed to sweep orphaned HTTPRoute {name} in {namespace}")
+
+
 def _reset_pair(key: str, entry: dict, discovered: dict, *,
                 dry_run: bool = False, namespaces: list[str] | None = None,
                 preserve_done_status: bool = False) -> bool:
@@ -2276,10 +2332,12 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
         info(f"[DRY-RUN] {key}: would delete pipelinerun {pr_name or '(unknown)'} in {target}")
         if not is_done:
             info(f"[DRY-RUN] {key}: would uninstall all helm releases in {target}")
+            info(f"[DRY-RUN] {key}: would sweep orphaned HTTPRoutes in {target}")
         else:
             completed_ns = entry.get("completed_namespace")
             if completed_ns:
                 info(f"[DRY-RUN] {key}: would check for orphaned helm releases in {completed_ns}")
+                info(f"[DRY-RUN] {key}: would sweep orphaned HTTPRoutes in {completed_ns}")
         return True
 
     # Delete PipelineRun
@@ -2314,6 +2372,7 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
         completed_ns = entry.get("completed_namespace")
         if completed_ns:
             _uninstall_orphaned_helm(key, completed_ns)
+            _sweep_orphaned_httproutes(completed_ns)
         if not preserve_done_status:
             entry["status"] = "pending"
             entry["namespace"] = None
@@ -2348,6 +2407,11 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
             if helm_failed:
                 warn(f"{key}: some releases failed to uninstall — state NOT reset")
                 return False
+        # Sweep HTTPRoutes orphaned by teardown (issue #603): they are not
+        # helm-owned and not GC'd, so helm uninstall above never removes them.
+        # Runs even when no live releases remain, to clear debris left by prior
+        # runs in this namespace slot.
+        _sweep_orphaned_httproutes(ns)
     else:
         # PipelineRun was known but no namespace recorded — helm needs the
         # namespace, so cleanup is skipped. Warn rather than silently report
