@@ -40,6 +40,12 @@ MODEL_METADATA = {
         "size": "1Ti",
         "maxModelLen": 40960,
     },
+    "Qwen/Qwen2.5-14B-Instruct-1M": {
+        "shortName": "qwen2-5-14b-instruct-1m",
+        "path": "models/Qwen/Qwen2.5-14B-Instruct-1M",
+        "size": "1Ti",
+        "maxModelLen": 131072,  # H100-80GB KV feasibility cap (25.8GB/req); model native ~1,010,000
+    },
 }
 
 HARDWARE_LABELS = {
