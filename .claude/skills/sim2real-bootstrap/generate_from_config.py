@@ -103,6 +103,15 @@ OBSERVE_TUNING_FLAGS = {
 # Hardcoded by tekton/tasks/run-workload-blis-observe-binary.yaml — the block
 # in config.md typically lists them for readability but the Tekton task
 # supplies them at runtime, so they must NOT leak into extraArgs.
+#
+# The corpus-mode trio (--corpus-header/--corpus-data and the pool flags
+# --concurrent-sessions/--total-sessions) is injected by the task's trace-mode
+# branch from the trace workload's descriptor (tracePath + pool block via
+# assemble), NOT from config.md. Listing them here keeps a config.md block that
+# spells them out (for readability) from double-injecting them into extraArgs.
+# --trace-header/--trace-data are the OUTPUT flags the task always injects and
+# stay listed. --session-mode is deliberately absent: the task does not inject
+# it (it is invalid for observe), so it is not ours to drop.
 OBSERVE_PIPELINE_INJECTED_FLAGS = {
     "--server-url",
     "--model",
@@ -111,6 +120,10 @@ OBSERVE_PIPELINE_INJECTED_FLAGS = {
     "--trace-data",
     "--saturation-report",
     "--post-hoc-detector",
+    "--corpus-header",
+    "--corpus-data",
+    "--concurrent-sessions",
+    "--total-sessions",
 }
 
 # Match pipeline/pipeline.yaml:36-50. Update in lockstep if those defaults

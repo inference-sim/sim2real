@@ -416,6 +416,19 @@ def test_trace_path_changes_when_descriptor_changes():
     assert trace_path("wl", changed) != trace_path("wl", _TRACE_WORKLOAD["trace"])
 
 
+def test_trace_path_ignores_pool():
+    """pool (concurrent_sessions/total_sessions) is a replay param, not corpus
+    content: changing it must NOT bust the trace-content cache. Two descriptors
+    differing only in pool share the same trace path."""
+    other_pool = dict(_TRACE_WORKLOAD["trace"])
+    other_pool["pool"] = {"concurrent_sessions": 1, "total_sessions": 1}
+    assert trace_path("wl", other_pool) == trace_path("wl", _TRACE_WORKLOAD["trace"])
+
+    # Adding vs. omitting the pool block entirely is likewise a no-op.
+    no_pool = {k: v for k, v in _TRACE_WORKLOAD["trace"].items() if k != "pool"}
+    assert trace_path("wl", no_pool) == trace_path("wl", _TRACE_WORKLOAD["trace"])
+
+
 def test_trace_path_independent_of_key_order():
     """Canonical serialization means key ordering does not affect the hash."""
     reordered = {

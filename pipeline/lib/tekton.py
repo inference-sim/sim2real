@@ -101,11 +101,19 @@ def trace_path(wl_name: str, trace: dict) -> str:
     for a trace descriptor.
 
     ``<sha12>`` is the first 12 hex chars of sha256 over a CANONICAL JSON
-    serialization of ``trace`` (``sort_keys=True``, no whitespace) so the path
-    is STABLE across runs for identical descriptors and CHANGES when the
-    descriptor changes. ``<safe_wl_name>`` is the workload name with ``_`` → ``-``.
+    serialization of the trace descriptor's CONTENT fields (``sort_keys=True``,
+    no whitespace) so the path is STABLE across runs for identical descriptors
+    and CHANGES when the built corpus would differ. ``<safe_wl_name>`` is the
+    workload name with ``_`` → ``-``.
+
+    The ``pool`` block (``concurrent_sessions`` / ``total_sessions``) is
+    EXCLUDED from the hash: it is a replay parameter consumed at observe time
+    (``--concurrent-sessions`` / ``--total-sessions``), not an input to
+    prepare-trace. Two descriptors that differ only in ``pool`` build the
+    identical corpus, so they share a trace path and reuse the same cache entry.
     """
-    canonical = json.dumps(trace, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    content = {k: v for k, v in trace.items() if k != "pool"}
+    canonical = json.dumps(content, sort_keys=True, separators=(",", ":")).encode("utf-8")
     sha12 = hashlib.sha256(canonical).hexdigest()[:12]
     safe = wl_name.replace("_", "-")
     return f"traces/{safe}-{sha12}"

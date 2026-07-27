@@ -94,6 +94,31 @@ blis observe \\
     assert gfc.parse_observe_block(text) == {}
 
 
+def test_corpus_mode_injected_flags_are_dropped_not_extraargs():
+    """Corpus-mode inputs (--corpus-header/--corpus-data) and the pool flags
+    (--concurrent-sessions/--total-sessions) are injected by the Tekton task's
+    trace-mode branch. A config.md block that spells them out for readability
+    must NOT leak them into extraArgs (which would double-inject them and cause
+    a duplicate-flag error). Regression for #605."""
+    text = """\
+```bash
+blis observe \\
+  --server-url http://gateway:80 \\
+  --model foo/bar \\
+  --corpus-header trace.yaml \\
+  --corpus-data trace.csv \\
+  --concurrent-sessions 128 \\
+  --total-sessions 192 \\
+  --max-concurrency 10000 \\
+  --saturation-report s.json
+```
+"""
+    parsed = gfc.parse_observe_block(text)
+    # Only the tuning flag survives; every injected flag is dropped.
+    assert parsed == {"maxConcurrency": "10000"}
+    assert "extraArgs" not in parsed
+
+
 def test_unknown_flags_collected_into_extra_args():
     text = """\
 ```bash
