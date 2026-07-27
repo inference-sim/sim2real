@@ -1,6 +1,6 @@
 [submodule "inference-sim"]
 	path = inference-sim
-	url = https://github.com/inference-sim/inference-sim.git
+	url = https://github.com/kalantar/inference-sim.git
 [submodule "tektonc-data-collection"]
 	path = tektonc-data-collection
 	url = https://github.com/inference-sim/tektonc-data-collection.git
