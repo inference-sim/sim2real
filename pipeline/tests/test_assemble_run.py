@@ -1449,3 +1449,99 @@ class TestAssembleResolveContract:
             f"assemble writes keys not in resolve's known set: {sorted(extra)}. "
             f"Add the field to resolve_run's return dict and to this whitelist."
         )
+
+
+class TestLoadWorkloadTraceValidation:
+    """`_load_workload` validates the trace-workload shape and rejects
+    ambiguous workloads that declare both trace and generative keys."""
+
+    _VALID_TRACE = {
+        "name": "exgentic-agentic-trace",
+        "trace": {
+            "source": "hf:Exgentic/agent-llm-traces",
+            "shards": 39,
+            "pool": {"concurrent_sessions": 128, "total_sessions": 192},
+        },
+    }
+
+    def _write(self, tmp_path: Path, data) -> Path:
+        exp_root = tmp_path / "exp"
+        (exp_root / "workloads").mkdir(parents=True, exist_ok=True)
+        (exp_root / "workloads" / "w.yaml").write_text(yaml.dump(data))
+        return exp_root
+
+    def test_valid_trace_workload_loads(self, tmp_path):
+        exp_root = self._write(tmp_path, self._VALID_TRACE)
+        data = assemble_run._load_workload(exp_root, "workloads/w.yaml")
+        assert data["trace"]["source"] == "hf:Exgentic/agent-llm-traces"
+
+    def test_valid_generative_workload_loads(self, tmp_path):
+        exp_root = self._write(
+            tmp_path, {"name": "wl", "version": 1, "clients": []}
+        )
+        data = assemble_run._load_workload(exp_root, "workloads/w.yaml")
+        assert "trace" not in data
+
+    def test_trace_missing_pool_concurrent_sessions_raises(self, tmp_path):
+        bad = {
+            "name": "wl",
+            "trace": {
+                "source": "hf:x",
+                "pool": {"total_sessions": 192},
+            },
+        }
+        exp_root = self._write(tmp_path, bad)
+        with pytest.raises(assemble_run.AssembleError, match="concurrent_sessions"):
+            assemble_run._load_workload(exp_root, "workloads/w.yaml")
+
+    def test_trace_missing_pool_raises(self, tmp_path):
+        bad = {"name": "wl", "trace": {"source": "hf:x"}}
+        exp_root = self._write(tmp_path, bad)
+        with pytest.raises(assemble_run.AssembleError, match="trace.pool"):
+            assemble_run._load_workload(exp_root, "workloads/w.yaml")
+
+    def test_trace_missing_source_raises(self, tmp_path):
+        bad = {
+            "name": "wl",
+            "trace": {"pool": {"concurrent_sessions": 4, "total_sessions": 0}},
+        }
+        exp_root = self._write(tmp_path, bad)
+        with pytest.raises(assemble_run.AssembleError, match="trace.source"):
+            assemble_run._load_workload(exp_root, "workloads/w.yaml")
+
+    def test_concurrent_sessions_below_one_raises(self, tmp_path):
+        bad = {
+            "name": "wl",
+            "trace": {
+                "source": "hf:x",
+                "pool": {"concurrent_sessions": 0, "total_sessions": 0},
+            },
+        }
+        exp_root = self._write(tmp_path, bad)
+        with pytest.raises(assemble_run.AssembleError, match="concurrent_sessions"):
+            assemble_run._load_workload(exp_root, "workloads/w.yaml")
+
+    def test_total_sessions_zero_is_allowed(self, tmp_path):
+        ok = {
+            "name": "wl",
+            "trace": {
+                "source": "hf:x",
+                "pool": {"concurrent_sessions": 1, "total_sessions": 0},
+            },
+        }
+        exp_root = self._write(tmp_path, ok)
+        data = assemble_run._load_workload(exp_root, "workloads/w.yaml")
+        assert data["trace"]["pool"]["total_sessions"] == 0
+
+    def test_both_trace_and_clients_raises(self, tmp_path):
+        bad = {
+            "name": "wl",
+            "clients": [],
+            "trace": {
+                "source": "hf:x",
+                "pool": {"concurrent_sessions": 1, "total_sessions": 1},
+            },
+        }
+        exp_root = self._write(tmp_path, bad)
+        with pytest.raises(assemble_run.AssembleError, match="both 'trace' and 'clients'"):
+            assemble_run._load_workload(exp_root, "workloads/w.yaml")
