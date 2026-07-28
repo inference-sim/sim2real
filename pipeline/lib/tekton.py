@@ -12,9 +12,9 @@ _SCENARIO_FILE_PATH = "/tmp/llmdbench-config/scenario.yaml"
 # stay below spec.timeouts.pipeline below; Tekton rejects taskRunSpecs entries
 # whose timeout exceeds the enclosing pipeline timeout.
 _TASK_TIMEOUTS: dict[str, str] = {
-    "stream-epp-logs": "2h",
-    "stream-gpu-stats": "2h",
-    "run-workload-blis-observe-binary": "90m",
+    "stream-epp-logs": "3h",
+    "stream-gpu-stats": "3h",
+    "run-workload-blis-observe-binary": "3h",
 }
 
 
