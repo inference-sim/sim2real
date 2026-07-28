@@ -78,6 +78,12 @@ spec:
     - name: traceContextGrowth
       type: string
       default: ""
+    - name: traceDedupByConversation
+      type: string
+      default: ""
+    - name: traceShuffleSeed
+      type: string
+      default: ""
   workspaces:
     - name: source
     - name: data-storage
@@ -131,6 +137,10 @@ spec:
           value: "$(params.traceSplit)"
         - name: traceContextGrowth
           value: "$(params.traceContextGrowth)"
+        - name: traceDedupByConversation
+          value: "$(params.traceDedupByConversation)"
+        - name: traceShuffleSeed
+          value: "$(params.traceShuffleSeed)"
 
     - name: llmdbenchmark-standup
       runAfter: ["install-llmdbenchmark"]
