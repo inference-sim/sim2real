@@ -169,6 +169,13 @@ def make_pipelinerun_scenario(
         trace_context_growth = str(
             (trace.get("convert") or {}).get("context_growth", "accumulate")
         )
+        # Sample-selection controls (build-otel dedup/shuffle). Part of the trace
+        # descriptor, so they also affect tracePath (trace_path hashes the whole
+        # trace dict) → changing them forces a corpus rebuild. Defaults: dedup on,
+        # seed 42.
+        trace_sample = trace.get("sample") or {}
+        trace_dedup = "1" if trace_sample.get("dedup_by_conversation", True) else "0"
+        trace_shuffle_seed = str(trace_sample.get("shuffle_seed", 42))
     else:
         wl_spec = {k: v for k, v in workload.items() if k != "workload_name"}
         wl_spec_str = yaml.dump(wl_spec, default_flow_style=True).strip()
@@ -205,6 +212,8 @@ def make_pipelinerun_scenario(
             {"name": "traceMinRounds",     "value": trace_min_rounds},
             {"name": "traceSplit",         "value": trace_split},
             {"name": "traceContextGrowth", "value": trace_context_growth},
+            {"name": "traceDedupByConversation", "value": trace_dedup},
+            {"name": "traceShuffleSeed",   "value": trace_shuffle_seed},
         ]
     if observe:
         # Emit only specified keys; omitted ones fall through to Pipeline-level

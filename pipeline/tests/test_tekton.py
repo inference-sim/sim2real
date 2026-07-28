@@ -466,6 +466,28 @@ def test_trace_workload_emits_locked_params():
     assert params["traceMinRounds"] == "2"
     assert params["traceSplit"] == "test"
     assert params["traceContextGrowth"] == "accumulate"
+    # Sample-selection controls default to dedup-on / seed 42 when no sample block.
+    assert params["traceDedupByConversation"] == "1"
+    assert params["traceShuffleSeed"] == "42"
+
+
+def test_trace_sample_block_overrides_dedup_and_seed():
+    """A trace.sample block controls build-otel dedup + shuffle seed."""
+    wl = {
+        "name": "sampled-trace",
+        "trace": {
+            "source": "hf:Org/dataset",
+            "pool": {"concurrent_sessions": 4, "total_sessions": 8},
+            "sample": {"dedup_by_conversation": False, "shuffle_seed": 7},
+        },
+    }
+    pr = make_pipelinerun_scenario(
+        phase="baseline", workload=wl, run_name="r",
+        namespace="ns", pipeline_name="sim2real", scenario_content="{}",
+    )
+    params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
+    assert params["traceDedupByConversation"] == "0"
+    assert params["traceShuffleSeed"] == "7"
 
 
 def test_trace_workload_scalar_params_use_defaults_when_absent():
@@ -489,6 +511,8 @@ def test_trace_workload_scalar_params_use_defaults_when_absent():
     assert params["traceMinRounds"] == "2"
     assert params["traceSplit"] == "test"
     assert params["traceContextGrowth"] == "accumulate"
+    assert params["traceDedupByConversation"] == "1"
+    assert params["traceShuffleSeed"] == "42"
 
 
 def test_trace_workload_path_is_deterministic_across_calls():
@@ -517,5 +541,5 @@ def test_generative_workload_unchanged_param_set():
     names = _names(pr)
     for k in ("traceSpec", "tracePath", "concurrentSessions", "totalSessions",
               "traceSource", "traceShards", "traceMinRounds", "traceSplit",
-              "traceContextGrowth"):
+              "traceContextGrowth", "traceDedupByConversation", "traceShuffleSeed"):
         assert k not in names
