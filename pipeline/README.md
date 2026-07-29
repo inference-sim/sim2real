@@ -513,7 +513,7 @@ Two invariants shape the grow-only path:
 Orchestrates PipelineRun execution across namespace slots. Operates independently of `transfer.yaml` — driven by workspace files, `setup_config.json` (workspace-scoped), and `clusters/<id>/cluster_config.json` (namespaces, PVCs, secrets).
 
 ```bash
-python pipeline/deploy.py {build|run|status|collect|stop|reset|wipe|pairs} [flags]
+python pipeline/deploy.py {run|status|collect|stop|reset|wipe|pairs} [flags]
 ```
 
 Common flags (all subcommands):
@@ -607,7 +607,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 **Auto-cleanup** — when a PipelineRun succeeds, the orchestrator deletes the PipelineRun CR from the cluster. Failed PipelineRuns are left in place for debugging (`kubectl describe`, pod logs). Use `reset` to remove them when done. Note: `--skip-teardown` only suppresses the Tekton `llmdbenchmark-teardown` task (Helm-level resource cleanup); PipelineRun CR deletion by the orchestrator is unaffected. Use `--preserve-pipelineruns` to suppress PipelineRun CR deletion on success — useful for debugging steps that fail silently (e.g., `set +e` scripts that exit 0 despite internal errors).
 
-**Remote mode** — `deploy.py run --remote` submits the orchestrator as a Kubernetes Job (`sim2real-orchestrator`) instead of running locally. The launcher builds the EPP image locally, packs workspace files into a ConfigMap, applies the Job, and waits for the pod to reach Running. Use `stop` to cancel, `status` to check progress, and `collect` to pull results after completion. Requires `orchestrator_image` in `setup_config.json`.
+**Remote mode** — `deploy.py run --remote` submits the orchestrator as a Kubernetes Job (`sim2real-orchestrator`) instead of running locally. The launcher packs workspace files into a ConfigMap, applies the Job, and waits for the pod to reach Running. Use `stop` to cancel, `status` to check progress, and `collect` to pull results after completion. Requires `orchestrator_image` in `setup_config.json`.
 
 **`deploy.py status`** — prints the current state of all pairs. Reads from the `sim2real-progress-{scenario}-{run}` ConfigMap. Requires a configured namespace.
 
@@ -790,7 +790,7 @@ python pipeline/deploy.py --experiment-root <experiment-root> \
     --run <run-name> run
 ```
 
-Builds the treatment EPP image (if not current), dispatches PipelineRuns across the namespace slots, and polls for completion. Progress lands in the `sim2real-progress-<scenario>-<run-name>` ConfigMap (scoped by both `transfer.yaml:scenario` and the run name — issue #551). Use `deploy.py --run <run-name> status` to snapshot progress; use `deploy.py --run <run-name> stop` to cancel the remote orchestrator Job (if `--remote` was passed); use `deploy.py --run <run-name> reset` to requeue non-pending pairs (which also cancels their in-flight PipelineRuns).
+Dispatches PipelineRuns across the namespace slots (using the already-built EPP image refs baked into the resolved `cluster/` scenarios) and polls for completion. Progress lands in the `sim2real-progress-<scenario>-<run-name>` ConfigMap (scoped by both `transfer.yaml:scenario` and the run name — issue #551). Use `deploy.py --run <run-name> status` to snapshot progress; use `deploy.py --run <run-name> stop` to cancel the remote orchestrator Job (if `--remote` was passed); use `deploy.py --run <run-name> reset` to requeue non-pending pairs (which also cancels their in-flight PipelineRuns).
 
 ### 6. Collect results
 

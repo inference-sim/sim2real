@@ -3503,7 +3503,7 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict,
             err(f"Failed to delete completed Job: {detail}")
             sys.exit(1)
 
-    # Validate filter flags before building images (fail fast)
+    # Validate filter flags before dispatching PipelineRuns (fail fast)
     cluster_dir = run_dir / "cluster"
     discovered = _load_pairs(cluster_dir)
     if discovered:
