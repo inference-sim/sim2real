@@ -777,9 +777,20 @@ def parse_observe_block(config_md_text: str) -> dict[str, str]:
             value = inline_value if inline_value is not None else (
                 flag_tokens[i + 1] if has_next_value else None
             )
-            if value is not None:
+            if value:
                 parsed[OBSERVE_TUNING_FLAGS[flag_name]] = value
-            # else: tuning flag with no value is malformed; skip.
+            else:
+                # Recognized tuning flag but no usable value (`--timeout` with
+                # no arg, or `--timeout=`). Drop it and warn — consistent with
+                # the other drop paths — so the sim2real-bootstrap default
+                # applies visibly instead of an empty value leaking into
+                # transfer.yaml tagged as config.md-sourced (issue #602 review).
+                print(
+                    f"WARNING: dropping '{flag_name}' from the blis observe "
+                    f"block (recognized flag with no value); the "
+                    f"sim2real-bootstrap default will apply.",
+                    file=sys.stderr,
+                )
         elif flag_name in OBSERVE_PIPELINE_INJECTED_FLAGS:
             pass  # Drop entirely — the Tekton task supplies these.
         elif flag_name in OBSERVE_VALID_FLAGS:

@@ -245,6 +245,30 @@ blis observe \\
     assert parsed["extraArgs"] == "--rate=50"
 
 
+def test_tuning_flag_with_no_value_is_dropped_and_warned(capsys):
+    """A recognized tuning flag with no usable value (`--timeout` with no arg,
+    or the `=`-form `--timeout=`) is malformed: drop it and warn so the
+    bootstrap default applies, rather than leak an empty value into
+    transfer.yaml tagged as config.md-sourced. Issue #602 review."""
+    text = """\
+```bash
+blis observe \\
+  --timeout= \\
+  --max-concurrency \\
+  --rate 50
+```
+"""
+    parsed = gfc.parse_observe_block(text)
+    # Neither malformed tuning flag lands a key; only the valid unmodeled flag.
+    assert "timeout" not in parsed
+    assert "maxConcurrency" not in parsed
+    assert parsed["extraArgs"] == "--rate 50"
+    err = capsys.readouterr().err
+    assert "--timeout" in err
+    assert "--max-concurrency" in err
+    assert "recognized flag with no value" in err
+
+
 def test_dropped_flag_emits_warning_to_stderr(capsys):
     """Refusing a flag is surfaced, not silent, so the operator can re-add a
     legitimate flag in transfer.yaml. Issue #602."""
