@@ -337,6 +337,11 @@ Assemble transfer manifest from all prior task outputs.
     5 keys with per-key `# source:` provenance comments; if `config.md` is
     absent or the block is missing, an all-defaults fragment is emitted. Do
     NOT hand-edit the fragment — regenerate by re-running the script.
+    The block is validated against `blis observe`'s flag namespace (issue
+    #602): recognized flags map to their key or `extraArgs`, while replay-only
+    flags (e.g. `--session-mode`) and any non-observe flag are dropped with a
+    `WARNING:` on stderr rather than transcribed. If a dropped flag was in fact
+    intended, add it to `blis_observe.extraArgs` in `transfer.yaml` by hand.
 
 **Output schema:**
 ```yaml
