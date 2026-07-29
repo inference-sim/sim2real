@@ -674,7 +674,7 @@ When `--only` or `--workload` is given, only matching workload subdirectories ar
 
 **`deploy.py stop`** — deletes the `sim2real-orchestrator` Kubernetes Job (with cascading pod deletion) in the primary namespace. Only meaningful when the orchestrator runs as an in-cluster Job. Pair state is left as-is. If no remote orchestrator Job exists, prints a message and returns. Use `reset` separately to clear failed/stalled pair state.
 
-**`deploy.py reset`** — resets all non-pending pairs to `pending` and removes their cluster resources (PipelineRuns, Helm releases). This includes `done` pairs — use `--preserve-done-status` to clean up cluster resources for done pairs without re-queuing them.
+**`deploy.py reset`** — resets all non-pending pairs to `pending` and removes their cluster resources (PipelineRuns, Helm releases, and orphaned HTTPRoutes). This includes `done` pairs — use `--preserve-done-status` to clean up cluster resources for done pairs without re-queuing them. HTTPRoutes rendered by llm-d-benchmark's `08_httproute` template are applied directly to the cluster (no helm-release annotation, no ownerReference to their InferencePool), so neither `helm uninstall` nor Kubernetes GC removes them at teardown; reset sweeps any HTTPRoute whose backend InferencePool no longer exists (routes with a live backend are never touched), clearing debris that would otherwise strand on the shared gateway and steal traffic (issue #603).
 
 | Flag | Description |
 |------|-------------|

@@ -2214,7 +2214,7 @@ def _uninstall_orphaned_helm(key: str, namespace: str) -> None:
                 warn(f"Failed to uninstall {release} in {namespace}")
 
 
-def _sweep_orphaned_httproutes(namespace: str) -> None:
+def _sweep_orphaned_httproutes(key: str, namespace: str) -> None:
     """Delete HTTPRoutes whose backend InferencePool no longer exists (issue #603).
 
     Model HTTPRoutes are rendered by llm-d-benchmark's 08_httproute template and
@@ -2235,17 +2235,25 @@ def _sweep_orphaned_httproutes(namespace: str) -> None:
     pools = run(["kubectl", "get", "inferencepool", "-n", namespace,
                  "-o", "jsonpath={.items[*].metadata.name}"], check=False, capture=True)
     if pools.returncode != 0:
-        # CRD/API unavailable: cannot tell live from dead — do nothing.
+        # CRD/API unavailable: cannot tell live from dead — do nothing, but warn.
+        # Silently no-op'ing here would let the exact orphaned-route leak this
+        # sweep exists to fix recur with zero operator signal (issue #603).
+        warn(f"{key}: cannot list InferencePools in {namespace} — skipping "
+             f"HTTPRoute sweep (orphaned routes may remain)")
         return
     live = set(pools.stdout.split())
 
     got = run(["kubectl", "get", "httproute", "-n", namespace, "-o", "json"],
               check=False, capture=True)
     if got.returncode != 0:
+        warn(f"{key}: cannot list HTTPRoutes in {namespace} — skipping sweep "
+             f"(orphaned routes may remain)")
         return
     try:
         routes = json.loads(got.stdout).get("items", [])
     except (ValueError, TypeError):
+        warn(f"{key}: unparseable HTTPRoute list in {namespace} — skipping sweep "
+             f"(orphaned routes may remain)")
         return
 
     for r in routes:
@@ -2267,7 +2275,8 @@ def _sweep_orphaned_httproutes(namespace: str) -> None:
             if dr.returncode == 0:
                 ok(f"Swept orphaned HTTPRoute {name} (dead InferencePool backend) in {namespace}")
             else:
-                warn(f"Failed to sweep orphaned HTTPRoute {name} in {namespace}")
+                warn(f"{key}: failed to sweep orphaned HTTPRoute {name} in "
+                     f"{namespace}: {dr.stderr.strip()}")
 
 
 def _reset_pair(key: str, entry: dict, discovered: dict, *,
@@ -2306,8 +2315,10 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
             if completed_ns:
                 if dry_run:
                     info(f"[DRY-RUN] {key}: would check for orphaned helm releases in {completed_ns}")
+                    info(f"[DRY-RUN] {key}: would sweep orphaned HTTPRoutes in {completed_ns}")
                 else:
                     _uninstall_orphaned_helm(key, completed_ns)
+                    _sweep_orphaned_httproutes(key, completed_ns)
         elif not dry_run:
             # Terminal pair (callers only reset non-pending pairs) with no
             # namespace recorded — helm cleanup is skipped. Warn rather than
@@ -2372,7 +2383,7 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
         completed_ns = entry.get("completed_namespace")
         if completed_ns:
             _uninstall_orphaned_helm(key, completed_ns)
-            _sweep_orphaned_httproutes(completed_ns)
+            _sweep_orphaned_httproutes(key, completed_ns)
         if not preserve_done_status:
             entry["status"] = "pending"
             entry["namespace"] = None
@@ -2411,7 +2422,7 @@ def _reset_pair(key: str, entry: dict, discovered: dict, *,
         # helm-owned and not GC'd, so helm uninstall above never removes them.
         # Runs even when no live releases remain, to clear debris left by prior
         # runs in this namespace slot.
-        _sweep_orphaned_httproutes(ns)
+        _sweep_orphaned_httproutes(key, ns)
     else:
         # PipelineRun was known but no namespace recorded — helm needs the
         # namespace, so cleanup is skipped. Warn rather than silently report

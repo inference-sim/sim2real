@@ -1014,7 +1014,7 @@ def test_sweep_deletes_only_dangling_httproute(monkeypatch):
     monkeypatch.setattr(mod, "run", _sweep_fake_run(
         calls, pools_out="qwen-live-router", routes_out=_SWEEP_ROUTES))
 
-    mod._sweep_orphaned_httproutes("kalantar-0")
+    mod._sweep_orphaned_httproutes("wl-x-baseline", "kalantar-0")
 
     assert _deleted_httproutes(calls) == ["qwen-stale"]
 
@@ -1026,7 +1026,7 @@ def test_sweep_noop_when_inferencepool_api_unavailable(monkeypatch):
     monkeypatch.setattr(mod, "run", _sweep_fake_run(
         calls, pools_rc=1, routes_out=_SWEEP_ROUTES))
 
-    mod._sweep_orphaned_httproutes("kalantar-0")
+    mod._sweep_orphaned_httproutes("wl-x-baseline", "kalantar-0")
 
     assert _deleted_httproutes(calls) == []
     # must not even enumerate routes once liveness can't be judged
@@ -1041,7 +1041,7 @@ def test_sweep_keeps_routes_when_all_backends_live(monkeypatch):
         calls, pools_out="qwen-stale-router qwen-live-router",
         routes_out=_SWEEP_ROUTES))
 
-    mod._sweep_orphaned_httproutes("kalantar-0")
+    mod._sweep_orphaned_httproutes("wl-x-baseline", "kalantar-0")
 
     assert _deleted_httproutes(calls) == []
 
@@ -1075,4 +1075,114 @@ def test_reset_pair_invokes_sweep_even_with_no_releases(monkeypatch):
     deleted = set(_deleted_httproutes(calls))
     assert deleted == {"qwen-stale", "qwen-live"}   # both InferencePool routes dangle
     assert "plain-svc-route" not in deleted         # no InferencePool backend
+    assert entry["status"] == "pending"
+
+
+# A single route fronting two InferencePool backends — one dead, one still live.
+# Guards the all()-not-any() deletion semantics: the route still serves traffic
+# through the live backend, so it must NOT be swept.
+_SWEEP_ROUTES_MIXED = _json.dumps({"items": [
+    {"metadata": {"name": "qwen-mixed"},
+     "spec": {"rules": [{"backendRefs": [
+         {"kind": "InferencePool", "name": "qwen-stale-router"},
+         {"kind": "InferencePool", "name": "qwen-live-router"}]}]}},
+]})
+
+
+def test_sweep_keeps_route_with_one_live_backend_among_dead(monkeypatch):
+    """A route with a mix of dead and live InferencePool backends is kept.
+
+    Deletion is gated on ALL backends being dead (deploy.py's
+    ``all(b not in live ...)``); a route still serving through any live backend
+    must survive. A regression to ``any()`` would delete a live-serving route.
+    """
+    import pipeline.deploy as mod
+    calls = []
+    monkeypatch.setattr(mod, "run", _sweep_fake_run(
+        calls, pools_out="qwen-live-router", routes_out=_SWEEP_ROUTES_MIXED))
+
+    mod._sweep_orphaned_httproutes("wl-x-baseline", "kalantar-0")
+
+    assert _deleted_httproutes(calls) == []
+
+
+def test_sweep_warns_when_inferencepool_api_unavailable(monkeypatch, capsys):
+    """When the InferencePool API errors, the sweep no-ops but WARNS — a silent
+    no-op would let the issue-#603 leak recur with zero operator signal."""
+    import pipeline.deploy as mod
+    calls = []
+    monkeypatch.setattr(mod, "run", _sweep_fake_run(
+        calls, pools_rc=1, routes_out=_SWEEP_ROUTES))
+
+    mod._sweep_orphaned_httproutes("wl-x-baseline", "kalantar-0")
+
+    out = capsys.readouterr().out.lower()
+    assert "kalantar-0" in out
+    assert "inferencepool" in out and "skipping" in out
+
+
+def test_reset_pair_done_sweeps_httproutes_in_completed_namespace(monkeypatch):
+    """Primary #603 teardown path: a done pair (namespace already freed, PR name
+    on disk) sweeps orphaned HTTPRoutes in its completed_namespace."""
+    import pipeline.deploy as mod
+    # wl-smoke-baseline IS in _DISCOVERED (pr_name present) -> reaches the
+    # is_done cleanup block, not the (no ns, no pr_name) early branch.
+    entry = {"workload": "wl-smoke", "package": "baseline", "status": "done",
+             "namespace": None, "completed_namespace": "sim2real-0", "retries": 0}
+    calls = []
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        calls.append(cmd)
+        class _R:
+            returncode = 0
+            stdout = ""
+        r = _R()
+        if cmd[:2] == ["helm", "list"]:
+            r.stdout = ""                 # no live releases
+        elif cmd[:3] == ["kubectl", "get", "inferencepool"]:
+            r.stdout = ""                 # no live pools => both pool routes dangle
+        elif cmd[:3] == ["kubectl", "get", "httproute"]:
+            r.stdout = _SWEEP_ROUTES
+        return r
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    mod._reset_pair("wl-smoke-baseline", entry, _DISCOVERED)
+
+    deleted = set(_deleted_httproutes(calls))
+    assert deleted == {"qwen-stale", "qwen-live"}
+    assert "plain-svc-route" not in deleted
+    assert entry["status"] == "pending"
+
+
+def test_reset_pair_done_no_pr_name_still_sweeps_httproutes(monkeypatch):
+    """Done pair reaching the (no ns, no pr_name) early branch — namespace freed
+    and no PipelineRun discovered — must still sweep its completed_namespace
+    (the branch previously did helm cleanup only)."""
+    import pipeline.deploy as mod
+    entry = {"workload": "wl-orphan", "package": "baseline", "status": "done",
+             "namespace": None, "completed_namespace": "sim2real-0", "retries": 0}
+    calls = []
+
+    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+        calls.append(cmd)
+        class _R:
+            returncode = 0
+            stdout = ""
+        r = _R()
+        if cmd[:2] == ["helm", "list"]:
+            r.stdout = ""
+        elif cmd[:3] == ["kubectl", "get", "inferencepool"]:
+            r.stdout = ""
+        elif cmd[:3] == ["kubectl", "get", "httproute"]:
+            r.stdout = _SWEEP_ROUTES
+        return r
+
+    monkeypatch.setattr(mod, "run", fake_run)
+
+    # key absent from discovered => pr_name == "" => early (no ns, no pr_name) branch
+    mod._reset_pair("wl-orphan-baseline", entry, {})
+
+    deleted = set(_deleted_httproutes(calls))
+    assert deleted == {"qwen-stale", "qwen-live"}
     assert entry["status"] == "pending"
