@@ -1,11 +1,13 @@
 """Tests for parse_observe_block + render_blis_observe_yaml.
 
-Covers acceptance criteria from issue #403:
+Covers acceptance criteria from issues #403 and #602:
   - Full `blis observe \\ ... \\` block → all 4 tuning keys extracted
   - Partial block → only present keys extracted
   - No block in text → empty dict
   - Pipeline-injected flags dropped, not folded into extraArgs
-  - Unknown flags collected into extraArgs (space-joined)
+  - Valid-but-unmodeled observe flags pass through to extraArgs (#602)
+  - Non-observe flags (replay-only, sim-world, unknown) dropped + warned, never
+    transcribed into extraArgs (#602)
   - Rendered YAML has correct provenance for extracted vs defaulted keys
   - Rendered YAML round-trips through PyYAML with expected typing
   - Rendered YAML matches the 5-key schema validated by manifest.py
@@ -119,7 +121,9 @@ blis observe \\
     assert "extraArgs" not in parsed
 
 
-def test_unknown_flags_collected_into_extra_args():
+def test_non_observe_flags_are_dropped_not_extraargs():
+    """Flags that are not in blis observe's namespace are refused, not folded
+    into extraArgs (which would abort observe at runtime). Issue #602."""
     text = """\
 ```bash
 blis observe \\
@@ -129,11 +133,11 @@ blis observe \\
 ```
 """
     parsed = gfc.parse_observe_block(text)
-    assert parsed["maxConcurrency"] == "100"
-    assert parsed["extraArgs"] == "--new-flag foo --another-flag bar"
+    assert parsed == {"maxConcurrency": "100"}
+    assert "extraArgs" not in parsed
 
 
-def test_bare_unknown_flag_collected_into_extra_args():
+def test_bare_non_observe_flag_is_dropped_not_extraargs():
     text = """\
 ```bash
 blis observe \\
@@ -142,8 +146,84 @@ blis observe \\
 ```
 """
     parsed = gfc.parse_observe_block(text)
+    assert parsed == {"timeout": "60"}
+    assert "extraArgs" not in parsed
+
+
+def test_session_mode_is_dropped_not_extraargs():
+    """The documented failure (#602): a transcribed `blis replay` closed-loop
+    invocation carries --session-mode (+ pool flags). --session-mode has no
+    observe equivalent and must be dropped, not transcribed — otherwise observe
+    aborts with `unknown flag: --session-mode`."""
+    text = """\
+```bash
+blis observe \\
+  --session-mode closed-loop \\
+  --concurrent-sessions 128 \\
+  --total-sessions 192 \\
+  --max-concurrency 10000
+```
+"""
+    parsed = gfc.parse_observe_block(text)
+    # --session-mode dropped (replay-only); pool flags dropped (task-injected);
+    # only the modeled tuning flag survives.
+    assert parsed == {"maxConcurrency": "10000"}
+    assert "extraArgs" not in parsed
+
+
+def test_sim_world_flags_are_dropped_not_extraargs():
+    """Simulator model-of-the-world flags (routing/hardware/instances) are
+    realized by the real deployment + EPP; they must never reach observe."""
+    text = """\
+```bash
+blis observe \\
+  --num-instances 4 \\
+  --routing-policy least-loaded \\
+  --total-kv-blocks 8192 \\
+  --hardware H100 \\
+  --tp 2 \\
+  --timeout 60
+```
+"""
+    parsed = gfc.parse_observe_block(text)
+    assert parsed == {"timeout": "60"}
+    assert "extraArgs" not in parsed
+
+
+def test_valid_but_unmodeled_observe_flags_pass_through_to_extraargs():
+    """Real blis observe flags without a first-class key survive into extraArgs
+    so the operator can tune them in transfer.yaml. Issue #602 choice (a)."""
+    text = """\
+```bash
+blis observe \\
+  --rate 50 \\
+  --num-requests 1000 \\
+  --no-streaming \\
+  --timeout 60
+```
+"""
+    parsed = gfc.parse_observe_block(text)
     assert parsed["timeout"] == "60"
-    assert parsed["extraArgs"] == "--verbose"
+    assert parsed["extraArgs"] == "--rate 50 --num-requests 1000 --no-streaming"
+
+
+def test_dropped_flag_emits_warning_to_stderr(capsys):
+    """Refusing a flag is surfaced, not silent, so the operator can re-add a
+    legitimate flag in transfer.yaml. Issue #602."""
+    text = """\
+```bash
+blis observe \\
+  --session-mode closed-loop \\
+  --frobnicate x \\
+  --timeout 60
+```
+"""
+    gfc.parse_observe_block(text)
+    err = capsys.readouterr().err
+    assert "--session-mode" in err
+    assert "replay/sim flag with no blis observe equivalent" in err
+    assert "--frobnicate" in err
+    assert "not a blis observe flag" in err
 
 
 def test_block_without_backslash_continuation_still_parses():
@@ -211,10 +291,10 @@ def test_render_output_parses_as_yaml_with_expected_types():
 
 
 def test_render_extra_args_from_config_stays_a_string():
-    parsed = {"extraArgs": "--verbose --dry-run"}
+    parsed = {"extraArgs": "--rate 50 --no-streaming"}
     out = gfc.render_blis_observe_yaml(parsed)
     loaded = yaml.safe_load(out)
-    assert loaded["blis_observe"]["extraArgs"] == "--verbose --dry-run"
+    assert loaded["blis_observe"]["extraArgs"] == "--rate 50 --no-streaming"
 
 
 def test_render_key_order_is_canonical():

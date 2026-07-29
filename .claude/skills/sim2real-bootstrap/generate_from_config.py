@@ -110,8 +110,9 @@ OBSERVE_TUNING_FLAGS = {
 # assemble), NOT from config.md. Listing them here keeps a config.md block that
 # spells them out (for readability) from double-injecting them into extraArgs.
 # --trace-header/--trace-data are the OUTPUT flags the task always injects and
-# stay listed. --session-mode is deliberately absent: the task does not inject
-# it (it is invalid for observe), so it is not ours to drop.
+# stay listed. --session-mode is NOT in this set (the task does not inject it):
+# it is not a blis observe flag at all, so it is dropped by the
+# OBSERVE_VALID_FLAGS allowlist guardrail below rather than here (issue #602).
 OBSERVE_PIPELINE_INJECTED_FLAGS = {
     "--server-url",
     "--model",
@@ -124,6 +125,44 @@ OBSERVE_PIPELINE_INJECTED_FLAGS = {
     "--corpus-data",
     "--concurrent-sessions",
     "--total-sessions",
+}
+
+# The complete set of flags `blis observe` accepts, derived from
+# inference-sim cmd/observe_cmd.go @ 583f7195 (PR #1499, corpus-mode). This is
+# the allowlist: a flag in config.md's observe block is written to transfer.yaml
+# only if it appears here (as a first-class OBSERVE_TUNING_FLAGS key, or — for
+# anything without a dedicated key — verbatim in extraArgs). Anything NOT here
+# is dropped, never transcribed (issue #602). Update in lockstep with
+# observe_cmd.go when observe's flags change.
+OBSERVE_VALID_FLAGS = {
+    "--api-format", "--api-key", "--concurrency", "--concurrent-sessions",
+    "--corpus-data", "--corpus-header", "--defaults-filepath", "--itl-output",
+    "--lazy-generation", "--max-concurrency", "--model", "--no-streaming",
+    "--num-requests", "--output-tokens", "--output-tokens-max",
+    "--output-tokens-min", "--output-tokens-stdev", "--post-hoc-detector",
+    "--prefix-tokens", "--prewarm-duration", "--prompt-tokens",
+    "--prompt-tokens-max", "--prompt-tokens-min", "--prompt-tokens-stdev",
+    "--rate", "--record-itl", "--rtt-ms", "--saturation-report",
+    "--saturation-threshold-ms", "--server-type", "--server-url",
+    "--session-id-header", "--slo-e2e", "--slo-itl", "--slo-ttft",
+    "--think-time-dist", "--think-time-ms", "--timeout", "--total-sessions",
+    "--trace-data", "--trace-header", "--unconstrained-output",
+    "--warmup-requests", "--workload", "--workload-spec",
+}
+
+# Flags that belong to `blis replay` (the simulator's load generator) or to
+# `blis run`'s model-of-the-world, and have NO `blis observe` equivalent. An
+# operator hand-authoring config.md by transcribing the sim's `blis replay`
+# invocation will list these; they must be dropped, never transcribed into the
+# observe command (issue #602). --session-mode is the canonical case: observe
+# infers closed-loop from the session pool, so the flag does not exist and
+# `blis observe` aborts with "unknown flag: --session-mode" if it leaks. This
+# set exists only to emit a precise warning — any flag absent from
+# OBSERVE_VALID_FLAGS is dropped regardless of whether it is listed here.
+OBSERVE_REPLAY_ONLY_FLAGS = {
+    "--session-mode", "--results-path", "--trace-output",  # blis replay load/output
+    "--num-instances", "--routing-policy",                 # sim routing
+    "--total-kv-blocks", "--hardware", "--tp",             # sim hardware/model
 }
 
 # Match pipeline/pipeline.yaml:36-50. Update in lockstep if those defaults
@@ -714,14 +753,32 @@ def parse_observe_block(config_md_text: str) -> dict[str, str]:
         elif tok in OBSERVE_PIPELINE_INJECTED_FLAGS:
             # Drop entirely — the Tekton task supplies these.
             i += 2 if has_value else 1
-        else:
-            # Unknown → extraArgs.
+        elif tok in OBSERVE_VALID_FLAGS:
+            # A real blis observe flag with no first-class key — pass it
+            # through verbatim so the operator can tune it in transfer.yaml.
             if has_value:
                 extra_pieces.extend([tok, value])
                 i += 2
             else:
                 extra_pieces.append(tok)
                 i += 1
+        else:
+            # Not a blis observe flag. Refuse to transcribe it into extraArgs
+            # (it would abort observe at runtime, e.g. the transcribed
+            # `blis replay` flag "unknown flag: --session-mode"). Warn and drop
+            # so a valid invocation still emits; the operator can add it back
+            # in transfer.yaml if it is legitimate (issue #602).
+            reason = (
+                "replay/sim flag with no blis observe equivalent"
+                if tok in OBSERVE_REPLAY_ONLY_FLAGS
+                else "not a blis observe flag"
+            )
+            print(
+                f"WARNING: dropping '{tok}' from the blis observe block "
+                f"({reason}); add it to transfer.yaml if intended.",
+                file=sys.stderr,
+            )
+            i += 2 if has_value else 1
 
     if extra_pieces:
         parsed["extraArgs"] = " ".join(extra_pieces)
