@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""sim2real deploy — Ensure images, orchestrate runs, collect results.
+"""sim2real deploy — orchestrate runs, collect results.
 
 Subcommands:
-  build    Ensure all scenario images exist (pre-flight for run)
-  run      Ensure images + submit PipelineRuns
+  run      Submit PipelineRuns and orchestrate their execution
   status   Show progress of all (workload, package, iteration) triples
   collect  Pull results from cluster for completed phases
   stop     Stop the remote orchestrator Job
@@ -51,7 +50,7 @@ def _c(code: str, text: str) -> str:
     return f"\033[{code}m{text}\033[0m" if _tty else text
 
 
-from pipeline.lib import build, cluster_ops, layout
+from pipeline.lib import cluster_ops, layout
 from pipeline.lib.log import info, ok, warn, err
 from pipeline.lib.pairkey import parse_iteration_spec, parse_pair_key
 from pipeline.lib.redact import redact_yaml_file, redact_yaml_tree
@@ -360,239 +359,6 @@ def _load_progress(store, *, allow_unreachable: bool = False,
         if allow_unreachable:
             raise ProgressUnavailable(str(exc)) from exc
         raise
-
-
-# ── Image build ───────────────────────────────────────────────────────────────
-
-def _write_build_metadata(run_dir: Path, epp_image: str) -> None:
-    """Record a successful EPP build in run_metadata.json.
-
-    Sets ``epp_image`` and ``stages.deploy.last_completed_step = "build"``.
-    No current reader consumes these fields — they remain for future
-    inspect tooling (see epic #443). No-op if run_metadata.json is missing
-    or unparseable — the caller's earlier load/validate path already
-    surfaces those errors.
-    """
-    meta_path = run_dir / "run_metadata.json"
-    if not meta_path.exists():
-        return
-    try:
-        meta = json.loads(meta_path.read_text())
-    except json.JSONDecodeError:
-        return
-    meta["epp_image"] = epp_image
-    meta.setdefault("stages", {}).setdefault("deploy", {})["last_completed_step"] = "build"
-    build.atomic_write_json(meta_path, meta)
-
-
-def _cmd_build(
-    run_dir: Path,
-    namespace: str,
-    skip_build: bool,
-    registry_secret_name: str,
-) -> str:
-    """Ensure all required scenario images exist. Returns 'built', 'skip', or 'current'.
-
-    Iterates over resolved scenarios in cluster/, extracts image refs,
-    and builds any that are stale (source hash mismatch).
-
-    ``registry_secret_name`` is the k8s Secret name holding the
-    dockerconfigjson push credentials — resolved from
-    ``cluster_config.json:secret_names.registry_creds`` by callers.
-    Empty string aborts before dispatch.
-    """
-    from pipeline.lib.ensure_image import (
-        collect_scenario_images, compute_source_hash,
-        image_needs_build, save_source_hash,
-    )
-
-    run_meta_path = run_dir / "run_metadata.json"
-    if not run_meta_path.exists():
-        err(f"run_metadata.json not found at {run_meta_path} — run 'sim2real assemble --run <name>' first.")
-        sys.exit(1)
-    try:
-        run_meta = json.loads(run_meta_path.read_text())
-    except json.JSONDecodeError as e:
-        err(f"run_metadata.json is not valid JSON: {e}. Re-run 'sim2real assemble --run <name>'.")
-        sys.exit(1)
-
-    component_image = run_meta.get("component_image")
-    if component_image is None:
-        info("No component_image in run metadata — skipping image build")
-        return "skip"
-    if not component_image:
-        err("component_image is empty in run_metadata.json — re-run 'sim2real assemble --run <name>'.")
-        sys.exit(1)
-
-    if skip_build:
-        info("--skip-build: skipping image build")
-        return "skip"
-
-    if not registry_secret_name:
-        err(
-            "cluster_config.json has no secret_names.registry_creds — "
-            "re-run 'cluster.py provision --registry-user U --registry-token T'"
-        )
-        sys.exit(1)
-
-    step(1, "Ensure Images")
-
-    registry = run_meta.get("registry", "")
-    if not registry:
-        err("registry is empty in run_metadata.json — re-run 'sim2real assemble --run <name>'.")
-        sys.exit(1)
-    repo_name = run_meta.get("repo_name", "llm-d-inference-scheduler")
-    run_name = run_dir.name
-    source_dir = EXPERIMENT_ROOT / repo_name
-
-    if not source_dir.exists():
-        err(f"Component source directory not found: {source_dir}")
-        sys.exit(1)
-
-    # Collect all unique image refs from resolved scenarios
-    cluster_dir = run_dir / "cluster"
-    scenario_images = collect_scenario_images(cluster_dir)
-
-    if not scenario_images:
-        if cluster_dir.exists() and any(cluster_dir.glob("*.yaml")):
-            warn("cluster/ has scenario files but no router.epp.image found — "
-                 "falling back to treatment image only")
-        treatment_ref = f"{registry}/{repo_name}:{run_name}"
-        scenario_images = [{"image_ref": treatment_ref, "package": "treatment"}]
-
-    # Determine which images need building
-    to_build = []
-    for img_info in scenario_images:
-        ref = img_info["image_ref"]
-        if image_needs_build(run_dir, ref, source_dir):
-            to_build.append(img_info)
-        else:
-            ok(f"Image current (hash unchanged): {ref}")
-
-    if not to_build:
-        treatment_ref = f"{registry}/{repo_name}:{run_name}"
-        _write_build_metadata(run_dir, treatment_ref)
-        return "current"
-
-    # Load translation output for source toggle (if available)
-    translation_output_path = run_dir / "translation_output.json"
-    translation_output = None
-    per_algorithm_outputs = None
-    if translation_output_path.exists():
-        try:
-            raw_output = json.loads(translation_output_path.read_text())
-        except json.JSONDecodeError as e:
-            err(f"translation_output.json is not valid JSON: {e}. Re-run /sim2real-translate.")
-            sys.exit(1)
-
-        if "per_algorithm" in raw_output:
-            per_algorithm_outputs = raw_output["per_algorithm"]
-        elif "plugin_type" in raw_output:
-            translation_output = raw_output
-        else:
-            err("translation_output.json has unrecognized format "
-                "(missing both 'per_algorithm' and 'plugin_type' keys). "
-                "Re-run /sim2real-translate.")
-            sys.exit(1)
-
-    build_script = REPO_ROOT / "pipeline" / "scripts" / "build-epp.sh"
-    if not build_script.exists():
-        err(f"build-epp.sh not found at {build_script.relative_to(REPO_ROOT)}")
-        sys.exit(1)
-
-    generated_dir = run_dir / "generated"
-
-    built_any = False
-    for img_info in to_build:
-        ref = img_info["image_ref"]
-        pkg_name = img_info["package"]
-
-        # Determine which translation output governs this image and whether it's an algo build
-        algo_output = None
-        algo_name = None
-        if per_algorithm_outputs is not None and pkg_name in per_algorithm_outputs:
-            algo_output = per_algorithm_outputs[pkg_name]
-            algo_name = pkg_name
-        elif translation_output:
-            # Legacy single-algo format: check if this is the treatment image
-            treatment_ref = f"{registry}/{repo_name}:{run_name}"
-            if ref == treatment_ref:
-                algo_output = translation_output
-                algo_name = None  # legacy mode, no per-algo subdirectory
-            else:
-                # Baseline build — need to restore baseline state
-                algo_output = translation_output
-
-        is_algorithm_build = (algo_name is not None) or (
-            translation_output and ref == f"{registry}/{repo_name}:{run_name}"
-        )
-        is_baseline_build = not is_algorithm_build and algo_output is not None
-
-        # Source toggle: ensure working tree is in correct state
-        if is_baseline_build:
-            from pipeline.lib.source_toggle import restore_baseline
-            info(f"Restoring baseline state for: {ref}")
-            try:
-                restore_baseline(source_dir, algo_output)
-            except (subprocess.CalledProcessError, OSError) as exc:
-                err(f"Failed to restore baseline state in {source_dir}: {exc}")
-                sys.exit(1)
-        elif is_algorithm_build and algo_name:
-            # Per-algorithm: apply only this algorithm's files
-            from pipeline.lib.source_toggle import restore_baseline, restore_treatment
-            info(f"Applying algorithm state for: {ref} (algo={algo_name})")
-            try:
-                restore_baseline(source_dir, algo_output)
-                restore_treatment(source_dir, generated_dir, algo_output, algo_name=algo_name)
-            except (subprocess.CalledProcessError, OSError, FileNotFoundError) as exc:
-                err(f"Failed to apply algorithm state for {algo_name}: {exc}")
-                sys.exit(1)
-
-        info(f"Building image: {ref}")
-        rc = build.dispatch_buildkit_build(
-            image_ref=ref,
-            build_id=run_name,
-            namespace=namespace,
-            source_dir=source_dir,
-            run_dir=run_dir,
-            repo_root=REPO_ROOT,
-            registry_secret_name=registry_secret_name,
-        )
-
-        # Restore baseline after algorithm build (clean state for next iteration)
-        if is_algorithm_build and algo_output:
-            from pipeline.lib.source_toggle import restore_baseline
-            try:
-                restore_baseline(source_dir, algo_output)
-            except (subprocess.CalledProcessError, OSError) as exc:
-                err(f"Failed to restore baseline after build: {exc}\n"
-                    f"  Working tree may be in modified state. To recover:\n"
-                    f"  cd {source_dir} && git checkout -- .")
-                sys.exit(1)
-
-        # Restore treatment state after baseline build (legacy mode)
-        if is_baseline_build and translation_output:
-            from pipeline.lib.source_toggle import restore_treatment
-            try:
-                restore_treatment(source_dir, generated_dir, translation_output)
-            except (OSError, FileNotFoundError) as exc:
-                err(f"Failed to restore treatment state in {source_dir}: {exc}\n"
-                    f"  Working tree may be in baseline state. To recover:\n"
-                    f"  cd {source_dir} && git checkout -- .")
-                sys.exit(1)
-
-        if rc != 0:
-            err(f"Image build failed for {ref} — see output above")
-            sys.exit(1)
-
-        current_hash = compute_source_hash(source_dir)
-        save_source_hash(run_dir, ref, current_hash)
-        ok(f"Image built and hash recorded: {ref}")
-        built_any = True
-
-    treatment_ref = f"{registry}/{repo_name}:{run_name}"
-    _write_build_metadata(run_dir, treatment_ref)
-    return "built" if built_any else "current"
 
 
 # ── PipelineRun helpers ──────────────────────────────────────────────────────
@@ -2895,16 +2661,6 @@ def _cmd_run(args, run_dir: Path, cluster_config: dict) -> None:
     if not namespaces or not namespaces[0]:
         err(_no_namespaces_hint()); sys.exit(1)
 
-    registry_secret_name = (
-        (cluster_config.get("secret_names") or {}).get("registry_creds") or ""
-    )
-    _cmd_build(
-        run_dir,
-        namespace=namespaces[0],
-        skip_build=args.skip_build,
-        registry_secret_name=registry_secret_name,
-    )
-
     max_retries = getattr(args, "max_retries", 2)
     poll_interval = getattr(args, "poll_interval", 30)
     pending_threshold = getattr(args, "pending_threshold", 600)
@@ -3747,7 +3503,7 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict,
             err(f"Failed to delete completed Job: {detail}")
             sys.exit(1)
 
-    # Validate filter flags before building images (fail fast)
+    # Validate filter flags before dispatching PipelineRuns (fail fast)
     cluster_dir = run_dir / "cluster"
     discovered = _load_pairs(cluster_dir)
     if discovered:
@@ -3774,16 +3530,6 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict,
                         "status":   "pending",
                     }
             _resolve_scope(progress, args)
-
-    registry_secret_name = (
-        (cluster_config.get("secret_names") or {}).get("registry_creds") or ""
-    )
-    _cmd_build(
-        run_dir,
-        namespace=namespace,
-        skip_build=args.skip_build,
-        registry_secret_name=registry_secret_name,
-    )
 
     workspace_dir = EXPERIMENT_ROOT / "workspace"
     run_name = run_dir.name
@@ -3848,14 +3594,12 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict,
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="deploy.py",
-        description="sim2real deploy — Ensure images, orchestrate runs, collect results",
+        description="sim2real deploy — orchestrate runs, collect results",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python pipeline/deploy.py build                      # Ensure all scenario images exist
-  python pipeline/deploy.py run                        # Ensure images + orchestrate all pairs
+  python pipeline/deploy.py run                        # Orchestrate all pairs
   python pipeline/deploy.py run --remote               # Submit orchestrator as in-cluster Job
-  python pipeline/deploy.py run --skip-build           # Orchestrate without image build
   python pipeline/deploy.py status                     # Show progress snapshot
   python pipeline/deploy.py collect                    # Pull results for completed phases
   python pipeline/deploy.py collect --skip-logs        # Collect traces only (skip large logs)
@@ -3897,15 +3641,9 @@ Examples:
     status_p.add_argument("-s", "--silent", action="store_true",
                           help="Suppress the per-pair table; print only the summary line")
 
-    build_p = sub.add_parser("build", help="Ensure all scenario images exist (pre-flight for run)")
-    build_p.add_argument("--skip-build", action="store_true", dest="skip_build",
-                         help="Skip image build entirely")
-
     run_p = sub.add_parser("run", help="Orchestrate parallel pool execution")
     run_p.add_argument("--remote", action="store_true", default=False,
                        help="Submit orchestrator as in-cluster Job instead of running locally")
-    run_p.add_argument("--skip-build", action="store_true", dest="skip_build",
-                       help="Skip image build")
     run_p.add_argument("--only",         nargs="+", metavar="PAIR",  help="Scope execution to specific pair keys (comma or space-separated, wl- prefix optional)")
     run_p.add_argument("--workload",     nargs="+", metavar="NAME",  help="Scope execution to pairs matching these workloads (comma or space-separated)")
     run_p.add_argument("--package",      nargs="+", metavar="NAME",  help="Scope execution to pairs matching these packages (comma or space-separated)")
@@ -3998,21 +3736,6 @@ def main():
 
     cluster_config = _load_run_cluster_config(run_dir)
 
-    if cmd == "build":
-        namespaces = cluster_config.get("namespaces") or []
-        if not namespaces or not namespaces[0]:
-            err("No namespaces configured. Run cluster.py provision with --namespaces."); sys.exit(1)
-        registry_secret_name = (
-            (cluster_config.get("secret_names") or {}).get("registry_creds") or ""
-        )
-        _cmd_build(
-            run_dir,
-            namespace=namespaces[0],
-            skip_build=getattr(args, "skip_build", False),
-            registry_secret_name=registry_secret_name,
-        )
-        return
-
     if cmd == "run":
         if getattr(args, "remote", False):
             _cmd_run_remote(args, run_dir, setup_config, cluster_config)
@@ -4045,7 +3768,7 @@ def main():
             sys.exit(1)
         _cmd_stop(namespace=namespaces[0])
     else:
-        err("No subcommand specified. Use: deploy.py build | run | status | collect | stop | reset | wipe | pairs")
+        err("No subcommand specified. Use: deploy.py run | status | collect | stop | reset | wipe | pairs")
         sys.exit(1)
 
 

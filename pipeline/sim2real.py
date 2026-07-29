@@ -2371,7 +2371,7 @@ def _cmd_build(args) -> int:
 
         # About to build: apply this algorithm's source overlay to source_dir
         # so buildkit uploads the correct plugin implementation + runner.go
-        # registration. Mirrors the pattern in deploy.py:_cmd_build on main.
+        # registration.
         import subprocess
         from pipeline.lib.source_toggle import restore_baseline, restore_treatment
 

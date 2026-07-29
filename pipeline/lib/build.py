@@ -2,8 +2,6 @@
 
 Consumers:
   - ``pipeline/sim2real.py:_cmd_build`` (step-2, translation-scoped)
-  - ``pipeline/deploy.py:_cmd_build`` (step-1, run-scoped) — routes its
-    buildkit invocation through this module.
 
 Runtime primitives (``probe_image_digest``, ``dispatch_buildkit_build``,
 ``atomic_write_json``) are failure-tolerant in the "fail-safe → rebuild"

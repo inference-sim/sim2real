@@ -411,7 +411,7 @@ python pipeline/sim2real.py build \
 1. Compose `image_ref = <registry>/<repo_name>:<translation_hash[:12]>-<algo>`.
 2. **Idempotency short-circuit**: if the algorithm's recorded `image_ref` already equals the composed value AND `image_digest` is non-null AND `--force-rebuild` is not set, skip. Prints `already built: <ref> (<digest>)`.
 3. **Pre-build registry probe**: `skopeo inspect docker://<ref>`. Success returns the digest; the digest is written back to `translation_output.json` and the build is skipped. Any failure (network, auth, missing tag, timeout) is treated as "absent → build" (fail-safe).
-4. **Buildkit dispatch**: submits an in-cluster `moby/buildkit:latest` pod that reads component source from a PVC and pushes to the target registry via the credentials Secret whose name is recorded in `cluster_config.json:secret_names.registry_creds` (default `registry-creds`, provisioned by `cluster.py provision`). Same `pipeline/scripts/build-epp.sh` code path `deploy.py:_cmd_build` has always used; the Secret name is threaded in via `--registry-secret-name`.
+4. **Buildkit dispatch**: submits an in-cluster `moby/buildkit:latest` pod that reads component source from a PVC and pushes to the target registry via the credentials Secret whose name is recorded in `cluster_config.json:secret_names.registry_creds` (default `registry-creds`, provisioned by `cluster.py provision`), via `pipeline/scripts/build-epp.sh`; the Secret name is threaded in via `--registry-secret-name`.
 5. **Post-build digest inspect**: `skopeo inspect` runs a second time to record the pushed digest. On success, `image_digest` is set. On failure, the build is still considered successful (the image was pushed); `image_digest` is recorded as `null` with a warning. Digest can be back-filled by a later `sim2real build --force-rebuild`.
 6. **Atomic writeback**: `translations/<hash>/translation_output.json:algorithms[i].image_ref` and `image_digest` are written after every algorithm via tempfile-and-rename. A mid-run failure preserves prior algorithms' recorded state.
 
@@ -510,10 +510,10 @@ Two invariants shape the grow-only path:
 
 ## deploy.py
 
-Ensures all scenario images exist and orchestrates PipelineRun execution across namespace slots. Operates independently of `transfer.yaml` — driven by workspace files, `setup_config.json` (workspace-scoped), and `clusters/<id>/cluster_config.json` (namespaces, PVCs, secrets).
+Orchestrates PipelineRun execution across namespace slots. Operates independently of `transfer.yaml` — driven by workspace files, `setup_config.json` (workspace-scoped), and `clusters/<id>/cluster_config.json` (namespaces, PVCs, secrets).
 
 ```bash
-python pipeline/deploy.py {build|run|status|collect|stop|reset|wipe|pairs} [flags]
+python pipeline/deploy.py {run|status|collect|stop|reset|wipe|pairs} [flags]
 ```
 
 Common flags (all subcommands):
@@ -522,9 +522,8 @@ Common flags (all subcommands):
 |------|---------|-------|
 | `--run NAME` | from `setup_config.json` | override active run |
 | `--experiment-root PATH` | cwd | path to experiment repo |
-| `--skip-build` | false | skip image build pre-flight |
 
-**Image build** — `deploy.py build` (called implicitly as pre-flight by `deploy.py run`) iterates over all resolved scenarios in `cluster/`, collects unique `router.epp.image` refs, and builds any that are stale. Baseline images are tagged by the component directory's HEAD SHA (8 chars); algorithm images are tagged `{run_name}-{algo_name}` (per-algorithm). For each algorithm build, the component working tree is reset to baseline and only that algorithm's files are applied before building. Source hash comparison skips builds when the image is already current.
+Images are built by `sim2real build` (step-2, per-algorithm) before `sim2real assemble`; `deploy.py` consumes the already-built image refs from the resolved `cluster/` scenarios and does not build.
 
 **Pair keys.** A pair key names a `(workload, package, iteration)` triple in the ConfigMap and on disk. Canonical grammar:
 
@@ -561,13 +560,10 @@ Different flags compose as AND: `--workload X --package baseline --iteration 1,3
 
 **Collection phases** — `deploy.py collect` derives valid phases dynamically from progress data (packages with status `done`). Falls back to `[baseline, treatment]` when no progress exists. Use `--package` (literals or globs) to filter, or `--package experiment` to collect all known phases. Note: globs (`base*`, `*`) never match the `experiment` magic token; pass it as a literal.
 
-**`--skip-build`** — skips the image build; use when resubmitting after a failed PipelineRun without changing the scorer.
-
 **Subcommands:**
 
 ```bash
-python pipeline/deploy.py build   [flags]   # ensure all scenario images exist (pre-flight for run)
-python pipeline/deploy.py run     [flags]   # ensure images + orchestrate parallel pool execution
+python pipeline/deploy.py run     [flags]   # orchestrate parallel pool execution
 python pipeline/deploy.py status            # show progress snapshot of all (workload, package, iteration) triples
 python pipeline/deploy.py collect [flags]     # pull results from the cluster PVC
 python pipeline/deploy.py stop               # stop the remote orchestrator Job
@@ -611,7 +607,7 @@ python pipeline/deploy.py pairs   [flags]   # list available pair keys, workload
 
 **Auto-cleanup** — when a PipelineRun succeeds, the orchestrator deletes the PipelineRun CR from the cluster. Failed PipelineRuns are left in place for debugging (`kubectl describe`, pod logs). Use `reset` to remove them when done. Note: `--skip-teardown` only suppresses the Tekton `llmdbenchmark-teardown` task (Helm-level resource cleanup); PipelineRun CR deletion by the orchestrator is unaffected. Use `--preserve-pipelineruns` to suppress PipelineRun CR deletion on success — useful for debugging steps that fail silently (e.g., `set +e` scripts that exit 0 despite internal errors).
 
-**Remote mode** — `deploy.py run --remote` submits the orchestrator as a Kubernetes Job (`sim2real-orchestrator`) instead of running locally. The launcher builds the EPP image locally, packs workspace files into a ConfigMap, applies the Job, and waits for the pod to reach Running. Use `stop` to cancel, `status` to check progress, and `collect` to pull results after completion. Requires `orchestrator_image` in `setup_config.json`.
+**Remote mode** — `deploy.py run --remote` submits the orchestrator as a Kubernetes Job (`sim2real-orchestrator`) instead of running locally. The launcher packs workspace files into a ConfigMap, applies the Job, and waits for the pod to reach Running. Use `stop` to cancel, `status` to check progress, and `collect` to pull results after completion. Requires `orchestrator_image` in `setup_config.json`.
 
 **`deploy.py status`** — prints the current state of all pairs. Reads from the `sim2real-progress-{scenario}-{run}` ConfigMap. Requires a configured namespace.
 
@@ -794,7 +790,7 @@ python pipeline/deploy.py --experiment-root <experiment-root> \
     --run <run-name> run
 ```
 
-Builds the treatment EPP image (if not current), dispatches PipelineRuns across the namespace slots, and polls for completion. Progress lands in the `sim2real-progress-<scenario>-<run-name>` ConfigMap (scoped by both `transfer.yaml:scenario` and the run name — issue #551). Use `deploy.py --run <run-name> status` to snapshot progress; use `deploy.py --run <run-name> stop` to cancel the remote orchestrator Job (if `--remote` was passed); use `deploy.py --run <run-name> reset` to requeue non-pending pairs (which also cancels their in-flight PipelineRuns).
+Dispatches PipelineRuns across the namespace slots (using the already-built EPP image refs baked into the resolved `cluster/` scenarios) and polls for completion. Progress lands in the `sim2real-progress-<scenario>-<run-name>` ConfigMap (scoped by both `transfer.yaml:scenario` and the run name — issue #551). Use `deploy.py --run <run-name> status` to snapshot progress; use `deploy.py --run <run-name> stop` to cancel the remote orchestrator Job (if `--remote` was passed); use `deploy.py --run <run-name> reset` to requeue non-pending pairs (which also cancels their in-flight PipelineRuns).
 
 ### 6. Collect results
 
@@ -871,7 +867,7 @@ The same success gate applies — `per_request_lifecycle_metrics.json` under `wo
 | `manifest.py` | Loads and validates `transfer.yaml` (v3 schema) |
 | `slicer.py` | Splits `transfer.yaml` into translation-slice vs assembly-slice + computes `translation_hash` (`translation_hash_with_sources` folds algorithm source bytes into the hash for the skill-driven flow) |
 | `translation_ref.py` | Shared alias/algorithm-name validator, on-read shim for `translation_output.json` (handles both step-1 legacy and step-2 per-algo shapes), and `resolve_translation_ref` (accepts alias / hash prefix / full hash) |
-| `build.py` | Shared build primitives — image-ref construction, skopeo digest probe, buildkit-pod dispatch, atomic JSON write. Consumed by `sim2real build` and `deploy.py:_cmd_build`. |
+| `build.py` | Shared build primitives — image-ref construction, skopeo digest probe, buildkit-pod dispatch, atomic JSON write. Consumed by `sim2real build`. |
 | `assemble_run.py` | Assembly logic behind `sim2real assemble` (deep-merge + PipelineRun generation, additive-grow / drift / legacy-run decision tree) |
 | `values.py` | Deep-merge utility used by `assemble_run.py` |
 | `pairkey.py` | Pair-key parser (canonical grammar `wl-<w>\|<p>\|iN` with legacy `wl-<w>\|<p>` fallback) and `--iteration` spec parser (list + range) |
@@ -1089,9 +1085,6 @@ python pipeline/sim2real.py assemble --translation HASH --cluster CID --run tria
 
 # Re-assemble the same run (clobbers workspace/runs/trial-1/)
 python pipeline/sim2real.py assemble --translation HASH --cluster CID --run trial-1 --force
-
-# Resubmit without rebuilding EPP
-python pipeline/deploy.py run --skip-build
 
 # Reset failed pairs without acting (preview the plan)
 python pipeline/deploy.py reset --dry-run

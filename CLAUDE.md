@@ -68,7 +68,7 @@ python pipeline/sim2real.py --experiment-root ../admission-control use --run <ru
 
 **`/sim2real-translate`** — Skill-driven translation. Reads `workspace/translations/<hash>/skill_input.json` (written by `sim2real translate`) and spawns a three-agent team (expert + writer + reviewer) per algorithm to produce the Go plugin source + treatment overlay under `workspace/translations/<hash>/generated/<algo>/`. Follow up with `sim2real translate --resume` to validate outputs. See `.claude/skills/sim2real-translate/SKILL.md`.
 
-**`pipeline/deploy.py`** — Builds EPP image and orchestrates PipelineRun execution across namespace slots (`deploy.py run`). Use `deploy.py collect` to pull results from the cluster PVC after runs complete. Operates independently of `transfer.yaml` — driven by workspace files, `setup_config.json`, and `clusters/<id>/cluster_config.json`.
+**`pipeline/deploy.py`** — Orchestrates PipelineRun execution across namespace slots (`deploy.py run`). Images are built upstream by `sim2real build`; deploy.py consumes the already-built refs and does not build. Use `deploy.py collect` to pull results from the cluster PVC after runs complete. Operates independently of `transfer.yaml` — driven by workspace files, `setup_config.json`, and `clusters/<id>/cluster_config.json`.
 
 **`pipeline/sim2real.py` (`use`, `list runs`, `list translations`)** — Manage runs and translations. `use --run <name>` flips `current_run` in `setup_config.json`. `list runs` prints all runs newest-first (mtime desc) with the active run marked `*`. `list translations` prints all translations newest-first (by `created_at`) with `ALIAS / HASH / SOURCE / IMAGES / APPENDS / CREATED` columns (`APPENDS` is the length of `append_history[]`, `0` for translations that have never been appended to — see #585). Downstream commands (`assemble --translation`, and step-2's `build --translation`) accept an alias, a hash prefix (min 4 chars), or a full hash — resolution happens via `pipeline/lib/translation_ref.py:resolve_translation_ref`.
 
@@ -81,7 +81,7 @@ python pipeline/sim2real.py --experiment-root ../admission-control use --run <ru
 | `manifest.py` | Loads and validates `transfer.yaml` (v3 schema) |
 | `slicer.py` | Splits `transfer.yaml` into translation-slice vs assembly-slice + computes `translation_hash` |
 | `translation_ref.py` | Shared alias/algorithm-name validator, on-read shim for `translation_output.json` (handles both step-1 legacy and step-2 per-algo shapes), and `resolve_translation_ref` (accepts alias / hash prefix / full hash) |
-| `build.py` | Shared build primitives — image-ref construction, skopeo digest probe, buildkit-pod dispatch, atomic JSON write. Consumed by `sim2real build` and `deploy.py:_cmd_build`. |
+| `build.py` | Shared build primitives — image-ref construction, skopeo digest probe, buildkit-pod dispatch, atomic JSON write. Consumed by `sim2real build`. |
 | `assemble_run.py` | Assembly logic behind `sim2real assemble` (deep-merge + PipelineRun generation, additive-grow / drift / legacy-run decision tree) |
 | `values.py` | Deep-merge utility (`deep_merge`) used by `assemble_run.py` |
 | `pairkey.py` | Pair-key parser (canonical grammar `wl-<w>\|<p>\|iN` with legacy `wl-<w>\|<p>` fallback) and `--iteration` spec parser (list + range) |
