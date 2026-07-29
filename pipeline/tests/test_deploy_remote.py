@@ -692,7 +692,7 @@ def test_run_remote_preflight_accepts_newly_discovered_workload(monkeypatch, tmp
         # Must NOT SystemExit at pre-flight.
         mod._cmd_run_remote(args, run_dir, setup_config, cluster_config)
 
-    # ConfigMap + Job were submitted (we got past pre-flight + image build).
+    # ConfigMap + Job were submitted (we got past pre-flight).
     assert len(apply_inputs) == 2
     assert apply_inputs[0]["kind"] == "ConfigMap"
     assert apply_inputs[1]["kind"] == "Job"
