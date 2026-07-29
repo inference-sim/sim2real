@@ -256,7 +256,9 @@ def test_job_structure():
     args = container["args"]
     assert "--experiment-root" in args
     assert "run" in args
-    assert "--skip-build" in args
+    # deploy.py no longer builds images (removed in #611), so the remote
+    # orchestrator command no longer carries --skip-build.
+    assert "--skip-build" not in args
     assert "--dry-run" in args
 
 

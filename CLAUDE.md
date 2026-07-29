@@ -81,7 +81,7 @@ python pipeline/sim2real.py --experiment-root ../admission-control use --run <ru
 | `manifest.py` | Loads and validates `transfer.yaml` (v3 schema) |
 | `slicer.py` | Splits `transfer.yaml` into translation-slice vs assembly-slice + computes `translation_hash` |
 | `translation_ref.py` | Shared alias/algorithm-name validator, on-read shim for `translation_output.json` (handles both step-1 legacy and step-2 per-algo shapes), and `resolve_translation_ref` (accepts alias / hash prefix / full hash) |
-| `build.py` | Shared build primitives — image-ref construction, skopeo digest probe, buildkit-pod dispatch, atomic JSON write. Consumed by `sim2real build` and `deploy.py:_cmd_build`. |
+| `build.py` | Shared build primitives — image-ref construction, skopeo digest probe, buildkit-pod dispatch, atomic JSON write. Consumed by `sim2real build`. |
 | `assemble_run.py` | Assembly logic behind `sim2real assemble` (deep-merge + PipelineRun generation, additive-grow / drift / legacy-run decision tree) |
 | `values.py` | Deep-merge utility (`deep_merge`) used by `assemble_run.py` |
 | `pairkey.py` | Pair-key parser (canonical grammar `wl-<w>\|<p>\|iN` with legacy `wl-<w>\|<p>` fallback) and `--iteration` spec parser (list + range) |

@@ -2624,41 +2624,6 @@ def test_status_empty_pairs_only_orchestrator(tmp_path, capsys, monkeypatch):
     assert "0 pairs" in out
 
 
-# ── Image build decision (_cmd_build) ──────────────────────────────────────────
-
-def test_cmd_build_missing_metadata(tmp_path):
-    """Missing run_metadata.json → sys.exit."""
-    from pipeline.deploy import _cmd_build
-    with pytest.raises(SystemExit):
-        _cmd_build(tmp_path, namespace="ns", skip_build=False, registry_secret_name="registry-creds")
-
-
-def test_cmd_build_no_component_image(tmp_path, capsys):
-    """component_image absent → skip."""
-    from pipeline.deploy import _cmd_build
-    (tmp_path / "run_metadata.json").write_text(json.dumps({"registry": "quay.io/me"}))
-    result = _cmd_build(tmp_path, namespace="ns", skip_build=False, registry_secret_name="registry-creds")
-    assert result == "skip"
-
-
-def test_cmd_build_empty_component_image(tmp_path):
-    """component_image is empty string → sys.exit (misconfigured setup)."""
-    from pipeline.deploy import _cmd_build
-    (tmp_path / "run_metadata.json").write_text(json.dumps({"component_image": ""}))
-    with pytest.raises(SystemExit):
-        _cmd_build(tmp_path, namespace="ns", skip_build=False, registry_secret_name="registry-creds")
-
-
-def test_cmd_build_skip_flag(tmp_path, capsys):
-    """--skip-build returns skip."""
-    from pipeline.deploy import _cmd_build
-    (tmp_path / "run_metadata.json").write_text(
-        json.dumps({"component_image": "quay.io/me/sched:r1", "registry": "quay.io/me", "repo_name": "sched"})
-    )
-    result = _cmd_build(tmp_path, namespace="ns", skip_build=True, registry_secret_name="")
-    assert result == "skip"
-
-
 # ── _check_slot_ready hf_secret_name parameter ──────────────────────────────
 
 
@@ -3013,7 +2978,6 @@ def test_cmd_run_uses_configmap_store(monkeypatch, tmp_path):
     import pipeline.deploy as mod
 
     _mock_cm(monkeypatch, {})
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_load_pairs", lambda d: {})
 
     run_dir = tmp_path / "runs" / "test-run"
@@ -3022,7 +2986,7 @@ def test_cmd_run_uses_configmap_store(monkeypatch, tmp_path):
     (run_dir / "cluster").mkdir()
 
     args = argparse.Namespace(
-        skip_build=True, only=None, workload=None, package=None,
+        only=None, workload=None, package=None,
         status=None, force=False, max_retries=2, poll_interval=30,
         gpu_resource_type=None, default_gpu_cost=1,
         pending_threshold=600, max_pending_stalls=10,
@@ -3337,7 +3301,7 @@ def test_dispatch_sets_entry_running(tmp_path, monkeypatch):
     }
     (cluster_dir / "pipelinerun-a-baseline.yaml").write_text(_yaml.dump(pr))
 
-    # Write run_metadata.json (needed by _cmd_build)
+    # Write run_metadata.json (read by _cmd_run)
     (run_dir / "run_metadata.json").write_text(json.dumps({"scenario": "test-scenario"}))
 
     # Setup config with one namespace slot
@@ -3352,8 +3316,6 @@ def test_dispatch_sets_entry_running(tmp_path, monkeypatch):
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
     monkeypatch.setattr(ConfigMapProgressStore, "save", mock_save)
 
-    # _cmd_build → no-op (skip)
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
 
     # _check_slot_ready → always ready
     monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
@@ -3388,7 +3350,6 @@ def test_dispatch_sets_entry_running(tmp_path, monkeypatch):
 
     # Build args namespace
     args = argparse.Namespace(
-        skip_build=True,
         max_retries=0,
         poll_interval=1,
         pending_threshold=600,
@@ -3432,7 +3393,7 @@ def _write_pr(cluster_dir, name):
 
 def _run_args():
     return argparse.Namespace(
-        skip_build=True, max_retries=0, poll_interval=1, pending_threshold=600,
+        max_retries=0, poll_interval=1, pending_threshold=600,
         max_pending_stalls=10, default_gpu_cost=1, gpu_resource_type="nvidia.com/gpu",
         only=None, workload=None, package=None, status=None, force=False,
         skip_teardown=False, remote=False, preserve_pipelineruns=False, shadow_ttl=0,
@@ -3469,7 +3430,6 @@ def test_all_slots_busy_skips_gpu_probe(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: dict(preloaded))
     monkeypatch.setattr(ConfigMapProgressStore, "save", mock_save)
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
     # Isolate the probe-gating behavior from in-cycle health/timeout/pending checks.
     monkeypatch.setattr(mod, "_handle_pending_pods", lambda **kw: False)
@@ -3548,7 +3508,6 @@ def test_free_slot_runs_gpu_probe_and_dispatches(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
     monkeypatch.setattr(ConfigMapProgressStore, "save", mock_save)
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
 
     import pipeline.lib.capacity as _cap_mod
@@ -3607,7 +3566,6 @@ def _orphan_harness(tmp_path, monkeypatch, *, initial_progress):
 
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: dict(initial_progress))
     monkeypatch.setattr(ConfigMapProgressStore, "save", mock_save)
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
 
     import pipeline.lib.capacity as _cap_mod
@@ -3730,7 +3688,6 @@ def _run_harness(tmp_path, monkeypatch, *, status_fn, extra_patches=None):
     monkeypatch.setattr(ConfigMapProgressStore, "save",
                         lambda self, data: saved_progress.update(data))
 
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
     monkeypatch.setattr(_cap_mod, "probe_free_gpus", lambda **kw: (8, 8, 0))
     monkeypatch.setattr(_cap_mod, "load_defaults",
@@ -3752,7 +3709,7 @@ def _run_harness(tmp_path, monkeypatch, *, status_fn, extra_patches=None):
         extra_patches(mod, monkeypatch)
 
     args = argparse.Namespace(
-        skip_build=True, max_retries=0, poll_interval=1, pending_threshold=600,
+        max_retries=0, poll_interval=1, pending_threshold=600,
         max_pending_stalls=10, default_gpu_cost=1,
         gpu_resource_type="nvidia.com/gpu", only=None, workload=None,
         package=None, status=None, force=False, skip_teardown=False,
@@ -3824,8 +3781,6 @@ def test_derive_costs_only_for_scoped_pairs(tmp_path, monkeypatch):
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
     monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
 
-    # _cmd_build → no-op
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
 
     # _check_slot_ready → always ready
     monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
@@ -3867,7 +3822,6 @@ def test_derive_costs_only_for_scoped_pairs(tmp_path, monkeypatch):
 
     # Args: scope to workload "wl-a" only (2 pairs: wl-a-baseline, wl-a-treatment)
     args = argparse.Namespace(
-        skip_build=True,
         max_retries=0,
         poll_interval=1,
         pending_threshold=600,
@@ -4023,7 +3977,6 @@ def test_health_escalation_cancels_pipelinerun(tmp_path, monkeypatch):
     saved = {}
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
     monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: saved.update(d))
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
     monkeypatch.setattr(_cap_mod, "probe_free_gpus", lambda **kw: (8, 8, 0))
     monkeypatch.setattr(_cap_mod, "load_defaults",
@@ -4057,7 +4010,7 @@ def test_health_escalation_cancels_pipelinerun(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "_handle_timeout", lambda **kw: None)
 
     args = argparse.Namespace(
-        skip_build=True, max_retries=0, poll_interval=1,
+        max_retries=0, poll_interval=1,
         pending_threshold=600, max_pending_stalls=10,
         default_gpu_cost=1, gpu_resource_type="nvidia.com/gpu",
         only=None, workload=None, package=None, status=None,
@@ -4210,7 +4163,6 @@ def test_dispatch_shuffles_dispatchable(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
     monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
 
     import pipeline.lib.capacity as _cap_mod
@@ -4240,7 +4192,7 @@ def test_dispatch_shuffles_dispatchable(tmp_path, monkeypatch):
     monkeypatch.setattr(mod.random, "shuffle", tracking_shuffle)
 
     args = argparse.Namespace(
-        skip_build=True, max_retries=0, poll_interval=1,
+        max_retries=0, poll_interval=1,
         pending_threshold=600, max_pending_stalls=10,
         default_gpu_cost=1, gpu_resource_type="nvidia.com/gpu",
         only=None, workload=None, package=None, status=None,
@@ -4289,7 +4241,6 @@ def test_shadow_ledger_prevents_over_subscription(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
     monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
 
     import pipeline.lib.capacity as _cap_mod
@@ -4329,7 +4280,7 @@ def test_shadow_ledger_prevents_over_subscription(tmp_path, monkeypatch):
     monkeypatch.setattr(_shadow_mod.time, "time", fake_time)
 
     args = argparse.Namespace(
-        skip_build=True, max_retries=0, poll_interval=1,
+        max_retries=0, poll_interval=1,
         pending_threshold=600, max_pending_stalls=10,
         default_gpu_cost=4, gpu_resource_type="nvidia.com/gpu",
         only=None, workload=None, package=None, status=None,
@@ -4374,7 +4325,6 @@ def test_shadow_ttl_zero_disables_gating(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
     monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
 
     import pipeline.lib.capacity as _cap_mod
@@ -4401,7 +4351,7 @@ def test_shadow_ttl_zero_disables_gating(tmp_path, monkeypatch):
     monkeypatch.setattr(mod.time, "sleep", lambda s: None)
 
     args = argparse.Namespace(
-        skip_build=True, max_retries=0, poll_interval=1,
+        max_retries=0, poll_interval=1,
         pending_threshold=600, max_pending_stalls=10,
         default_gpu_cost=4, gpu_resource_type="nvidia.com/gpu",
         only=None, workload=None, package=None, status=None,
@@ -4449,7 +4399,6 @@ def _setup_dispatch_run(tmp_path, monkeypatch, *, baseline_yaml: str):
 
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
     monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, data: None)
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
     monkeypatch.setattr(mod, "_check_pipelinerun_status", lambda pr_name, ns: "Succeeded")
     monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
@@ -4468,7 +4417,7 @@ def _setup_dispatch_run(tmp_path, monkeypatch, *, baseline_yaml: str):
     monkeypatch.setattr(_cap_mod, "probe_free_gpus", fake_probe)
 
     args = argparse.Namespace(
-        skip_build=True, max_retries=0, poll_interval=1,
+        max_retries=0, poll_interval=1,
         pending_threshold=600, max_pending_stalls=10,
         default_gpu_cost=4, gpu_resource_type="nvidia.com/gpu",
         only=None, workload=None, package=None, status=None, force=False,
@@ -4656,7 +4605,6 @@ def test_one_cycle_emits_unified_capacity_log_and_effective_free_warn(
 
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: {})
     monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
 
     # Probe returns probed=23, allocatable=48, requested=25 — distinct values
@@ -4701,7 +4649,7 @@ def test_one_cycle_emits_unified_capacity_log_and_effective_free_warn(
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
 
     args = argparse.Namespace(
-        skip_build=True, max_retries=0, poll_interval=1, pending_threshold=600,
+        max_retries=0, poll_interval=1, pending_threshold=600,
         max_pending_stalls=10, default_gpu_cost=4, gpu_resource_type="nvidia.com/gpu",
         only=None, workload=None, package=None, status=None, force=False,
         skip_teardown=False, remote=False, preserve_pipelineruns=False,
@@ -5032,14 +4980,11 @@ def test_cmd_run_empty_cluster_dir_emits_assemble_hint(tmp_path, capsys, monkeyp
     _make_run_dir(tmp_path)  # workspace/runs/trial-1/{cluster/,run_metadata.json}
     run_dir = tmp_path / "workspace" / "runs" / "trial-1"
 
-    # _cmd_run's first substantive action is _cmd_build; stub it so we
-    # exercise only the pair-discovery guard. Also stub out the ConfigMap
-    # load so the guard is reached without a real kubectl call.
-    monkeypatch.setattr(deploy, "_cmd_build", lambda *a, **kw: None)
+    # Stub the ConfigMap load so the pair-discovery guard is reached
+    # without a real kubectl call.
     _mock_cm(monkeypatch, {})
 
     class _Args:
-        skip_build = True
         gpu_resource_type = None
         default_gpu_cost = 1
         defaults_path = None
@@ -5104,13 +5049,12 @@ def test_cmd_run_all_terminal_message_enumerates_states(tmp_path, monkeypatch, c
     monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
 
     # Skip build + slot readiness so we hit the message before dispatch.
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
     monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
 
     args = argparse.Namespace(
-        skip_build=True, max_retries=0, poll_interval=1,
+        max_retries=0, poll_interval=1,
         pending_threshold=600, max_pending_stalls=10,
         default_gpu_cost=1, gpu_resource_type="nvidia.com/gpu",
         only=None, workload=None, package=None, status=None,

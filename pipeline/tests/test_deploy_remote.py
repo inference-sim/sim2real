@@ -27,7 +27,7 @@ def _reset_layout_experiment_root():
 
 
 def _make_run_args(*, remote=False, workload=None, only=None, package=None,
-                   status=None, iteration=None, force=False, skip_build=False,
+                   status=None, iteration=None, force=False,
                    skip_teardown=False,
                    max_retries=2, poll_interval=30, gpu_resource_type=None,
                    default_gpu_cost=1, pending_threshold=600,
@@ -35,7 +35,7 @@ def _make_run_args(*, remote=False, workload=None, only=None, package=None,
                    shadow_ttl=120):
     return argparse.Namespace(
         remote=remote, workload=workload, only=only, package=package,
-        status=status, iteration=iteration, force=force, skip_build=skip_build,
+        status=status, iteration=iteration, force=force,
         skip_teardown=skip_teardown,
         max_retries=max_retries, poll_interval=poll_interval,
         gpu_resource_type=gpu_resource_type, default_gpu_cost=default_gpu_cost,
@@ -461,9 +461,8 @@ def test_run_remote_refuses_when_active(monkeypatch, tmp_path):
     run_dir = _setup_run_dir(tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: "active")
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
 
-    args = _make_run_args(remote=True, skip_build=True)
+    args = _make_run_args(remote=True)
     setup_config = {"orchestrator_image": "img:latest"}
     cluster_config = {"namespaces": ["ns"]}
 
@@ -476,7 +475,6 @@ def test_run_remote_deletes_completed_job(monkeypatch, tmp_path):
     run_dir = _setup_run_dir(tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: "completed")
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_wait_for_job_pod", lambda *a, **kw: None)
 
     calls = []
@@ -492,7 +490,7 @@ def test_run_remote_deletes_completed_job(monkeypatch, tmp_path):
     monkeypatch.setattr(mod, "run", fake_run)
 
     with patch("subprocess.run", side_effect=_mock_subprocess_ok):
-        args = _make_run_args(remote=True, skip_build=True)
+        args = _make_run_args(remote=True)
         setup_config = {"orchestrator_image": "img:latest"}
         cluster_config = {"namespaces": ["ns"]}
         mod._cmd_run_remote(args, run_dir, setup_config, cluster_config)
@@ -507,7 +505,6 @@ def test_run_remote_completed_delete_failure_exits(monkeypatch, tmp_path, capsys
     run_dir = _setup_run_dir(tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: "completed")
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
 
     def fake_run(cmd, *, check=True, capture=False, cwd=None):
         class _R:
@@ -518,7 +515,7 @@ def test_run_remote_completed_delete_failure_exits(monkeypatch, tmp_path, capsys
 
     monkeypatch.setattr(mod, "run", fake_run)
 
-    args = _make_run_args(remote=True, skip_build=True)
+    args = _make_run_args(remote=True)
     setup_config = {"orchestrator_image": "img:latest"}
     cluster_config = {"namespaces": ["ns"]}
 
@@ -532,7 +529,6 @@ def test_run_remote_creates_configmap_and_job(monkeypatch, tmp_path):
     run_dir = _setup_run_dir(tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_wait_for_job_pod", lambda *a, **kw: None)
 
     apply_inputs = []
@@ -543,7 +539,7 @@ def test_run_remote_creates_configmap_and_job(monkeypatch, tmp_path):
         return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     with patch("subprocess.run", side_effect=fake_subprocess_run):
-        args = _make_run_args(remote=True, skip_build=True)
+        args = _make_run_args(remote=True)
         setup_config = {"orchestrator_image": "img:latest"}
         cluster_config = {"namespaces": ["ns"]}
         mod._cmd_run_remote(args, run_dir, setup_config, cluster_config)
@@ -558,7 +554,6 @@ def test_run_remote_uses_server_side_apply(monkeypatch, tmp_path):
     run_dir = _setup_run_dir(tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_wait_for_job_pod", lambda *a, **kw: None)
 
     apply_cmds = []
@@ -569,7 +564,7 @@ def test_run_remote_uses_server_side_apply(monkeypatch, tmp_path):
         return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     with patch("subprocess.run", side_effect=fake_subprocess_run):
-        args = _make_run_args(remote=True, skip_build=True)
+        args = _make_run_args(remote=True)
         setup_config = {"orchestrator_image": "img:latest"}
         cluster_config = {"namespaces": ["ns"]}
         mod._cmd_run_remote(args, run_dir, setup_config, cluster_config)
@@ -585,7 +580,6 @@ def test_run_remote_job_uses_initcontainer_and_emptydir(monkeypatch, tmp_path):
     run_dir = _setup_run_dir(tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_wait_for_job_pod", lambda *a, **kw: None)
 
     apply_inputs = []
@@ -596,7 +590,7 @@ def test_run_remote_job_uses_initcontainer_and_emptydir(monkeypatch, tmp_path):
         return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     with patch("subprocess.run", side_effect=fake_subprocess_run):
-        args = _make_run_args(remote=True, skip_build=True)
+        args = _make_run_args(remote=True)
         setup_config = {"orchestrator_image": "img:latest"}
         cluster_config = {"namespaces": ["ns"]}
         mod._cmd_run_remote(args, run_dir, setup_config, cluster_config)
@@ -624,7 +618,6 @@ def test_run_remote_passes_scoping_flags(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_wait_for_job_pod", lambda *a, **kw: None)
 
     apply_inputs = []
@@ -635,7 +628,7 @@ def test_run_remote_passes_scoping_flags(monkeypatch, tmp_path):
         return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     with patch("subprocess.run", side_effect=fake_subprocess_run):
-        args = _make_run_args(remote=True, skip_build=True, workload="wl-smoke")
+        args = _make_run_args(remote=True, workload="wl-smoke")
         setup_config = {"orchestrator_image": "img:latest"}
         cluster_config = {"namespaces": ["ns"]}
         mod._cmd_run_remote(args, run_dir, setup_config, cluster_config)
@@ -683,7 +676,6 @@ def test_run_remote_preflight_accepts_newly_discovered_workload(monkeypatch, tmp
     )
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_wait_for_job_pod", lambda *a, **kw: None)
 
     apply_inputs = []
@@ -694,7 +686,7 @@ def test_run_remote_preflight_accepts_newly_discovered_workload(monkeypatch, tmp
         return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     with patch("subprocess.run", side_effect=fake_subprocess_run):
-        args = _make_run_args(remote=True, skip_build=True, workload="wl-newwl")
+        args = _make_run_args(remote=True, workload="wl-newwl")
         setup_config = {"orchestrator_image": "img:latest"}
         cluster_config = {"namespaces": ["ns"]}
         # Must NOT SystemExit at pre-flight.
@@ -724,9 +716,8 @@ def test_run_remote_preflight_still_rejects_truly_unknown_workload(monkeypatch, 
     )
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
 
-    args = _make_run_args(remote=True, skip_build=True, workload="wl-bogus")
+    args = _make_run_args(remote=True, workload="wl-bogus")
     setup_config = {"orchestrator_image": "img:latest"}
     cluster_config = {"namespaces": ["ns"]}
 
@@ -742,7 +733,7 @@ def test_run_remote_no_image_exits(monkeypatch, tmp_path):
     run_dir = _setup_run_dir(tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
 
-    args = _make_run_args(remote=True, skip_build=True)
+    args = _make_run_args(remote=True)
     setup_config = {}
     cluster_config = {"namespaces": ["ns"]}
 
@@ -756,13 +747,12 @@ def test_run_remote_configmap_apply_failure_exits(monkeypatch, tmp_path, capsys)
     run_dir = _setup_run_dir(tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
 
     def fake_subprocess_run(cmd, *, input=None, text=True, check=False, capture_output=True, **kw):
         return type("R", (), {"returncode": 1, "stdout": "", "stderr": "forbidden"})()
 
     with patch("subprocess.run", side_effect=fake_subprocess_run):
-        args = _make_run_args(remote=True, skip_build=True)
+        args = _make_run_args(remote=True)
         setup_config = {"orchestrator_image": "img:latest"}
         cluster_config = {"namespaces": ["ns"]}
         with pytest.raises(SystemExit) as exc_info:
@@ -831,7 +821,6 @@ def test_run_remote_status_filter_uses_configmap(monkeypatch, tmp_path):
     run_dir = _setup_run_dir(tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_wait_for_job_pod", lambda *a, **kw: None)
 
     progress_with_status = {
@@ -843,7 +832,7 @@ def test_run_remote_status_filter_uses_configmap(monkeypatch, tmp_path):
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: progress_with_status.copy())
 
     with patch("subprocess.run", side_effect=_mock_subprocess_ok):
-        args = _make_run_args(remote=True, skip_build=True, status="failed")
+        args = _make_run_args(remote=True, status="failed")
         setup_config = {"orchestrator_image": "img:latest"}
         cluster_config = {"namespaces": ["ns"]}
         mod._cmd_run_remote(args, run_dir, setup_config, cluster_config)
@@ -856,7 +845,6 @@ def test_run_remote_status_filter_rejects_unmatched(monkeypatch, tmp_path):
     run_dir = _setup_run_dir(tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
 
     progress_all_done = {
         "wl-a-baseline": {"workload": "wl-a", "package": "baseline", "status": "done",
@@ -864,7 +852,7 @@ def test_run_remote_status_filter_rejects_unmatched(monkeypatch, tmp_path):
     }
     monkeypatch.setattr(ConfigMapProgressStore, "load", lambda self: progress_all_done.copy())
 
-    args = _make_run_args(remote=True, skip_build=True, status="failed")
+    args = _make_run_args(remote=True, status="failed")
     setup_config = {"orchestrator_image": "img:latest"}
     cluster_config = {"namespaces": ["ns"]}
 
@@ -881,7 +869,6 @@ def test_run_remote_skips_validation_when_configmap_unreachable(monkeypatch, tmp
     run_dir = _setup_run_dir(tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: None)
-    monkeypatch.setattr(mod, "_cmd_build", lambda *a, **kw: "skip")
     monkeypatch.setattr(mod, "_wait_for_job_pod", lambda *a, **kw: None)
 
     def failing_load(self):
@@ -890,7 +877,7 @@ def test_run_remote_skips_validation_when_configmap_unreachable(monkeypatch, tmp
     monkeypatch.setattr(ConfigMapProgressStore, "load", failing_load)
 
     with patch("subprocess.run", side_effect=_mock_subprocess_ok):
-        args = _make_run_args(remote=True, skip_build=True, status="failed")
+        args = _make_run_args(remote=True, status="failed")
         setup_config = {"orchestrator_image": "img:latest"}
         cluster_config = {"namespaces": ["ns"]}
         mod._cmd_run_remote(args, run_dir, setup_config, cluster_config)
