@@ -5048,7 +5048,7 @@ def test_cmd_run_all_terminal_message_enumerates_states(tmp_path, monkeypatch, c
                         lambda self: json.loads(json.dumps(initial_progress)))
     monkeypatch.setattr(ConfigMapProgressStore, "save", lambda self, d: None)
 
-    # Skip build + slot readiness so we hit the message before dispatch.
+    # Stub slot readiness so we hit the message before dispatch.
     monkeypatch.setattr(mod, "_check_slot_ready", lambda ns, **kw: (True, []))
     monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)

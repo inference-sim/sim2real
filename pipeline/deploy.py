@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""sim2real deploy — Ensure images, orchestrate runs, collect results.
+"""sim2real deploy — orchestrate runs, collect results.
 
 Subcommands:
-  build    Ensure all scenario images exist (pre-flight for run)
-  run      Ensure images + submit PipelineRuns
+  run      Submit PipelineRuns and orchestrate their execution
   status   Show progress of all (workload, package, iteration) triples
   collect  Pull results from cluster for completed phases
   stop     Stop the remote orchestrator Job
@@ -3769,7 +3768,7 @@ def main():
             sys.exit(1)
         _cmd_stop(namespace=namespaces[0])
     else:
-        err("No subcommand specified. Use: deploy.py build | run | status | collect | stop | reset | wipe | pairs")
+        err("No subcommand specified. Use: deploy.py run | status | collect | stop | reset | wipe | pairs")
         sys.exit(1)
 
 

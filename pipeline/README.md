@@ -510,7 +510,7 @@ Two invariants shape the grow-only path:
 
 ## deploy.py
 
-Ensures all scenario images exist and orchestrates PipelineRun execution across namespace slots. Operates independently of `transfer.yaml` — driven by workspace files, `setup_config.json` (workspace-scoped), and `clusters/<id>/cluster_config.json` (namespaces, PVCs, secrets).
+Orchestrates PipelineRun execution across namespace slots. Operates independently of `transfer.yaml` — driven by workspace files, `setup_config.json` (workspace-scoped), and `clusters/<id>/cluster_config.json` (namespaces, PVCs, secrets).
 
 ```bash
 python pipeline/deploy.py {build|run|status|collect|stop|reset|wipe|pairs} [flags]
@@ -563,7 +563,7 @@ Different flags compose as AND: `--workload X --package baseline --iteration 1,3
 **Subcommands:**
 
 ```bash
-python pipeline/deploy.py run     [flags]   # ensure images + orchestrate parallel pool execution
+python pipeline/deploy.py run     [flags]   # orchestrate parallel pool execution
 python pipeline/deploy.py status            # show progress snapshot of all (workload, package, iteration) triples
 python pipeline/deploy.py collect [flags]     # pull results from the cluster PVC
 python pipeline/deploy.py stop               # stop the remote orchestrator Job
