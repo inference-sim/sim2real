@@ -207,6 +207,44 @@ blis observe \\
     assert parsed["extraArgs"] == "--rate 50 --num-requests 1000 --no-streaming"
 
 
+def test_seed_and_saturation_flags_pass_through_to_extraargs():
+    """Regression for the review of #602: --seed (Int64Var, missed by the first
+    allowlist regex) and the --saturation-* backlog-drift flags (registered on
+    observeCmd via registerSaturationFlags, not inline) are real observe flags
+    and must survive into extraArgs, not be dropped."""
+    text = """\
+```bash
+blis observe \\
+  --seed 42 \\
+  --saturation-window 5s \\
+  --saturation-classifier composite \\
+  --timeout 60
+```
+"""
+    parsed = gfc.parse_observe_block(text)
+    assert parsed["timeout"] == "60"
+    assert parsed["extraArgs"] == (
+        "--seed 42 --saturation-window 5s --saturation-classifier composite"
+    )
+
+
+def test_equals_form_flags_are_handled():
+    """--flag=value must classify on the flag name: a modeled tuning flag maps
+    to its key, a valid-but-unmodeled flag passes through verbatim, and a
+    non-observe flag is still dropped."""
+    text = """\
+```bash
+blis observe \\
+  --timeout=900 \\
+  --rate=50 \\
+  --session-mode=closed-loop
+```
+"""
+    parsed = gfc.parse_observe_block(text)
+    assert parsed["timeout"] == "900"
+    assert parsed["extraArgs"] == "--rate=50"
+
+
 def test_dropped_flag_emits_warning_to_stderr(capsys):
     """Refusing a flag is surfaced, not silent, so the operator can re-add a
     legitimate flag in transfer.yaml. Issue #602."""

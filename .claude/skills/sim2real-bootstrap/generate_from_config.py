@@ -127,27 +127,41 @@ OBSERVE_PIPELINE_INJECTED_FLAGS = {
     "--total-sessions",
 }
 
-# The complete set of flags `blis observe` accepts, derived from
-# inference-sim cmd/observe_cmd.go @ 583f7195 (PR #1499, corpus-mode). This is
-# the allowlist: a flag in config.md's observe block is written to transfer.yaml
-# only if it appears here (as a first-class OBSERVE_TUNING_FLAGS key, or — for
-# anything without a dedicated key — verbatim in extraArgs). Anything NOT here
-# is dropped, never transcribed (issue #602). Update in lockstep with
-# observe_cmd.go when observe's flags change.
+# The complete set of flags `blis observe` accepts, from inference-sim
+# @ 583f7195 (PR #1499, corpus-mode). This is the allowlist: a flag in
+# config.md's observe block is written to transfer.yaml only if it appears here
+# (as a first-class OBSERVE_TUNING_FLAGS key, or — for anything without a
+# dedicated key — verbatim in extraArgs). Anything NOT here is dropped, never
+# transcribed (issue #602).
+#
+# Two source sites, so both must be regenerated in lockstep when observe's flags
+# change (the second is easy to miss):
+#   1. cmd/observe_cmd.go — flags registered directly on observeCmd. Match EVERY
+#      pflag setter, including Int64Var/Float64Var/DurationVar, not just Int/String.
+#   2. cmd/root.go:registerSaturationFlags(observeCmd) — the --saturation-* /
+#      backlog-drift block, shared with `blis run`/`blis replay` and registered
+#      on observe via that helper call (observe_cmd.go).
 OBSERVE_VALID_FLAGS = {
+    # --- cmd/observe_cmd.go (registered directly on observeCmd) ---
     "--api-format", "--api-key", "--concurrency", "--concurrent-sessions",
-    "--corpus-data", "--corpus-header", "--defaults-filepath", "--itl-output",
-    "--lazy-generation", "--max-concurrency", "--model", "--no-streaming",
-    "--num-requests", "--output-tokens", "--output-tokens-max",
+    "--corpus-data", "--corpus-header", "--defaults-filepath", "--horizon",
+    "--itl-output", "--lazy-generation", "--max-concurrency", "--model",
+    "--no-streaming", "--num-requests", "--output-tokens", "--output-tokens-max",
     "--output-tokens-min", "--output-tokens-stdev", "--post-hoc-detector",
     "--prefix-tokens", "--prewarm-duration", "--prompt-tokens",
     "--prompt-tokens-max", "--prompt-tokens-min", "--prompt-tokens-stdev",
     "--rate", "--record-itl", "--rtt-ms", "--saturation-report",
-    "--saturation-threshold-ms", "--server-type", "--server-url",
+    "--saturation-threshold-ms", "--seed", "--server-type", "--server-url",
     "--session-id-header", "--slo-e2e", "--slo-itl", "--slo-ttft",
     "--think-time-dist", "--think-time-ms", "--timeout", "--total-sessions",
     "--trace-data", "--trace-header", "--unconstrained-output",
     "--warmup-requests", "--workload", "--workload-spec",
+    # --- cmd/root.go:registerSaturationFlags (attached to observeCmd) ---
+    "--saturation-ci", "--saturation-classifier",
+    "--saturation-drain-ratio-saturated", "--saturation-drain-ratio-transient",
+    "--saturation-min-windows", "--saturation-peak-band",
+    "--saturation-peak-ratio", "--saturation-tail-windows",
+    "--saturation-warmup-windows", "--saturation-window",
 }
 
 # Flags that belong to `blis replay` (the simulator's load generator) or to
@@ -691,8 +705,13 @@ def parse_observe_block(config_md_text: str) -> dict[str, str]:
     """Extract flags from the `blis observe \\ ... \\` command in config.md.
 
     Returns a dict keyed by transfer.yaml key. Keys are present only when the
-    block contained the corresponding flag. `extraArgs` collects any unknown
-    non-injected flags (whitespace-joined, source order). Absent block → {}.
+    block contained the corresponding flag. Each flag is validated against
+    `blis observe`'s namespace: modeled tuning flags map to their key, other
+    real observe flags are passed through verbatim in `extraArgs`
+    (whitespace-joined, source order), and flags that are not observe flags
+    (replay-only, sim-world, unknown) are dropped with a stderr warning rather
+    than transcribed (issue #602). Both `--flag value` and `--flag=value` forms
+    are accepted. Absent block → {}.
     """
     # Locate the first line that starts a `blis observe` invocation. We accept
     # optional leading whitespace so the block can live inside a code fence.
@@ -739,29 +758,37 @@ def parse_observe_block(config_md_text: str) -> dict[str, str]:
             # Stray value with no preceding flag — skip.
             i += 1
             continue
-        # Peek at next token; it's a value if it exists and is not a flag.
-        has_value = i + 1 < len(flag_tokens) and not flag_tokens[i + 1].startswith("--")
-        value = flag_tokens[i + 1] if has_value else None
+        # Support both "--flag value" and "--flag=value" forms. Classification
+        # keys on the flag NAME; the value is inline (after '=') or, failing
+        # that, the next token when it is not itself a flag.
+        if "=" in tok:
+            flag_name, inline_value = tok.split("=", 1)
+        else:
+            flag_name, inline_value = tok, None
+        has_next_value = (
+            inline_value is None
+            and i + 1 < len(flag_tokens)
+            and not flag_tokens[i + 1].startswith("--")
+        )
+        # Tokens this flag consumes: itself, plus a separate value token if any.
+        step = 2 if has_next_value else 1
 
-        if tok in OBSERVE_TUNING_FLAGS:
+        if flag_name in OBSERVE_TUNING_FLAGS:
+            value = inline_value if inline_value is not None else (
+                flag_tokens[i + 1] if has_next_value else None
+            )
             if value is not None:
-                parsed[OBSERVE_TUNING_FLAGS[tok]] = value
-                i += 2
-            else:
-                # Tuning flag with no value is malformed; skip.
-                i += 1
-        elif tok in OBSERVE_PIPELINE_INJECTED_FLAGS:
-            # Drop entirely — the Tekton task supplies these.
-            i += 2 if has_value else 1
-        elif tok in OBSERVE_VALID_FLAGS:
+                parsed[OBSERVE_TUNING_FLAGS[flag_name]] = value
+            # else: tuning flag with no value is malformed; skip.
+        elif flag_name in OBSERVE_PIPELINE_INJECTED_FLAGS:
+            pass  # Drop entirely — the Tekton task supplies these.
+        elif flag_name in OBSERVE_VALID_FLAGS:
             # A real blis observe flag with no first-class key — pass it
-            # through verbatim so the operator can tune it in transfer.yaml.
-            if has_value:
-                extra_pieces.extend([tok, value])
-                i += 2
-            else:
-                extra_pieces.append(tok)
-                i += 1
+            # through verbatim (preserving --flag=value vs --flag value) so the
+            # operator can tune it in transfer.yaml.
+            extra_pieces.append(tok)
+            if has_next_value:
+                extra_pieces.append(flag_tokens[i + 1])
         else:
             # Not a blis observe flag. Refuse to transcribe it into extraArgs
             # (it would abort observe at runtime, e.g. the transcribed
@@ -770,15 +797,15 @@ def parse_observe_block(config_md_text: str) -> dict[str, str]:
             # in transfer.yaml if it is legitimate (issue #602).
             reason = (
                 "replay/sim flag with no blis observe equivalent"
-                if tok in OBSERVE_REPLAY_ONLY_FLAGS
+                if flag_name in OBSERVE_REPLAY_ONLY_FLAGS
                 else "not a blis observe flag"
             )
             print(
-                f"WARNING: dropping '{tok}' from the blis observe block "
+                f"WARNING: dropping '{flag_name}' from the blis observe block "
                 f"({reason}); add it to transfer.yaml if intended.",
                 file=sys.stderr,
             )
-            i += 2 if has_value else 1
+        i += step
 
     if extra_pieces:
         parsed["extraArgs"] = " ".join(extra_pieces)
