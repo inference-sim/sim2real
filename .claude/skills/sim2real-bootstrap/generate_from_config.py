@@ -69,7 +69,14 @@ PARAMETER_ALIASES = {
     # Negative bare flag: presence (with empty value column) means caching OFF.
     # Folded into enable_prefix_caching at the end of extract_fields.
     "__no_enable_prefix_caching__": {"--no-enable-prefix-caching"},
-    "replicas": {"number of pods", "instances", "replicas", "num_instances"},
+    "replicas": {
+        "number of pods",
+        "number of vllm pods",   # BLIS experiment folders use this exact label (issue #549)
+        "number of decode pods",  # anticipate variant label names
+        "instances",
+        "replicas",
+        "num_instances",
+    },
     "dtype": {"dtype", "--dtype"},
     "pipeline_parallel_size": {"pipeline_parallel_size", "--pipeline-parallel-size"},
     "data_parallel_size": {"data_parallel_size", "--data-parallel-size"},
