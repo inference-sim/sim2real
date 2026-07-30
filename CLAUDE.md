@@ -148,11 +148,15 @@ python -m pytest pipeline/ \
   pipeline/tests/test_slicer.py \
   pipeline/tests/test_sim2real.py \
   pipeline/tests/test_assemble_run.py \
+  pipeline/tests/test_assemble_replicas.py \
   pipeline/tests/test_translation_ref.py \
   pipeline/tests/test_translate.py \
   pipeline/tests/test_build.py \
   pipeline/tests/test_pairkey.py \
   pipeline/tests/test_load_pairs.py \
+  pipeline/tests/test_collect_internals.py \
+  pipeline/tests/test_source_locator.py \
+  pipeline/tests/test_setup_coverage.py \
   .claude/skills/sim2real-analyze/tests/ \
   .claude/skills/sim2real-bootstrap/tests/ \
   .claude/skills/sim2real-translate/tests/ \
