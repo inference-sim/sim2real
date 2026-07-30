@@ -98,6 +98,14 @@ python pipeline/sim2real.py --experiment-root ../admission-control use --run <ru
 | `cluster_ops.py` | Cluster-side primitives: read/write/update `cluster_config.json`, `provision_namespace`, `apply_cluster_resources`, `detect_openshift` |
 | `layout.py` | Workspace path helpers (`workspace_dir`, `cluster_dir`, `cluster_config_path`, `runs_dir`, `translations_dir`, `translation_dir`, `setup_config_path`) |
 | `epp.py` | EPP image injection helpers (`inject_epp_image`, `inject_image_ref`) |
+| `health.py` | Pod health detection and remediation for the deploy orchestrator |
+| `log.py` | Shared logging functions for pipeline scripts |
+| `progress.py` | Progress persistence for the parallel pool orchestrator (ConfigMap store) |
+| `redact.py` | YAML redaction for collected plan files — stubs sensitive fields before writing to `results/` |
+| `resolve.py` | Powers `sim2real resolve --run` — hydrated run-view helper for the workspace |
+| `shadow.py` | Shadow GPU reservation ledger for `deploy.py` orchestrator |
+| `source_locator.py` | Source-location abstraction for `translation register --build` (PathLocation / GitLocation) |
+| `source_toggle.py` | Toggle component directory between baseline and treatment states for `sim2real build` |
 
 ## Workspace Artifacts
 
