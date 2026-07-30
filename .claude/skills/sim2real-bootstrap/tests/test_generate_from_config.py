@@ -183,3 +183,33 @@ def test_output_absent_emits_default_enable_with_bootstrap_provenance():
     flag, source = pc_flags[0]
     assert flag == "--enable-prefix-caching"
     assert "sim2real-bootstrap default" in source
+
+
+# ---------------------------------------------------------------------------
+# Replicas alias: "Number of vLLM pods" (issue #549)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "label,value",
+    [
+        ("Number of vLLM pods", "2"),
+        ("number of vllm pods", "3"),    # case-insensitive
+        ("Number of pods", "4"),          # existing alias still works
+        ("number of decode pods", "5"),   # new decode-pods variant
+    ],
+)
+def test_replicas_alias_number_of_vllm_pods(label, value):
+    """BLIS experiment folders use 'Number of vLLM pods' as the replica count
+    label.  The canonicalize_parameter lookup must match it so that the emitted
+    baselines/baseline.yaml uses the correct replica count rather than silently
+    defaulting to 1 (issue #549)."""
+    table = make_table([{"Parameter": label, "Value": value}])
+    fields = gfc.extract_fields(table)
+    assert "replicas" in fields, (
+        f"Expected 'replicas' to be extracted from label {label!r}, "
+        f"but it was missing.  Extracted fields: {list(fields.keys())}"
+    )
+    assert fields["replicas"].value == int(value), (
+        f"Expected replicas={value} from label {label!r}, "
+        f"got {fields['replicas'].value!r}"
+    )
