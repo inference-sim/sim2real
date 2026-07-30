@@ -22,7 +22,16 @@ RUN apt-get update && \
 
 RUN pip install --no-cache-dir "PyYAML>=6.0,<7"
 
+# Create a non-root user for the orchestrator process.
+# Running as root is unnecessary and increases the blast radius if the
+# process is compromised while it holds cluster credentials.
+RUN addgroup --system --gid 1001 appgroup && \
+    adduser --system --uid 1001 --ingroup appgroup --no-create-home --shell /bin/false appuser
+
 WORKDIR /app
 COPY pipeline/ pipeline/
+
+# Drop privileges: run as non-root appuser (UID 1001)
+USER 1001
 
 ENTRYPOINT ["python", "pipeline/deploy.py"]
