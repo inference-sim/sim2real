@@ -173,7 +173,17 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: Unconfined  # buildkit needs unconfined seccomp for clone(2)/unshare(2)
-        # privileged: false (default) — rootless buildkit does not require it
+        # privileged: false (default) — rootless buildkit does not require it.
+        # SETUID/SETGID are the minimal caps rootless buildkit needs: the setuid
+        # helpers newuidmap/newgidmap use them to map a subordinate UID/GID range
+        # (/etc/subuid, /etc/subgid) for the build's user namespace. Two narrow
+        # caps — a large reduction from privileged (all caps + host access).
+        # NOTE: a cluster whose admission policy hard-drops these will reject this
+        # pod; such clusters need a scoped SCC/Kyverno exception instead.
+        capabilities:
+          add:
+            - SETUID
+            - SETGID
       volumeMounts:
         # Writable scratch for rootless BuildKit. This cluster's admission policy
         # injects readOnlyRootFilesystem: true, so each path rootlesskit/buildkitd
