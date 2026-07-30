@@ -101,7 +101,7 @@ python pipeline/sim2real.py --experiment-root ../admission-control use --run <ru
 | `remote.py` | ConfigMap and Job generation for `deploy.py run --remote` |
 | `capacity.py` | Cluster GPU capacity probe (taint / cordon / product filter) |
 | `cluster_ops.py` | Cluster-side primitives: read/write/update `cluster_config.json`, `provision_namespace`, `apply_cluster_resources`, `detect_openshift` |
-| `layout.py` | Workspace path helpers (`workspace_dir`, `cluster_dir`, `cluster_config_path`, `runs_dir`, `translations_dir`, `translation_dir`, `setup_config_path`) |
+| `layout.py` | Workspace path helpers — `repo_root()` (canonical repo-root, introduced in #772; use this instead of ad-hoc `Path(__file__).parent` chains), `set_experiment_root(arg)` / `experiment_root()` (module-level experiment-root state, mirrors the `--experiment-root` CLI rule), `workspace_dir`, `cluster_dir`, `cluster_config_path`, `list_cluster_ids`, `runs_dir`, `translations_dir`, `translation_dir`, `setup_config_path`, `translation_output_path`, `registered_path`, `generated_config_path` |
 | `epp.py` | EPP image injection helpers (`inject_epp_image`, `inject_image_ref`) |
 | `health.py` | Pod health detection and remediation for the deploy orchestrator |
 | `log.py` | Shared logging functions for pipeline scripts |
