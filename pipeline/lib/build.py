@@ -129,6 +129,7 @@ def dispatch_buildkit_build(
         ],
         check=False,
         cwd=repo_root,
+        timeout=600,  # buildkit image builds can take several minutes
     )
     return result.returncode
 

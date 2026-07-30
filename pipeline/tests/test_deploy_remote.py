@@ -180,7 +180,7 @@ def test_skip_teardown_injection_missing_params():
 # ── _check_existing_job tests ──────────────────────────────────────────────
 
 def test_check_existing_job_active(monkeypatch):
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = json.dumps({"status": {"active": 1}})
@@ -191,7 +191,7 @@ def test_check_existing_job_active(monkeypatch):
 
 
 def test_check_existing_job_completed(monkeypatch):
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = json.dumps({"status": {}})
@@ -202,7 +202,7 @@ def test_check_existing_job_completed(monkeypatch):
 
 
 def test_check_existing_job_not_found(monkeypatch):
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 1
             stdout = ""
@@ -215,7 +215,7 @@ def test_check_existing_job_not_found(monkeypatch):
 # ── _wait_for_job_pod tests ────────────────────────────────────────────────
 
 def test_wait_for_pod_running(monkeypatch):
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = json.dumps({
@@ -228,7 +228,7 @@ def test_wait_for_pod_running(monkeypatch):
 
 
 def test_wait_for_pod_image_pull_backoff(monkeypatch):
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = json.dumps({
@@ -251,7 +251,7 @@ def test_wait_for_pod_image_pull_backoff(monkeypatch):
 def test_wait_for_pod_no_pods_retries(monkeypatch):
     call_count = [0]
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         call_count[0] += 1
         if call_count[0] <= 2:
             class _Empty:
@@ -275,7 +275,7 @@ def test_wait_for_pod_no_pods_retries(monkeypatch):
 
 def test_wait_for_pod_failed_phase_exits(monkeypatch):
     """Pod with phase=Failed triggers immediate exit."""
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = json.dumps({
@@ -311,7 +311,7 @@ def test_wait_for_pod_failed_surfaces_logs(monkeypatch, capsys):
     log_text = "[ERROR] --workload: unrecognized values ['balanced-20']"
     log_cmds = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stderr = ""
@@ -356,7 +356,7 @@ def test_report_failed_pod_init_container_in_header(monkeypatch, capsys):
         },
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 1  # orchestrator container never ran -> no logs
             stdout = ""
@@ -378,7 +378,7 @@ def test_report_failed_pod_no_logs_no_crash(monkeypatch, capsys):
                    "containerStatuses": []},
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 1
             stdout = ""
@@ -393,7 +393,7 @@ def test_report_failed_pod_no_logs_no_crash(monkeypatch, capsys):
 
 def test_wait_for_pod_consecutive_kubectl_failures_exits(monkeypatch):
     """Three consecutive kubectl failures trigger early exit."""
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 1
             stdout = ""
@@ -408,7 +408,7 @@ def test_wait_for_pod_consecutive_kubectl_failures_exits(monkeypatch):
 
 def test_wait_for_pod_init_container_image_pull_exits(monkeypatch):
     """ImagePullBackOff in initContainerStatuses triggers fail-fast."""
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = json.dumps({
@@ -479,7 +479,7 @@ def test_run_remote_deletes_completed_job(monkeypatch, tmp_path):
 
     calls = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         calls.append(cmd)
         class _R:
             returncode = 0
@@ -506,7 +506,7 @@ def test_run_remote_completed_delete_failure_exits(monkeypatch, tmp_path, capsys
     monkeypatch.setattr(mod, "EXPERIMENT_ROOT", tmp_path)
     monkeypatch.setattr(mod, "_check_existing_job", lambda ns: "completed")
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 1
             stdout = ""

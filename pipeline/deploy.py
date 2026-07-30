@@ -105,8 +105,15 @@ def step(n, title: str) -> None:
 # ── Subprocess helper ────────────────────────────────────────────────────────
 
 def run(cmd: list[str], *, check: bool = True, capture: bool = False,
-        cwd: "Path | None" = None) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, check=check, text=True, capture_output=capture, cwd=cwd)
+        cwd: "Path | None" = None, timeout: int = 120) -> subprocess.CompletedProcess:
+    """Thin subprocess wrapper. ``timeout`` defaults to 120 s so that
+    kubectl/helm calls against a hung or unreachable cluster do not block
+    the deploy process indefinitely.
+    """
+    return subprocess.run(
+        cmd, check=check, text=True, capture_output=capture,
+        cwd=cwd, timeout=timeout,
+    )
 
 
 # ── ConfigMap namespace resolution ──────────────────────────────────────────
@@ -3561,6 +3568,7 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict,
     result = subprocess.run(
         ["kubectl", "apply", "--server-side", "--force-conflicts", "-f", "-"],
         input=json.dumps(cm), text=True, check=False, capture_output=True,
+        timeout=120,
     )
     if result.returncode != 0:
         err(f"Failed to apply ConfigMap: {(result.stderr or '').strip()}")
@@ -3579,6 +3587,7 @@ def _cmd_run_remote(args, run_dir: "Path", setup_config: dict,
     result = subprocess.run(
         ["kubectl", "apply", "--server-side", "--force-conflicts", "-f", "-"],
         input=json.dumps(job), text=True, check=False, capture_output=True,
+        timeout=120,
     )
     if result.returncode != 0:
         err(f"Failed to apply Job: {(result.stderr or '').strip()}")

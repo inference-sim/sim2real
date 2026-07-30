@@ -312,11 +312,19 @@ def _run(
     check: bool = True,
     capture: bool = False,
     input: str | None = None,
+    timeout: int = 120,
 ) -> subprocess.CompletedProcess:
     """Thin wrapper over ``subprocess.run``. Tests monkeypatch this to
     intercept every kubectl/oc invocation.
+
+    ``timeout`` defaults to 120 s — enough for nearly all kubectl/helm
+    operations while preventing indefinite hangs when the cluster API
+    server is unreachable or the connection drops mid-stream.
     """
-    return subprocess.run(cmd, check=check, text=True, capture_output=capture, input=input)
+    return subprocess.run(
+        cmd, check=check, text=True, capture_output=capture,
+        input=input, timeout=timeout,
+    )
 
 
 def _which(cmd: str) -> bool:
