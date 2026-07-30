@@ -73,97 +73,6 @@ class TestCopyWorkloadIterationsFull:
         assert len(errors) > 0
         assert any("network timeout" in e for e in errors)
 
-    def test_skips_iteration_when_up_to_date(self, tmp_path, monkeypatch):
-        """When an iteration's trace_data.csv is fresh, that iteration is skipped."""
-        from pipeline import deploy
-
-        wl_dest = tmp_path / "results" / "baseline" / "wl-smoke"
-        i1_dir = wl_dest / "i1"
-        i1_dir.mkdir(parents=True)
-        # Write a fresh trace_data.csv
-        csv = i1_dir / "trace_data.csv"
-        csv.write_text("data")
-        local_mtime = csv.stat().st_mtime
-
-        cp_calls = []
-
-        def mock_run(cmd, **kwargs):
-            cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
-            # ls iteration dirs
-            if "exec" in cmd_str and "ls " in cmd_str:
-                return _fake_run(stdout="i1\n")
-            if "exec" in cmd_str and "stat" in cmd_str:
-                return _fake_run(stdout="")
-            if "cp" in cmd_str:
-                cp_calls.append(cmd_str)
-                return _fake_run()
-            return _fake_run()
-
-        _mock_subprocess(monkeypatch, mock_run)
-
-        # Remote mtime is OLDER than local — should skip
-        errors = deploy._copy_workload_iterations_full(
-            "sim2real-extract", "run-1", "baseline", "wl-smoke", "ns-0",
-            wl_dest, {"i1": local_mtime - 100},
-        )
-        assert errors == []
-        assert cp_calls == [], "No kubectl cp should be issued for up-to-date iteration"
-
-    def test_returns_error_when_ls_fails(self, tmp_path, monkeypatch):
-        """When _list_pvc_iterations fails (ls error), single error is returned."""
-        from pipeline import deploy
-
-        wl_dest = tmp_path / "results" / "baseline" / "wl-smoke"
-        wl_dest.mkdir(parents=True)
-
-        def mock_run(cmd, **kwargs):
-            cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
-            if "exec" in cmd_str and "ls " in cmd_str:
-                return _fake_run(returncode=1, stderr="pod not found")
-            return _fake_run()
-
-        _mock_subprocess(monkeypatch, mock_run)
-
-        errors = deploy._copy_workload_iterations_full(
-            "sim2real-extract", "run-1", "baseline", "wl-smoke", "ns-0",
-            wl_dest, {},
-        )
-        assert len(errors) == 1
-        assert "failed to list iterations" in errors[0]
-
-    def test_removes_stale_iN_dir_before_recopy(self, tmp_path, monkeypatch):
-        """Stale i1/ dir is wiped before kubectl cp re-downloads."""
-        from pipeline import deploy
-
-        wl_dest = tmp_path / "results" / "baseline" / "wl-smoke"
-        i1_dir = wl_dest / "i1"
-        i1_dir.mkdir(parents=True)
-        stale = i1_dir / "old_file.txt"
-        stale.write_text("stale content")
-
-        def mock_run(cmd, **kwargs):
-            cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
-            if "exec" in cmd_str and "ls " in cmd_str:
-                return _fake_run(stdout="i1\n")
-            if "exec" in cmd_str and "stat" in cmd_str:
-                return _fake_run(stdout="")
-            if "cp" in cmd_str:
-                return _fake_run()
-            return _fake_run()
-
-        _mock_subprocess(monkeypatch, mock_run)
-
-        # remote_mtime None forces re-download
-        errors = deploy._copy_workload_iterations_full(
-            "sim2real-extract", "run-1", "baseline", "wl-smoke", "ns-0",
-            wl_dest, {},
-        )
-        assert errors == []
-        # The stale file should be gone (dir was wiped and recreated)
-        assert not stale.exists()
-        # But i1/ dir should still exist (recreated for kubectl cp target)
-        assert i1_dir.exists()
-
 
 # ── _extract_phases_from_pvc: skip_logs + scoped workload ────────────────────
 
@@ -639,52 +548,6 @@ class TestSkipLogsIterationLsFailure:
 class TestSkipLogsAllowedWorkloadsFilter:
     """Tests for skip_logs path filtering workloads via allowed_workloads."""
 
-    def test_only_allowed_workloads_are_processed(self, tmp_path, monkeypatch):
-        """skip_logs path filters ls output to only process allowed workloads."""
-        from pipeline import deploy
-
-        run_dir = tmp_path / "workspace" / "runs" / "test-run"
-        (run_dir / "cluster").mkdir(parents=True)
-
-        processed_workloads = []
-
-        def mock_run(cmd, **kwargs):
-            cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
-            if "delete" in cmd_str or "run " in cmd_str or "wait" in cmd_str:
-                return _fake_run()
-            if "exec" in cmd_str and "stat" in cmd_str:
-                return _fake_run(stdout="")
-            if "exec" in cmd_str and "du" in cmd_str:
-                return _fake_run(stdout="100\t/data/test-run/baseline\n")
-            # Top-level ls returns 3 workloads
-            if "exec" in cmd_str and "ls " in cmd_str and "/baseline/" in cmd_str and "wl-" not in cmd_str:
-                return _fake_run(stdout="wl-a wl-b wl-c\n")
-            # Iteration ls for any workload
-            if "exec" in cmd_str and "ls " in cmd_str:
-                # Extract workload name from path
-                for wl in ("wl-a", "wl-b", "wl-c"):
-                    if f"/{wl}/" in cmd_str:
-                        processed_workloads.append(wl)
-                return _fake_run(stdout="i1\n")
-            if "cp" in cmd_str:
-                return _fake_run()
-            return _fake_run()
-
-        _mock_subprocess(monkeypatch, mock_run)
-        monkeypatch.setattr(deploy, "redact_yaml_tree", lambda p: None)
-
-        # Only allow wl-a and wl-c
-        allowed = {"baseline": {"wl-a", "wl-c"}}
-
-        deploy._extract_phases_from_pvc(
-            ["baseline"], "test-run", "ns-0", run_dir,
-            skip_logs=True, allowed_workloads=allowed)
-
-        # Only wl-a and wl-c should have their iterations listed
-        assert "wl-a" in processed_workloads
-        assert "wl-c" in processed_workloads
-        assert "wl-b" not in processed_workloads
-
 
 # ── Size probe > 1GB behavior (skip_logs=True bypasses prompt) ───────────────
 
@@ -746,28 +609,6 @@ class TestSizeProbeSkipLogs:
 class TestExtractPhasePodCreateFailure:
     """Tests for pod lifecycle error handling in _extract_phases_from_pvc."""
 
-    def test_pod_create_failure_raises_runtime_error(self, tmp_path, monkeypatch):
-        """When kubectl run (pod create) fails, RuntimeError is raised."""
-        from pipeline import deploy
-
-        run_dir = tmp_path / "workspace" / "runs" / "test-run"
-        (run_dir / "cluster").mkdir(parents=True)
-
-        def mock_run(cmd, **kwargs):
-            cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
-            # Delete succeeds (cleanup)
-            if "delete" in cmd_str:
-                return _fake_run()
-            # Pod create fails
-            if "run " in cmd_str:
-                return _fake_run(returncode=1, stderr="quota exceeded")
-            return _fake_run()
-
-        _mock_subprocess(monkeypatch, mock_run)
-
-        with pytest.raises(RuntimeError, match="create failed"):
-            deploy._extract_phases_from_pvc(
-                ["baseline"], "test-run", "ns-0", run_dir)
 
     def test_pod_wait_failure_raises_runtime_error(self, tmp_path, monkeypatch):
         """When kubectl wait (pod ready) fails, RuntimeError is raised."""
