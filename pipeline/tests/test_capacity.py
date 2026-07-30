@@ -736,3 +736,112 @@ class TestExtractNodeFilters:
         }
         result = extract_node_filters(scenario)
         assert result["decode"].tolerations == ()
+
+
+# ── Additional edge-case coverage (quality agent) ──────────────────────────
+
+
+class TestProbeFreeGpusEdgeCases:
+    """Cover remaining uncovered lines in probe_free_gpus."""
+
+    @patch("pipeline.lib.capacity.subprocess.run")
+    def test_oserror_from_subprocess_returns_error_string(self, mock_run):
+        """Lines 132-135: OSError from subprocess.run is caught and returned."""
+        mock_run.side_effect = OSError("kubectl not found")
+        result = probe_free_gpus()
+        assert isinstance(result, str)
+        assert "kubectl not found" in result
+
+    @patch("pipeline.lib.capacity.subprocess.run")
+    def test_pods_call_failure_returns_error_string(self, mock_run):
+        """Line 132: kubectl get pods fails after nodes succeeds."""
+        nodes_json = json.dumps({
+            "items": [{
+                "metadata": {"name": "node-0"},
+                "status": {"allocatable": {"nvidia.com/gpu": "4"}},
+            }]
+        })
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=nodes_json),
+            MagicMock(returncode=1, stdout="", stderr="connection refused"),
+        ]
+        result = probe_free_gpus()
+        assert isinstance(result, str)
+        assert "connection refused" in result
+
+    @patch("pipeline.lib.capacity.subprocess.run")
+    def test_non_integer_pod_gpu_request_returns_error(self, mock_run):
+        """Lines 181-182: non-integer GPU request value on a pod."""
+        nodes_json = json.dumps({
+            "items": [{
+                "metadata": {"name": "node-0"},
+                "status": {"allocatable": {"nvidia.com/gpu": "4"}},
+            }]
+        })
+        # Pod has a non-integer request (e.g., "two" instead of "2")
+        pods_json = json.dumps({
+            "items": [{
+                "metadata": {"name": "bad-pod"},
+                "spec": {
+                    "nodeName": "node-0",
+                    "containers": [{
+                        "resources": {"requests": {"nvidia.com/gpu": "two"}}
+                    }],
+                },
+            }]
+        })
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=nodes_json),
+            MagicMock(returncode=0, stdout=pods_json),
+        ]
+        result = probe_free_gpus()
+        assert isinstance(result, str)
+        assert "non-integer request value" in result
+        assert "bad-pod" in result
+
+
+class TestLoadDefaultsEdgeCases:
+    """Cover remaining uncovered lines in load_defaults."""
+
+    def test_yaml_parse_error_returns_error_string(self, tmp_path):
+        """Lines 352-353: malformed YAML returns error message string."""
+        defaults_file = tmp_path / "defaults.yaml"
+        defaults_file.write_text(":\n  :\n  - [invalid yaml")
+        result = load_defaults(tmp_path, defaults_path=defaults_file)
+        assert isinstance(result, str)
+        assert "parse error" in result
+
+    def test_oserror_returns_error_string(self, tmp_path, monkeypatch):
+        """Lines 354-355: OSError on read returns error message string."""
+        from pathlib import Path
+
+        defaults_file = tmp_path / "defaults.yaml"
+        defaults_file.write_text("decode:\n  count: 2\n")
+
+        original_read_text = Path.read_text
+
+        def raising_read(self, *a, **kw):
+            if "defaults.yaml" in str(self):
+                raise OSError("permission denied")
+            return original_read_text(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "read_text", raising_read)
+        result = load_defaults(tmp_path, defaults_path=defaults_file)
+        assert isinstance(result, str)
+        assert "read error" in result
+
+    def test_default_path_construction_when_no_explicit_path(self, tmp_path):
+        """Line 347: when defaults_path is None, build from repo_root convention."""
+        # Create the conventional defaults.yaml path
+        defaults_dir = tmp_path / "llm-d-benchmark" / "config" / "templates" / "values"
+        defaults_dir.mkdir(parents=True)
+        defaults_file = defaults_dir / "defaults.yaml"
+        defaults_file.write_text("decode:\n  accelerator:\n    count: 8\n")
+
+        result = load_defaults(tmp_path)  # No defaults_path kwarg
+        assert result == {"decode": {"accelerator": {"count": 8}}}
+
+    def test_default_path_construction_returns_none_when_missing(self, tmp_path):
+        """When the conventional path doesn't exist, return None."""
+        result = load_defaults(tmp_path)  # No defaults_path kwarg, no file
+        assert result is None

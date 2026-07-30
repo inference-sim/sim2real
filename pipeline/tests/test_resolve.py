@@ -662,3 +662,101 @@ class TestWorkloadHasData:
         monkeypatch.setattr(Path, "iterdir", lambda self: raise_oserror())
         result = resolve._workload_has_data(wl_dir)
         assert result is False
+
+
+# ── Coverage: remaining uncovered lines (resolve.py L182, L201, L204, L357) ──
+
+
+class TestBuildTranslationSectionEdgeCases:
+    """Cover defensive guards in _build_translation_section for malformed data."""
+
+    def test_non_dict_algorithm_entry_skipped(self, tmp_path):
+        """Line 182: when algorithms list has a non-dict entry, skip it."""
+        _make_run(
+            tmp_path,
+            algorithms=[
+                {
+                    "name": "softreflective",
+                    "source_path": "algorithms/softreflective.py",
+                    "source_sha256": "e3b0c44",
+                    "image_ref": "ghcr.io/foo/bar:v1",
+                    "image_digest": "sha256:aa",
+                }
+            ],
+        )
+        # Inject a non-dict entry into translation_output.json algorithms list
+        trans_dir = tmp_path / "workspace" / "translations" / _HASH
+        tout_path = trans_dir / "translation_output.json"
+        import json as _json
+        tout = _json.loads(tout_path.read_text())
+        tout["algorithms"].append("not-a-dict")
+        tout["algorithms"].append(42)
+        _write_json(tout_path, tout)
+
+        result = resolve.resolve_run(tmp_path, "trial-1")
+        # Only the valid algorithm should be in the list
+        algos = result["translation"]["algorithms"]
+        assert len(algos) == 1
+        assert algos[0]["name"] == "softreflective"
+
+    def test_non_dict_baseline_entry_skipped(self, tmp_path):
+        """Line 201: when baselines list in manifest has a non-dict entry, skip it."""
+        _make_run(tmp_path)
+        # Inject a non-dict entry into manifest.assembly.yaml baselines list
+        run_dir = tmp_path / "workspace" / "runs" / "trial-1"
+        manifest_path = run_dir / "manifest.assembly.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        manifest["baselines"].append("not-a-dict")
+        manifest["baselines"].append(None)
+        _write_yaml(manifest_path, manifest)
+
+        result = resolve.resolve_run(tmp_path, "trial-1")
+        # Only the valid baseline should be in the list
+        baselines = result["translation"]["baselines"]
+        assert len(baselines) == 1
+        assert baselines[0]["name"] == "baseline"
+
+    def test_baseline_with_empty_name_skipped(self, tmp_path):
+        """Line 204: when a baseline dict has no/empty name, skip it."""
+        _make_run(tmp_path)
+        # Inject a baseline with empty name into manifest.assembly.yaml
+        run_dir = tmp_path / "workspace" / "runs" / "trial-1"
+        manifest_path = run_dir / "manifest.assembly.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        manifest["baselines"].append({"name": "", "scenario": "empty.yaml"})
+        manifest["baselines"].append({"scenario": "no-name.yaml"})
+        _write_yaml(manifest_path, manifest)
+
+        result = resolve.resolve_run(tmp_path, "trial-1")
+        # Only the valid baseline with a non-empty name should be included
+        baselines = result["translation"]["baselines"]
+        assert len(baselines) == 1
+        assert baselines[0]["name"] == "baseline"
+
+
+class TestRunMetadataNotDict:
+    """Cover line 357: run_metadata.json is valid JSON but not a dict."""
+
+    def test_json_array_raises_resolve_error(self, tmp_path):
+        """When run_metadata.json is a JSON array, raise ResolveError."""
+        run_dir = tmp_path / "workspace" / "runs" / "trial-1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "run_metadata.json").write_text('[1, 2, 3]')
+        with pytest.raises(resolve.ResolveError, match="not a JSON object"):
+            resolve.resolve_run(tmp_path, "trial-1")
+
+    def test_json_string_raises_resolve_error(self, tmp_path):
+        """When run_metadata.json is a JSON string, raise ResolveError."""
+        run_dir = tmp_path / "workspace" / "runs" / "trial-1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "run_metadata.json").write_text('"just a string"')
+        with pytest.raises(resolve.ResolveError, match="not a JSON object"):
+            resolve.resolve_run(tmp_path, "trial-1")
+
+    def test_json_number_raises_resolve_error(self, tmp_path):
+        """When run_metadata.json is a JSON number, raise ResolveError."""
+        run_dir = tmp_path / "workspace" / "runs" / "trial-1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "run_metadata.json").write_text('42')
+        with pytest.raises(resolve.ResolveError, match="not a JSON object"):
+            resolve.resolve_run(tmp_path, "trial-1")
