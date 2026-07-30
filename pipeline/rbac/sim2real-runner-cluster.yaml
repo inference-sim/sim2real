@@ -1,12 +1,19 @@
 # ClusterRole and ClusterRoleBinding granting sim2real-runner read access to
 # nodes — required for the orchestrator's GPU capacity probe (kubectl get nodes).
+#
+# Security: only "nodes" is listed here. "pods" was previously included at
+# cluster scope, granting the SA visibility into pods in ALL namespaces —
+# a violation of least privilege. The namespace-scoped sim2real-runner-ns Role
+# already grants pods get/list/watch within each slot namespace, which is
+# sufficient for lib/health.py and lib/pod_pending.py.
+# See: https://github.com/inference-sim/sim2real/issues/646
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: sim2real-runner-nodes
 rules:
   - apiGroups: [""]
-    resources: ["nodes", "pods"]
+    resources: ["nodes"]
     verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
