@@ -1,18 +1,45 @@
+# Debug manifest for exploring the shared data PVC.
+#
+# USAGE: Set NAMESPACE to your slot namespace before applying:
+#   NAMESPACE=your-namespace
+#   sed "s/\${NAMESPACE}/$NAMESPACE/" pipeline/scripts/data-pvc-explorer.yaml | kubectl apply -f -
+#
+# When done: kubectl delete pod data-pvc-explorer -n $NAMESPACE
+#
+# Security hardening vs original:
+#   - Removed hardcoded internal namespace (jchen3) → operator must supply
+#   - Pinned alpine image to specific digest instead of mutable :latest
+#   - Runs as non-root user (UID 1000) with read-only root filesystem
+#   - Added resource limits to prevent runaway consumption
+
 apiVersion: v1
 kind: Pod
 metadata:
   name: data-pvc-explorer
-  namespace: jchen3
+  namespace: ${NAMESPACE}
 spec:
   containers:
     - name: shell
-      image: alpine:latest
+      image: alpine:3.20@sha256:b89d9c93e9ed3597455c90a0b88a8bbb5cb7188438f70953fede212a0c4394e0
       command: ["sh", "-c", "sleep infinity"]
       volumeMounts:
         - name: data-storage
           mountPath: /data
+          readOnly: true
       securityContext:
-        runAsUser: 0
+        runAsUser: 1000
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        limits:
+          cpu: "200m"
+          memory: "128Mi"
+        requests:
+          cpu: "50m"
+          memory: "32Mi"
   volumes:
     - name: data-storage
       persistentVolumeClaim:
