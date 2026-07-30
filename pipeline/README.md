@@ -885,6 +885,7 @@ The same success gate applies — `trace_data.csv` under `workspace/runs/<run-na
 | `resolve.py` | Powers `sim2real resolve --run` — hydrated run-view helper for the workspace |
 | `shadow.py` | Shadow GPU reservation ledger for `deploy.py` orchestrator |
 | `source_locator.py` | Source-location abstraction for `translation register --build` (PathLocation / GitLocation) |
+| `errors.py` | Shared exception types (`AssembleError`) — breaks import cycles between low-level modules (e.g. `slicer`) and high-level modules (e.g. `assemble_run`) |
 | `source_toggle.py` | Toggle component directory between baseline and treatment states for `sim2real build` |
 
 ---
