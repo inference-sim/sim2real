@@ -10,7 +10,7 @@ The fragments shipped today:
 
 | Fragment stem | What it adds |
 |---------------|--------------|
-| `llm-d-rbac` | EPP `Role` + `RoleBinding` for `inferenceobjectives.llm-d.ai` |
+| `externally-managed-gateway` | `gateway.externallyManaged: true` — tells the chart to skip gateway provisioning when Istio / agentgateway / another external gateway already manages ingress |
 | `preserve-request-id` | `EnvoyFilter` that preserves the external request-id |
 | `epp-verbosity` | `inferenceExtension.verbosity: "5"` |
 | `vllm-logging` | `vllm.additionalFlags: [--no-disable-uvicorn-access-log]` + `loggingLevel: INFO` |
@@ -35,6 +35,8 @@ The remainder of this document keeps the original snippets so operators can hand
 The EPP fails because it does not have permission to inspect `inferenceobjectives.llm-d.ai` resources. This can happen if the `llm-d.ai` CRDs are loaded in your cluster and you are using the `main` branch of `llm-d-router`.
 
 > **Note:** PR #28 in `tektonc-data-collection` added `llm-d.ai` RBAC to the *collector* role used by the data-collection Tekton tasks. That does not cover the EPP itself — the EPP runs under its own ServiceAccount (`${model.idLabel}-gaie-epp`). The workaround below injects a `Role` + `RoleBinding` for that ServiceAccount via the scenario YAML.
+>
+> This RBAC block is **not** shipped as a defaults fragment today — apply it manually if your cluster requires it, or add an `llm-d-rbac.yaml` fragment to `<experiment-root>/baselines/defaults/` using the snippet below.
 
 Add this to your `baselines/*.yaml`:
 
