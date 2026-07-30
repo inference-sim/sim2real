@@ -2,9 +2,13 @@
 
 Thank you for your interest in contributing to sim2real!
 
-sim2real is a pipeline for transferring simulation-discovered routing algorithms from
-[inference-sim](https://github.com/inference-sim/inference-sim) to production
-[llm-d-inference-scheduler](https://github.com/llm-d/llm-d-inference-scheduler) scorer plugins.
+sim2real is a pipeline for taking simulation-discovered algorithms from
+[inference-sim](https://github.com/inference-sim/inference-sim) into production serving systems.
+The aim is a general, reproducible process for promoting an algorithm found in simulation to a
+real deployment — it is not tied to any single production target. In practice the pipeline is
+currently developed and validated against [llm-d-router](https://github.com/llm-d/llm-d-router)
+(as scorer/EPP plugins), which serves as the reference target, but the process is designed to
+generalize to other targets.
 
 ---
 
@@ -14,7 +18,7 @@ sim2real is a pipeline for transferring simulation-discovered routing algorithms
 
 Before contributing, ensure you have:
 
-- **Python 3.11+**
+- **Python 3.10+** (CI runs 3.14)
 - **kubectl** — configured to reach a test cluster
 - **Tekton Pipelines** installed on the cluster
 - **Claude Code CLI** (`claude`) — for AI-assisted development (optional but recommended)
@@ -49,7 +53,7 @@ pytest --cov=pipeline --cov-report=term-missing
 pytest tests/test_deploy_helpers.py -v
 ```
 
-The project targets **≥80% test coverage**. PRs that reduce coverage below this threshold will fail CI.
+The project enforces **≥90% test coverage** (`--cov-fail-under=90`). PRs that drop coverage below this threshold will fail CI.
 
 ---
 
@@ -59,7 +63,6 @@ The project targets **≥80% test coverage**. PRs that reduce coverage below thi
 
 - **Good first issues**: Look for the [`good first issue`](https://github.com/inference-sim/sim2real/labels/good%20first%20issue) label
 - **Documentation**: Issues labeled [`documentation`](https://github.com/inference-sim/sim2real/labels/documentation) are great entry points
-- **Roadmap**: See [ROADMAP.md](ROADMAP.md) for prioritized work items
 
 ### Opening Issues
 
@@ -114,7 +117,7 @@ Before submitting:
 
 ## Architecture Overview
 
-See [docs/architecture.md](docs/architecture.md) (for the Nous framework) and [CLAUDE.md](CLAUDE.md) for the sim2real pipeline architecture.
+See [CLAUDE.md](CLAUDE.md) and [pipeline/README.md](pipeline/README.md) for the sim2real pipeline architecture, entry points, and artifact schemas.
 
 Key modules:
 ```
@@ -123,10 +126,8 @@ pipeline/
   setup.py           # Workspace setup
   sim2real.py        # Translation/assembly CLI
   cluster.py         # Cluster provisioning
-  lib/               # Shared library modules
-    proc.py          # Subprocess utilities
-    errors.py        # Shared error types
-    rbac/            # RBAC manifests
+  lib/               # Shared library modules (proc.py, errors.py, slicer.py, assemble_run.py, ...)
+  rbac/              # RBAC manifests
 ```
 
 ---
@@ -134,7 +135,6 @@ pipeline/
 ## Community
 
 - **Issues**: [github.com/inference-sim/sim2real/issues](https://github.com/inference-sim/sim2real/issues)
-- **Roadmap**: [ROADMAP.md](ROADMAP.md)
 
 ---
 
