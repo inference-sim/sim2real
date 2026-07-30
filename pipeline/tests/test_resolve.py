@@ -528,3 +528,137 @@ class TestResolveCLI:
         assert result.returncode == 2
         assert "no workspace/" in result.stderr
         assert "--experiment-root" in result.stderr
+
+
+# ── Additional edge-case coverage (quality agent) ────────────────────
+
+
+class TestReadTranslationOutputErrors:
+    """Cover error paths in _read_translation_output."""
+
+    def test_missing_translation_output_json_raises_resolve_error(self, tmp_path):
+        """When translation_output.json does not exist, raise ResolveError."""
+        translation_dir = tmp_path / "workspace" / "translations" / _HASH
+        translation_dir.mkdir(parents=True)
+        # No translation_output.json written
+        with pytest.raises(resolve.ResolveError, match="not found"):
+            resolve._read_translation_output(translation_dir)
+
+    def test_malformed_translation_output_json_raises_resolve_error(self, tmp_path):
+        """When translation_output.json contains invalid JSON, raise ResolveError."""
+        translation_dir = tmp_path / "workspace" / "translations" / _HASH
+        translation_dir.mkdir(parents=True)
+        (translation_dir / "translation_output.json").write_text("{{invalid json")
+        with pytest.raises(resolve.ResolveError, match="malformed"):
+            resolve._read_translation_output(translation_dir)
+
+
+class TestReadManifestAssemblyErrors:
+    """Cover error paths in _read_manifest_assembly."""
+
+    def test_malformed_yaml_raises_resolve_error(self, tmp_path):
+        """Malformed YAML in manifest.assembly.yaml raises ResolveError."""
+        run_dir = tmp_path / "workspace" / "runs" / "trial"
+        run_dir.mkdir(parents=True)
+        (run_dir / "manifest.assembly.yaml").write_text(":\n  :\n  - [invalid")
+        with pytest.raises(resolve.ResolveError, match="malformed"):
+            resolve._read_manifest_assembly(run_dir)
+
+    def test_empty_yaml_returns_empty_dict(self, tmp_path):
+        """Empty YAML file (parsed as None) returns {}."""
+        run_dir = tmp_path / "workspace" / "runs" / "trial"
+        run_dir.mkdir(parents=True)
+        (run_dir / "manifest.assembly.yaml").write_text("")
+        result = resolve._read_manifest_assembly(run_dir)
+        assert result == {}
+
+    def test_non_mapping_yaml_raises_resolve_error(self, tmp_path):
+        """YAML that parses to a non-dict (e.g. a list) raises ResolveError."""
+        run_dir = tmp_path / "workspace" / "runs" / "trial"
+        run_dir.mkdir(parents=True)
+        (run_dir / "manifest.assembly.yaml").write_text("- item1\n- item2\n")
+        with pytest.raises(resolve.ResolveError, match="not a YAML mapping"):
+            resolve._read_manifest_assembly(run_dir)
+
+    def test_missing_file_returns_none(self, tmp_path):
+        """When file doesn't exist, returns None (not an error)."""
+        run_dir = tmp_path / "workspace" / "runs" / "trial"
+        run_dir.mkdir(parents=True)
+        result = resolve._read_manifest_assembly(run_dir)
+        assert result is None
+
+
+class TestResolveClusterConfigPath:
+    """Cover _resolve_cluster_config_path edge cases."""
+
+    def test_empty_cluster_id_returns_none(self, tmp_path):
+        """Empty cluster_id immediately returns None."""
+        result = resolve._resolve_cluster_config_path("")
+        assert result is None
+
+    def test_nonexistent_cluster_config_returns_none(self, tmp_path):
+        """When cluster_config.json doesn't exist, returns None."""
+        result = resolve._resolve_cluster_config_path("nonexistent-cluster")
+        assert result is None
+
+
+class TestWorkloadHasData:
+    """Cover _workload_has_data including the OSError fallback."""
+
+    def test_empty_directory_returns_false(self, tmp_path):
+        """Directory with no trace_data.csv anywhere returns False."""
+        wl_dir = tmp_path / "wl-test"
+        wl_dir.mkdir()
+        result = resolve._workload_has_data(wl_dir)
+        assert result is False
+
+    def test_no_trace_data_in_iter_dirs_returns_false(self, tmp_path):
+        """Dir with iteration subdirs but no trace_data.csv returns False."""
+        wl_dir = tmp_path / "wl-test"
+        wl_dir.mkdir()
+        (wl_dir / "i1").mkdir()
+        (wl_dir / "i2").mkdir()
+        # No trace_data.csv in any iteration dir
+        result = resolve._workload_has_data(wl_dir)
+        assert result is False
+
+    def test_flat_trace_data_returns_true(self, tmp_path):
+        """Flat-shape workload with trace_data.csv returns True."""
+        wl_dir = tmp_path / "wl-test"
+        wl_dir.mkdir()
+        (wl_dir / "trace_data.csv").write_text("col1,col2\n")
+        result = resolve._workload_has_data(wl_dir)
+        assert result is True
+
+    def test_replica_shape_trace_data_returns_true(self, tmp_path):
+        """Replica-shape workload with iN/trace_data.csv returns True."""
+        wl_dir = tmp_path / "wl-test"
+        wl_dir.mkdir()
+        i1 = wl_dir / "i1"
+        i1.mkdir()
+        (i1 / "trace_data.csv").write_text("col1,col2\n")
+        result = resolve._workload_has_data(wl_dir)
+        assert result is True
+
+    def test_i0_not_matched_by_regex(self, tmp_path):
+        """i0 does not match _ITER_DIR_RE (starts at i1)."""
+        wl_dir = tmp_path / "wl-test"
+        wl_dir.mkdir()
+        i0 = wl_dir / "i0"
+        i0.mkdir()
+        (i0 / "trace_data.csv").write_text("col1,col2\n")
+        # i0 doesn't match ^i[1-9][0-9]*$ regex
+        result = resolve._workload_has_data(wl_dir)
+        assert result is False
+
+    def test_oserror_during_iterdir_returns_false(self, tmp_path, monkeypatch):
+        """When iterdir() raises OSError, returns False gracefully."""
+        wl_dir = tmp_path / "wl-test"
+        wl_dir.mkdir()
+
+        def raise_oserror():
+            raise OSError("permission denied")
+
+        monkeypatch.setattr(Path, "iterdir", lambda self: raise_oserror())
+        result = resolve._workload_has_data(wl_dir)
+        assert result is False

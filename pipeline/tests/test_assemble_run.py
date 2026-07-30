@@ -1545,3 +1545,79 @@ class TestLoadWorkloadTraceValidation:
         exp_root = self._write(tmp_path, bad)
         with pytest.raises(assemble_run.AssembleError, match="both 'trace' and 'clients'"):
             assemble_run._load_workload(exp_root, "workloads/w.yaml")
+
+
+# ── Additional coverage: _load_yaml and _load_workload error paths ────
+
+
+class TestLoadYamlErrors:
+    """Cover _load_yaml error paths (lines 149-156)."""
+
+    def test_oserror_raises_assemble_error(self, tmp_path):
+        """Non-existent file raises AssembleError."""
+        fake = tmp_path / "nonexistent.yaml"
+        with pytest.raises(assemble_run.AssembleError, match="cannot read"):
+            assemble_run._load_yaml(fake)
+
+    def test_yaml_parse_error_raises_assemble_error(self, tmp_path):
+        """Malformed YAML raises AssembleError."""
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("---\n%invalid_directive\n")
+        with pytest.raises(assemble_run.AssembleError, match="YAML parse error"):
+            assemble_run._load_yaml(bad)
+
+    def test_non_mapping_raises_assemble_error(self, tmp_path):
+        """YAML that's not a mapping raises AssembleError."""
+        listfile = tmp_path / "list.yaml"
+        listfile.write_text("- item1\n- item2\n")
+        with pytest.raises(assemble_run.AssembleError, match="expected YAML mapping"):
+            assemble_run._load_yaml(listfile)
+
+    def test_valid_yaml_returns_dict(self, tmp_path):
+        """Valid YAML file returns dict."""
+        good = tmp_path / "good.yaml"
+        good.write_text("key: value\nnested:\n  a: 1\n")
+        result = assemble_run._load_yaml(good)
+        assert result == {"key": "value", "nested": {"a": 1}}
+
+    def test_empty_yaml_returns_empty_dict(self, tmp_path):
+        """Empty YAML file returns {}."""
+        empty = tmp_path / "empty.yaml"
+        empty.write_text("")
+        result = assemble_run._load_yaml(empty)
+        assert result == {}
+
+
+class TestLoadWorkloadErrors:
+    """Cover _load_workload error paths (lines 505-516)."""
+
+    def test_missing_workload_raises_assemble_error(self, tmp_path):
+        """Non-existent workload file raises AssembleError."""
+        with pytest.raises(assemble_run.AssembleError, match="not found"):
+            assemble_run._load_workload(tmp_path, "workloads/missing.yaml")
+
+    def test_invalid_yaml_workload_raises_assemble_error(self, tmp_path):
+        """Malformed YAML in workload raises AssembleError."""
+        wl = tmp_path / "workloads" / "bad.yaml"
+        wl.parent.mkdir(parents=True)
+        wl.write_text("---\n%invalid\n")
+        with pytest.raises(assemble_run.AssembleError, match="invalid YAML"):
+            assemble_run._load_workload(tmp_path, "workloads/bad.yaml")
+
+    def test_non_mapping_workload_raises_assemble_error(self, tmp_path):
+        """Workload YAML that's not a mapping raises AssembleError."""
+        wl = tmp_path / "workloads" / "list.yaml"
+        wl.parent.mkdir(parents=True)
+        wl.write_text("- item1\n- item2\n")
+        with pytest.raises(assemble_run.AssembleError, match="not a YAML mapping"):
+            assemble_run._load_workload(tmp_path, "workloads/list.yaml")
+
+    def test_valid_workload_sets_workload_name_from_stem(self, tmp_path):
+        """Valid workload without name/workload_name gets stem-derived name."""
+        wl = tmp_path / "workloads" / "wl_chat.yaml"
+        wl.parent.mkdir(parents=True)
+        wl.write_text(yaml.dump({
+            "trace": {"source": "data.csv", "pool": {"concurrent_sessions": 1, "total_sessions": 10}},
+        }))
+        result = assemble_run._load_workload(tmp_path, "workloads/wl_chat.yaml")
+        assert result["workload_name"] == "wl_chat"

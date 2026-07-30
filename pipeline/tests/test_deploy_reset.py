@@ -206,6 +206,7 @@ def test_reset_pair_state_only_clears_completed_namespace(monkeypatch):
              "namespace": None, "completed_namespace": "sim2real-0", "retries": 0}
 
     monkeypatch.setattr(mod, "_uninstall_orphaned_helm", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "_sweep_orphaned_httproutes", lambda *a, **k: None)
 
     # _DISCOVERED has wl-smoke-baseline with a pr_name set; for this test we
     # need the no-pr_name branch, so pass an empty discovered map.
