@@ -1629,7 +1629,7 @@ def _cmd_translation_append(args) -> int:
         thash = translation_ref.resolve_translation_ref(
             args.translation, layout.translations_dir()
         )
-    except translation_ref.ResolveError as exc:
+    except translation_ref.TranslationResolveError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
@@ -2223,7 +2223,7 @@ def _cmd_build(args) -> int:
 
     try:
         translation_hash = translation_ref.resolve_translation_ref(args.translation)
-    except translation_ref.ResolveError as exc:
+    except translation_ref.TranslationResolveError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
@@ -2498,7 +2498,7 @@ def _cmd_assemble(args) -> int:
     from pipeline.lib import translation_ref
     try:
         translation_hash = translation_ref.resolve_translation_ref(args.translation)
-    except translation_ref.ResolveError as exc:
+    except translation_ref.TranslationResolveError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
