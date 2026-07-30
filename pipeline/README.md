@@ -1104,6 +1104,29 @@ python pipeline/deploy.py run --package baseline
 python pipeline/deploy.py collect --package treatment
 ```
 
+## Shell completion
+
+Tab completion scripts for `deploy.py` are provided for bash and zsh:
+
+```bash
+# bash — add to ~/.bashrc
+source /path/to/sim2real/pipeline/completions.bash
+
+# zsh — add to ~/.zshrc
+source /path/to/sim2real/pipeline/completions.zsh
+```
+
+Both scripts complete the `deploy.py` subcommands (`run`, `status`, `collect`, `stop`, `reset`, `wipe`, `pairs`) and their flags. The bash script also registers completion for the `python pipeline/deploy.py` invocation form via a wrapper.
+
+For custom aliases, register completion manually:
+
+```bash
+# bash
+complete -F _sim2real_deploy my-alias
+# zsh
+compdef _sim2real_deploy my-alias
+```
+
 ## Troubleshooting
 
 Pipeline-level recovery and operational commands. For experiment-config issues (EPP RBAC, logging verbosity), see [`docs/troubleshooting.md`](../docs/troubleshooting.md).
