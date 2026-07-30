@@ -10,7 +10,7 @@ The fragments shipped today:
 
 | Fragment stem | What it adds |
 |---------------|--------------|
-| `epp-verbosity` | `inferenceExtension.verbosity: "5"` |
+| `epp-verbosity` | `router.epp.verbosity: "5"` |
 | `externally-managed-gateway` | `gateway.externallyManaged: true` — tells the chart to assume the gateway (Istio, AgentGateway, etc.) is managed externally and skip in-chart gateway provisioning |
 | `preserve-request-id` | `EnvoyFilter` that preserves the external request-id |
 | `routing-proxy-resources` | `routing.proxy.resources.requests` set to `memory: 16Gi`, `cpu: 4` (chart leaves it unset) |
@@ -70,9 +70,12 @@ Add this to your `baselines/*.yaml`:
 Add to the `scenario` in `baselines/*.yaml`:
 
 ```yaml
-  inferenceExtension:
+router:
+  epp:
     verbosity: "5"
 ```
+
+> **Note:** The `epp-verbosity` framework defaults fragment applies this automatically — it is enabled by default for all bootstrapped experiments. The `/sim2real-check` §4.2 InferenceObjectives check is **INAPPLICABLE** when EPP verbosity is below `-v=3`; `verbosity: "5"` (V(5) = VERBOSE) satisfies this requirement.
 
 ### vLLM
 
