@@ -44,7 +44,7 @@ jobs:
             type=raw,value=${{ github.sha }}
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build
+      - name: Build (load for smoke test)
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -72,8 +72,20 @@ jobs:
           print('OK: all pipeline.lib modules imported')
           "
 
+      # Push from buildkit rather than the docker daemon. A separate
+      # `docker push` of the loaded image intermittently fails with
+      # `unknown blob`: layers restored from the type=gha cache are
+      # manifest-present but blob-absent in the daemon store (issue #661).
+      # This step is a warm cache hit from the build above, so it rebuilds
+      # nothing and streams the (guaranteed-present) blobs straight to ghcr.
       - name: Push
-        run: docker push --all-tags ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
 
       - name: Notify on failure
         if: failure() && github.event_name == 'push'
