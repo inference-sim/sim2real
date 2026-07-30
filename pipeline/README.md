@@ -799,14 +799,14 @@ python pipeline/deploy.py --experiment-root <experiment-root> \
     --run <run-name> collect
 ```
 
-Pulls per-pair `per_request_lifecycle_metrics.json` and GPU logs from the cluster PVC into `workspace/runs/<run-name>/results/<phase>/<workload>/i<N>/`. This is the epic's success gate — the demo is done when the JSON files exist locally.
+Pulls per-pair `trace_data.csv` and GPU logs from the cluster PVC into `workspace/runs/<run-name>/results/<phase>/<workload>/i<N>/`. This is the epic's success gate — the demo is done when the CSV files exist locally.
 
 ### Success criterion
 
 For each `<workload>` in `transfer.yaml:workloads`, each `<phase>` in `{baseline, <algorithm>}`, and each iteration `<N>` in `1..replicas`:
 
 ```
-workspace/runs/<run-name>/results/<phase>/<workload>/i<N>/per_request_lifecycle_metrics.json
+workspace/runs/<run-name>/results/<phase>/<workload>/i<N>/trace_data.csv
 ```
 
 Once these files exist, step-1's BYO demo is complete. Downstream skills (e.g. `/sim2real-analyze`) consume them for latency comparison and report generation.
@@ -815,7 +815,7 @@ Once these files exist, step-1's BYO demo is complete. Downstream skills (e.g. `
 
 ## End-of-step-2 skill-driven demo
 
-Same success criterion as the BYO demo — per-workload per-algorithm `per_request_lifecycle_metrics.json` files exist locally. The difference is that instead of registering a pre-built image (step 3 above), the operator invokes the `/sim2real-translate` Claude skill to produce the plugin source, then `sim2real build` compiles it into images.
+Same success criterion as the BYO demo — per-workload per-algorithm `trace_data.csv` files exist locally. The difference is that instead of registering a pre-built image (step 3 above), the operator invokes the `/sim2real-translate` Claude skill to produce the plugin source, then `sim2real build` compiles it into images.
 
 ### Prerequisites
 
@@ -856,7 +856,7 @@ For each algorithm: probe the registry, build if absent, record `image_ref`/`ima
 
 ### 7-9. Assemble, deploy, collect (identical to BYO steps 4-6, using the same `--translation` alias)
 
-The same success gate applies — `per_request_lifecycle_metrics.json` under `workspace/runs/<run-name>/results/<phase>/<workload>/i<N>/` (one file per iteration).
+The same success gate applies — `trace_data.csv` under `workspace/runs/<run-name>/results/<phase>/<workload>/i<N>/` (one file per iteration).
 
 ---
 
@@ -876,7 +876,7 @@ The same success gate applies — `per_request_lifecycle_metrics.json` under `wo
 | `remote.py` | ConfigMap + Job generation for `deploy.py run --remote` |
 | `capacity.py` | Cluster GPU capacity probe (taint / cordon / product filter) |
 | `cluster_ops.py` | Cluster-side primitives: read/write/update `cluster_config.json`, `provision_namespace`, `apply_cluster_resources`, `detect_openshift` |
-| `layout.py` | Workspace path helpers (`workspace_dir`, `cluster_dir`, `cluster_config_path`, `runs_dir`, `translations_dir`, `translation_dir`, `setup_config_path`) |
+| `layout.py` | Workspace path helpers — `repo_root()` (canonical repo-root, introduced in #772; use this instead of ad-hoc `Path(__file__).parent` chains), `set_experiment_root(arg)` / `experiment_root()` (module-level experiment-root state, mirrors the `--experiment-root` CLI rule), `workspace_dir`, `cluster_dir`, `cluster_config_path`, `list_cluster_ids`, `runs_dir`, `translations_dir`, `translation_dir`, `setup_config_path`, `translation_output_path`, `registered_path`, `generated_config_path` |
 | `epp.py` | EPP image injection helpers (`inject_epp_image`, `inject_image_ref`) |
 | `health.py` | Pod health detection and remediation for the deploy orchestrator |
 | `log.py` | Shared logging functions for pipeline scripts |
@@ -885,7 +885,9 @@ The same success gate applies — `per_request_lifecycle_metrics.json` under `wo
 | `resolve.py` | Powers `sim2real resolve --run` — hydrated run-view helper for the workspace |
 | `shadow.py` | Shadow GPU reservation ledger for `deploy.py` orchestrator |
 | `source_locator.py` | Source-location abstraction for `translation register --build` (PathLocation / GitLocation) |
+| `errors.py` | Shared exception types (`AssembleError`) — breaks import cycles between low-level modules (e.g. `slicer`) and high-level modules (e.g. `assemble_run`) |
 | `source_toggle.py` | Toggle component directory between baseline and treatment states for `sim2real build` |
+| `proc.py` | Shared subprocess-execution seam (`run`, `which`) — consolidates the near-identical thin wrappers that formerly lived in `deploy.py`, `setup.py`, and `cluster_ops.py`; test monkeypatching targets this module |
 
 ---
 
@@ -936,6 +938,9 @@ algorithms:                 # optional — omit for baseline-only benchmarks
 
 workloads:
   - <path>                  # one or more workload YAMLs
+                            # Each YAML is either a generative workload (any fields understood
+                            # by llm-d-benchmark's WorkloadSpec) or a trace workload (must have
+                            # a non-empty `trace:` mapping — see Trace workload schema below).
 
 context:
   text: |                   # freeform instructions (consumed by step-2's translation skill)
@@ -977,6 +982,36 @@ blis_observe:               # optional — per-transfer overrides for blis obser
 All paths are relative to the experiment root and validated by `sim2real assemble` at load time.
 
 `component.ref` (optional): tag, branch, or commit SHA identifying the expected version of the component submodule. Reserved for step-2 (the skill-driven flow that will consume it).
+
+### Trace workload schema
+
+A workload YAML with a non-empty `trace:` mapping is treated as a **trace workload** — it sources requests from a recorded conversation trace (via `prepare-trace` + session pool) rather than a generative `WorkloadSpec`. `sim2real assemble` detects the presence of `trace:` and switches the PipelineRun to the trace code path.
+
+```yaml
+name: <workload-name>         # required; kebab-or-snake-case, unique in the YAML list
+trace:
+  source: <spec>              # required. Dataset location:
+                              #   hf:<org>/<dataset>   — HuggingFace Hub dataset
+                              #   data.csv / <path>    — local file (relative to experiment root)
+  shards: 39                  # optional (default 39) — number of shards to download
+  split: test                 # optional (default "test") — HF dataset split
+  filters:                    # optional — filter conversations before conversion
+    min_rounds: 2             # minimum turns a conversation must have to be kept (default 2)
+  convert:                    # optional — conversion options
+    context_growth: accumulate  # how to build context window: "accumulate" (default) or other
+  pool:                       # required — session pool sizing
+    concurrent_sessions: <N>  # concurrent replays in-flight (maps to --concurrent-sessions)
+    total_sessions: <N>       # total sessions to run (0 = exhaust corpus; maps to --total-sessions)
+  sample:                     # optional — corpus sampling controls (applied at corpus-build time)
+    dedup_by_conversation: true  # deduplicate by conversation ID before sampling (default true)
+    shuffle_seed: 42          # RNG seed for deterministic corpus shuffle (default 42)
+```
+
+**Required fields:** `source`, `pool.concurrent_sessions`, `pool.total_sessions`.
+
+**`tracePath`** is deterministic: `sim2real assemble` hashes all `trace:` content fields (excluding `pool:` — replay-time only) and names the path `traces/<safe_wl_name>-<sha12>`. Changing any content field forces a new corpus build; changing only `pool:` reuses the cached corpus.
+
+**`sample.dedup_by_conversation` and `sample.shuffle_seed`** affect the corpus hash (changing them forces a rebuild). They are NOT included in the generative `workloadSpec` path — only trace workloads emit `traceDedupByConversation` and `traceShuffleSeed` PipelineRun params.
 
 ---
 
@@ -1051,24 +1086,25 @@ scenario:
 
 ### Plugin config
 
-The EPP plugin configuration goes inside `inferenceExtension.pluginsCustomConfig` as a YAML-in-YAML string:
+The EPP plugin configuration goes inside `router.epp.pluginsCustomConfig` as a YAML-in-YAML string:
 
 ```yaml
-inferenceExtension:
-  pluginsConfigFile: custom-plugins.yaml
-  pluginsCustomConfig:
-    custom-plugins.yaml: |
-      apiVersion: inference.networking.x-k8s.io/v1alpha1
-      kind: EndpointPickerConfig
-      plugins:
-      - type: my-plugin
-        name: my-plugin
-        parameters:
-          threshold: 5
-      schedulingProfiles:
-      - name: default
+router:
+  epp:
+    pluginsConfigFile: custom-plugins.yaml
+    pluginsCustomConfig:
+      custom-plugins.yaml: |
+        apiVersion: inference.networking.x-k8s.io/v1alpha1
+        kind: EndpointPickerConfig
         plugins:
-        - pluginRef: my-plugin
+        - type: my-plugin
+          name: my-plugin
+          parameters:
+            threshold: 5
+        schedulingProfiles:
+        - name: default
+          plugins:
+          - pluginRef: my-plugin
 ```
 
 ### Typical overlay content

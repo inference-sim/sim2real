@@ -621,7 +621,7 @@ def _dispatch_build(entry: dict, *, thash: str, build_context: dict) -> None:
             namespace=build_context["build_namespace"],
             source_dir=source_dir,
             run_dir=layout.translation_dir(thash),
-            repo_root=_REPO_ROOT,
+            repo_root=layout.repo_root(),
             registry_secret_name=build_context["registry_secret_name"],
         )
     if rc != 0:
@@ -1629,7 +1629,7 @@ def _cmd_translation_append(args) -> int:
         thash = translation_ref.resolve_translation_ref(
             args.translation, layout.translations_dir()
         )
-    except translation_ref.ResolveError as exc:
+    except translation_ref.TranslationResolveError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
@@ -2223,7 +2223,7 @@ def _cmd_build(args) -> int:
 
     try:
         translation_hash = translation_ref.resolve_translation_ref(args.translation)
-    except translation_ref.ResolveError as exc:
+    except translation_ref.TranslationResolveError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
@@ -2417,7 +2417,7 @@ def _cmd_build(args) -> int:
                     namespace=build_namespace,
                     source_dir=source_dir,
                     run_dir=tdir,
-                    repo_root=_REPO_ROOT,
+                    repo_root=layout.repo_root(),
                     registry_secret_name=registry_secret_name,
                 )
             except build.BuildError as exc:
@@ -2498,7 +2498,7 @@ def _cmd_assemble(args) -> int:
     from pipeline.lib import translation_ref
     try:
         translation_hash = translation_ref.resolve_translation_ref(args.translation)
-    except translation_ref.ResolveError as exc:
+    except translation_ref.TranslationResolveError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

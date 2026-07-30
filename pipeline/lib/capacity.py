@@ -118,6 +118,7 @@ def probe_free_gpus(
         nodes_result = subprocess.run(
             ["kubectl", "get", "nodes", "-o", "json"],
             check=False, text=True, capture_output=True,
+            timeout=30,  # prevent hang if API server is unresponsive
         )
         if nodes_result.returncode != 0:
             return nodes_result.stderr.strip() or "kubectl get nodes failed"
@@ -127,11 +128,12 @@ def probe_free_gpus(
              "--field-selector=status.phase!=Succeeded,status.phase!=Failed",
              "-o", "json"],
             check=False, text=True, capture_output=True,
+            timeout=30,  # prevent hang if API server is unresponsive
         )
         if pods_result.returncode != 0:
             return pods_result.stderr.strip() or "kubectl get pods failed"
 
-    except OSError as e:
+    except (OSError, subprocess.TimeoutExpired) as e:
         return str(e)
 
     try:

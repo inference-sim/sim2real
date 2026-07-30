@@ -86,8 +86,9 @@ class ConfigMapProgressStore(ProgressStore):
                  "-n", self._namespace,
                  "-o", f"jsonpath={{.data.{self.DATA_KEY}}}"],
                 check=False, text=True, capture_output=True,
+                timeout=30,  # prevent hang if API server is unresponsive
             )
-        except OSError as exc:
+        except (OSError, subprocess.TimeoutExpired) as exc:
             raise RuntimeError(f"kubectl not available: {exc}") from exc
         if result.returncode != 0:
             if "(NotFound)" in result.stderr:
@@ -129,8 +130,9 @@ class ConfigMapProgressStore(ProgressStore):
                 ["kubectl", "apply", "-f", "-"],
                 input=json.dumps(cm),
                 check=False, text=True, capture_output=True,
+                timeout=30,  # prevent hang if API server is unresponsive
             )
-        except OSError as exc:
+        except (OSError, subprocess.TimeoutExpired) as exc:
             raise RuntimeError(
                 f"Failed to update ConfigMap {self.configmap_name}: {exc}"
             ) from exc
