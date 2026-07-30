@@ -246,3 +246,60 @@ def test_tree_on_empty_or_missing_dir(tmp_path: Path):
 
     missing = tmp_path / "does-not-exist"
     assert redact_yaml_tree(missing) == 0
+
+
+# ── Additional edge-case coverage (quality agent) ────────────────────
+
+
+def test_unreadable_file_returns_zero(tmp_path: Path, monkeypatch):
+    """When the file cannot be read (OSError), return 0 and leave untouched."""
+    from pipeline.lib.redact import redact_yaml_file
+
+    p = tmp_path / "secret.yaml"
+    p.write_text("apiVersion: v1\nkind: Secret\ndata:\n  key: dmFsdWU=\n")
+
+    # Make read_text raise OSError
+    def raise_oserror(self):
+        raise OSError("Permission denied")
+
+    monkeypatch.setattr(Path, "read_text", raise_oserror)
+    result = redact_yaml_file(p)
+    assert result == 0
+
+
+def test_write_failure_returns_zero_and_cleans_tmp(tmp_path: Path, monkeypatch):
+    """When writing the redacted output fails, return 0 and clean up tmp file."""
+    from pipeline.lib.redact import redact_yaml_file
+
+    p = tmp_path / "secret.yaml"
+    p.write_text("apiVersion: v1\nkind: Secret\ndata:\n  key: dmFsdWU=\n")
+
+    original_content = p.read_text()
+    write_calls = []
+
+    original_write_text = Path.write_text
+
+    def failing_write(self, content, *a, **kw):
+        if ".redact.tmp" in str(self):
+            write_calls.append(str(self))
+            raise OSError("disk full")
+        return original_write_text(self, content, *a, **kw)
+
+    monkeypatch.setattr(Path, "write_text", failing_write)
+    result = redact_yaml_file(p)
+    assert result == 0
+    # Original file should be untouched (write failed before replace)
+    assert p.read_text() == original_content
+
+
+def test_yaml_with_tab_characters_is_unparseable(tmp_path: Path):
+    """YAML with invalid characters triggers YAMLError path."""
+    from pipeline.lib.redact import redact_yaml_file
+
+    p = tmp_path / "bad.yaml"
+    # Multi-doc with invalid YAML in first doc
+    p.write_text("---\n%invalid_directive\n---\napiVersion: v1\nkind: Secret\n")
+    result = redact_yaml_file(p)
+    assert result == 0
+    # File should be untouched
+    assert "%invalid_directive" in p.read_text()
