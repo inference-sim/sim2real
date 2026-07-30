@@ -176,21 +176,30 @@ spec:
         # privileged: false (default) — rootless buildkit does not require it
       volumeMounts:
         # Writable scratch for rootless BuildKit. Required because this cluster's
-        # admission policy injects readOnlyRootFilesystem: true — buildctl-daemonless.sh
-        # mktemp's its state/socket dir and BuildKit writes its data root under $HOME,
-        # both of which fail on a read-only rootfs without these emptyDir mounts.
+        # admission policy injects readOnlyRootFilesystem: true, so every path
+        # rootlesskit/buildkitd writes to must be a mounted volume:
+        #   /home/user           — HOME: rootlesskit state (.local/tmp) + buildkit
+        #                          data root (.local/share/buildkit) + caches
+        #   /run/user/1000       — XDG_RUNTIME_DIR: the buildkitd.sock socket dir
+        #   /tmp                 — buildctl-daemonless.sh mktemp scratch
+        # registry-creds is mounted onto /home/user/.docker on top of the home
+        # emptyDir (kubelet mounts the parent first, then the nested secret).
+        - name: buildkit-home
+          mountPath: /home/user
+        - name: buildkit-xdg
+          mountPath: /run/user/1000
         - name: buildkit-tmp
           mountPath: /tmp
-        - name: buildkit-state
-          mountPath: /home/user/.local/share/buildkit
         - name: source
           mountPath: /workspace/source
         - name: registry-creds
           mountPath: /home/user/.docker
   volumes:
-    - name: buildkit-tmp
+    - name: buildkit-home
       emptyDir: {}
-    - name: buildkit-state
+    - name: buildkit-xdg
+      emptyDir: {}
+    - name: buildkit-tmp
       emptyDir: {}
     - name: source
       persistentVolumeClaim:
