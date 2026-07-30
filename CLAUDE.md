@@ -14,7 +14,7 @@ inference-sim to production llm-d-inference-scheduler scorer plugins.
 
 ## Submodules
 
-- `inference-sim/` — Discrete-event LLM inference simulator (source of evolved algorithms)
+- `inference-sim/` — Discrete-event LLM inference simulator (source of evolved algorithms). See [`blis-context.md`](blis-context.md) for a developer-oriented explanation of how BLIS simulates the llm-d-inference-scheduler and GAIE control plane, and how evolved simulation policies map to production scorer plugins.
 - `tektonc-data-collection/` — Tekton-based cluster data collection pipeline
 
 `llm-d-inference-scheduler` is not a submodule of the framework repo. Each experiment repo carries its own copy (e.g. `admission-control/llm-d-inference-scheduler/`).
