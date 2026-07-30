@@ -1,6 +1,6 @@
 jinja2>=3.1.5,<4          # CVE-2024-56326, CVE-2024-56201 fixed in 3.1.5
 PyYAML>=6.0.3,<7
-requests>=2.32.0,<3       # CVE-2024-35195 fixed in 2.32.0
+requests>=2.34.2,<3       # CVE-2024-35195 fixed in 2.32.0
 matplotlib>=3.11.1,<4
 numpy>=1.24.4,<3
 anthropic>=0.25.0
