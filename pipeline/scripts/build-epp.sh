@@ -144,10 +144,13 @@ spec:
   containers:
     - name: buildkit
       # Pin to rootless variant: no privileged flag needed, runs as UID 1000.
-      # Use a specific version tag (not :latest) to avoid silent supply-chain updates.
-      # Update this pin when upgrading buildkit: moby/buildkit release page at
-      # https://github.com/moby/buildkit/releases
-      image: moby/buildkit:v0.32.0-rootless
+      # Pinned by digest (not just the tag) so a repointed tag can't silently
+      # swap in unreviewed build tooling. The tag is retained for readability;
+      # the @sha256 digest is what actually gets pulled.
+      # To upgrade: pick a new release from https://github.com/moby/buildkit/releases,
+      # then resolve its digest (e.g. `crane digest moby/buildkit:<tag>-rootless`)
+      # and update the tag and digest together.
+      image: moby/buildkit:v0.32.0-rootless@sha256:40615b4a00f9a791b6fd1d6c41ebfc690e4f4b2e3710240bdd043b4467bc4d7a
       command:
         - buildctl-daemonless.sh
       args:
