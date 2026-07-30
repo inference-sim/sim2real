@@ -152,6 +152,14 @@ spec:
       # NOTE: unquoted heredoc — keep comments here free of backticks and
       # dollar-parenthesis command substitution; they expand before apply.
       image: moby/buildkit:v0.32.0-rootless@sha256:40615b4a00f9a791b6fd1d6c41ebfc690e4f4b2e3710240bdd043b4467bc4d7a
+      env:
+        # Rootless buildkit can't create the nested runc sandbox that RUN steps
+        # use — it would remount /proc, which is denied in this pod's user
+        # namespace under the cluster's restrictions. Disable the process sandbox
+        # so RUN steps execute directly in the worker. buildctl-daemonless.sh
+        # forwards BUILDKITD_FLAGS to the buildkitd it spawns.
+        - name: BUILDKITD_FLAGS
+          value: --oci-worker-no-process-sandbox
       command:
         - buildctl-daemonless.sh
       args:
