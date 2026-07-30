@@ -37,7 +37,11 @@ if TYPE_CHECKING:
 
 
 # ── Repo layout ──────────────────────────────────────────────────────────────
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# Reuse the value computed for the sys.path bootstrap above rather than
+# recomputing it. The canonical helper is ``pipeline.lib.layout.repo_root()``,
+# imported below once the package is importable; this alias preserves the
+# module-level ``REPO_ROOT`` name used throughout deploy.py.
+REPO_ROOT = _REPO_ROOT
 
 # Overridden in main() when --experiment-root is specified.
 EXPERIMENT_ROOT = REPO_ROOT

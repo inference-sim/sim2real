@@ -27,6 +27,20 @@ from pathlib import Path
 _EXPERIMENT_ROOT: Path | None = None
 
 
+def repo_root() -> Path:
+    """Absolute path to the sim2real repository root.
+
+    Single source of truth for the value that pipeline entrypoints
+    (``deploy.py``, ``sim2real.py``, ``cluster.py``, ``setup.py``) each
+    otherwise recompute inline as ``Path(__file__).resolve().parent.parent``.
+
+    ``layout.py`` lives at ``<repo>/pipeline/lib/layout.py``, so the repo
+    root is three parents up. Entrypoint modules live at ``<repo>/pipeline``
+    (two parents up from their own file), which resolves to the same path.
+    """
+    return Path(__file__).resolve().parent.parent.parent
+
+
 def set_experiment_root(arg: str | Path | None) -> Path:
     """Set the module-level experiment root from a CLI-arg-style value.
 
