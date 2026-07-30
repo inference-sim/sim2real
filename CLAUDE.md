@@ -136,9 +136,15 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). When no `-
 | `runs/<run>/cluster/pipelinerun-*.yaml` | `sim2real assemble` | `deploy.py run` |
 | `runs/<run>/results/{phase}/` | `deploy.py collect` | `/sim2real-analyze` skill, `deploy.py wipe` |
 | `runs/<run>/results/{phase}/<workload>/i<N>/gpu_logs/<node>.log` | `deploy.py collect` (pulled from PVC) | analysis / debugging |
+| `runs/<run>/results/{phase}/<workload>/i<N>/epp_logs/` | `deploy.py collect` (pulled from PVC) | EPP pod logs, time-bucketed (produced by `stream-epp-logs` sidecar) |
 | `runs/<run>/results/{phase}/<workload>/i<N>/metrics/raw/<pod>_<ts>_metrics.log` | `deploy.py collect` (pulled from PVC) | analysis — raw Prometheus text-exposition dumps, one file per pod per scrape (produced by `collect_metrics.sh`, which `stream-metrics` wraps — see `pipeline/README.md#metric-capture-stream-metrics`) |
 | `runs/<run>/results/{phase}/<workload>/i<N>/metrics/processed/metrics_summary.json` | `deploy.py collect` (pulled from PVC) | analysis — post-run percentiles over the metrics named in `process_metrics.py:AGGREGATE_METRICS` |
 | `runs/<run>/results/{phase}/<workload>/i<N>/metrics/processed/replica_status_timeseries.json` | `deploy.py collect` (pulled from PVC) | analysis — replica state / scale over the workload window |
+| `runs/<run>/results/{phase}/<workload>/i<N>/metrics/processed/pod_startup_times.json` | `deploy.py collect` (pulled from PVC) | analysis — pod startup times collected each iteration |
+| `runs/<run>/results/{phase}/<workload>/i<N>/epp_stream_done` | `deploy.py collect` (pulled from PVC) | sentinel written by `collect-results` when workload finishes; `stream-epp-logs` polls this and exits |
+| `runs/<run>/results/{phase}/<workload>/i<N>/gpu_stream_done` | `deploy.py collect` (pulled from PVC) | sentinel for `stream-gpu-stats` |
+| `runs/<run>/results/{phase}/<workload>/i<N>/metrics_stream_done` | `deploy.py collect` (pulled from PVC) | sentinel for `stream-metrics` |
+| `runs/<run>/results/{phase}/plans/{flow}/*.yaml` | `deploy.py collect` (best-effort — non-fatal) | resolved llm-d-benchmark plan YAMLs pulled from PVC; workload-invariant within a phase |
 | ConfigMap `sim2real-progress-{scenario}-{run}` | `deploy.py run`, `deploy.py reset` | All `deploy.py` subcommands |
 | `runs/<run>/plans/<phase>/<workload>/` | `deploy.py run` | workload tasks |
 
