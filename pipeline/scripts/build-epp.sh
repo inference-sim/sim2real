@@ -148,8 +148,9 @@ spec:
       # swap in unreviewed build tooling. The tag is retained for readability;
       # the @sha256 digest is what actually gets pulled.
       # To upgrade: pick a new release from https://github.com/moby/buildkit/releases,
-      # then resolve its digest (e.g. `crane digest moby/buildkit:<tag>-rootless`)
-      # and update the tag and digest together.
+      # resolve its digest with crane or skopeo, then update tag and digest together.
+      # NOTE: unquoted heredoc — keep comments here free of backticks and
+      # dollar-parenthesis command substitution; they expand before apply.
       image: moby/buildkit:v0.32.0-rootless@sha256:40615b4a00f9a791b6fd1d6c41ebfc690e4f4b2e3710240bdd043b4467bc4d7a
       command:
         - buildctl-daemonless.sh
@@ -174,11 +175,23 @@ spec:
           type: Unconfined  # buildkit needs unconfined seccomp for clone(2)/unshare(2)
         # privileged: false (default) — rootless buildkit does not require it
       volumeMounts:
+        # Writable scratch for rootless BuildKit. Required because this cluster's
+        # admission policy injects readOnlyRootFilesystem: true — buildctl-daemonless.sh
+        # mktemp's its state/socket dir and BuildKit writes its data root under $HOME,
+        # both of which fail on a read-only rootfs without these emptyDir mounts.
+        - name: buildkit-tmp
+          mountPath: /tmp
+        - name: buildkit-state
+          mountPath: /home/user/.local/share/buildkit
         - name: source
           mountPath: /workspace/source
         - name: registry-creds
           mountPath: /home/user/.docker
   volumes:
+    - name: buildkit-tmp
+      emptyDir: {}
+    - name: buildkit-state
+      emptyDir: {}
     - name: source
       persistentVolumeClaim:
         claimName: source-pvc
