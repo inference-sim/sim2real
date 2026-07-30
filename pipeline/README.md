@@ -886,6 +886,8 @@ The same success gate applies — `trace_data.csv` under `workspace/runs/<run-na
 | `shadow.py` | Shadow GPU reservation ledger for `deploy.py` orchestrator |
 | `source_locator.py` | Source-location abstraction for `translation register --build` (PathLocation / GitLocation) |
 | `source_toggle.py` | Toggle component directory between baseline and treatment states for `sim2real build` |
+| `errors.py` | Shared exception types (`AssembleError`) — breaks import cycles between low-level modules (e.g. `slicer`) and high-level consumers (e.g. `assemble_run`) |
+| `proc.py` | Shared subprocess execution seam (`run`, `which`) — single consolidation point for output capture, timeouts, and test monkeypatching; consumed by `deploy.py`, `setup.py`, `cluster_ops.py`, and `build.py` |
 
 ---
 

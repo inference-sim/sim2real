@@ -111,6 +111,8 @@ python pipeline/sim2real.py --experiment-root ../admission-control use --run <ru
 | `shadow.py` | Shadow GPU reservation ledger for `deploy.py` orchestrator |
 | `source_locator.py` | Source-location abstraction for `translation register --build` (PathLocation / GitLocation) |
 | `source_toggle.py` | Toggle component directory between baseline and treatment states for `sim2real build` |
+| `errors.py` | Shared exception types (`AssembleError`) — breaks import cycles between low-level modules (e.g. `slicer`) and high-level consumers (e.g. `assemble_run`) |
+| `proc.py` | Shared subprocess execution seam (`run`, `which`) — single consolidation point for output capture, timeouts, and test monkeypatching; consumed by `deploy.py`, `setup.py`, `cluster_ops.py`, and `build.py` |
 
 ## Workspace Artifacts
 
@@ -165,31 +167,19 @@ Two checks run in order:
 # 1. Lint (pyflakes errors only — F codes)
 ruff check pipeline/ .claude/skills/ --select F
 
-# 2. Tests
+# 2. Tests (pipeline/ glob picks up all test_*.py files automatically)
 python -m pytest pipeline/ \
-  pipeline/tests/test_layout.py \
-  pipeline/tests/test_cluster_ops.py \
-  pipeline/tests/test_cluster_py.py \
-  pipeline/tests/test_slicer.py \
-  pipeline/tests/test_sim2real.py \
-  pipeline/tests/test_assemble_run.py \
-  pipeline/tests/test_assemble_replicas.py \
-  pipeline/tests/test_translation_ref.py \
-  pipeline/tests/test_translate.py \
-  pipeline/tests/test_build.py \
-  pipeline/tests/test_pairkey.py \
-  pipeline/tests/test_load_pairs.py \
-  pipeline/tests/test_collect_internals.py \
-  pipeline/tests/test_source_locator.py \
-  pipeline/tests/test_setup_coverage.py \
   .claude/skills/sim2real-analyze/tests/ \
   .claude/skills/sim2real-bootstrap/tests/ \
   .claude/skills/sim2real-translate/tests/ \
   .claude/skills/sim2real-check/tests/ \
+  --cov=pipeline \
+  --cov-report=term-missing \
+  --cov-fail-under=90 \
   -v
 ```
 
-Run both locally before pushing. If your change adds a new module, test file location, or skill, update `.github/workflows/test.yml` to include it — CI only covers paths explicitly listed.
+Run both locally before pushing. If your change adds a new skill directory under `.claude/skills/`, add its `tests/` subdirectory to `.github/workflows/test.yml` — skill test directories are listed explicitly, while all `pipeline/tests/test_*.py` files are discovered automatically via the `pipeline/` glob.
 
 ## Contributing: Read This First
 
