@@ -391,7 +391,6 @@ defaults:
   # Available fragments (filename stems in baselines/defaults/):
   #   - epp-verbosity
   #   - externally-managed-gateway
-  #   - llm-d-rbac
   #   - preserve-request-id
   #   - routing-proxy-resources
   #   - vllm-logging
@@ -458,10 +457,10 @@ Exit code 0 and all fields printed = success.
   baselines/
     <name>.yaml                  <- task-3
     defaults/                    <- task-4b
-      llm-d-rbac.yaml
       preserve-request-id.yaml
       epp-verbosity.yaml
       vllm-logging.yaml
+      externally-managed-gateway.yaml
       routing-proxy-resources.yaml
   <component-name>/             <- task-2 (submodule)
   algorithms/
