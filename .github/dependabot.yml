@@ -1,0 +1,50 @@
+# Dependabot configuration for inference-sim/sim2real
+# Monitors Python dependencies, GitHub Actions, Docker base images, and Go modules.
+# See: https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+updates:
+  # Python dependencies (requirements.txt)
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "python"
+    # Open PRs for security updates immediately
+    open-pull-requests-limit: 10
+
+  # GitHub Actions — keeps SHA pins current for supply-chain safety
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    open-pull-requests-limit: 10
+
+  # Docker base images (Dockerfile)
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "docker"
+    open-pull-requests-limit: 5
+
+  # Go modules (go.work + submodule go.mod files)
+  - package-ecosystem: "gomod"
+    directory: "/inference-sim"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "go"
+    open-pull-requests-limit: 10
