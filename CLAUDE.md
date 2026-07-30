@@ -44,7 +44,7 @@ python pipeline/cluster.py provision <cluster_id> --namespaces NS1,NS2,...
 # Per-workspace + per-run cycle:
 python pipeline/setup.py     --experiment-root ../admission-control
 python pipeline/sim2real.py translation register \
-    --algorithm <name> --image <ref> --config <treatment-overlay-path>
+    --algorithm <name>=<image-ref>@<treatment-overlay-path>
 python pipeline/sim2real.py assemble \
     --translation <hash> --cluster <cluster_id> --run <run-name>
 python pipeline/deploy.py run --experiment-root ../admission-control
@@ -53,6 +53,8 @@ python pipeline/sim2real.py --experiment-root ../admission-control use --run <ru
 ```
 
 **Backward compat:** Omitting `--experiment-root` defaults to the current working directory. Run all pipeline commands from the experiment repo root and the default will resolve correctly without the flag.
+
+**`--algorithm` flag form:** The quickstart uses the preferred compact form `NAME=IMAGE@CONFIG`. The older 3-flag form (`--algorithm <name> --image <ref> --config <path>`) is still accepted for backward compatibility but emits a deprecation warning. The compact form is required when registering multiple algorithms in one call: `--algorithm A=imgA@cfgA --algorithm B=imgB@cfgB`.
 
 **`pipeline/setup.py`** — One-time workspace config writer. Writes `setup_config.json` with operator-side fields (registry, repo name, orchestrator image, sim2real_root). Idempotent — safe to re-run. Does not touch `workspace/runs/` — run directory materialization is owned by `sim2real assemble`. `current_run` in `setup_config.json` is owned by `sim2real use`. Cluster-side bootstrap (namespaces, RBAC, secrets, PVCs, Tekton tasks, Pipeline definition, and the optional `--pipeline-yaml` manifest override) lives in `cluster.py provision`.
 
