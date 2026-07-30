@@ -799,14 +799,14 @@ python pipeline/deploy.py --experiment-root <experiment-root> \
     --run <run-name> collect
 ```
 
-Pulls per-pair `per_request_lifecycle_metrics.json` and GPU logs from the cluster PVC into `workspace/runs/<run-name>/results/<phase>/<workload>/i<N>/`. This is the epic's success gate — the demo is done when the JSON files exist locally.
+Pulls per-pair `trace_data.csv` and GPU logs from the cluster PVC into `workspace/runs/<run-name>/results/<phase>/<workload>/i<N>/`. This is the epic's success gate — the demo is done when the CSV files exist locally.
 
 ### Success criterion
 
 For each `<workload>` in `transfer.yaml:workloads`, each `<phase>` in `{baseline, <algorithm>}`, and each iteration `<N>` in `1..replicas`:
 
 ```
-workspace/runs/<run-name>/results/<phase>/<workload>/i<N>/per_request_lifecycle_metrics.json
+workspace/runs/<run-name>/results/<phase>/<workload>/i<N>/trace_data.csv
 ```
 
 Once these files exist, step-1's BYO demo is complete. Downstream skills (e.g. `/sim2real-analyze`) consume them for latency comparison and report generation.
@@ -815,7 +815,7 @@ Once these files exist, step-1's BYO demo is complete. Downstream skills (e.g. `
 
 ## End-of-step-2 skill-driven demo
 
-Same success criterion as the BYO demo — per-workload per-algorithm `per_request_lifecycle_metrics.json` files exist locally. The difference is that instead of registering a pre-built image (step 3 above), the operator invokes the `/sim2real-translate` Claude skill to produce the plugin source, then `sim2real build` compiles it into images.
+Same success criterion as the BYO demo — per-workload per-algorithm `trace_data.csv` files exist locally. The difference is that instead of registering a pre-built image (step 3 above), the operator invokes the `/sim2real-translate` Claude skill to produce the plugin source, then `sim2real build` compiles it into images.
 
 ### Prerequisites
 
@@ -856,7 +856,7 @@ For each algorithm: probe the registry, build if absent, record `image_ref`/`ima
 
 ### 7-9. Assemble, deploy, collect (identical to BYO steps 4-6, using the same `--translation` alias)
 
-The same success gate applies — `per_request_lifecycle_metrics.json` under `workspace/runs/<run-name>/results/<phase>/<workload>/i<N>/` (one file per iteration).
+The same success gate applies — `trace_data.csv` under `workspace/runs/<run-name>/results/<phase>/<workload>/i<N>/` (one file per iteration).
 
 ---
 
