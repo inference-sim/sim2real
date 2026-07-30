@@ -139,6 +139,13 @@ kind: Pod
 metadata:
   name: ${BUILD_POD}
   namespace: ${NAMESPACE}
+  annotations:
+    # AppArmor unconfined (legacy annotation form, for k8s < 1.30). Rootless
+    # buildkit's RUN steps mount devpts/proc/sysfs for the nested build
+    # container; the node's default AppArmor profile denies those mounts even
+    # with seccomp Unconfined. The container-level appArmorProfile below is the
+    # modern equivalent; both are set for version-robustness.
+    container.apparmor.security.beta.kubernetes.io/buildkit: unconfined
 spec:
   restartPolicy: Never
   containers:
@@ -181,6 +188,8 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: Unconfined  # buildkit needs unconfined seccomp for clone(2)/unshare(2)
+        appArmorProfile:
+          type: Unconfined  # k8s >=1.30: allow the RUN-step mounts AppArmor blocks
         # privileged: false (default) — rootless buildkit does not require it.
         # SETUID/SETGID are the minimal caps rootless buildkit needs: the setuid
         # helpers newuidmap/newgidmap use them to map a subordinate UID/GID range
