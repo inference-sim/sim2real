@@ -886,6 +886,7 @@ The same success gate applies — `per_request_lifecycle_metrics.json` under `wo
 | `shadow.py` | Shadow GPU reservation ledger for `deploy.py` orchestrator |
 | `source_locator.py` | Source-location abstraction for `translation register --build` (PathLocation / GitLocation) |
 | `source_toggle.py` | Toggle component directory between baseline and treatment states for `sim2real build` |
+| `proc.py` | Shared subprocess-execution seam (`run`, `which`) — consolidates the near-identical thin wrappers that formerly lived in `deploy.py`, `setup.py`, and `cluster_ops.py`; test monkeypatching targets this module |
 
 ---
 
