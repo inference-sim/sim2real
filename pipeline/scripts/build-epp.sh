@@ -175,27 +175,28 @@ spec:
           type: Unconfined  # buildkit needs unconfined seccomp for clone(2)/unshare(2)
         # privileged: false (default) — rootless buildkit does not require it
       volumeMounts:
-        # Writable scratch for rootless BuildKit. Required because this cluster's
-        # admission policy injects readOnlyRootFilesystem: true, so every path
-        # rootlesskit/buildkitd writes to must be a mounted volume:
-        #   /home/user           — HOME: rootlesskit state (.local/tmp) + buildkit
-        #                          data root (.local/share/buildkit) + caches
-        #   /run/user/1000       — XDG_RUNTIME_DIR: the buildkitd.sock socket dir
-        #   /tmp                 — buildctl-daemonless.sh mktemp scratch
-        # registry-creds is mounted onto /home/user/.docker on top of the home
-        # emptyDir (kubelet mounts the parent first, then the nested secret).
-        - name: buildkit-home
-          mountPath: /home/user
+        # Writable scratch for rootless BuildKit. This cluster's admission policy
+        # injects readOnlyRootFilesystem: true, so each path rootlesskit/buildkitd
+        # writes to needs its own emptyDir. Mount the SPECIFIC leaf dirs (which
+        # already exist in the rootless image) rather than shadowing all of
+        # /home/user — an emptyDir over the whole home would wipe the image's
+        # pre-created .local structure and rootlesskit would fail on a missing dir.
+        - name: buildkit-rootlesskit
+          mountPath: /home/user/.local/tmp        # rootlesskit parent state dir
+        - name: buildkit-state
+          mountPath: /home/user/.local/share/buildkit  # buildkitd data root
         - name: buildkit-xdg
-          mountPath: /run/user/1000
+          mountPath: /run/user/1000               # XDG_RUNTIME_DIR: buildkitd.sock
         - name: buildkit-tmp
-          mountPath: /tmp
+          mountPath: /tmp                          # buildctl-daemonless mktemp
         - name: source
           mountPath: /workspace/source
         - name: registry-creds
           mountPath: /home/user/.docker
   volumes:
-    - name: buildkit-home
+    - name: buildkit-rootlesskit
+      emptyDir: {}
+    - name: buildkit-state
       emptyDir: {}
     - name: buildkit-xdg
       emptyDir: {}
