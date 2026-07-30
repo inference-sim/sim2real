@@ -143,7 +143,10 @@ spec:
   restartPolicy: Never
   containers:
     - name: buildkit
-      image: moby/buildkit:latest
+      # Pinned to v0.32.0 with digest for reproducible, tamper-proof builds.
+      # Do NOT use :latest — it is a floating tag that can pull unreviewed code.
+      # To upgrade: verify the new release, update the tag and digest together.
+      image: moby/buildkit:v0.32.0@sha256:ca6da90e9028439029ecfcbea40e6c06f603002d65359a5313bbf0c9e9184a76
       command:
         - buildctl-daemonless.sh
       args:
@@ -159,8 +162,15 @@ spec:
         - platform=linux/amd64
         - --output
         - type=image,name=${FULL_IMAGE},push=true
+        # Required for non-privileged (daemonless) BuildKit: disables the
+        # inner process sandbox, allowing the OCI worker to function without
+        # Linux capabilities that require privileged mode.
+        - --oci-worker-no-process-sandbox
       securityContext:
-        privileged: true
+        # privileged: true removed — running BuildKit without privileged using
+        # --oci-worker-no-process-sandbox above. Privileged containers can escape
+        # to the host node; this hardening limits the blast radius if BuildKit
+        # or the build source is compromised.
       volumeMounts:
         - name: source
           mountPath: /workspace/source
