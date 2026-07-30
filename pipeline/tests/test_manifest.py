@@ -843,3 +843,83 @@ def test_byo_manifest_loads_cleanly_for_downstream(tmp_path):
     assert "source" not in m["algorithms"][0]
     assert "component" not in m
     assert m["algorithms"][0]["defaults"] in {b["name"] for b in m["baselines"]}
+
+
+# ── Additional validation coverage (quality agent) ────────────────────
+
+
+def test_yaml_parse_error_raises(tmp_path):
+    """Malformed YAML (parse error) raises ManifestError."""
+    p = tmp_path / "transfer.yaml"
+    p.write_text("---\nkind: sim2real-transfer\nversion: 3\n  bad indent: [")
+    with pytest.raises(ManifestError, match="YAML parse error"):
+        load_manifest(p)
+
+
+def test_algorithms_not_a_list_raises(tmp_path):
+    """When algorithms is present but not a list, raise ManifestError."""
+    data = {**MINIMAL_V3, "algorithms": "not_a_list"}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="algorithms must be a list"):
+        load_manifest(path)
+
+
+def test_algorithms_entry_not_mapping_raises(tmp_path):
+    """When an algorithm entry is not a dict, raise ManifestError."""
+    data = {**MINIMAL_V3, "algorithms": ["just_a_string"]}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match=r"algorithms\[0\] must be a mapping"):
+        load_manifest(path)
+
+
+def test_algorithms_duplicate_name_raises(tmp_path):
+    """Duplicate algorithm names raise ManifestError."""
+    data = {**MINIMAL_V3, "algorithms": [
+        {"name": "duped", "source": "src1.go", "defaults": "baseline"},
+        {"name": "duped", "source": "src2.go", "defaults": "baseline"},
+    ]}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="algorithms.*duplicate name"):
+        load_manifest(path)
+
+
+def test_algorithms_missing_required_fields_raises(tmp_path):
+    """Algorithm entry missing 'name' raises ManifestError."""
+    data = {**MINIMAL_V3, "algorithms": [
+        {"source": "src.go", "defaults": "baseline"},  # no name
+    ]}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match=r"algorithms\[0\].*missing required field.*name"):
+        load_manifest(path)
+
+
+def test_baselines_entry_not_mapping_raises(tmp_path):
+    """When a baseline entry is not a dict, raise ManifestError."""
+    data = {**MINIMAL_V3, "baselines": ["just_a_string"]}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match=r"baselines\[0\] must be a mapping"):
+        load_manifest(path)
+
+
+def test_pipeline_name_empty_raises(tmp_path):
+    """Empty pipeline.name raises ManifestError."""
+    data = {**MINIMAL_V3, "pipeline": {"name": "", "yaml": "p.yaml"}}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="pipeline.name must be a non-empty string"):
+        load_manifest(path)
+
+
+def test_pipeline_yaml_empty_raises(tmp_path):
+    """Empty pipeline.yaml raises ManifestError."""
+    data = {**MINIMAL_V3, "pipeline": {"name": "sim2real", "yaml": ""}}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="pipeline.yaml must be a non-empty string"):
+        load_manifest(path)
+
+
+def test_pipeline_yaml_absolute_raises(tmp_path):
+    """Absolute pipeline.yaml path raises ManifestError."""
+    data = {**MINIMAL_V3, "pipeline": {"name": "sim2real", "yaml": "/absolute/path.yaml"}}
+    path = _write_manifest(tmp_path, data)
+    with pytest.raises(ManifestError, match="pipeline.yaml must be a relative path"):
+        load_manifest(path)
