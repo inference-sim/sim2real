@@ -143,7 +143,11 @@ spec:
   restartPolicy: Never
   containers:
     - name: buildkit
-      image: moby/buildkit:latest
+      # Pin to rootless variant: no privileged flag needed, runs as UID 1000.
+      # Use a specific version tag (not :latest) to avoid silent supply-chain updates.
+      # Update this pin when upgrading buildkit: moby/buildkit release page at
+      # https://github.com/moby/buildkit/releases
+      image: moby/buildkit:v0.32.0-rootless
       command:
         - buildctl-daemonless.sh
       args:
@@ -160,12 +164,17 @@ spec:
         - --output
         - type=image,name=${FULL_IMAGE},push=true
       securityContext:
-        privileged: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        seccompProfile:
+          type: Unconfined  # buildkit needs unconfined seccomp for clone(2)/unshare(2)
+        # privileged: false (default) — rootless buildkit does not require it
       volumeMounts:
         - name: source
           mountPath: /workspace/source
         - name: registry-creds
-          mountPath: /root/.docker
+          mountPath: /home/user/.docker
   volumes:
     - name: source
       persistentVolumeClaim:
