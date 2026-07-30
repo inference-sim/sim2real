@@ -1,6 +1,6 @@
 # sim2real Roadmap
 
-> **Status**: Living document. Last updated: 2026-07-30 (session 5).
+> **Status**: Living document. Last updated: 2026-07-30 (session 6).
 > This roadmap reflects current strategic priorities as assessed by the Hive strategist agent.
 > Operators and contributors should adjust priorities as project needs evolve.
 
@@ -14,22 +14,22 @@ The project is in **active development** with a small, focused team. The pipelin
 end-to-end and has reached 97%+ test coverage. The hardening phase continues with a large
 backlog of security and documentation PRs pending human merge.
 
-### Strategic Health (2026-07-30, session 5)
+### Strategic Health (2026-07-30, session 6)
 
 | Dimension | Status | Notes |
 |-----------|--------|-------|
 | Test coverage | ✅ 97%+ | Enforced in CI since PR #717 |
 | CI health | ✅ Stable | Python 3.14, dep bumps, coverage enforcement all merged |
-| Security PRs | 🔴 **14 hold-gated** | 14 hold-labeled PRs require human triage and merge |
-| Documentation | 🟡 21 guide PRs open | 21 unmerged guide branches; 3 now obsolete (reference deleted blis-context.md) |
+| Security PRs | 🔴 **16 hold-gated** | 16 hold-labeled PRs require human triage; new: #783 (buildkit pin), #784 (ClusterRole pods:get drop) |
+| Documentation | 🟡 11 guide PRs open | Merged several guide PRs; 3 still obsolete (reference deleted blis-context.md) |
 | License | 🔴 **MISSING** | No LICENSE file — open-source adoption blocker (PR #729 has it) |
 | CONTRIBUTING.md | 🔴 **MISSING** | Only in hold-gated PR #729 |
 | ROADMAP.md | 🔴 **MISSING** | Only in hold-gated PR #728 (this file) |
 | Releases | 🔴 None | 0 GitHub releases since April 2026 — ecosystem cannot pin stable versions |
-| PR queue | 🔴 28 open PRs | 14 hold-labeled, 12 marked merge-eligible (hive infra checks broken) |
-| Architecture | 🟡 Decomposition underway | 3 architect branches open; proc.py consolidated |
-| Branch hygiene | 🔴 170 branches | 68 unmerged non-worktree branches; 20 dead merged branches not yet deleted |
-| Hive infra | 🔴 **Degraded** | PR-request watcher and merge-eligible checks both broken (TLS cert issue) |
+| PR queue | 🔴 **31 open PRs** | 16 hold-labeled, 15 non-hold (14 merge-eligible per hive, but all blocked by TLS) |
+| Architecture | 🟡 Decomposition underway | 4 architect PRs open (#721, #746, #772, #774); proc.py ready to merge |
+| Branch hygiene | 🔴 175 branches | 4 superseded sec branches; 3 broken guide branches (reference deleted blis-context.md) |
+| Hive infra | 🔴 **Degraded** | PR-request watcher and auto-merge both broken (TLS cert — IS #786); **0 auto-merges since session 5** |
 
 ---
 
@@ -39,24 +39,26 @@ backlog of security and documentation PRs pending human merge.
 
 ### Critical (Blockers)
 
-1. **🔴 Fix hive infrastructure TLS cert issue** — PR-request watcher and merge-eligibility checks fail with "tls: certificate signed by unknown authority"; blocks all hive-automated PR creation and CI status reporting. Manual PR opens affected.
-2. **🔴 Merge PR #729** (CONTRIBUTING.md + Apache 2.0 LICENSE) — Hold-gated; merge to unblock open-source adoption
+1. **🔴 Fix hive infrastructure TLS cert issue (IS #786)** — All 15 non-hold CI-passing PRs are blocked from auto-merge; hive PR-request watcher and merge-eligibility checks both fail with TLS cert error. See also IS #782.
+2. **🔴 Merge PR #729** (CONTRIBUTING.md + Apache 2.0 LICENSE) — Hold-gated; merge to unblock open-source adoption and v0.1.0 release
 3. **🔴 Merge PR #728** (ROADMAP.md, this file) — Hold-gated; merge to establish public roadmap
 
 ### High Priority (Security)
 
-4. **🟡 Merge PR #699** (BuildKit: rootless pod) — hold-gated security fix; clean, no blockers
-5. **🟡 Merge PR #768** (RBAC secrets:get resourceNames) — hold-gated security hardening
-6. **🟡 Merge PR #765** (claude-plugins SHA pin) — hold-gated supply chain fix
-7. **🟡 Merge PR #763** (Helm pin in Dockerfile) — hold-gated supply chain fix
-8. **🟡 Merge sec/fix-clusterrole-pods** (remove cluster-wide pods from ClusterRole) — fresh PR needed or merge the branch directly
+4. **🟡 Merge PR #784** (RBAC: drop pods:get from ClusterRole) — addresses IS #646; mergeable
+5. **🟡 Merge PR #783** (pin moby/buildkit + drop privileged:true) — addresses IS #780; mergeable
+6. **🟡 Merge PR #768** (restrict secrets:get to resourceNames) — addresses IS #767; hold-gated
+7. **🟡 Merge PR #765** (pin anthropics/claude-plugins-official) — addresses IS #761; hold-gated
+8. **🟡 Merge PR #763** (pin Helm to v4.2.3) — addresses IS #762; hold-gated
+9. **🟡 Merge PR #699** (replace privileged BuildKit pod) — hold-gated security fix; clean
 
 ### Recommended
 
-9. **🟡 Create v0.1.0 release tag** — pipeline is stable, 97%+ coverage, ready for first tag
-10. **🟡 Close PR #766** (guide/docs-blis-context) — references deleted blis-context.md; will introduce broken links
-11. **🟡 Sequence architect/scanner merge**: Merge PR #721 (proc-consolidation) first, then PR #744 (timeout fix) applies cleanly on top
-12. **🟡 Batch-merge guide doc PRs** #752, #754, #756, #759 — all no-conflict docs fixes
+10. **🟡 Create v0.1.0 release tag (IS #790)** — pipeline stable, 97%+ coverage; requires #729 merged first
+11. **🟡 Close PR #766 + delete broken guide branches (IS #789)** — reference deleted blis-context.md
+12. **🟡 Delete 4 superseded sec branches (IS #791)**: `sec/fix-supply-chain-hardening`, `sec/pin-claude-action-supply-chain`, `sec/pin-github-actions-sha`, `scanner/fix-claude-supply-chain`
+13. **🟡 Sequence architect/scanner merge**: #721 (proc.py) → #744 (timeout fix)
+14. **🟡 Batch-merge guide doc PRs** #752, #754, #756, #759, #764, #769, #770, #775, #776 — all no-conflict docs fixes
 
 ---
 
@@ -69,15 +71,16 @@ backlog of security and documentation PRs pending human merge.
 - [ ] **Merge ROADMAP.md** (PR #728, this file) — public roadmap visibility
 - [ ] **Create `v0.1.0` release tag** — pipeline functional, 97%+ coverage, ready for first tag
 
-### Security (14 Hold-Gated PRs)
+### Security (16 Hold-Gated PRs)
 - [x] Merge PR #648 — Closed (contained regression risk)
 - [x] Merge PR #731 — RBAC secrets:get scope documentation ✅ (merged 2026-07-30)
+- [ ] Merge PR #784 — Drop pods:get from ClusterRole (mergeable; IS #646)
+- [ ] Merge PR #783 — Pin moby/buildkit + drop privileged:true (mergeable; IS #780)
 - [ ] Merge PR #699 — Replace privileged BuildKit pod with rootless alternative (hold-gated)
 - [ ] Merge PR #697 — Harden `data-pvc-explorer` debug manifest (hold-gated)
-- [ ] Merge PR #768 — Restrict secrets:get to known resourceNames (hold-gated)
-- [ ] Merge PR #765 — Pin anthropics/claude-plugins-official to commit SHA (hold-gated)
-- [ ] Merge PR #763 — Pin Helm to v4.2.3 in Dockerfile (hold-gated)
-- [ ] Open PR for sec/fix-clusterrole-pods — Remove cluster-wide pods from ClusterRole (branch exists, no PR yet)
+- [ ] Merge PR #768 — Restrict secrets:get to known resourceNames (hold-gated; IS #767)
+- [ ] Merge PR #765 — Pin anthropics/claude-plugins-official to commit SHA (hold-gated; IS #761)
+- [ ] Merge PR #763 — Pin Helm to v4.2.3 in Dockerfile (hold-gated; IS #762)
 - [ ] Other sec/* branches (#758 go.work, #755 subprocess timeouts, etc.) — batch review
 
 ### CI & Quality
@@ -85,7 +88,7 @@ backlog of security and documentation PRs pending human merge.
 - [x] Merge PR #718 — Node.js 20 deprecation fix ✅
 - [x] Merge PR #751 — Python 3.14 upgrade ✅
 - [x] Merge PR #706 — deploy.py helper tests ✅
-- [ ] Fix CI failure on PR #750 (quality/test-sim2real-cli-errors) — currently CI-failing
+- [ ] Fix CI failure on PR #750 (quality/test-sim2real-cli-errors) — PR #781 (lint fix) is hold-gated; merge #781 first
 - [ ] Merge PR #750 after CI fix — 30 new CLI error-path tests
 - [ ] Clean up dead merged branches — 20 already-merged branches still present (10 worktree-issue, 10 non-worktree)
 - [ ] Clean up blis-context guide branches — `guide/docs-blis-context`, `docs-blis-context-709`, `docs-link-blis-context` all reference deleted file; close PR #766
@@ -181,6 +184,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions.
 
 | Date | Update |
 |---|---|
+| 2026-07-30 | Session 6 update: 31 open PRs (16 hold-gated), 0 auto-merges since session 5 (TLS cert IS #786), new PRs #783 (buildkit pin) and #784 (ClusterRole pods:get drop), IS #789-#791 filed, v0.1.0 readiness criteria clarified |
 | 2026-07-30 | Session 5 update: hive infrastructure degradation (TLS cert), 28 open PRs (14 hold-gated), blis-context.md deletion cascades, sec/fix-clusterrole-pods new security branch, proc.py sequencing clarified, branch hygiene analysis |
 | 2026-07-30 | Session 2 update: strategic health table, immediate actions, proc.py conflict analysis, license/release gaps |
 | 2026-07-30 | Initial roadmap created by strategist agent |
