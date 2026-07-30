@@ -26,6 +26,10 @@ from typing import NamedTuple
 import yaml
 
 from pipeline.lib import cluster_ops, layout, slicer, translation_ref as _translation_ref
+# ``AssembleError`` lives in ``pipeline.lib.errors`` so low-level modules
+# (e.g. ``slicer``) can raise it without an import cycle. Re-exported below
+# to preserve the existing ``assemble_run.AssembleError`` API.
+from pipeline.lib.errors import AssembleError
 from pipeline.lib.manifest import ManifestError, load_manifest
 from pipeline.lib.tekton import is_trace_workload, make_pipelinerun_scenario
 from pipeline.lib.values import deep_merge
@@ -112,10 +116,6 @@ def discover_framework_submodules(
             urls[name] = parser.get(section, "url", fallback="")
 
     return shas, urls, sorted(missing)
-
-
-class AssembleError(Exception):
-    """Raised when assembly fails validation."""
 
 
 def filter_algorithms(

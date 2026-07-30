@@ -38,6 +38,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from pipeline.lib.errors import AssembleError
+
 TRANSLATION_FIELDS: list[str] = [
     "scenario",
     "component",
@@ -146,9 +148,6 @@ def translation_hash_with_sources(manifest: dict, experiment_root: Path) -> str:
         under ``experiment_root``. Message format: ``source file not
         found: <path>``.
     """
-    # Deferred import to avoid the ``assemble_run -> slicer`` import cycle.
-    from pipeline.lib.assemble_run import AssembleError
-
     sources: list[dict[str, str]] = []
     algos = manifest.get("algorithms") or []
     for algo in _sorted_by_name(algos):
