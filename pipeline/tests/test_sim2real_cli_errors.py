@@ -10,8 +10,6 @@ Filed by quality agent (hold-gated mode).
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 import yaml
@@ -363,7 +361,7 @@ class TestCmdTranslateBYOGuard:
             {"name": "algo1", "source": "myrepo/algo1.go", "defaults": "base1"},
         ])
         # It will fail at slicer.translation_hash_with_sources, but NOT at BYO guard
-        rc = sim2real.main([
+        sim2real.main([
             "--experiment-root", str(tmp_path),
             "translate",
         ])
