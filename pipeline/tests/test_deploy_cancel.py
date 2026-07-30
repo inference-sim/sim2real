@@ -6,7 +6,7 @@ def test_cancel_returns_true_on_successful_delete(monkeypatch):
     """When the final kubectl delete succeeds, return True."""
     calls = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         calls.append(cmd)
         class _R:
             returncode = 0
@@ -23,7 +23,7 @@ def test_cancel_returns_true_on_successful_delete(monkeypatch):
 
 def test_cancel_returns_true_when_pr_does_not_exist(monkeypatch):
     """When the PipelineRun doesn't exist, nothing to cancel — return True."""
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 1
             stdout = ""
@@ -38,7 +38,7 @@ def test_cancel_returns_true_when_pr_does_not_exist(monkeypatch):
 
 def test_cancel_returns_false_when_delete_fails(monkeypatch):
     """When the final kubectl delete fails, return False and warn."""
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             stdout = ""
             stderr = "connection refused"
@@ -59,7 +59,7 @@ def test_cancel_returns_false_when_delete_fails(monkeypatch):
 
 def test_cancel_returns_false_when_get_fails_not_notfound(monkeypatch):
     """When kubectl get fails with a non-NotFound error (RBAC, network), return False."""
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 1
             stdout = ""
@@ -76,7 +76,7 @@ def test_cancel_patch_failure_still_attempts_delete(monkeypatch):
     """When cancel patch fails, function still tries delete and returns based on delete result."""
     calls = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         calls.append(cmd[:3])
         class _R:
             stdout = ""
@@ -139,7 +139,7 @@ def test_cancel_waits_through_cancelled_running_finally(monkeypatch):
 
     cmds = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         cmds.append(list(cmd[:3]))
         class _R:
             returncode = 0
@@ -191,7 +191,7 @@ def test_cancel_times_out_when_finally_never_completes(monkeypatch):
 
     cmds = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         cmds.append(list(cmd[:3]))
         class _R:
             returncode = 0
@@ -233,7 +233,7 @@ def test_cancel_breaks_on_non_cancel_terminal_reason(monkeypatch):
 
     cmds = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         cmds.append(list(cmd[:3]))
         class _R:
             returncode = 0

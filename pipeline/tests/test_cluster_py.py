@@ -24,7 +24,7 @@ class FakeRun:
     def set(self, prefix: list[str], result):
         self._responses.append((prefix, result))
 
-    def __call__(self, cmd, *, check=True, capture=False, input=None):
+    def __call__(self, cmd, *, check=True, capture=False, input=None, timeout=None):
         self.calls.append(list(cmd))
         self.inputs.append(input)
         for prefix, response in self._responses:

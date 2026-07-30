@@ -1846,7 +1846,7 @@ def _mock_run(monkeypatch):
     """Mock subprocess.run for _force_reset tests (no real kubectl/helm)."""
     import pipeline.deploy as mod
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = ""
@@ -2191,7 +2191,7 @@ def test_early_reclaim_recoverable_threshold_exceeded(monkeypatch):
 
     cancelled = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = json.dumps(pods_json_recoverable)
@@ -2242,7 +2242,7 @@ def test_early_reclaim_recoverable_under_threshold(monkeypatch):
         "pending_stalls": 0, "pending_since": None,
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = json.dumps(pods_json_recoverable)
@@ -2290,7 +2290,7 @@ def test_early_reclaim_non_recoverable_fails_immediately(monkeypatch):
 
     cancelled = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = json.dumps(pods_json_non_recoverable)
@@ -2343,7 +2343,7 @@ def test_early_reclaim_stalled_at_max_pending_stalls(monkeypatch):
         "pending_since": (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=700)).isoformat(),
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = json.dumps(pods_json_recoverable)
@@ -2377,7 +2377,7 @@ def test_early_reclaim_kubectl_failure_returns_false(monkeypatch, capsys):
         "pending_stalls": 0, "pending_since": None,
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 1
             stdout = ""
@@ -2421,7 +2421,7 @@ def test_early_reclaim_pods_running_clears_pending_since(monkeypatch):
         "pending_since": "2026-05-09T12:00:00+00:00",
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = json.dumps(pods_json_running)
@@ -2467,7 +2467,7 @@ def test_early_reclaim_malformed_pending_since_resets_timer(monkeypatch, capsys)
         "pending_since": "not-a-valid-timestamp",
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = json.dumps(pods_json_recoverable)
@@ -2493,7 +2493,7 @@ def test_force_reset_clears_pending_stalls(monkeypatch):
     """--force resets pending_stalls along with retries."""
     from pipeline.deploy import _force_reset
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = ""
@@ -2524,7 +2524,7 @@ def test_early_reclaim_json_decode_error_warns(monkeypatch, capsys):
         "pending_stalls": 0, "pending_since": None,
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = "<html>auth proxy page</html>"
@@ -3059,7 +3059,7 @@ def test_early_reclaim_non_recoverable_cancel_fails_leaves_slot_busy(monkeypatch
         "pending_stalls": 0, "pending_since": None,
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = json.dumps(pods_json)
@@ -3107,7 +3107,7 @@ def test_early_reclaim_recoverable_cancel_fails_leaves_slot_busy(monkeypatch):
         "pending_stalls": 0, "pending_since": old_time,
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = json.dumps(pods_json)
@@ -3145,7 +3145,7 @@ def test_handle_timeout_cancel_fails_leaves_entry_unchanged(monkeypatch):
         "namespace": "sim2real-0", "retries": 0, "pending_since": None,
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = old_ts
@@ -3181,7 +3181,7 @@ def test_handle_timeout_cancel_succeeds_requeues(monkeypatch):
         "namespace": "sim2real-0", "retries": 0, "pending_since": None,
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = old_ts
@@ -3219,7 +3219,7 @@ def test_handle_timeout_max_retries_retains_namespace(monkeypatch):
         "namespace": "sim2real-0", "retries": 3, "pending_since": None,
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = old_ts
@@ -3255,7 +3255,7 @@ def test_handle_timeout_not_expired_returns_none(monkeypatch):
         "namespace": "sim2real-0", "retries": 0, "pending_since": None,
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = recent_ts

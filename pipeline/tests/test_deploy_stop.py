@@ -19,7 +19,7 @@ def test_stop_deletes_orchestrator_job(monkeypatch, capsys):
     """When the orchestrator Job exists, stop deletes it."""
     calls = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         calls.append(cmd)
         return _fake_run_ok(cmd)
 
@@ -43,7 +43,7 @@ def test_stop_deletes_orchestrator_job(monkeypatch, capsys):
 
 def test_stop_no_job_prints_message(monkeypatch, capsys):
     """When no orchestrator Job exists, print info message and return."""
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 1
             stdout = ""
@@ -60,7 +60,7 @@ def test_stop_no_job_prints_message(monkeypatch, capsys):
 
 def test_stop_kubectl_get_error_exits(monkeypatch, capsys):
     """Non-NotFound kubectl get errors exit with code 1."""
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 1
             stdout = ""
@@ -81,7 +81,7 @@ def test_stop_kubectl_delete_error_exits(monkeypatch, capsys):
     """When Job exists but delete fails, exit with code 1."""
     call_count = [0]
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         call_count[0] += 1
         if call_count[0] == 1:
             return _fake_run_ok(cmd)
