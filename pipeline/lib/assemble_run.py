@@ -35,11 +35,11 @@ from pipeline.lib.tekton import is_trace_workload, make_pipelinerun_scenario
 from pipeline.lib.values import deep_merge
 
 
-# Framework repo root — three levels up from pipeline/lib/assemble_run.py.
-# Mirrors pipeline/lib/cluster_ops.py:_REPO_ROOT. Used to locate framework
+# Framework repo root. Resolved centrally by ``layout.repo_root()`` (single
+# source of truth) rather than re-deriving it here. Used to locate framework
 # submodules (inference-sim, llm-d-benchmark), which always live in the
 # framework repo — NOT in the experiment repo.
-_REPO_ROOT: Path = Path(__file__).resolve().parent.parent.parent
+_REPO_ROOT: Path = layout.repo_root()
 
 
 # Framework submodule pair — pinned. These names appear in the PipelineRun

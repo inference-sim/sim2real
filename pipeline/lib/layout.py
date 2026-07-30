@@ -51,6 +51,32 @@ def experiment_root() -> Path:
     return _EXPERIMENT_ROOT if _EXPERIMENT_ROOT is not None else Path.cwd()
 
 
+# ── Repository root ──────────────────────────────────────────────────────────
+
+# This module lives at ``<repo>/pipeline/lib/layout.py``, so the repository
+# root is three parents up. Computed once at import time and cached so callers
+# do not each re-derive it with an ad-hoc ``Path(__file__)...parent`` chain at
+# an easy-to-get-wrong depth.
+_REPO_ROOT: Path = Path(__file__).resolve().parent.parent.parent
+
+
+def repo_root() -> Path:
+    """Return the sim2real repository root directory.
+
+    Canonical replacement for the per-module
+    ``Path(__file__).resolve().parent.parent[.parent]`` computations that
+    previously appeared in ``setup.py``, ``cluster.py``, ``deploy.py``,
+    ``sim2real.py``, ``cluster_ops.py`` and ``assemble_run.py`` — each with a
+    depth that depended on that file's own location, so moving any file
+    silently changed its notion of the repo root. Routing every caller through
+    this single helper keeps the value stable regardless of caller location.
+
+    Unlike :func:`experiment_root`, this is the checkout of the sim2real source
+    tree (where ``pipeline/`` lives), not the user's experiment workspace.
+    """
+    return _REPO_ROOT
+
+
 def workspace_dir() -> Path:
     """``<experiment-root>/workspace/``"""
     return experiment_root() / "workspace"
