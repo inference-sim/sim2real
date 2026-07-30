@@ -1043,24 +1043,25 @@ scenario:
 
 ### Plugin config
 
-The EPP plugin configuration goes inside `inferenceExtension.pluginsCustomConfig` as a YAML-in-YAML string:
+The EPP plugin configuration goes inside `router.epp.pluginsCustomConfig` as a YAML-in-YAML string:
 
 ```yaml
-inferenceExtension:
-  pluginsConfigFile: custom-plugins.yaml
-  pluginsCustomConfig:
-    custom-plugins.yaml: |
-      apiVersion: inference.networking.x-k8s.io/v1alpha1
-      kind: EndpointPickerConfig
-      plugins:
-      - type: my-plugin
-        name: my-plugin
-        parameters:
-          threshold: 5
-      schedulingProfiles:
-      - name: default
+router:
+  epp:
+    pluginsConfigFile: custom-plugins.yaml
+    pluginsCustomConfig:
+      custom-plugins.yaml: |
+        apiVersion: inference.networking.x-k8s.io/v1alpha1
+        kind: EndpointPickerConfig
         plugins:
-        - pluginRef: my-plugin
+        - type: my-plugin
+          name: my-plugin
+          parameters:
+            threshold: 5
+        schedulingProfiles:
+        - name: default
+          plugins:
+          - pluginRef: my-plugin
 ```
 
 ### Typical overlay content
