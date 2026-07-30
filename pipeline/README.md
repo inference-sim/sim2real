@@ -887,6 +887,7 @@ The same success gate applies — `trace_data.csv` under `workspace/runs/<run-na
 | `source_locator.py` | Source-location abstraction for `translation register --build` (PathLocation / GitLocation) |
 | `errors.py` | Shared exception types (`AssembleError`) — breaks import cycles between low-level modules (e.g. `slicer`) and high-level modules (e.g. `assemble_run`) |
 | `source_toggle.py` | Toggle component directory between baseline and treatment states for `sim2real build` |
+| `proc.py` | Shared subprocess-execution seam (`run`, `which`) — consolidates the near-identical thin wrappers that formerly lived in `deploy.py`, `setup.py`, and `cluster_ops.py`; test monkeypatching targets this module |
 
 ---
 
