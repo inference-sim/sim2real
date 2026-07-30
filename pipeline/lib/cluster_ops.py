@@ -65,9 +65,10 @@ from pipeline.lib.values import deep_merge
 _DEEP_MERGE_KEYS = ("secret_names", "workspaces")
 
 
-# Repo-relative paths used by the kubectl/oc primitives. ``cluster_ops.py``
-# lives at ``pipeline/lib/cluster_ops.py``, so the repo root is two parents up.
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+# Repo-relative paths used by the kubectl/oc primitives. The repo root is
+# resolved once, centrally, by ``layout.repo_root()`` so this module does not
+# re-derive it with a location-dependent ``Path(__file__)`` parent chain.
+_REPO_ROOT = layout.repo_root()
 _TEKTONC_DIR = _REPO_ROOT / "tektonc-data-collection"
 _PIPELINE_YAML = _REPO_ROOT / "pipeline" / "pipeline.yaml"
 
