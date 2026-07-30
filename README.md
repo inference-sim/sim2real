@@ -2,7 +2,7 @@
 
 [![Build Orchestrator Image](https://github.com/inference-sim/sim2real/actions/workflows/orchestrator-image.yml/badge.svg)](https://github.com/inference-sim/sim2real/actions/workflows/orchestrator-image.yml)
 
-Pipeline for transferring simulation-discovered routing algorithms from [inference-sim](inference-sim/) to production [llm-d](https://github.com/llm-d/llm-d).
+Pipeline for transferring simulation-discovered routing algorithms from [inference-sim](inference-sim/) to production [llm-d](https://github.com/llm-d/llm-d). For BLIS simulator architecture and the key abstractions that bridge simulation policies to production scorer plugins, see [`blis-context.md`](blis-context.md).
 
 ## Install
 
