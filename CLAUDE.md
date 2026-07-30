@@ -8,7 +8,7 @@ inference-sim to production llm-d-inference-scheduler scorer plugins.
 ## Repository Structure
 
 - `pipeline/` — Pipeline entry points and shared library (see [`pipeline/README.md`](pipeline/README.md))
-- `pipeline/pipeline.yaml` — Static Tekton Pipeline definition (applied by `cluster.py provision`)
+- `pipeline/pipeline.yaml` — Static Tekton Pipeline definition (applied by `cluster.py init`)
 - `prompts/` — Agent prompt templates (currently disabled — see below)
 - `workspace/` — Inter-stage artifacts (gitignored, not committed)
 
@@ -29,7 +29,7 @@ The pipeline has two phases: a one-time-per-cluster bootstrap, then a per-worksp
 ```
 /sim2real-bootstrap  (one-time per experiment repo — scaffolds transfer.yaml, baselines/, component submodule)
                    ↓
-cluster.py provision  (one-time per cluster)
+cluster.py init + slot add  (one-time per cluster)
                    ↓
 setup.py → [BYO: sim2real translation register] OR
            [Skill: sim2real translate → /sim2real-translate → translate --resume → sim2real build]
@@ -40,8 +40,9 @@ sim2real assemble → deploy.py → deploy.py collect → /sim2real-check → /s
 Run all pipeline commands from the `sim2real/` directory, pointing `--experiment-root` at the experiment repo:
 
 ```bash
-# One-time cluster bootstrap (re-run only when adding/changing slots):
-python pipeline/cluster.py provision <cluster_id> --namespaces NS1,NS2,...
+# One-time cluster bootstrap (init primary namespace; then slot add for additional namespaces):
+python pipeline/cluster.py init <cluster_id> <primary_namespace>
+python pipeline/cluster.py slot add <cluster_id> <namespace>  # repeat for each additional slot
 
 # Per-workspace + per-run cycle:
 python pipeline/setup.py     --experiment-root ../admission-control
@@ -58,7 +59,7 @@ python pipeline/sim2real.py --experiment-root ../admission-control use --run <ru
 
 **`--algorithm` flag form:** The quickstart uses the preferred compact form `NAME=IMAGE@CONFIG`. The older 3-flag form (`--algorithm <name> --image <ref> --config <path>`) is still accepted for backward compatibility but emits a deprecation warning. The compact form is required when registering multiple algorithms in one call: `--algorithm A=imgA@cfgA --algorithm B=imgB@cfgB`.
 
-**`pipeline/setup.py`** — One-time workspace config writer. Writes `setup_config.json` with operator-side fields (registry, repo name, orchestrator image, sim2real_root). Idempotent — safe to re-run. Does not touch `workspace/runs/` — run directory materialization is owned by `sim2real assemble`. `current_run` in `setup_config.json` is owned by `sim2real use`. Cluster-side bootstrap (namespaces, RBAC, secrets, PVCs, Tekton tasks, Pipeline definition, and the optional `--pipeline-yaml` manifest override) lives in `cluster.py provision`.
+**`pipeline/setup.py`** — One-time workspace config writer. Writes `setup_config.json` with operator-side fields (registry, repo name, orchestrator image, sim2real_root). Idempotent — safe to re-run. Does not touch `workspace/runs/` — run directory materialization is owned by `sim2real assemble`. `current_run` in `setup_config.json` is owned by `sim2real use`. Cluster-side bootstrap (namespaces, RBAC, secrets, PVCs, Tekton tasks, Pipeline definition, and the optional `--pipeline-yaml` manifest override) lives in `cluster.py init` / `slot add`.
 
 **`pipeline/sim2real.py translation register`** — Records a translation on disk. Two spec kinds are supported per invocation: `--algorithm NAME=IMAGE@CONFIG` (classic BYO, pre-built image) and `--build NAME=LOCATION@CONFIG` (assisted-BYO — framework materializes `LOCATION` and dispatches buildkit; `LOCATION` is either a filesystem path or `git+<url>#<ref>`). Both kinds are mixable in one call, and each spec may optionally be followed by `--like <existing-algorithm>` (issue #586) — copies the referenced algorithm's `<name>_config.yaml` byte-for-byte, making the `@CONFIG` portion of the spec optional. Writes `workspace/translations/<hash>/translation_output.json` (algorithm index + provenance; git-URL builds also record `source_git_url` and resolved `source_git_ref` per algorithm), `registered.json` (image ref + digest), and `generated/<algo>/<algo>_config.yaml`. `translation_hash` is deterministic — same inputs produce the same hash (path-content sha for path builds, resolved commit sha for git builds, skopeo digest for BYO). See [`pipeline/README.md`](pipeline/README.md#register-a-translation) for the flag reference, `--build` details, `--like` rules, and idempotency semantics.
 
@@ -193,7 +194,7 @@ Run both locally before pushing. If your change adds a new module, test file loc
 The `pipeline/` scripts form a linear dependency chain, with a one-time cluster bootstrap as prerequisite:
 
 ```
-cluster.py provision  (one-time per cluster)
+cluster.py init + slot add  (one-time per cluster)
                    ↓
 setup.py → [BYO: sim2real translation register] OR
            [Skill: sim2real translate → /sim2real-translate → sim2real translate --resume → sim2real build]

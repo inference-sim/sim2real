@@ -45,13 +45,16 @@ Skip this step if your experiment repo already contains `transfer.yaml`, `baseli
 export HF_TOKEN=<huggingface token with access to required models>
 ```
 
-### 3. Provision the cluster (one-time per cluster)
+### 3. Bootstrap the cluster (one-time per cluster)
 
-Idempotent. Provisions namespaces, RBAC, PVCs, and Tekton tasks. Re-run when adding namespace slots or rotating secrets.
+Bootstraps cluster identity, RBAC, PVCs, and Tekton resources in the primary namespace. Add additional namespace slots with `slot add` (safe to run while a deployment is in flight).
 
 ```bash
-python $SIM2REAL/pipeline/cluster.py provision <cluster_id> \
-    --namespaces <comma,separated,namespace,slots>
+# One-time bootstrap (creates primary namespace):
+python $SIM2REAL/pipeline/cluster.py init <cluster_id> <primary_namespace>
+
+# Add additional namespace slots (repeat as needed):
+python $SIM2REAL/pipeline/cluster.py slot add <cluster_id> <namespace>
 ```
 
 ### 4. Configure the workspace (one-time per experiment repo)
