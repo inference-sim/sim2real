@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from typing import Optional
 
 
 def run(
@@ -26,13 +27,17 @@ def run(
     capture: bool = False,
     cwd: "str | None" = None,
     input: "str | None" = None,
+    timeout: "Optional[int]" = None,
 ) -> "subprocess.CompletedProcess":
     """Run ``cmd`` as a subprocess.
 
     Text mode is always enabled. ``check`` raises on non-zero exit unless
     ``False``. ``capture`` captures stdout/stderr. ``cwd`` sets the working
-    directory. ``input`` feeds stdin. This is the single process-exec seam for
-    the pipeline; tests may monkeypatch this function to intercept invocations.
+    directory. ``input`` feeds stdin. ``timeout`` is the subprocess timeout in
+    seconds — ``None`` means no timeout (callers such as ``cluster_ops._run``
+    and ``deploy.run`` pass their own defaults). This is the single
+    process-exec seam for the pipeline; tests may monkeypatch this function
+    to intercept invocations.
     """
     return subprocess.run(
         cmd,
@@ -41,6 +46,7 @@ def run(
         capture_output=capture,
         cwd=cwd,
         input=input,
+        timeout=timeout,
     )
 
 

@@ -106,9 +106,13 @@ def step(n, title: str) -> None:
 # ── Subprocess helper ────────────────────────────────────────────────────────
 
 def run(cmd: list[str], *, check: bool = True, capture: bool = False,
-        cwd: "Path | None" = None) -> subprocess.CompletedProcess:
-    """Delegates to :func:`pipeline.lib.proc.run` — the single process-exec seam."""
-    return _proc.run(cmd, check=check, capture=capture, cwd=cwd)
+        cwd: "Path | None" = None, timeout: int = 120) -> subprocess.CompletedProcess:
+    """Delegates to :func:`pipeline.lib.proc.run` — the single process-exec seam.
+
+    ``timeout`` defaults to 120 s to prevent indefinite hangs when kubectl/helm
+    calls against a hung or unreachable cluster API server.
+    """
+    return _proc.run(cmd, check=check, capture=capture, cwd=cwd, timeout=timeout)
 
 
 # ── ConfigMap namespace resolution ──────────────────────────────────────────

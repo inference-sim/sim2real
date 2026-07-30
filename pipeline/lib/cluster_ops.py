@@ -312,12 +312,17 @@ def _run(
     check: bool = True,
     capture: bool = False,
     input: str | None = None,
+    timeout: int = 120,
 ) -> subprocess.CompletedProcess:
     """Thin wrapper delegating to :func:`pipeline.lib.proc.run` — the single
     process-exec seam. Tests monkeypatch this to intercept kubectl/oc
     invocations made through this module.
+
+    ``timeout`` defaults to 120 s — sufficient for kubectl/helm operations
+    while preventing indefinite hangs when the cluster API server is
+    unreachable or the connection drops mid-stream.
     """
-    return _proc.run(cmd, check=check, capture=capture, input=input)
+    return _proc.run(cmd, check=check, capture=capture, input=input, timeout=timeout)
 
 
 def _which(cmd: str) -> bool:

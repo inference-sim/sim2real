@@ -55,7 +55,7 @@ def test_reset_pair_failed_deletes_pr_and_helm(monkeypatch):
              "namespace": "sim2real-0", "retries": 0}
     calls = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         calls.append(cmd)
         class _R:
             returncode = 0
@@ -94,7 +94,7 @@ def test_reset_pair_running_cancels_first(monkeypatch):
         cancelled.append((pr_name, ns))
         return True
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = ""
@@ -130,7 +130,7 @@ def test_reset_pair_failed_with_stale_completed_namespace_clears_it(monkeypatch)
              "namespace": "sim2real-0", "completed_namespace": "sim2real-0",
              "retries": 0}
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = ""
@@ -158,7 +158,7 @@ def test_reset_pair_clears_completed_namespace_when_done_reset_to_pending(monkey
     entry = {"workload": "wl-smoke", "package": "baseline", "status": "done",
              "namespace": None, "completed_namespace": "sim2real-0", "retries": 0}
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = ""
@@ -182,7 +182,7 @@ def test_reset_pair_preserves_completed_namespace_when_status_preserved(monkeypa
     entry = {"workload": "wl-smoke", "package": "baseline", "status": "done",
              "namespace": None, "completed_namespace": "sim2real-0", "retries": 0}
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = ""
@@ -244,7 +244,7 @@ def test_timed_out_entry_flows_to_reset_helm_uninstall(monkeypatch):
 
     calls = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         calls.append(cmd)
         class _R:
             returncode = 0
@@ -282,7 +282,7 @@ def test_reset_pair_null_namespace_skips_helm_and_warns(monkeypatch, capsys):
 
     calls = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         calls.append(cmd)
         class _R:
             returncode = 0
@@ -306,7 +306,7 @@ def test_reset_pair_kubectl_delete_failure_does_not_reset(monkeypatch):
     entry = {"workload": "wl-heavy", "package": "baseline", "status": "failed",
              "namespace": "sim2real-0", "retries": 0}
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 1 if "pipelinerun" in cmd else 0
             stdout = ""
@@ -327,7 +327,7 @@ def test_reset_pair_helm_list_failure_does_not_reset(monkeypatch):
     entry = {"workload": "wl-heavy", "package": "baseline", "status": "failed",
              "namespace": "sim2real-0", "retries": 0}
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 1 if cmd[:2] == ["helm", "list"] else 0
             stdout = ""
@@ -348,7 +348,7 @@ def test_reset_pair_helm_uninstall_failure_does_not_reset(monkeypatch):
     entry = {"workload": "wl-heavy", "package": "baseline", "status": "failed",
              "namespace": "sim2real-0", "retries": 0}
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 1 if cmd[:2] == ["helm", "uninstall"] else 0
             stdout = "stuck-release\n" if cmd[:2] == ["helm", "list"] else ""
@@ -369,7 +369,7 @@ def test_reset_pair_missing_pr_name_warns(monkeypatch, capsys):
     entry = {"workload": "wl-unknown", "package": "baseline", "status": "failed",
              "namespace": "sim2real-0", "retries": 0}
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = ""
@@ -435,7 +435,7 @@ def test_reset_pair_done_resets_state_by_default(monkeypatch):
              "namespace": None, "retries": 0}
     calls = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         calls.append(cmd)
         class _R:
             returncode = 0
@@ -464,7 +464,7 @@ def test_reset_pair_done_preserves_status_with_flag(monkeypatch):
              "namespace": None, "retries": 0}
     calls = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         calls.append(cmd)
         class _R:
             returncode = 0
@@ -568,7 +568,7 @@ def test_cmd_reset_saves_progress_on_success(tmp_path, monkeypatch, capsys):
     saved_data = {}
     _mock_cm(monkeypatch, _PROGRESS, capture_saves=saved_data)
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = ""
@@ -727,7 +727,7 @@ def test_reset_pair_done_uninstalls_helm_in_completed_namespace(monkeypatch):
              "namespace": None, "completed_namespace": "sim2real-0", "retries": 0}
     calls = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         calls.append(cmd)
         class _R:
             returncode = 0
@@ -759,7 +759,7 @@ def test_reset_pair_done_no_completed_ns_skips_helm(monkeypatch):
              "namespace": None, "retries": 0}
     calls = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         calls.append(cmd)
         class _R:
             returncode = 0
@@ -784,7 +784,7 @@ def test_reset_pair_done_no_releases_is_noop(monkeypatch):
              "namespace": None, "completed_namespace": "sim2real-0", "retries": 0}
     calls = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         calls.append(cmd)
         class _R:
             returncode = 0
@@ -810,7 +810,7 @@ def test_reset_pair_done_helm_list_failure_warns(monkeypatch, capsys):
     entry = {"workload": "wl-smoke", "package": "baseline", "status": "done",
              "namespace": None, "completed_namespace": "sim2real-0", "retries": 0}
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 1 if cmd[:2] == ["helm", "list"] else 0
             stdout = ""
@@ -834,7 +834,7 @@ def test_reset_pair_done_helm_uninstall_failure_warns(monkeypatch, capsys):
     entry = {"workload": "wl-smoke", "package": "baseline", "status": "done",
              "namespace": None, "completed_namespace": "sim2real-0", "retries": 0}
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 1 if cmd[:2] == ["helm", "uninstall"] else 0
             stdout = "stuck-release\n" if cmd[:2] == ["helm", "list"] else ""
@@ -859,7 +859,7 @@ def test_reset_pair_done_no_pr_name_still_cleans_helm(monkeypatch):
              "namespace": None, "completed_namespace": "sim2real-0", "retries": 0}
     calls = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         calls.append(cmd)
         class _R:
             returncode = 0
@@ -989,7 +989,7 @@ _SWEEP_ROUTES = _json.dumps({"items": [
 
 def _sweep_fake_run(calls, *, pools_rc=0, pools_out="", routes_out="{}"):
     """Fake ``run`` dispatching on the kubectl subcommand the sweep issues."""
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         calls.append(cmd)
         class _R:
             returncode = 0
@@ -1055,7 +1055,7 @@ def test_reset_pair_invokes_sweep_even_with_no_releases(monkeypatch):
              "namespace": "sim2real-0", "retries": 0}
     calls = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         calls.append(cmd)
         class _R:
             returncode = 0
@@ -1132,7 +1132,7 @@ def test_reset_pair_done_sweeps_httproutes_in_completed_namespace(monkeypatch):
              "namespace": None, "completed_namespace": "sim2real-0", "retries": 0}
     calls = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         calls.append(cmd)
         class _R:
             returncode = 0
@@ -1165,7 +1165,7 @@ def test_reset_pair_done_no_pr_name_still_sweeps_httproutes(monkeypatch):
              "namespace": None, "completed_namespace": "sim2real-0", "retries": 0}
     calls = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         calls.append(cmd)
         class _R:
             returncode = 0

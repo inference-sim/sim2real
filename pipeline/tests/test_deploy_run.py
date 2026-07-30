@@ -1846,7 +1846,7 @@ def _mock_run(monkeypatch):
     """Mock subprocess.run for _force_reset tests (no real kubectl/helm)."""
     import pipeline.deploy as mod
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = ""
@@ -2191,7 +2191,7 @@ def test_early_reclaim_recoverable_threshold_exceeded(monkeypatch):
 
     cancelled = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = json.dumps(pods_json_recoverable)
@@ -2242,7 +2242,7 @@ def test_early_reclaim_recoverable_under_threshold(monkeypatch):
         "pending_stalls": 0, "pending_since": None,
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = json.dumps(pods_json_recoverable)
@@ -2290,7 +2290,7 @@ def test_early_reclaim_non_recoverable_fails_immediately(monkeypatch):
 
     cancelled = []
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = json.dumps(pods_json_non_recoverable)
@@ -2343,7 +2343,7 @@ def test_early_reclaim_stalled_at_max_pending_stalls(monkeypatch):
         "pending_since": (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=700)).isoformat(),
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = json.dumps(pods_json_recoverable)
@@ -2377,7 +2377,7 @@ def test_early_reclaim_kubectl_failure_returns_false(monkeypatch, capsys):
         "pending_stalls": 0, "pending_since": None,
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 1
             stdout = ""
@@ -2421,7 +2421,7 @@ def test_early_reclaim_pods_running_clears_pending_since(monkeypatch):
         "pending_since": "2026-05-09T12:00:00+00:00",
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = json.dumps(pods_json_running)
@@ -2467,7 +2467,7 @@ def test_early_reclaim_malformed_pending_since_resets_timer(monkeypatch, capsys)
         "pending_since": "not-a-valid-timestamp",
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = json.dumps(pods_json_recoverable)
@@ -2493,7 +2493,7 @@ def test_force_reset_clears_pending_stalls(monkeypatch):
     """--force resets pending_stalls along with retries."""
     from pipeline.deploy import _force_reset
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = ""
@@ -2524,7 +2524,7 @@ def test_early_reclaim_json_decode_error_warns(monkeypatch, capsys):
         "pending_stalls": 0, "pending_since": None,
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = "<html>auth proxy page</html>"
@@ -3059,7 +3059,7 @@ def test_early_reclaim_non_recoverable_cancel_fails_leaves_slot_busy(monkeypatch
         "pending_stalls": 0, "pending_since": None,
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = json.dumps(pods_json)
@@ -3107,7 +3107,7 @@ def test_early_reclaim_recoverable_cancel_fails_leaves_slot_busy(monkeypatch):
         "pending_stalls": 0, "pending_since": old_time,
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = json.dumps(pods_json)
@@ -3145,7 +3145,7 @@ def test_handle_timeout_cancel_fails_leaves_entry_unchanged(monkeypatch):
         "namespace": "sim2real-0", "retries": 0, "pending_since": None,
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = old_ts
@@ -3181,7 +3181,7 @@ def test_handle_timeout_cancel_succeeds_requeues(monkeypatch):
         "namespace": "sim2real-0", "retries": 0, "pending_since": None,
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = old_ts
@@ -3219,7 +3219,7 @@ def test_handle_timeout_max_retries_retains_namespace(monkeypatch):
         "namespace": "sim2real-0", "retries": 3, "pending_since": None,
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = old_ts
@@ -3255,7 +3255,7 @@ def test_handle_timeout_not_expired_returns_none(monkeypatch):
         "namespace": "sim2real-0", "retries": 0, "pending_since": None,
     }
 
-    def fake_run(cmd, *, check=True, capture=False, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = recent_ts
@@ -3330,7 +3330,7 @@ def test_dispatch_sets_entry_running(tmp_path, monkeypatch):
     # subprocess run → kubectl apply succeeds; then PipelineRun completes
     call_count = {"n": 0}
 
-    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = ""
@@ -3466,7 +3466,7 @@ def test_all_slots_busy_skips_gpu_probe(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
 
-    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = ""
@@ -3523,7 +3523,7 @@ def test_free_slot_runs_gpu_probe_and_dispatches(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "_check_pipelinerun_status",
                         lambda pr_name, ns: "Succeeded")
 
-    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = ""
@@ -3575,7 +3575,7 @@ def _orphan_harness(tmp_path, monkeypatch, *, initial_progress):
     monkeypatch.setattr(mod, "_check_pipelinerun_status",
                         lambda pr_name, ns: "Succeeded")
 
-    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = ""
@@ -3693,7 +3693,7 @@ def _run_harness(tmp_path, monkeypatch, *, status_fn, extra_patches=None):
     monkeypatch.setattr(_cap_mod, "load_defaults",
                         lambda root: {"decode": {"accelerator": {"count": 1}}})
 
-    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = ""
@@ -3793,7 +3793,7 @@ def test_derive_costs_only_for_scoped_pairs(tmp_path, monkeypatch):
                         lambda root: {"decode": {"accelerator": {"count": 1}}})
 
     # subprocess run → success
-    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = ""
@@ -3982,7 +3982,7 @@ def test_health_escalation_cancels_pipelinerun(tmp_path, monkeypatch):
     monkeypatch.setattr(_cap_mod, "load_defaults",
                         lambda root, **kw: {"decode": {"accelerator": {"count": 1}}})
 
-    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = ""
@@ -4169,7 +4169,7 @@ def test_dispatch_shuffles_dispatchable(tmp_path, monkeypatch):
     monkeypatch.setattr(_cap_mod, "probe_free_gpus", lambda **kw: (8, 8, 0))
     monkeypatch.setattr(_cap_mod, "load_defaults", lambda root: {"decode": {"accelerator": {"count": 1}}})
 
-    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = ""
@@ -4250,7 +4250,7 @@ def test_shadow_ledger_prevents_over_subscription(tmp_path, monkeypatch):
 
     dispatch_log = []
 
-    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = ""
@@ -4334,7 +4334,7 @@ def test_shadow_ttl_zero_disables_gating(tmp_path, monkeypatch):
 
     dispatch_count = {"n": 0}
 
-    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = ""
@@ -4637,7 +4637,7 @@ def test_one_cycle_emits_unified_capacity_log_and_effective_free_warn(
 
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
 
-    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None):
+    def fake_run(cmd, *, check=True, capture=False, input=None, cwd=None, timeout=None):
         class _R:
             returncode = 0
             stdout = ""
