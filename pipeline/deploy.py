@@ -12,6 +12,7 @@ Subcommands:
 """
 
 import argparse
+import datetime as _dt
 import fnmatch
 import json
 import os
@@ -485,7 +486,6 @@ def _mark_running(entry: dict) -> None:
     invariant: a running entry has running_since set and last_duration None;
     a terminated entry has the inverse.
     """
-    import datetime as _dt
     entry["running_since"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
     entry["last_duration"] = None
 
@@ -500,7 +500,6 @@ def _finalize_run(entry: dict) -> None:
     from pending → failed), this is a no-op other than ensuring the field
     stays None.
     """
-    import datetime as _dt
     started = entry.get("running_since")
     if started:
         try:
@@ -546,7 +545,6 @@ def _runtime_str(entry: dict) -> str:
     - done / failed / timed-out / stalled: frozen ``last_duration``
     - pending or any state with missing fields: "—"
     """
-    import datetime as _dt
     status = entry.get("status", "")
     if status == "running":
         started = entry.get("running_since")
@@ -728,8 +726,6 @@ def _handle_pending_pods(*, pr_name: str, namespace: str, entry: dict,
         - pending_since: set on first recoverable detection, cleared when
           pods start running, reset on malformed timestamp
     """
-    import datetime as _dt
-    import json as _json
     from pipeline.lib.pod_pending import parse_pod_conditions
 
     result = run(
@@ -743,8 +739,8 @@ def _handle_pending_pods(*, pr_name: str, namespace: str, entry: dict,
         return False
 
     try:
-        pods_json = _json.loads(result.stdout)
-    except _json.JSONDecodeError:
+        pods_json = json.loads(result.stdout)
+    except json.JSONDecodeError:
         warn(f"[{entry.get('workload', '?')}] pod query returned invalid JSON: {result.stdout[:120]}")
         return False
 
@@ -814,7 +810,6 @@ def _handle_timeout(*, pr_name: str, namespace: str, entry: dict,
     Returns True if the entry was timed out and cleaned up, False if timeout
     was detected but cancel failed (slot left busy), None if not timed out.
     """
-    import datetime as _dt
     ts_result = run(
         ["kubectl", "get", "pipelinerun", pr_name, f"-n={namespace}",
          "-o", "jsonpath={.metadata.creationTimestamp}"],
