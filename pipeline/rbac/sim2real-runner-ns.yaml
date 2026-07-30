@@ -1,6 +1,17 @@
 # Namespace-scoped permissions the orchestrator SA needs in each slot ns:
 # - pipelineruns (tekton.dev): create/manage workload PipelineRuns.
-# - persistentvolumeclaims, secrets: slot-readiness checks.
+# - persistentvolumeclaims: slot-readiness checks (PVC bound state).
+# - secrets: credential existence check before Tekton run dispatch.
+#   The orchestrator calls `kubectl get secret <name>` to verify the
+#   HuggingFace token, registry-creds, and metrics-reader secrets exist
+#   before submitting a PipelineRun.
+#
+#   Security note (issue #767): the resourceNames list below restricts
+#   secrets:get to only the known credential secrets. The default names
+#   match cluster_config.json:secret_names defaults. If you customised
+#   secret names during setup.py, add them here and remove the defaults.
+#   See PR #731 for background on this hardening.
+#
 # - pods: per-PipelineRun pending-pod triage (deploy.py _check_pending_pods)
 #   and broader non-Tekton pod health sweeps (lib/health.py:get_all_pods).
 # - events: triage context for pending/failed pods
@@ -19,8 +30,16 @@ rules:
     resources: ["pipelineruns"]
     verbs: ["create", "get", "watch", "list", "delete", "patch"]
   - apiGroups: [""]
-    resources: ["persistentvolumeclaims", "secrets"]
+    resources: ["persistentvolumeclaims"]
     verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames:
+      - hf-secret
+      - registry-creds
+      - dockerhub-creds
+      - inference-gateway-sa-metrics-reader-secret
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
