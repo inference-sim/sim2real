@@ -1,6 +1,6 @@
 # sim2real Roadmap
 
-> **Status**: Living document. Last updated: 2026-07-30 (session 2).
+> **Status**: Living document. Last updated: 2026-07-30 (session 5).
 > This roadmap reflects current strategic priorities as assessed by the Hive strategist agent.
 > Operators and contributors should adjust priorities as project needs evolve.
 
@@ -11,21 +11,25 @@ sim2real is a pipeline for transferring simulation-discovered routing algorithms
 [llm-d-inference-scheduler](https://github.com/llm-d/llm-d-inference-scheduler) scorer plugins.
 
 The project is in **active development** with a small, focused team. The pipeline is functional
-end-to-end and has reached 97%+ test coverage. Current focus is hardening, decomposition,
-and open-source readiness.
+end-to-end and has reached 97%+ test coverage. The hardening phase continues with a large
+backlog of security and documentation PRs pending human merge.
 
-### Strategic Health (2026-07-30)
+### Strategic Health (2026-07-30, session 5)
 
 | Dimension | Status | Notes |
 |-----------|--------|-------|
-| Test coverage | ✅ 97%+ | Coverage enforcement added (PR #717 merged) |
-| CI health | ✅ Stable | 7 dependency PRs merged today |
-| Security PRs | 🟡 Pending | PR #699 (BuildKit), #697, #690 awaiting human merge |
-| Documentation | 🟡 In progress | CONTRIBUTING (#729) and ROADMAP (#728) PRs filed |
-| License | 🔴 **MISSING** | No LICENSE file — adoption blocker |
-| Releases | 🔴 None | 0 GitHub releases since April 2026 |
-| PR queue | 🟡 13 open | 6 hold-labeled, 2 with merge conflicts |
-| Architecture | 🟡 Monolithic | deploy.py (170K lines), sim2real.py (109K lines) need decomposition |
+| Test coverage | ✅ 97%+ | Enforced in CI since PR #717 |
+| CI health | ✅ Stable | Python 3.14, dep bumps, coverage enforcement all merged |
+| Security PRs | 🔴 **14 hold-gated** | 14 hold-labeled PRs require human triage and merge |
+| Documentation | 🟡 21 guide PRs open | 21 unmerged guide branches; 3 now obsolete (reference deleted blis-context.md) |
+| License | 🔴 **MISSING** | No LICENSE file — open-source adoption blocker (PR #729 has it) |
+| CONTRIBUTING.md | 🔴 **MISSING** | Only in hold-gated PR #729 |
+| ROADMAP.md | 🔴 **MISSING** | Only in hold-gated PR #728 (this file) |
+| Releases | 🔴 None | 0 GitHub releases since April 2026 — ecosystem cannot pin stable versions |
+| PR queue | 🔴 28 open PRs | 14 hold-labeled, 12 marked merge-eligible (hive infra checks broken) |
+| Architecture | 🟡 Decomposition underway | 3 architect branches open; proc.py consolidated |
+| Branch hygiene | 🔴 170 branches | 68 unmerged non-worktree branches; 20 dead merged branches not yet deleted |
+| Hive infra | 🔴 **Degraded** | PR-request watcher and merge-eligible checks both broken (TLS cert issue) |
 
 ---
 
@@ -33,11 +37,26 @@ and open-source readiness.
 
 > These are **operator decisions** — agents cannot merge or create releases.
 
-1. **🔴 Add Apache 2.0 LICENSE file** — CONTRIBUTING.md references it; it doesn't exist
-2. **🟡 Merge PR #699** (BuildKit security) — clean, mergeable, no blockers
-3. **🟡 Merge PR #729** (CONTRIBUTING.md) — clean, mergeable
-4. **🟡 Sequence PR conflict**: Merge PR #721 (architect/proc) first, then scanner rebases PR #744
-5. **🟡 Create v0.1.0 release tag** — pipeline is stable, coverage is high
+### Critical (Blockers)
+
+1. **🔴 Fix hive infrastructure TLS cert issue** — PR-request watcher and merge-eligibility checks fail with "tls: certificate signed by unknown authority"; blocks all hive-automated PR creation and CI status reporting. Manual PR opens affected.
+2. **🔴 Merge PR #729** (CONTRIBUTING.md + Apache 2.0 LICENSE) — Hold-gated; merge to unblock open-source adoption
+3. **🔴 Merge PR #728** (ROADMAP.md, this file) — Hold-gated; merge to establish public roadmap
+
+### High Priority (Security)
+
+4. **🟡 Merge PR #699** (BuildKit: rootless pod) — hold-gated security fix; clean, no blockers
+5. **🟡 Merge PR #768** (RBAC secrets:get resourceNames) — hold-gated security hardening
+6. **🟡 Merge PR #765** (claude-plugins SHA pin) — hold-gated supply chain fix
+7. **🟡 Merge PR #763** (Helm pin in Dockerfile) — hold-gated supply chain fix
+8. **🟡 Merge sec/fix-clusterrole-pods** (remove cluster-wide pods from ClusterRole) — fresh PR needed or merge the branch directly
+
+### Recommended
+
+9. **🟡 Create v0.1.0 release tag** — pipeline is stable, 97%+ coverage, ready for first tag
+10. **🟡 Close PR #766** (guide/docs-blis-context) — references deleted blis-context.md; will introduce broken links
+11. **🟡 Sequence architect/scanner merge**: Merge PR #721 (proc-consolidation) first, then PR #744 (timeout fix) applies cleanly on top
+12. **🟡 Batch-merge guide doc PRs** #752, #754, #756, #759 — all no-conflict docs fixes
 
 ---
 
@@ -46,34 +65,44 @@ and open-source readiness.
 *Goal: Eliminate known security risks, stabilize CI, and reduce technical debt.*
 
 ### Open-Source Readiness (Critical — Do First)
-- [ ] **Add `LICENSE` file** (Apache 2.0) — CONTRIBUTING.md references it but file doesn't exist ⚠️
+- [ ] **Merge LICENSE + CONTRIBUTING.md** (PR #729, hold-gated) — contains both files; unblocks contributor adoption
+- [ ] **Merge ROADMAP.md** (PR #728, this file) — public roadmap visibility
 - [ ] **Create `v0.1.0` release tag** — pipeline functional, 97%+ coverage, ready for first tag
-- [ ] Merge `CONTRIBUTING.md` PR #729 — contributor onboarding guide
 
-### Security (Immediate)
-- [x] Merge PR #648 — Closed (contained regression risk; PR #690 is the clean fix)
-- [ ] Merge PR #699 — Replace privileged BuildKit pod with rootless alternative (clean, mergeable)
-- [ ] Merge PR #697 — Harden `data-pvc-explorer` debug manifest
-- [ ] Merge PR #690 — Remove cluster-wide pods permission from ClusterRole (hold-gated)
-- [ ] Merge PR #731 — Document secrets:get scope and resourceNames hardening (clean, mergeable)
+### Security (14 Hold-Gated PRs)
+- [x] Merge PR #648 — Closed (contained regression risk)
+- [x] Merge PR #731 — RBAC secrets:get scope documentation ✅ (merged 2026-07-30)
+- [ ] Merge PR #699 — Replace privileged BuildKit pod with rootless alternative (hold-gated)
+- [ ] Merge PR #697 — Harden `data-pvc-explorer` debug manifest (hold-gated)
+- [ ] Merge PR #768 — Restrict secrets:get to known resourceNames (hold-gated)
+- [ ] Merge PR #765 — Pin anthropics/claude-plugins-official to commit SHA (hold-gated)
+- [ ] Merge PR #763 — Pin Helm to v4.2.3 in Dockerfile (hold-gated)
+- [ ] Open PR for sec/fix-clusterrole-pods — Remove cluster-wide pods from ClusterRole (branch exists, no PR yet)
+- [ ] Other sec/* branches (#758 go.work, #755 subprocess timeouts, etc.) — batch review
 
 ### CI & Quality
-- [x] Merge PR #717 — Coverage enforcement added ✅ (merged 2026-07-30)
-- [x] Merge PR #718 — Node.js 20 deprecation suppression ✅
-- [ ] Fix lint failure on PR #706 (quality/test-deploy-helpers) — issue #719
-- [ ] Resolve CI test list drift — issues #640, #632
-- [ ] Clean up stale branches — 143 remote branches (87 stale worktree-issue/* branches)
+- [x] Merge PR #717 — Coverage enforcement ✅
+- [x] Merge PR #718 — Node.js 20 deprecation fix ✅
+- [x] Merge PR #751 — Python 3.14 upgrade ✅
+- [x] Merge PR #706 — deploy.py helper tests ✅
+- [ ] Fix CI failure on PR #750 (quality/test-sim2real-cli-errors) — currently CI-failing
+- [ ] Merge PR #750 after CI fix — 30 new CLI error-path tests
+- [ ] Clean up dead merged branches — 20 already-merged branches still present (10 worktree-issue, 10 non-worktree)
+- [ ] Clean up blis-context guide branches — `guide/docs-blis-context`, `docs-blis-context-709`, `docs-link-blis-context` all reference deleted file; close PR #766
 
 ### Documentation
-- [ ] Merge CONTRIBUTING.md PR #729 — contributor onboarding (clean, mergeable)
-- [ ] Merge ROADMAP.md PR #728 (this PR) — public roadmap
-- [ ] Merge guide doc PRs #707, #710, #730 as a batch
-- [ ] Remove retired `review.py` + dead `anthropic` dependency (issue #745)
-- [ ] Close issue #620 once CONTRIBUTING.md is merged
+- [ ] Merge CONTRIBUTING.md PR #729 (hold-gated)
+- [ ] Merge ROADMAP.md PR #728 (this PR, hold-gated)
+- [ ] Batch-merge guide doc PRs: #752, #754, #756, #759, #764, #769, #770 (all no-conflict)
+- [ ] Merge PR #775 (errors.py library table sync) and #774/#772 (architect refactors)
+- [ ] Remove retired `review.py` + dead `anthropic` dependency (PR #747, hold-gated; IS #745)
 
-### Architecture (proc.py Conflict)
+### Architecture (proc.py Sequencing)
 - [ ] Merge PR #721 (architect/proc-consolidation) — subprocess abstraction layer
-- [ ] Scanner rebases PR #744 on top of merged #721 (timeout fix)
+  - PR #744 (scanner/fix-proc-timeout-721) is BUILT ON TOP of #721 — merge #721 first
+- [ ] Merge PR #744 after #721 merges — timeout fix applies cleanly
+- [ ] Merge PR #746 (deploy deferred imports refactor)
+- [ ] Merge PR #772/#774 (layout.repo_root + ResolveError disambiguation)
 
 ---
 
@@ -85,12 +114,19 @@ and open-source readiness.
 - [ ] **kubectl abstraction layer** (issue #656) — Replace 58+ raw subprocess calls in `deploy.py`, `setup.py`, `cluster.py` with a typed `kubectl.py` module
   - Unblocks: reliable timeout enforcement, subprocess security hardening
   - Effort: ~1 week
-- [ ] **deploy.py decomposition** (issue #654) — Split 3,776-line monolith into modules by subcommand
+- [ ] **deploy.py decomposition** (issue #654) — Split 170K-line monolith into modules by subcommand
   - Effort: ~1.5 weeks
 - [ ] **sim2real.py decomposition** (issue #658) — Resolve 24 deferred imports, extract to modules
   - Effort: ~1 week
-- [ ] **REPO_ROOT centralization** (issue #657) — Replace 7× fragile parent-chain traversal with single config
+- [ ] **REPO_ROOT centralization** (issue #657) — Replace 7× fragile parent-chain traversal with single layout.repo_root()
+  - **PR #772 in progress** — architect working on this; mergeable once hold-queue clears
   - Effort: ~2 days
+
+### Branch Hygiene (Operational)
+- [ ] Delete 20 already-merged dead branches (10 worktree-issue, 10 named branches)
+- [ ] Delete/close 3 blis-context guide branches (reference deleted file)
+- [ ] Audit sec/* branches for duplicates (sec/fix-rbac-cluster is superseded by sec/fix-clusterrole-pods)
+- [ ] Consider archiving worktree-issue-* namespace (88 branches, most stale)
 
 ### Feature Work
 - [ ] Round-trip integration test: `translation register --build` → `sim2real assemble` (issue #592)
@@ -105,14 +141,13 @@ and open-source readiness.
 
 ### Reliability
 - [ ] Orchestrator ConfigMap save/restore — prevent clobber of out-of-band edits (issue #450)
-- [ ] classify infra-caused `PipelineRun Failed` and route to retry (issue #567)
+- [ ] Classify infra-caused `PipelineRun Failed` and route to retry (issue #567)
 - [ ] Data PVC path scoping by scenario (issue #553)
 - [ ] Auto-prune stale progress-dict entries (issue #554)
 
 ### Observability
 - [ ] Stale orchestrator image warning when `--remote` is used (issue #376)
 - [ ] GPU capacity probe: per-node fragmentation for multi-GPU pods (issue #262)
-- [ ] Shadow reservation ledger (from worktree-issue-255)
 
 ---
 
@@ -133,8 +168,8 @@ New contributors are especially welcome in these areas:
 
 | Area | Entry Point | Skill Level |
 |---|---|---|
-| Documentation | Issues #619, #675, #700 | Beginner |
-| Test coverage | Issues #631, #635 | Intermediate |
+| Documentation | Issues #700, #732, #675 | Beginner |
+| Test coverage | PR #750 (needs CI fix) | Intermediate |
 | kubectl abstraction | Issue #656 | Intermediate |
 | deploy.py decomposition | Issue #654 | Advanced |
 
@@ -146,7 +181,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions.
 
 | Date | Update |
 |---|---|
-| 2026-07-30 | Session 2 update: strategic health table, immediate actions, proc.py conflict analysis, license/release gaps, Dependabot churn noted |
+| 2026-07-30 | Session 5 update: hive infrastructure degradation (TLS cert), 28 open PRs (14 hold-gated), blis-context.md deletion cascades, sec/fix-clusterrole-pods new security branch, proc.py sequencing clarified, branch hygiene analysis |
+| 2026-07-30 | Session 2 update: strategic health table, immediate actions, proc.py conflict analysis, license/release gaps |
 | 2026-07-30 | Initial roadmap created by strategist agent |
 
 ---
