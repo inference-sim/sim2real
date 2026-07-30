@@ -10,11 +10,11 @@ The fragments shipped today:
 
 | Fragment stem | What it adds |
 |---------------|--------------|
-| `llm-d-rbac` | EPP `Role` + `RoleBinding` for `inferenceobjectives.llm-d.ai` |
-| `preserve-request-id` | `EnvoyFilter` that preserves the external request-id |
 | `epp-verbosity` | `inferenceExtension.verbosity: "5"` |
-| `vllm-logging` | `vllm.additionalFlags: [--no-disable-uvicorn-access-log]` + `loggingLevel: INFO` |
+| `externally-managed-gateway` | `gateway.externallyManaged: true` — tells the chart to assume the gateway (Istio, AgentGateway, etc.) is managed externally and skip in-chart gateway provisioning |
+| `preserve-request-id` | `EnvoyFilter` that preserves the external request-id |
 | `routing-proxy-resources` | `routing.proxy.resources.requests` set to `memory: 16Gi`, `cpu: 4` (chart leaves it unset) |
+| `vllm-logging` | `vllm.additionalFlags: [--no-disable-uvicorn-access-log]` + `loggingLevel: INFO` |
 
 **Opt out** by listing fragment stems under `defaults.disable` in `transfer.yaml`:
 
@@ -35,6 +35,8 @@ The remainder of this document keeps the original snippets so operators can hand
 The EPP fails because it does not have permission to inspect `inferenceobjectives.llm-d.ai` resources. This can happen if the `llm-d.ai` CRDs are loaded in your cluster and you are using the `main` branch of `llm-d-router`.
 
 > **Note:** PR #28 in `tektonc-data-collection` added `llm-d.ai` RBAC to the *collector* role used by the data-collection Tekton tasks. That does not cover the EPP itself — the EPP runs under its own ServiceAccount (`${model.idLabel}-gaie-epp`). The workaround below injects a `Role` + `RoleBinding` for that ServiceAccount via the scenario YAML.
+>
+> **Note:** The `llm-d-rbac` RBAC fragment was removed from the shipped framework defaults (`.claude/skills/sim2real-bootstrap/templates/defaults/`) — it is no longer auto-applied by `sim2real assemble`. Apply the snippet below manually to your `baselines/*.yaml` if you encounter this error.
 
 Add this to your `baselines/*.yaml`:
 
