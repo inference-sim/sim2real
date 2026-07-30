@@ -2,8 +2,10 @@
 
 ## Project Overview
 
-sim2real is a pipeline for transferring simulation-discovered routing algorithms from
-inference-sim to production llm-d-inference-scheduler scorer plugins.
+sim2real is a pipeline for taking simulation-discovered algorithms from inference-sim into
+production serving systems. The aim is a general, reproducible process for promoting an algorithm
+found in simulation to a real deployment — it is not tied to any single production target. It is
+currently developed and validated against llm-d-router (as scorer/EPP plugins), the reference target.
 
 ## Repository Structure
 
