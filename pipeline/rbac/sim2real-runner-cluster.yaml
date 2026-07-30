@@ -1,13 +1,26 @@
 # ClusterRole and ClusterRoleBinding granting sim2real-runner read access to
-# nodes — required for the orchestrator's GPU capacity probe (kubectl get nodes).
+# nodes and cluster-wide pod listing — required for the GPU capacity probe.
+#
+# nodes: get + list — probe_free_gpus (lib/capacity.py) runs
+#   `kubectl get nodes -o json` to read per-node allocatable GPU resources.
+#
+# pods: list only (NOT get) — probe_free_gpus also runs
+#   `kubectl get pods --all-namespaces` to sum GPU requests across the cluster.
+#   This must be cluster-scoped: GPU contention comes from pods in any namespace,
+#   not just the sim2real slot namespaces. `get` (fetching a specific pod by name
+#   cluster-wide) is NOT required by any code path and is intentionally omitted
+#   to limit the blast radius of a compromised orchestrator.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: sim2real-runner-nodes
 rules:
   - apiGroups: [""]
-    resources: ["nodes", "pods"]
+    resources: ["nodes"]
     verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
