@@ -12,10 +12,7 @@ Covers:
 Issue: sim2real#792
 """
 
-import os
-import shutil
-from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -254,8 +251,6 @@ class TestExtractPhasesSkipLogsScoped:
             return _fake_run()
 
         _mock_subprocess(monkeypatch, mock_run)
-
-        orig_redact = deploy.redact_yaml_tree
 
         def capture_redact(path):
             redact_calls.append(path)
@@ -728,7 +723,6 @@ class TestSizeProbeSkipLogs:
 
         # Mock builtins.input to detect if it's called
         import builtins
-        orig_input = builtins.input
 
         def capture_input(prompt=""):
             input_called.append(prompt)
