@@ -936,6 +936,9 @@ algorithms:                 # optional — omit for baseline-only benchmarks
 
 workloads:
   - <path>                  # one or more workload YAMLs
+                            # Each YAML is either a generative workload (any fields understood
+                            # by llm-d-benchmark's WorkloadSpec) or a trace workload (must have
+                            # a non-empty `trace:` mapping — see Trace workload schema below).
 
 context:
   text: |                   # freeform instructions (consumed by step-2's translation skill)
@@ -977,6 +980,36 @@ blis_observe:               # optional — per-transfer overrides for blis obser
 All paths are relative to the experiment root and validated by `sim2real assemble` at load time.
 
 `component.ref` (optional): tag, branch, or commit SHA identifying the expected version of the component submodule. Reserved for step-2 (the skill-driven flow that will consume it).
+
+### Trace workload schema
+
+A workload YAML with a non-empty `trace:` mapping is treated as a **trace workload** — it sources requests from a recorded conversation trace (via `prepare-trace` + session pool) rather than a generative `WorkloadSpec`. `sim2real assemble` detects the presence of `trace:` and switches the PipelineRun to the trace code path.
+
+```yaml
+name: <workload-name>         # required; kebab-or-snake-case, unique in the YAML list
+trace:
+  source: <spec>              # required. Dataset location:
+                              #   hf:<org>/<dataset>   — HuggingFace Hub dataset
+                              #   data.csv / <path>    — local file (relative to experiment root)
+  shards: 39                  # optional (default 39) — number of shards to download
+  split: test                 # optional (default "test") — HF dataset split
+  filters:                    # optional — filter conversations before conversion
+    min_rounds: 2             # minimum turns a conversation must have to be kept (default 2)
+  convert:                    # optional — conversion options
+    context_growth: accumulate  # how to build context window: "accumulate" (default) or other
+  pool:                       # required — session pool sizing
+    concurrent_sessions: <N>  # concurrent replays in-flight (maps to --concurrent-sessions)
+    total_sessions: <N>       # total sessions to run (0 = exhaust corpus; maps to --total-sessions)
+  sample:                     # optional — corpus sampling controls (applied at corpus-build time)
+    dedup_by_conversation: true  # deduplicate by conversation ID before sampling (default true)
+    shuffle_seed: 42          # RNG seed for deterministic corpus shuffle (default 42)
+```
+
+**Required fields:** `source`, `pool.concurrent_sessions`, `pool.total_sessions`.
+
+**`tracePath`** is deterministic: `sim2real assemble` hashes all `trace:` content fields (excluding `pool:` — replay-time only) and names the path `traces/<safe_wl_name>-<sha12>`. Changing any content field forces a new corpus build; changing only `pool:` reuses the cached corpus.
+
+**`sample.dedup_by_conversation` and `sample.shuffle_seed`** affect the corpus hash (changing them forces a rebuild). They are NOT included in the generative `workloadSpec` path — only trace workloads emit `traceDedupByConversation` and `traceShuffleSeed` PipelineRun params.
 
 ---
 
