@@ -3,4 +3,4 @@ PyYAML>=6.0.3,<7
 requests>=2.34.2,<3       # CVE-2024-35195 fixed in 2.32.0
 matplotlib>=3.11.1,<4
 numpy>=2.5.1,<3
-anthropic>=0.25.0
+anthropic>=0.120.0
