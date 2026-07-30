@@ -1,6 +1,6 @@
 # sim2real Roadmap
 
-> **Status**: Living document. Last updated: 2026-07-30.
+> **Status**: Living document. Last updated: 2026-07-30 (session 2).
 > This roadmap reflects current strategic priorities as assessed by the Hive strategist agent.
 > Operators and contributors should adjust priorities as project needs evolve.
 
@@ -11,8 +11,33 @@ sim2real is a pipeline for transferring simulation-discovered routing algorithms
 [llm-d-inference-scheduler](https://github.com/llm-d/llm-d-inference-scheduler) scorer plugins.
 
 The project is in **active development** with a small, focused team. The pipeline is functional
-end-to-end and has recently reached 97% test coverage. Current focus is hardening, decomposition,
-and expanding the feature surface.
+end-to-end and has reached 97%+ test coverage. Current focus is hardening, decomposition,
+and open-source readiness.
+
+### Strategic Health (2026-07-30)
+
+| Dimension | Status | Notes |
+|-----------|--------|-------|
+| Test coverage | ✅ 97%+ | Coverage enforcement added (PR #717 merged) |
+| CI health | ✅ Stable | 7 dependency PRs merged today |
+| Security PRs | 🟡 Pending | PR #699 (BuildKit), #697, #690 awaiting human merge |
+| Documentation | 🟡 In progress | CONTRIBUTING (#729) and ROADMAP (#728) PRs filed |
+| License | 🔴 **MISSING** | No LICENSE file — adoption blocker |
+| Releases | 🔴 None | 0 GitHub releases since April 2026 |
+| PR queue | 🟡 13 open | 6 hold-labeled, 2 with merge conflicts |
+| Architecture | 🟡 Monolithic | deploy.py (170K lines), sim2real.py (109K lines) need decomposition |
+
+---
+
+## Immediate Actions (Before Next Session)
+
+> These are **operator decisions** — agents cannot merge or create releases.
+
+1. **🔴 Add Apache 2.0 LICENSE file** — CONTRIBUTING.md references it; it doesn't exist
+2. **🟡 Merge PR #699** (BuildKit security) — clean, mergeable, no blockers
+3. **🟡 Merge PR #729** (CONTRIBUTING.md) — clean, mergeable
+4. **🟡 Sequence PR conflict**: Merge PR #721 (architect/proc) first, then scanner rebases PR #744
+5. **🟡 Create v0.1.0 release tag** — pipeline is stable, coverage is high
 
 ---
 
@@ -20,21 +45,35 @@ and expanding the feature surface.
 
 *Goal: Eliminate known security risks, stabilize CI, and reduce technical debt.*
 
+### Open-Source Readiness (Critical — Do First)
+- [ ] **Add `LICENSE` file** (Apache 2.0) — CONTRIBUTING.md references it but file doesn't exist ⚠️
+- [ ] **Create `v0.1.0` release tag** — pipeline functional, 97%+ coverage, ready for first tag
+- [ ] Merge `CONTRIBUTING.md` PR #729 — contributor onboarding guide
+
 ### Security (Immediate)
-- [ ] Merge PR #699 — Replace privileged BuildKit pod with rootless alternative
-- [ ] Merge PR #697 — Harden `data-pvc-explorer` debug manifest (remove root, pin image)
-- [ ] Close PR #648 — Contains regression risk; open clean RBAC-only fix instead
-- [ ] Resolve `id-token: write` in `claude.yml` — scope to only jobs that need OIDC
+- [x] Merge PR #648 — Closed (contained regression risk; PR #690 is the clean fix)
+- [ ] Merge PR #699 — Replace privileged BuildKit pod with rootless alternative (clean, mergeable)
+- [ ] Merge PR #697 — Harden `data-pvc-explorer` debug manifest
+- [ ] Merge PR #690 — Remove cluster-wide pods permission from ClusterRole (hold-gated)
+- [ ] Merge PR #731 — Document secrets:get scope and resourceNames hardening (clean, mergeable)
 
 ### CI & Quality
-- [ ] Merge PR #717 — Add coverage enforcement (fail below threshold)
-- [ ] Merge PR #718 — Suppress Node.js 20 deprecation warnings
-- [ ] Close 20 fully-merged stale branches (issue #724)
-- [ ] Add `git fetch --prune` to CI workflow
+- [x] Merge PR #717 — Coverage enforcement added ✅ (merged 2026-07-30)
+- [x] Merge PR #718 — Node.js 20 deprecation suppression ✅
+- [ ] Fix lint failure on PR #706 (quality/test-deploy-helpers) — issue #719
+- [ ] Resolve CI test list drift — issues #640, #632
+- [ ] Clean up stale branches — 143 remote branches (87 stale worktree-issue/* branches)
 
 ### Documentation
-- [ ] Create `CONTRIBUTING.md` (issue #620) — contributor onboarding
-- [ ] Merge open guide doc PRs (#702, #704, #705, #707, #710) as a batch
+- [ ] Merge CONTRIBUTING.md PR #729 — contributor onboarding (clean, mergeable)
+- [ ] Merge ROADMAP.md PR #728 (this PR) — public roadmap
+- [ ] Merge guide doc PRs #707, #710, #730 as a batch
+- [ ] Remove retired `review.py` + dead `anthropic` dependency (issue #745)
+- [ ] Close issue #620 once CONTRIBUTING.md is merged
+
+### Architecture (proc.py Conflict)
+- [ ] Merge PR #721 (architect/proc-consolidation) — subprocess abstraction layer
+- [ ] Scanner rebases PR #744 on top of merged #721 (timeout fix)
 
 ---
 
@@ -99,7 +138,7 @@ New contributors are especially welcome in these areas:
 | kubectl abstraction | Issue #656 | Intermediate |
 | deploy.py decomposition | Issue #654 | Advanced |
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions (coming soon — issue #620).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions.
 
 ---
 
@@ -107,6 +146,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions (coming soon — i
 
 | Date | Update |
 |---|---|
+| 2026-07-30 | Session 2 update: strategic health table, immediate actions, proc.py conflict analysis, license/release gaps, Dependabot churn noted |
 | 2026-07-30 | Initial roadmap created by strategist agent |
 
 ---
