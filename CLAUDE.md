@@ -19,6 +19,8 @@ inference-sim to production llm-d-inference-scheduler scorer plugins.
 
 `llm-d-inference-scheduler` is not a submodule of the framework repo. Each experiment repo carries its own copy (e.g. `admission-control/llm-d-inference-scheduler/`).
 
+> **Note:** `gateway-api-inference-extension` (the upstream EPP framework that `llm-d-inference-scheduler` builds on) has been merged into `llm-d-router`. If you are working with `llm-d-router` checkouts, the GAIE framework code is included — there is no separate `gateway-api-inference-extension` repository to check out. The `/sim2real-check` skill handles this automatically: when a `gateway-api-inference-extension` directory is absent but an `llm-d-router` checkout is present, it treats the router checkout as the GAIE codebase (`GAIE=$LLMD`).
+
 ## Transfer Pipeline
 
 The pipeline has two phases: a one-time-per-cluster bootstrap, then a per-workspace and per-run cycle. Two producers write translations with the same on-disk shape:
