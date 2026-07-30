@@ -46,13 +46,13 @@ per-namespace applies. No exception ever escapes
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from pipeline.lib import layout
+from pipeline.lib import proc as _proc
 from pipeline.lib.log import err, info, ok, warn
 from pipeline.lib.values import deep_merge
 
@@ -314,21 +314,19 @@ def _run(
     input: str | None = None,
     timeout: int = 120,
 ) -> subprocess.CompletedProcess:
-    """Thin wrapper over ``subprocess.run``. Tests monkeypatch this to
-    intercept every kubectl/oc invocation.
+    """Thin wrapper delegating to :func:`pipeline.lib.proc.run` — the single
+    process-exec seam. Tests monkeypatch this to intercept kubectl/oc
+    invocations made through this module.
 
     ``timeout`` defaults to 120 s — enough for nearly all kubectl/helm
     operations while preventing indefinite hangs when the cluster API
-    server is unreachable or the connection drops mid-stream.
+    server is unreachable or the connection drops mid-stream (#694).
     """
-    return subprocess.run(
-        cmd, check=check, text=True, capture_output=capture,
-        input=input, timeout=timeout,
-    )
+    return _proc.run(cmd, check=check, capture=capture, input=input, timeout=timeout)
 
 
 def _which(cmd: str) -> bool:
-    return shutil.which(cmd) is not None
+    return _proc.which(cmd)
 
 
 # ── Relocated support helpers (from setup.py) ────────────────────────

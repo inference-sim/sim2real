@@ -51,6 +51,7 @@ def _c(code: str, text: str) -> str:
 
 
 from pipeline.lib import cluster_ops, layout
+from pipeline.lib import proc as _proc
 from pipeline.lib.log import info, ok, warn, err
 from pipeline.lib.pairkey import parse_iteration_spec, parse_pair_key
 from pipeline.lib.redact import redact_yaml_file, redact_yaml_tree
@@ -106,14 +107,12 @@ def step(n, title: str) -> None:
 
 def run(cmd: list[str], *, check: bool = True, capture: bool = False,
         cwd: "Path | None" = None, timeout: int = 120) -> subprocess.CompletedProcess:
-    """Thin subprocess wrapper. ``timeout`` defaults to 120 s so that
-    kubectl/helm calls against a hung or unreachable cluster do not block
-    the deploy process indefinitely.
+    """Delegates to :func:`pipeline.lib.proc.run` — the single process-exec seam.
+
+    ``timeout`` defaults to 120 s so kubectl/helm calls against a hung or
+    unreachable cluster do not block the deploy process indefinitely (#694).
     """
-    return subprocess.run(
-        cmd, check=check, text=True, capture_output=capture,
-        cwd=cwd, timeout=timeout,
-    )
+    return _proc.run(cmd, check=check, capture=capture, cwd=cwd, timeout=timeout)
 
 
 # ── ConfigMap namespace resolution ──────────────────────────────────────────

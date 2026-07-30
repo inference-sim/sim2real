@@ -44,6 +44,7 @@ _tty = sys.stdout.isatty()
 def _c(code: str, text: str) -> str:
     return f"\033[{code}m{text}\033[0m" if _tty else text
 
+from pipeline.lib import proc as _proc
 from pipeline.lib.log import info, ok, warn, err
 def step(n, total, title: str) -> None:
     print("\n" + _c("36", f"━━━ [{n}/{total}] {title} ━━━"))
@@ -84,12 +85,14 @@ Examples:
 
 def run(cmd: list[str], *, check: bool = True, capture: bool = False,
         input: str | None = None) -> subprocess.CompletedProcess:
-    """Run a command, raise on non-zero unless check=False."""
-    return subprocess.run(cmd, check=check, text=True, capture_output=capture, input=input)
+    """Run a command, raise on non-zero unless check=False.
+
+    Delegates to :func:`pipeline.lib.proc.run` — the single process-exec seam.
+    """
+    return _proc.run(cmd, check=check, capture=capture, input=input)
 
 def which(cmd: str) -> bool:
-    import shutil
-    return shutil.which(cmd) is not None
+    return _proc.which(cmd)
 
 def prompt(var_name: str, message: str, default: str = "", env_var: str = "") -> str:
     """Return env_var value, or prompt interactively with optional default."""
