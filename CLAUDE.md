@@ -27,12 +27,14 @@ The pipeline has two phases: a one-time-per-cluster bootstrap, then a per-worksp
 - **Skill-driven** (`sim2real translate` → `/sim2real-translate` skill → `sim2real translate --resume` → `sim2real build`) — the operator supplies algorithm source; the skill translates it into a plugin and `sim2real build` compiles+pushes an image.
 
 ```
+/sim2real-bootstrap  (one-time per experiment repo — scaffolds transfer.yaml, baselines/, component submodule)
+                   ↓
 cluster.py provision  (one-time per cluster)
                    ↓
 setup.py → [BYO: sim2real translation register] OR
            [Skill: sim2real translate → /sim2real-translate → translate --resume → sim2real build]
                    ↓
-sim2real assemble → deploy.py
+sim2real assemble → deploy.py → deploy.py collect → /sim2real-check → /sim2real-analyze
 ```
 
 Run all pipeline commands from the `sim2real/` directory, pointing `--experiment-root` at the experiment repo:
@@ -70,7 +72,7 @@ python pipeline/sim2real.py --experiment-root ../admission-control use --run <ru
 
 **`/sim2real-translate`** — Skill-driven translation. Reads `workspace/translations/<hash>/skill_input.json` (written by `sim2real translate`) and spawns a three-agent team (expert + writer + reviewer) per algorithm to produce the Go plugin source + treatment overlay under `workspace/translations/<hash>/generated/<algo>/`. Follow up with `sim2real translate --resume` to validate outputs. See `.claude/skills/sim2real-translate/SKILL.md`.
 
-**`/sim2real-bootstrap`** — Scaffolds a new experiment repo from a `config.md` spec. Generates `transfer.yaml`, baseline scenario YAML, workload YAMLs, and the blis-observe config from a structured configuration document. Invoked at the start of a new experiment to create the initial repo structure. See `.claude/skills/sim2real-bootstrap/SKILL.md`.
+**`/sim2real-bootstrap`** — Bootstraps an experiment repo into a pipeline-ready sim2real bundle. Two modes: **BLIS mode** (default) — parses a BLIS-generated folder (`algorithms/*.go`, `workloads/*.yaml`, `config.md` / `top3_selection.json`), derives `transfer.yaml`, baseline scenario YAMLs, a component submodule pointer, and framework defaults overlays; **`--byo` mode** — scaffolds `transfer.yaml` with per-algorithm `byo: true` markers from pre-built EPP images and prints a ready-to-run `translation register` command. Run once per experiment repo before any pipeline commands. See `.claude/skills/sim2real-bootstrap/SKILL.md`.
 
 **`/sim2real-check`** — Validates parity between sim and real deployments after a completed run. Runs a structured checklist (§1 workspace layout, §2 config parity, §3 inference objectives, §4 traffic profile, §5 runtime metrics) and reports PASS/FAIL/INAPPLICABLE for each check with actionable remediation steps. Requires a run assembled via `sim2real assemble --run <name>` and results collected via `deploy.py collect`. See `.claude/skills/sim2real-check/SKILL.md`.
 
