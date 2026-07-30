@@ -51,6 +51,7 @@ def _c(code: str, text: str) -> str:
 
 
 from pipeline.lib import cluster_ops, layout
+from pipeline.lib import proc as _proc
 from pipeline.lib.log import info, ok, warn, err
 from pipeline.lib.pairkey import parse_iteration_spec, parse_pair_key
 from pipeline.lib.redact import redact_yaml_file, redact_yaml_tree
@@ -106,7 +107,8 @@ def step(n, title: str) -> None:
 
 def run(cmd: list[str], *, check: bool = True, capture: bool = False,
         cwd: "Path | None" = None) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, check=check, text=True, capture_output=capture, cwd=cwd)
+    """Delegates to :func:`pipeline.lib.proc.run` — the single process-exec seam."""
+    return _proc.run(cmd, check=check, capture=capture, cwd=cwd)
 
 
 # ── ConfigMap namespace resolution ──────────────────────────────────────────
