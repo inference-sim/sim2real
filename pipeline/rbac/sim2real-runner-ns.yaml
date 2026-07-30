@@ -4,25 +4,10 @@
 # - secrets: credential existence check before Tekton run dispatch.
 #   The orchestrator calls `kubectl get secret <name>` to verify the
 #   HuggingFace token, registry-creds, and metrics-reader secrets exist
-#   before submitting a PipelineRun.  Secret *names* are operator-supplied
-#   at cluster-init time (cluster_config.json:secret_names); they default
-#   to: hf-secret, registry-creds, dockerhub-creds, and
-#   inference-gateway-sa-metrics-reader-secret.
-#
-#   Security note: this rule grants GET on *all* Secrets in the namespace
-#   because the names are configurable and unknown at RBAC-apply time.
-#   For a higher-security posture, replace this rule with a
-#   resourceNames-scoped rule that lists the actual secret names after
-#   cluster-init:
-#
-#     - apiGroups: [""]
-#       resources: ["secrets"]
-#       verbs: ["get"]
-#       resourceNames:
-#         - hf-secret
-#         - registry-creds
-#         - dockerhub-creds
-#         - inference-gateway-sa-metrics-reader-secret
+#   before submitting a PipelineRun.  The resourceNames list covers the
+#   four default secret names (pipeline/cluster.py:_DEFAULT_SECRET_NAMES)
+#   plus the metrics-reader secret. Operators who rename secrets at
+#   cluster-init time must update this list after applying the Role.
 #
 # - pods: per-PipelineRun pending-pod triage (deploy.py _check_pending_pods)
 #   and broader non-Tekton pod health sweeps (lib/health.py:get_all_pods).
@@ -47,9 +32,14 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get"]
-    # NOTE: No resourceNames restriction here because secret names are
-    # operator-configurable at cluster-init time. See the comment block
-    # above for how to add a resourceNames restriction post-init.
+    # Restrict to only the credential secrets the orchestrator actually reads.
+    # Default secret names come from pipeline/cluster.py:_DEFAULT_SECRET_NAMES.
+    # Update this list if you rename secrets at cluster-init time.
+    resourceNames:
+      - hf-secret
+      - registry-creds
+      - dockerhub-creds
+      - inference-gateway-sa-metrics-reader-secret
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
