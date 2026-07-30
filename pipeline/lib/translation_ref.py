@@ -39,8 +39,20 @@ class ValidationError(ValueError):
     """Raised when an alias or algorithm name fails validation."""
 
 
-class ResolveError(ValueError):
-    """Raised when `resolve_translation_ref` cannot resolve a ref."""
+class TranslationResolveError(ValueError):
+    """Raised when `resolve_translation_ref` cannot resolve a ref.
+
+    Named distinctly from ``pipeline.lib.resolve.ResolveError`` (an
+    ``Exception`` subclass raised during run hydration) so that catch
+    sites in ``sim2real.py`` are unambiguous about which failure domain
+    they handle. ``ResolveError`` is retained below as a backward-
+    compatible alias.
+    """
+
+
+# Backward-compatible alias: existing imports of ``ResolveError`` from
+# this module (including tests) continue to work unchanged.
+ResolveError = TranslationResolveError
 
 
 def validate_name(name: str) -> str:
@@ -173,7 +185,7 @@ def resolve_translation_ref(
     try:
         validate_name(ref)
     except ValidationError as exc:
-        raise ResolveError(f"invalid translation ref: {exc}") from exc
+        raise TranslationResolveError(f"invalid translation ref: {exc}") from exc
 
     base = translations_dir if translations_dir is not None else layout.translations_dir()
 
@@ -181,7 +193,7 @@ def resolve_translation_ref(
     if is_full_hash(ref):
         if (base / ref).is_dir() and (base / ref / "translation_output.json").exists():
             return ref
-        raise ResolveError(
+        raise TranslationResolveError(
             f"no such translation hash: {ref}; "
             "run 'sim2real list translations' to see available"
         )
@@ -189,7 +201,7 @@ def resolve_translation_ref(
     # Steps 3-4: scan.
     all_entries = list(iter_translations(base))
     if not all_entries:
-        raise ResolveError(
+        raise TranslationResolveError(
             f"no translations in {base}; "
             "run 'sim2real translation register' or 'sim2real translate' first"
         )
@@ -198,7 +210,7 @@ def resolve_translation_ref(
             return thash
 
     if len(ref) < _MIN_PREFIX_LEN:
-        raise ResolveError(
+        raise TranslationResolveError(
             f"'{ref}' is too short for a prefix match "
             f"(min {_MIN_PREFIX_LEN} chars) and does not match any alias; "
             "run 'sim2real list translations' to see available"
@@ -207,11 +219,11 @@ def resolve_translation_ref(
     if len(prefix_hits) == 1:
         return prefix_hits[0]
     if len(prefix_hits) > 1:
-        raise ResolveError(
+        raise TranslationResolveError(
             f"prefix '{ref}' matches {len(prefix_hits)} translations: "
             + ", ".join(sorted(prefix_hits))
         )
-    raise ResolveError(
+    raise TranslationResolveError(
         f"no such translation '{ref}'; "
         "run 'sim2real list translations' to see available"
     )
