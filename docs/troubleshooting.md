@@ -63,6 +63,55 @@ Add this to your `baselines/*.yaml`:
         name: ${model.idLabel}-gaie-epp-llm-d
 ```
 
+## Inspect the shared data PVC directly
+
+When `deploy.py collect` returns something unexpected (missing files, empty phases, an unfamiliar layout), you can browse the raw contents of a slot's results volume by hand. `data-pvc` is the per-namespace results volume that pipeline tasks write into and `deploy.py collect` reads from — each namespace slot has its own.
+
+Save the manifest below as `data-pvc-explorer.yaml`, replacing `<namespace>` with your slot namespace, then apply it. The pod mounts `/data` **read-only** and runs as a **non-root** user, so it can browse but never mutate results:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: data-pvc-explorer
+  namespace: <namespace>
+spec:
+  containers:
+    - name: shell
+      image: alpine:3.20@sha256:b89d9c93e9ed3597455c90a0b88a8bbb5cb7188438f70953fede212a0c4394e0
+      command: ["sh", "-c", "sleep infinity"]
+      volumeMounts:
+        - name: data-storage
+          mountPath: /data
+          readOnly: true
+      securityContext:
+        runAsUser: 1000
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        limits:   {cpu: "200m", memory: "128Mi"}
+        requests: {cpu: "50m",  memory: "32Mi"}
+  volumes:
+    - name: data-storage
+      persistentVolumeClaim:
+        claimName: data-pvc
+  restartPolicy: Never
+```
+
+```bash
+NAMESPACE=<your-slot-namespace>
+kubectl apply  -n "$NAMESPACE" -f data-pvc-explorer.yaml
+kubectl wait   -n "$NAMESPACE" --for=condition=Ready pod/data-pvc-explorer --timeout=60s
+kubectl exec   -n "$NAMESPACE" data-pvc-explorer -- ls -la /data
+# ... browse /data ...
+kubectl delete -n "$NAMESPACE" pod/data-pvc-explorer
+```
+
+> **Note:** If `ls /data` returns permission errors, the PVC's files are owned by a UID other than `1000` and are not world-readable. Add `fsGroup: <gid>` under a pod-level `spec.securityContext` to match the files' group, or adjust `runAsUser` to the owning UID.
+
 ## Increasing logging verbosity
 
 ### EPP
