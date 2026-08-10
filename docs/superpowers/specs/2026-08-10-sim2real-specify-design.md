@@ -182,11 +182,21 @@ unciteable unless that component's source says so.
 Three components, run in Phase 6 against the pinned checkouts.
 
 **Citation audit — all arms.** A fresh agent receives only the bundle and the two
-checkouts, with no generation transcript. For each cited expression and each
-non-obvious prose claim it resolves the citation and returns `CONFIRMED`,
-`WRONG`, or `UNSUPPORTED`, with the file and line that settles it. `WRONG` is
-fixed. `UNSUPPORTED` is deleted or converted to a stated open question. The
-verdict format is the one `pd-infocomm/docs/signal-analysis.md` already uses.
+checkouts, with no generation transcript. It performs **correspondence
+discovery**: for every non-trivial ported expression and every non-obvious prose
+claim, it locates the upstream counterpart — using an existing citation as a hint
+where one is present, and searching the pinned tree where none is — then returns
+`CONFIRMED`, `WRONG`, or `UNSUPPORTED` with the file and line that settles it.
+`WRONG` is fixed. `UNSUPPORTED` is deleted or converted to a stated open
+question. The verdict format is the one `pd-infocomm/docs/signal-analysis.md`
+already uses.
+
+Correspondence discovery rather than mere citation-checking, because citation
+density is itself an audit output, not an input: the pre-fix
+`causal_slo_externality.go` at `08203b4` carried exactly one citation
+(`pd_profile_handler.go:186`), and every citation in today's file was added by
+`ead56ea`. An auditor that only verifies existing citations would have returned
+clean on the file containing all four defects.
 
 **Blind re-derivation — focal arm only.** A second agent reads only the sim source
 at the pin and writes its own statement of the same policy, without seeing the
@@ -267,7 +277,10 @@ missing `math.Ceil`, and `ChunkTokens` versus `min(ap, ChunkTokens)`.
 `kairos_paper.go` at `08203b4`. Both must come back clean, per `ead56ea`.
 
 **Lint unit tests.** Fixture bundles covering a valid citation, a dangling path,
-an out-of-range line number, and a path outside the recorded pins.
+an out-of-range line number, and a path outside the recorded pins. The lint is
+exercised on synthetic fixtures plus the *post*-fix `causal_slo_externality.go`,
+which is citation-dense; the pre-fix file cannot serve as a lint fixture because
+it carries only one citation.
 
 **Acceptance run.** Regenerate the `pd-infocomm` bundle from the same provenance
 (`INFOCOM_REPRODUCIBILITY.md` plus BLIS `871b169b`) and compare against
