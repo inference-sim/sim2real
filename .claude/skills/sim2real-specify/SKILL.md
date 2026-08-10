@@ -133,9 +133,16 @@ Enumerate every quantity the decision rule reads. Classify each:
 Every row carries a citation to the value that supplies it. This is a
 classification pass, not a reference document — keep it to a table.
 
-If a quantity carrying the CORE mechanism is `unobtainable`, stop and put the case
-to the operator with `AskUserQuestion`. Degraded may be acceptable with reasoning,
-but that judgment is the operator's, not yours.
+If a quantity carrying the CORE mechanism is `unobtainable`, you MUST put the case
+to the operator with `AskUserQuestion` before proceeding to Phase 5. This is
+mandatory and blocking, not advisory. Present the quantity, what the target can
+supply instead, and the direction of the resulting bias — then let the operator
+decide. Writing a well-reasoned degradation note is NOT a substitute for asking:
+accepting a degradation that weakens the mechanism under test is the operator's
+call, however good your reasoning is.
+
+This classification governs runtime observability ONLY. It does not license
+omitting anything from the specification — see the firewall in Phase 5.
 
 ## Phase 4 — Isolation
 
@@ -153,12 +160,47 @@ Write `algorithms/<arm>.go` per arm, plus `config.md`.
 
 The specification layer:
 
+- states the COMPLETE computation — see the completeness rule below;
 - states the policy against REAL target interface names;
-- leaves adapters as declared unknowns rather than guesses, so a wrong guess fails
-  loudly rather than mis-scoring silently;
+- leaves TARGET-API ADAPTERS as declared unknowns rather than guesses, so a wrong
+  guess fails loudly rather than mis-scoring silently;
 - carries an upstream `path:line` citation on every non-obvious expression;
 - declares each Phase 3 degradation in its header WITH the direction of bias;
 - invents no in-source marker conventions.
+
+### Completeness, and the Phase 3 firewall
+
+READ THIS TWICE. It is the failure mode this skill is most prone to.
+
+The specification must state the whole computation: every term the simulation
+sums, every coefficient, every rounding, every guard that skips a term. Nothing
+downstream re-derives the algebra — `/sim2real-translate` treats this file as
+authoritative for the science, so an omission here is carried faithfully into the
+plugin and never questioned again.
+
+A function with NO BODY is legitimate in exactly one case: a target-API adapter
+whose exact accessor must be confirmed against the pinned checkout. It is never
+legitimate for a quantity the simulation computes.
+
+> Phase 3 tells you what the port can OBSERVE AT RUNTIME. It never tells you what
+> the specification may leave UNSTATED.
+
+An `unobtainable` or `degraded` INPUT does not license omitting the algebra that
+consumes it. Those are independent facts and both must be recorded:
+
+- the computation, stated in full, cited to the simulation source;
+- the input's observability status, declared as a degradation with its direction
+  of bias.
+
+Worked example of getting this WRONG. The rollout admission estimate depends on
+per-resident remaining steps, which the target cannot observe. The wrong response
+is a bodiless `estimateAdmissionDelay` marked UNKNOWN. The right response is to
+port the roll-forward estimator in full from the simulation, and separately
+declare that its per-resident input is degraded — approximated from EPP-side
+bookkeeping — and that the resulting bias understates contention.
+
+If you find yourself writing a bodiless function for anything other than an
+accessor, you are omitting science. Write the algebra.
 
 One rule governs references to other pipeline stages:
 
@@ -199,10 +241,16 @@ prompt uses a name absent here, or if a name here is used by no prompt.
 1. **Citation audit, every arm.** Spawn one agent per arm in a single tool-call
    message: `Agent(name="audit-<arm>", run_in_background=true,
    subagent_type=general-purpose, model="opus", prompt=<substituted audit.md>)`.
-2. **Blind re-derivation, focal arm only.** Spawn
-   `Agent(name="rederive", run_in_background=true, subagent_type=general-purpose,
-   model="opus", prompt=<substituted rederive.md>)`. Scoped to the focal arm
-   because that is where the algebra carrying the claim lives.
+2. **Blind re-derivation, EVERY arm.** Spawn one per arm:
+   `Agent(name="rederive-<arm>", run_in_background=true,
+   subagent_type=general-purpose, model="opus",
+   prompt=<substituted rederive.md>)`.
+
+   Every arm, not just the focal one, because this is the gate's ONLY omission
+   detector. The audit does correspondence discovery over expressions that are
+   present; a term that was never written has no expression to audit. Since
+   omission is this skill's most likely failure, the detector cannot be scoped to
+   one file.
 3. **Citation lint.** Run:
 
    ```bash
@@ -227,9 +275,14 @@ prompt uses a name absent here, or if a name here is used by no prompt.
   convention for it.
 - Every `BRIDGE` finding whose assumptions the auditor found wrong against the
   target or engine checkout: fix as for `WRONG`.
-- Every re-derivation term absent from the specification: either add it, or
-  declare its omission in the header with the direction of bias. A silent omission
-  is a defect even when the omission is defensible.
+- Every re-derivation term absent from the specification: ADD IT. The default is
+  to write the algebra, not to declare it missing. Declaring an omission is
+  permitted only when the term cannot be stated at all — not merely when its
+  inputs are unobservable, which is a Phase 3 degradation and does not license
+  omission. A silent omission is a defect even when defensible.
+- Any bodiless function that is NOT a target-API accessor: write its algebra from
+  the simulation source. This is the check that catches a specification which
+  states its top-level score and leaves every operand unimplemented.
 - Every lint failure: correct the citation, or add `lint-skip` on that line if the
   reference is illustrative rather than a citation.
 

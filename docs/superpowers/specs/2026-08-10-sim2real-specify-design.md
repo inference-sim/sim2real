@@ -71,6 +71,37 @@ a transcription process.
 Port correctness — the gate in this design — serves properties 1 and 2. It is one
 row of five.
 
+### Completeness is a precondition, not a sixth property
+
+All five properties above are epistemic, and a citation-dense ABSTRACT of an
+algorithm scores well on every one of them while stating none of the algebra. That
+is not a hypothetical: the first real run of this skill produced a focal arm with
+159 citations across four arms — against 11 in the hand-written bundle — and
+declared its two top-level operands bodiless with `UNKNOWN`. The latency law, the
+SLO kernel, the shadow resident table, and the re-timing model were absent
+entirely (`Coeffs`: 27 occurrences by hand, 0 generated).
+
+So the rubric needs a precondition the five properties do not imply:
+
+> The specification states the COMPLETE computation. A bodiless function is
+> legitimate only for a target-API adapter, never for a quantity the simulation
+> computes.
+
+Its cause was a coupling between Phase 3 and Phase 5. The run correctly classified
+per-resident state as unobtainable on the target, then treated that as licence not
+to specify the algebra consuming it — a bodiless `estimateAdmissionDelay` because
+"the rollout model is UNOBTAINABLE." But the rollout model is fully specified in
+the simulator; whether the target can feed it at runtime is an independent fact,
+and one the same analysis had already recorded. Hence the firewall:
+
+> Phase 3 governs what the port can OBSERVE AT RUNTIME. It never governs what the
+> specification may leave UNSTATED.
+
+Note this is the mirror image of the `BRIDGE` verdict below. `BRIDGE` covers code
+with no upstream counterpart; this covers an upstream counterpart with no code.
+Both are failures of correspondence, in opposite directions, and the gate needs a
+detector for each.
+
 ## Non-goals
 
 Mirroring `sim2real-translate`'s own negative-scope section:
@@ -222,11 +253,16 @@ density is itself an audit output, not an input: the pre-fix
 `ead56ea`. An auditor that only verifies existing citations would have returned
 clean on the file containing all four defects.
 
-**Blind re-derivation — focal arm only.** A second agent reads only the sim source
-at the pin and writes its own statement of the same policy, without seeing the
-port. The two statements are diffed and every divergence adjudicated against
-source. Scoped to the focal arm because that is where every observed defect was;
-`ead56ea` established that both comparator arms audited clean and were unchanged.
+**Blind re-derivation — every arm.** A second agent reads only the sim source at
+the pin and writes its own statement of the same policy, without seeing the port.
+The two statements are diffed and every divergence adjudicated against source.
+
+Originally scoped to the focal arm, on the evidence that `ead56ea` found every
+defect there and both comparators audited clean. The first real run overturned
+that: it is the gate's ONLY omission detector, because the audit does
+correspondence discovery over expressions that are present and a term never
+written has no expression to audit. With omission established as this skill's
+dominant failure mode, the detector cannot be scoped to one file.
 
 Rationale for including this beyond the audit: an auditor reading an existing port
 anchors on it. Defect 4 — which hid because `nChunks` is algebraically identical
