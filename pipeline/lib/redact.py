@@ -1,15 +1,29 @@
 """YAML redaction for collected plan files.
 
-Stubs out sensitive field values in Kubernetes objects whose `kind`
-matches a denylist, so collected plan YAMLs do not carry credentials
-into developer laptops or shared run dirs.
+Stubs out sensitive field values so collected plan YAMLs do not carry
+credentials into developer laptops or shared run dirs. Two independent
+mechanisms run over every file (defense in depth):
+
+  1. **Kind-based** — for Kubernetes objects whose `kind` matches a
+     denylist (default: ``Secret``), every value under `data` /
+     `stringData` is replaced with ``REDACTED``.
+  2. **Key-name-based** — for *any* document regardless of `kind`, a
+     recursive walk replaces values whose key names a credential
+     (``token``, ``password``, ``apiKey`` … — see ``SENSITIVE_KEYS``).
+     This catches credentials inlined as ordinary config fields, e.g.
+     an llm-d-benchmark harness plan's ``huggingface.token`` (issue
+     #819), which is neither a ``Secret`` nor under `data`/`stringData`.
 
 Behavior:
-  - `data` and `stringData` values in matching docs are replaced with
-    the literal string ``REDACTED``. Key names are preserved.
-  - Multi-doc YAML files are processed per-document; non-matching docs
-    pass through unchanged.
-  - Files without any matching docs are not rewritten.
+  - Matching values are replaced with the literal string ``REDACTED``.
+    Key names are always preserved.
+  - Reference/name fields that merely point at a secret (``secretName``,
+    ``tokenKey``, ``contextSecretName``) are NOT credentials and are left
+    intact — key matching is exact (case-insensitive), not substring.
+  - Multi-doc YAML files are processed per-document. A document is
+    counted once if either mechanism changed it; documents with no
+    `kind` are labelled ``document`` in the summary header.
+  - Files with no changes are not rewritten.
   - Unreadable / unparseable files are left untouched (warning logged).
   - Writes go through a sibling tmp file + atomic ``os.replace`` so a
     process crash mid-write cannot leave a half-redacted file on disk.
@@ -27,6 +41,51 @@ from pipeline.lib.log import warn
 REDACTED = "REDACTED"
 
 DEFAULT_REDACT_KINDS: frozenset[str] = frozenset({"Secret"})
+
+# Key names (matched case-insensitively, exact — not substring) whose
+# values are credentials and must be stubbed wherever they appear, in any
+# document. Stored lowercased; compared against ``key.lower()``.
+#
+# Deliberately excluded — these reference or name a secret but are not
+# themselves secret: ``secretName``, ``tokenKey``, ``contextSecretName``.
+SENSITIVE_KEYS: frozenset[str] = frozenset({
+    "token",
+    "tokenbase64",
+    "password",
+    "apikey",
+    "api_key",
+    "accesskey",
+    "secretaccesskey",
+    "authorization",
+    "bearertoken",
+})
+
+
+def _stub_sensitive_keys(node: object) -> bool:
+    """Recursively stub values under sensitive keys, in-place.
+
+    Walks nested dicts and lists. A value is replaced with ``REDACTED``
+    when its key is in ``SENSITIVE_KEYS`` (case-insensitive exact match);
+    the sensitive value is stubbed wholesale and not descended into.
+    Recursion continues through every other container value.
+
+    Already-redacted values are left as-is (so a re-run over a scrubbed
+    file reports no change). Returns True if any value was changed.
+    """
+    changed = False
+    if isinstance(node, dict):
+        for key, value in list(node.items()):
+            if isinstance(key, str) and key.lower() in SENSITIVE_KEYS:
+                if value != REDACTED:
+                    node[key] = REDACTED
+                    changed = True
+            elif _stub_sensitive_keys(value):
+                changed = True
+    elif isinstance(node, list):
+        for item in node:
+            if _stub_sensitive_keys(item):
+                changed = True
+    return changed
 
 
 def _stub_data_fields(doc: dict) -> bool:
@@ -82,8 +141,12 @@ def redact_yaml_file(path: Path, kinds: Iterable[str] | None = None) -> int:
         if not isinstance(doc, dict):
             continue
         kind = doc.get("kind")
-        if kind in redact_set and _stub_data_fields(doc):
-            counts[kind] += 1
+        changed = kind in redact_set and _stub_data_fields(doc)
+        # Key-name scrub runs on every document, regardless of kind.
+        changed = _stub_sensitive_keys(doc) or changed
+        if changed:
+            label = kind if isinstance(kind, str) else "document"
+            counts[label] += 1
 
     total = sum(counts.values())
     if total == 0:

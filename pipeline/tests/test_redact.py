@@ -194,12 +194,13 @@ def test_multi_kind_header_combines_counts(tmp_path: Path):
 
 
 def test_default_kind_set_is_secret_only(tmp_path: Path):
-    """ConfigMap is NOT in the default redact set; default-call leaves it alone."""
+    """ConfigMap is NOT in the default redact set; a ConfigMap carrying only
+    non-sensitive keys is not wholesale-stubbed the way a Secret would be."""
     src = (
         "apiVersion: v1\n"
         "kind: ConfigMap\n"
         "metadata: {name: cm}\n"
-        "data: {token: hf_abc}\n"
+        "data: {greeting: hello}\n"
     )
     p = tmp_path / "cm.yaml"
     p.write_text(src)
@@ -246,6 +247,123 @@ def test_tree_on_empty_or_missing_dir(tmp_path: Path):
 
     missing = tmp_path / "does-not-exist"
     assert redact_yaml_tree(missing) == 0
+
+
+# ── Sensitive-key scrub in non-Secret documents (issue #819) ─────────
+
+
+def test_redacts_sensitive_keys_in_plain_config(tmp_path: Path):
+    """A non-Secret harness config with an inlined HF token is scrubbed.
+
+    This is the issue #819 case: an llm-d-benchmark plan config.yaml whose
+    top-level document has no `kind:` and carries the credential as an
+    ordinary field (`huggingface.token` / `huggingface.tokenBase64`).
+    """
+    # Fixture values are deliberately fake and do not match any real
+    # credential pattern — the test only asserts they become REDACTED.
+    src = (
+        "huggingface:\n"
+        "  enabled: true\n"
+        "  secretName: hf-secret\n"
+        "  token: fake-example-token-not-real\n"
+        "  tokenBase64: ZmFrZS1leGFtcGxlLXRva2Vu\n"
+        "  tokenKey: HF_TOKEN\n"
+        "contextSecretName: llmdbench-context\n"
+    )
+    p = tmp_path / "config.yaml"
+    p.write_text(src)
+    assert redact_yaml_file(p) == 1
+    out = p.read_text()
+    assert out.startswith("# REDACTED by sim2real collect: 1 document stubbed\n")
+    d = list(yaml.safe_load_all(out))[0]
+    hf = d["huggingface"]
+    # Credentials scrubbed …
+    assert hf["token"] == REDACTED
+    assert hf["tokenBase64"] == REDACTED
+    # … reference / name fields preserved.
+    assert hf["enabled"] is True
+    assert hf["secretName"] == "hf-secret"
+    assert hf["tokenKey"] == "HF_TOKEN"
+    assert d["contextSecretName"] == "llmdbench-context"
+
+
+def test_sensitive_key_scrub_recurses_into_lists(tmp_path: Path):
+    """Sensitive keys nested inside list items (e.g. extraObjects) are found."""
+    src = (
+        "extraObjects:\n"
+        "- apiVersion: v1\n"
+        "  kind: Custom\n"
+        "  spec:\n"
+        "    password: hunter2\n"
+        "- name: keep-me\n"
+    )
+    p = tmp_path / "plan.yaml"
+    p.write_text(src)
+    assert redact_yaml_file(p) == 1
+    d = list(yaml.safe_load_all(p.read_text()))[0]
+    assert d["extraObjects"][0]["spec"]["password"] == REDACTED
+    assert d["extraObjects"][1]["name"] == "keep-me"
+
+
+def test_sensitive_key_scrub_case_insensitive_and_variants(tmp_path: Path):
+    """Case variants and the underscore form of key names are all caught."""
+    src = (
+        "auth:\n"
+        "  Token: abc\n"
+        "  API_KEY: def\n"
+        "  apiKey: ghi\n"
+        "  bearerToken: jkl\n"
+        "  authorization: Bearer xyz\n"
+    )
+    p = tmp_path / "auth.yaml"
+    p.write_text(src)
+    assert redact_yaml_file(p) == 1
+    auth = list(yaml.safe_load_all(p.read_text()))[0]["auth"]
+    assert all(v == REDACTED for v in auth.values())
+
+
+def test_sensitive_key_in_non_secret_kind_is_redacted(tmp_path: Path):
+    """A `token` key in a ConfigMap (not in the kind denylist) is scrubbed."""
+    src = (
+        "apiVersion: v1\n"
+        "kind: ConfigMap\n"
+        "metadata: {name: cm}\n"
+        "data: {token: hf_abc, greeting: hello}\n"
+    )
+    p = tmp_path / "cm.yaml"
+    p.write_text(src)
+    assert redact_yaml_file(p) == 1
+    d = list(yaml.safe_load_all(p.read_text()))[0]
+    assert d["data"]["token"] == REDACTED
+    assert d["data"]["greeting"] == "hello"
+
+
+def test_sensitive_key_scrub_idempotent(tmp_path: Path):
+    """Re-running over an already-scrubbed plain config is a no-op."""
+    src = (
+        "huggingface:\n"
+        "  token: hf_secret\n"
+        "  tokenBase64: YWJj\n"
+    )
+    p = tmp_path / "config.yaml"
+    p.write_text(src)
+    assert redact_yaml_file(p) == 1
+    after_first = p.read_text()
+    assert redact_yaml_file(p) == 0
+    assert p.read_text() == after_first
+
+
+def test_reference_keys_never_redacted(tmp_path: Path):
+    """Keys that name/reference secrets are not themselves secrets."""
+    src = (
+        "secretName: hf-secret\n"
+        "contextSecretName: llmdbench-context\n"
+        "tokenKey: HF_TOKEN\n"
+    )
+    p = tmp_path / "refs.yaml"
+    p.write_text(src)
+    assert redact_yaml_file(p) == 0
+    assert p.read_text() == src
 
 
 # ── Additional edge-case coverage (quality agent) ────────────────────
