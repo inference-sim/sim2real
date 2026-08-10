@@ -423,7 +423,7 @@ The independent citation audit, run on every arm. It must perform **corresponden
 
 **Interfaces:**
 - Consumes: nothing at runtime; SKILL.md substitutes its placeholders.
-- Produces: placeholders `{BUNDLE_ROOT}`, `{ARM_FILE}`, `{ARM_NAME}`, `{SIM_TREE}`, `{SIM_PIN}`, `{TARGET_TREE}`, `{TARGET_PIN}`, `{VERDICT_PATH}`, `{MAIN_SESSION_NAME}`. Writes a verdict JSON to `{VERDICT_PATH}` with schema `{"arm": str, "findings": [{"kind": "CONFIRMED"|"WRONG"|"UNSUPPORTED", "file": str, "line": int, "symbol": str, "claim": str, "upstream": str, "settled_by": str, "detail": str}]}`.
+- Produces: placeholders `{BUNDLE_ROOT}`, `{ARM_FILE}`, `{ARM_NAME}`, `{SIM_TREE}`, `{SIM_PIN}`, `{TARGET_TREE}`, `{TARGET_PIN}`, `{VERDICT_PATH}`, `{MAIN_SESSION_NAME}`. Writes a verdict JSON to `{VERDICT_PATH}` with schema `{"arm": str, "findings": [{"kind": "CONFIRMED"|"WRONG"|"UNSUPPORTED"|"BRIDGE", "file": str, "line": int, "symbol": str, "claim": str, "upstream": str, "settled_by": str, "declared_at": str | null, "detail": str}]}`. `declared_at` is required on `BRIDGE` findings and null elsewhere.
 
 - [ ] **Step 1: Write the prompt**
 
@@ -470,6 +470,19 @@ guard that skips or censors a term -- do this:
    value locally at each use (for example a per-request budget clamped to a
    request-specific size), a ported constant is a defect even when an algebraically
    equivalent downstream quantity hides it.
+6. Decide whether the code is PORTED or BRIDGE, and audit it accordingly.
+   - PORTED: the simulation computes this quantity, so a counterpart exists.
+     Compare against it. This includes quantities the simulation reads directly
+     from its own state — if the simulation knows the value exactly and the port
+     obtains it some other way, the counterpart still exists and the acquisition
+     is what you are checking. A unit error here is `WRONG`, not `BRIDGE`.
+   - BRIDGE: the code exists ONLY because the target lacks the simulation's
+     state, so no counterpart exists and none should. Do not report it
+     `UNSUPPORTED` — absence of a counterpart is the expected finding. Instead
+     verify its assumptions against the target or engine checkout, and check that
+     the specification header declares the degradation AND the direction of the
+     resulting bias. Record that header line in `declared_at`. If no declaration
+     exists, emit the finding with `declared_at: null`.
 
 Then audit the prose. For each non-obvious claim in `{BUNDLE_ROOT}/README.md` and
 `{BUNDLE_ROOT}/config.md`, resolve it against a checkout. Apply one rule:
@@ -488,11 +501,18 @@ Emit one finding per checked claim, using exactly these kinds:
 - `CONFIRMED` -- the port matches upstream, or the prose claim is substantiated.
 - `WRONG` -- a counterpart exists and the port disagrees with it. State the
   correct form.
-- `UNSUPPORTED` -- no upstream counterpart could be found after searching, so the
-  claim rests on nothing.
+- `UNSUPPORTED` -- no counterpart could be found after searching, AND the claim
+  purports to describe one. The claim rests on nothing.
+- `BRIDGE` -- no counterpart by construction, per method step 6. Set
+  `declared_at` to the specification-header line declaring the degradation and its
+  direction of bias, or `null` if no such declaration exists.
+
+Do NOT use `UNSUPPORTED` for bridge code. Absence of a counterpart is that code's
+expected property, not evidence against it.
 
 Every finding MUST carry `settled_by`: the `path:line` in a checkout that settles
-it. A finding without `settled_by` is not a finding.
+it. For `BRIDGE`, that is the target or engine line establishing what the code can
+actually observe. A finding without `settled_by` is not a finding.
 
 Be specific about consequence. "Units are wrong" is not useful; "the divisor
 under-counts by 100x, collapsing the term that carries hardware heterogeneity" is.
@@ -513,6 +533,7 @@ Write JSON to `{VERDICT_PATH}`:
       "claim": "what the specification says or computes",
       "upstream": "sim/example.go:168",
       "settled_by": "vllm/v1/metrics/loggers.py:563",
+      "declared_at": null,
       "detail": "what is wrong and what the correct form is, with consequence"
     }
   ]
@@ -869,6 +890,13 @@ Read `prompts/audit.md` and `prompts/rederive.md` and substitute every
   fix.
 - Every `UNSUPPORTED` finding: delete the claim, or convert it to a stated open
   question in `README.md` owned by the bundle.
+- Every `BRIDGE` finding with `declared_at: null`: write the declaration into the
+  specification header, naming the degradation AND the direction of the resulting
+  bias. Do NOT delete the code — absence of a simulation counterpart is that
+  code's expected property. This is prose in the header; do not introduce a marker
+  convention for it.
+- Every `BRIDGE` finding whose assumptions the auditor found wrong against the
+  target or engine checkout: fix as for `WRONG`.
 - Every re-derivation term absent from the specification: either add it, or
   declare its omission in the header with the direction of bias. A silent omission
   is a defect even when the omission is defensible.
@@ -877,8 +905,9 @@ Read `prompts/audit.md` and `prompts/rederive.md` and substitute every
 
 ### Pass condition
 
-Zero `UNSUPPORTED` claims remain, the lint exits 0, and every re-derivation
-divergence is resolved or declared.
+Zero `UNSUPPORTED` claims remain, every `BRIDGE` finding has a non-null
+`declared_at`, the lint exits 0, and every re-derivation divergence is resolved or
+declared.
 
 If `UNSUPPORTED` findings survive three fix rounds, STOP. Report what remains
 unresolved. Do not describe the bundle as audited.
@@ -1008,7 +1037,7 @@ Score the audit against ground truth established independently and by hand in `p
 
 **Interfaces:**
 - Consumes: `Failure`-free; independent of `lint_citations.py`.
-- Produces: `load_labels(path: Path) -> list[dict]`; `match(finding: dict, label: dict, tolerance: int = 6) -> bool`; `score(verdicts: list[dict], labels: list[dict]) -> dict` returning `{"found": [ids], "missed": [ids], "false_positive_arms": {arm: count}, "recall": float}`; `materialize(repo: Path, commit: str, dest: Path) -> None`; `main(argv) -> int`.
+- Produces: `load_labels(path: Path) -> list[dict]`; `match(finding: dict, label: dict, tolerance: int = 6) -> bool`; `score(verdicts: list[dict], labels: list[dict]) -> dict` returning `{"found": [ids], "missed": [ids], "false_positive_arms": {arm: count}, "recall": float}`; `undeclared_bridges(verdicts: list[dict]) -> list[dict]`; `materialize(repo: Path, commit: str, dest: Path) -> None`; `main(argv) -> int`. `BRIDGE` is neither a defect nor a false positive; it is gated separately by `undeclared_bridges`.
 
 - [ ] **Step 1: Write the labels fixture**
 
@@ -1136,13 +1165,36 @@ def test_score_reports_recall_and_false_positives():
     assert result["false_positive_arms"] == {"least_ttft_joint": 1}
 
 
-def test_confirmed_findings_are_not_counted_as_false_positives():
+def test_confirmed_and_bridge_are_not_counted_as_false_positives():
     labels = [l for l in acc.load_labels(LABELS) if "audit" in l["found_by"]]
     verdicts = [{"arm": "kairos_paper", "findings": [
         {"kind": "CONFIRMED", "file": "algorithms/kairos_paper.go",
          "line": 5, "symbol": "x"},
+        {"kind": "BRIDGE", "file": "algorithms/kairos_paper.go",
+         "line": 9, "symbol": "sPfFor", "declared_at": "algorithms/kairos_paper.go:44"},
     ]}]
     assert acc.score(verdicts, labels)["false_positive_arms"] == {}
+
+
+def test_undeclared_bridge_findings_are_reported():
+    verdicts = [{"arm": "causal_slo_externality", "findings": [
+        {"kind": "BRIDGE", "file": "algorithms/causal_slo_externality.go",
+         "line": 362, "symbol": "sPfFor", "declared_at": None},
+        {"kind": "BRIDGE", "file": "algorithms/causal_slo_externality.go",
+         "line": 231, "symbol": "residentTable",
+         "declared_at": "algorithms/causal_slo_externality.go:48"},
+        {"kind": "WRONG", "file": "algorithms/causal_slo_externality.go",
+         "line": 335, "symbol": "kvTokensFor"},
+    ]}]
+    undeclared = acc.undeclared_bridges(verdicts)
+    assert [f["symbol"] for f in undeclared] == ["sPfFor"]
+
+
+def test_missing_declared_at_key_counts_as_undeclared():
+    verdicts = [{"arm": "a", "findings": [
+        {"kind": "BRIDGE", "file": "a.go", "line": 1, "symbol": "noKey"},
+    ]}]
+    assert [f["symbol"] for f in acc.undeclared_bridges(verdicts)] == ["noKey"]
 ```
 
 - [ ] **Step 3: Run test to verify it fails**
@@ -1195,7 +1247,21 @@ def match(finding: dict, label: dict, tolerance: int = 6) -> bool:
     return any(abs(line - n) <= tolerance for n in label["lines"])
 
 
+def undeclared_bridges(verdicts: list[dict]) -> list[dict]:
+    """BRIDGE findings with no declared degradation. These block the gate.
+
+    BRIDGE means no simulation counterpart exists BY CONSTRUCTION -- the code is
+    there because the target lacks the simulator's state. That is not a defect and
+    not a false claim; what makes it acceptable is a declared direction of bias in
+    the specification header. A missing or null `declared_at` is the failure.
+    """
+    return [f for v in verdicts for f in v["findings"]
+            if f.get("kind") == "BRIDGE" and not f.get("declared_at")]
+
+
 def score(verdicts: list[dict], labels: list[dict]) -> dict:
+    # BRIDGE is deliberately excluded: it is neither a defect nor a false
+    # positive, and is gated separately by undeclared_bridges().
     defects = [f for v in verdicts for f in v["findings"]
                if f.get("kind") in ("WRONG", "UNSUPPORTED")]
     found = [l["id"] for l in labels if any(match(f, l) for f in defects)]
@@ -1260,8 +1326,12 @@ def main(argv: list[str] | None = None) -> int:
     labels = [l for l in load_labels(args.labels) if args.component in l["found_by"]]
     verdicts = [json.loads(p.read_text()) for p in args.verdict]
     result = score(verdicts, labels)
+    undeclared = undeclared_bridges(verdicts)
+    result["undeclared_bridges"] = [
+        f"{f.get('symbol')} at {f.get('file')}:{f.get('line')}" for f in undeclared
+    ]
     print(json.dumps(result, indent=2))
-    if result["missed"] or result["false_positive_arms"]:
+    if result["missed"] or result["false_positive_arms"] or undeclared:
         print("ACCEPTANCE FAILED", file=sys.stderr)
         return 1
     print("ACCEPTANCE PASSED")
@@ -1275,12 +1345,12 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `.venv/bin/pytest .claude/skills/sim2real-specify/tests/test_acceptance.py -v`
-Expected: PASS — 5 passed.
+Expected: PASS — 7 passed.
 
 - [ ] **Step 6: Run the whole skill's test suite**
 
 Run: `.venv/bin/pytest .claude/skills/sim2real-specify/ -v`
-Expected: PASS — 20 passed (5 + 7 from lint, 3 substitution, 5 acceptance).
+Expected: PASS — 22 passed (5 + 7 from lint, 3 substitution, 7 acceptance).
 
 - [ ] **Step 7: Commit**
 
@@ -1342,4 +1412,6 @@ git commit -m "fix(specify): strengthen audit prompt to reach full recall on the
 
 **Known gap, deliberate.** The spec's acceptance criterion "regenerate the bundle from the same provenance and confirm the four defects never appear" is a full end-to-end run of an interview-driven skill. It is not scriptable and is not a task here; Task 7 Step 8 covers the gate half of it, which is where the four defects are caught. Run the end-to-end regeneration once manually after this plan completes.
 
-**Type consistency.** `Citation(path, lines, source_line)` and `Failure(file, source_line, citation, kind, detail)` are used identically in Tasks 1–2. `lint_bundle(bundle, trees, exts)` matches its call in Task 2's tests and Task 5's CLI invocation. Verdict JSON keys (`arm`, `findings`, `kind`, `file`, `line`, `symbol`, `claim`, `upstream`, `settled_by`, `detail`) are identical in Task 3's prompt, Task 7's scorer, and Task 7's tests. `found_by` values `audit`/`rederive` match `--component` choices. Placeholder sets in Task 6's `test_expected_placeholder_sets` match Tasks 3 and 4 exactly and Task 5's substitution list.
+**Type consistency.** `Citation(path, lines, source_line)` and `Failure(file, source_line, citation, kind, detail)` are used identically in Tasks 1–2. `lint_bundle(bundle, trees, exts)` matches its call in Task 2's tests and Task 5's CLI invocation. Verdict JSON keys (`arm`, `findings`, `kind`, `file`, `line`, `symbol`, `claim`, `upstream`, `settled_by`, `declared_at`, `detail`) are identical in Task 3's prompt, Task 7's scorer, and Task 7's tests. The four verdict kinds `CONFIRMED`/`WRONG`/`UNSUPPORTED`/`BRIDGE` appear consistently in Task 3's prompt, Task 5's reconcile rules and pass condition, and Task 7's `score` / `undeclared_bridges`. `found_by` values `audit`/`rederive` match `--component` choices. Placeholder sets in Task 6's `test_expected_placeholder_sets` match Tasks 3 and 4 exactly and Task 5's substitution list — the `BRIDGE` change adds no placeholders.
+
+**BRIDGE coverage.** Spec's four-verdict table → Task 3 method step 6 and the verdict list. Spec's `declared_at` requirement → Task 3's schema, Task 5's reconcile rule, and Task 7's `undeclared_bridges` plus three tests. Spec's `kvTokensFor`-is-`WRONG`-not-`BRIDGE` boundary → Task 3 method step 6's PORTED clause, and the `kv-usage-fraction-not-percent` label remaining `found_by: ["audit"]` so the fixture still demands it be caught as a defect.

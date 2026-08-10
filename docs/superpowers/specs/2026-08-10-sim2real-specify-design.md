@@ -186,10 +186,34 @@ checkouts, with no generation transcript. It performs **correspondence
 discovery**: for every non-trivial ported expression and every non-obvious prose
 claim, it locates the upstream counterpart — using an existing citation as a hint
 where one is present, and searching the pinned tree where none is — then returns
-`CONFIRMED`, `WRONG`, or `UNSUPPORTED` with the file and line that settles it.
-`WRONG` is fixed. `UNSUPPORTED` is deleted or converted to a stated open
-question. The verdict format is the one `pd-infocomm/docs/signal-analysis.md`
-already uses.
+one of four verdicts with the file and line that settles it. The verdict format is
+the one `pd-infocomm/docs/signal-analysis.md` already uses.
+
+| verdict | meaning | reconcile action |
+|---|---|---|
+| `CONFIRMED` | matches upstream, or the prose claim is substantiated | none |
+| `WRONG` | a counterpart exists and the port disagrees with it | fix, citing what settles it |
+| `UNSUPPORTED` | no counterpart, and the claim purports to describe one | delete, or convert to a stated open question |
+| `BRIDGE` | no counterpart **by construction** — the code exists because the target lacks the simulator's state | verify assumptions against the target/engine checkout; require a declared direction of bias |
+
+`BRIDGE` exists because `UNSUPPORTED` otherwise conflates two unrelated
+situations. `sPfFor` approximates resident prefill tokens from residents whose
+first token has not arrived; the simulator simply reads the true value, so no
+counterpart exists and none should. An auditor searching for one correctly finds
+nothing — but deleting the code is not the remedy, and the code is not a false
+claim. What justifies it is a declared degradation.
+
+Note the boundary. Where a quantity HAS a simulator definition but a different
+acquisition path on the target, that is not `BRIDGE` — the counterpart exists and
+the audit checks it normally. `kvTokensFor`'s `/100.0` is `WRONG`, not `BRIDGE`:
+the summed-context quantity exists upstream, and the unit error is settled against
+the target checkout.
+
+Every `BRIDGE` finding carries `declared_at`, the specification-header line
+declaring the degradation and its direction of bias. A `BRIDGE` finding with
+`declared_at: null` blocks the gate until the declaration is written. This is a
+field in the audit's output, not an in-source annotation — the skill introduces no
+marker vocabulary.
 
 Correspondence discovery rather than mere citation-checking, because citation
 density is itself an audit output, not an input: the pre-fix
@@ -215,8 +239,9 @@ or line numbers that do not exist. Deterministic and cheap; catches drift on
 regeneration. It cannot catch misreading — a correct citation attached to a wrong
 transcription resolves fine. That is the audit's job.
 
-**Pass condition.** Zero `UNSUPPORTED` claims remain, and every re-derivation
-divergence is either resolved or recorded as a stated open question.
+**Pass condition.** Zero `UNSUPPORTED` claims remain, every `BRIDGE` finding has a
+non-null `declared_at`, and every re-derivation divergence is either resolved or
+recorded as a stated open question.
 
 ## Failure modes
 
