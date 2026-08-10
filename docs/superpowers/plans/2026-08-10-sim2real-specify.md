@@ -1350,7 +1350,9 @@ Expected: PASS — 7 passed.
 - [ ] **Step 6: Run the whole skill's test suite**
 
 Run: `.venv/bin/pytest .claude/skills/sim2real-specify/ -v`
-Expected: PASS — 22 passed (5 + 7 from lint, 3 substitution, 7 acceptance).
+Expected: PASS — 27 passed (15 lint, 4 substitution, 8 acceptance). See
+"Implementation notes" below for the three extra tests added during execution;
+the originally planned figure was 22.
 
 - [ ] **Step 7: Commit**
 
@@ -1411,6 +1413,49 @@ git commit -m "fix(specify): strengthen audit prompt to reach full recall on the
 **Spec coverage.** Five properties → SKILL.md Phases 1–5 (Task 5). Placement and non-goals → Task 5's "What this skill does NOT do". Output contract incl. no `LIMITATIONS.md` → Task 5. Verbatim-copy principle → Task 5. Request-vs-assert rule → Tasks 3 and 5. Gate's three components → Tasks 3, 4, 2 respectively, orchestrated in Task 5 Phase 6. Correspondence discovery → Task 3. Failure modes: HALTs → Phases 0–2; operator decisions → Phases 3–4 via `AskUserQuestion`; degraded output → Phase 5; gate non-convergence → Phase 6 three-round bound. Structure → File Structure section. Testing: sensitivity/specificity → Task 7; lint units → Tasks 1–2; lint on the citation-dense post-fix file → Task 2 Step 5; placeholder consistency → Task 6. Deferred items (`provenance.yaml`, bootstrap pin check) are correctly absent from all tasks.
 
 **Known gap, deliberate.** The spec's acceptance criterion "regenerate the bundle from the same provenance and confirm the four defects never appear" is a full end-to-end run of an interview-driven skill. It is not scriptable and is not a task here; Task 7 Step 8 covers the gate half of it, which is where the four defects are caught. Run the end-to-end regeneration once manually after this plan completes.
+
+## Implementation notes — deviations from this plan
+
+Recorded during execution. The plan above is the intent; this section is what
+actually shipped, so a reviewer diffing the two does not have to guess.
+
+**Test loader bug in the plan (fixed).** `_load()` as written fails at import:
+`from __future__ import annotations` makes dataclass field annotations strings, and
+`@dataclass` resolves them via `sys.modules[cls.__module__].__dict__`, which is
+`None` for a module built with `module_from_spec` but never registered. Both test
+files now register the module before `exec_module`.
+
+**Prose defect in the planned SKILL.md (fixed).** The substitution section said
+"substitute every `{PLACEHOLDER}`". That literal is itself extracted as a
+placeholder, so `test_no_documented_placeholder_is_unused` failed on its first
+run — the check catching its own first defect. Reworded to name the list as the
+tested contract rather than using a fake placeholder.
+
+**Test counts are higher than planned:** 27 total, not 22.
+
+| file | planned | shipped | added |
+|---|---|---|---|
+| `test_lint_citations.py` | 12 | 15 | citation at end of sentence; failure records its bundle file; `main` usage error |
+| `test_skill_substitution.py` | 3 | 4 | both prompts present (a rename must fail loudly) |
+| `test_acceptance.py` | 7 | 8 | `match` requires same file |
+
+The end-of-sentence test locks in the regex lookahead fence noted in Task 1 — it
+is the one guard whose absence would silently drop most real citations.
+
+**Environment deviations.** The worktree has no `.venv` and no checked-out
+submodules, so commands use the parent repo's `.venv/bin/pytest` (pytest 9.0.3) by
+absolute path, and the smoke test and acceptance run point at the parent's
+`inference-sim` checkout — already at exactly the `871b169b` pin — plus
+`pd-infocomm/llm-d-router` and `pd-infocomm/vllm` for target and engine citations.
+
+**Task 2's smoke test found two real defects** in the post-`ead56ea`
+`causal_slo_externality.go`, a file that had already been hand-audited:
+`vllm/v1/metrics/loggers.go:563` is unresolvable (no `loggers.go` exists anywhere
+in vLLM; it is a typo for `loggers.py`, and the comment carries both spellings),
+and `extractor.go:127` is ambiguous across three files in `llm-d-router`. Both are
+in `kalantar-msb/pd-infocomm`, not this repo, so neither is fixed here.
+
+## Self-Review
 
 **Type consistency.** `Citation(path, lines, source_line)` and `Failure(file, source_line, citation, kind, detail)` are used identically in Tasks 1–2. `lint_bundle(bundle, trees, exts)` matches its call in Task 2's tests and Task 5's CLI invocation. Verdict JSON keys (`arm`, `findings`, `kind`, `file`, `line`, `symbol`, `claim`, `upstream`, `settled_by`, `declared_at`, `detail`) are identical in Task 3's prompt, Task 7's scorer, and Task 7's tests. The four verdict kinds `CONFIRMED`/`WRONG`/`UNSUPPORTED`/`BRIDGE` appear consistently in Task 3's prompt, Task 5's reconcile rules and pass condition, and Task 7's `score` / `undeclared_bridges`. `found_by` values `audit`/`rederive` match `--component` choices. Placeholder sets in Task 6's `test_expected_placeholder_sets` match Tasks 3 and 4 exactly and Task 5's substitution list — the `BRIDGE` change adds no placeholders.
 
