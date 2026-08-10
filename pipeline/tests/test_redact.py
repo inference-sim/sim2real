@@ -306,14 +306,26 @@ def test_sensitive_key_scrub_recurses_into_lists(tmp_path: Path):
 
 
 def test_sensitive_key_scrub_case_insensitive_and_variants(tmp_path: Path):
-    """Case variants and the underscore form of key names are all caught."""
+    """Every case/separator spelling of a sensitive key is caught.
+
+    Covers camelCase, snake_case, SCREAMING_CASE and no-separator forms —
+    including the AWS-style access-key names and the base64/bearer keys
+    whose snake_case spellings would bypass an exact-lowercase match.
+    """
     src = (
         "auth:\n"
-        "  Token: abc\n"
-        "  API_KEY: def\n"
-        "  apiKey: ghi\n"
-        "  bearerToken: jkl\n"
+        "  Token: a\n"
+        "  API_KEY: b\n"
+        "  apiKey: c\n"
+        "  bearerToken: d\n"
+        "  bearer_token: e\n"
         "  authorization: Bearer xyz\n"
+        "  accessKey: f\n"
+        "  access_key: g\n"
+        "  secretAccessKey: h\n"
+        "  secret_access_key: i\n"
+        "  tokenBase64: j\n"
+        "  token_base64: k\n"
     )
     p = tmp_path / "auth.yaml"
     p.write_text(src)

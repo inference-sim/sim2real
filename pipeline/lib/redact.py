@@ -42,18 +42,22 @@ REDACTED = "REDACTED"
 
 DEFAULT_REDACT_KINDS: frozenset[str] = frozenset({"Secret"})
 
-# Key names (matched case-insensitively, exact — not substring) whose
-# values are credentials and must be stubbed wherever they appear, in any
-# document. Stored lowercased; compared against ``key.lower()``.
+# Key names whose values are credentials and must be stubbed wherever they
+# appear, in any document. Matching is exact against a normalized form of
+# the key: lowercased with ``_`` / ``-`` separators stripped (see
+# ``_normalize_key``), so ``accessKey``, ``access_key``, ``access-key`` and
+# ``ACCESSKEY`` all match the single entry ``accesskey``. Entries here are
+# therefore stored in that same separator-free lowercase form.
 #
-# Deliberately excluded — these reference or name a secret but are not
-# themselves secret: ``secretName``, ``tokenKey``, ``contextSecretName``.
+# Deliberately NOT matched — these reference or name a secret but are not
+# themselves secret; none normalizes to an entry below: ``secretName``
+# (→ ``secretname``), ``tokenKey`` (→ ``tokenkey``), ``contextSecretName``
+# (→ ``contextsecretname``).
 SENSITIVE_KEYS: frozenset[str] = frozenset({
     "token",
     "tokenbase64",
     "password",
     "apikey",
-    "api_key",
     "accesskey",
     "secretaccesskey",
     "authorization",
@@ -61,13 +65,26 @@ SENSITIVE_KEYS: frozenset[str] = frozenset({
 })
 
 
+def _normalize_key(key: str) -> str:
+    """Lowercase and strip ``_`` / ``-`` so separator style doesn't matter.
+
+    ``accessKey``, ``access_key``, ``access-key`` and ``ACCESSKEY`` all
+    normalize to ``accesskey``. This keeps the denylist a single entry per
+    key while catching every common YAML spelling — without it, camelCase
+    and snake_case forms of the same field would need separate entries and
+    a missing one would silently bypass redaction (the class of bug in #819).
+    """
+    return key.lower().replace("_", "").replace("-", "")
+
+
 def _stub_sensitive_keys(node: object) -> bool:
     """Recursively stub values under sensitive keys, in-place.
 
     Walks nested dicts and lists. A value is replaced with ``REDACTED``
-    when its key is in ``SENSITIVE_KEYS`` (case-insensitive exact match);
-    the sensitive value is stubbed wholesale and not descended into.
-    Recursion continues through every other container value.
+    when its key matches ``SENSITIVE_KEYS`` after normalization (see
+    ``_normalize_key`` — case- and separator-insensitive exact match); the
+    sensitive value is stubbed wholesale and not descended into. Recursion
+    continues through every other container value.
 
     Already-redacted values are left as-is (so a re-run over a scrubbed
     file reports no change). Returns True if any value was changed.
@@ -75,7 +92,7 @@ def _stub_sensitive_keys(node: object) -> bool:
     changed = False
     if isinstance(node, dict):
         for key, value in list(node.items()):
-            if isinstance(key, str) and key.lower() in SENSITIVE_KEYS:
+            if isinstance(key, str) and _normalize_key(key) in SENSITIVE_KEYS:
                 if value != REDACTED:
                     node[key] = REDACTED
                     changed = True
@@ -116,11 +133,16 @@ def _format_header(counts: Counter) -> str:
 
 
 def redact_yaml_file(path: Path, kinds: Iterable[str] | None = None) -> int:
-    """Redact data/stringData values for kind-matching docs in `path`.
+    """Redact credentials in `path`, in place.
 
-    Returns the count of docs that were redacted. Returns 0 (without
-    rewriting the file) for: files with no matching docs, files that
-    aren't valid YAML, or files that can't be read.
+    Two mechanisms run per document (see the module docstring): the
+    kind-based `data`/`stringData` scrub for docs whose `kind` is in
+    `kinds`, and the key-name scrub (`_stub_sensitive_keys`) on every doc
+    regardless of `kind`.
+
+    Returns the count of docs changed by either mechanism. Returns 0
+    (without rewriting the file) for: files with nothing to redact, files
+    that aren't valid YAML, or files that can't be read.
     """
     redact_set = frozenset(kinds) if kinds is not None else DEFAULT_REDACT_KINDS
 
