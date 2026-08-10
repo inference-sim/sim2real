@@ -133,34 +133,13 @@ Enumerate every quantity the decision rule reads. Classify each:
 Every row carries a citation to the value that supplies it. This is a
 classification pass, not a reference document — keep it to a table.
 
-### Resolve first, ask last
-
-Do NOT ask the operator how to source a signal. Work it out, then ask only about
-what genuinely remains. In order:
-
-1. **Apply the established pattern.** Per-request state that the target exposes
-   only in aggregate is reconstructed by an EPP-side SHADOW TABLE populated from
-   the request lifecycle the EPP already observes — the post-schedule observer,
-   the first-token/streaming hook, and the completion hook. Routing instant, first
-   token, and input length are EXACT this way. Remaining steps are a censored
-   estimate (N̂_out minus tokens streamed); check whether the simulation censors
-   too, in which case the degradation is like-for-like rather than new. This is a
-   solved problem — derive it, cite the hooks, declare the bias.
-2. **Prefer an aggregate correction where one exists.** A shadow table misses
-   requests this replica did not place, so cross-check any count the target
-   reports directly and prefer it. State which quantities remain shadow-only.
-3. **Flag the replication hazard.** A replicated EPP splits a shadow table and
-   systematically under-prices contention. Record it.
-4. **Then batch ONE decision** for whatever is still open.
-
-Ask the operator in a SINGLE `AskUserQuestion` at the end of this phase,
-presenting the whole classification table at once. Never one question per signal.
-Include only signals where you cannot resolve the mapping yourself AND the
-degradation could change the comparison the experiment exists to make — for those,
-give the options you found in the target checkout and your recommendation, not an
-open-ended question. Everything else is a declared degradation and needs no ask.
-
-If nothing meets that bar, do not ask at all. Proceed and declare.
+If a quantity carrying the CORE mechanism is `unobtainable`, you MUST put the case
+to the operator with `AskUserQuestion` before proceeding to Phase 5. This is
+mandatory and blocking, not advisory. Present the quantity, what the target can
+supply instead, and the direction of the resulting bias — then let the operator
+decide. Writing a well-reasoned degradation note is NOT a substitute for asking:
+accepting a degradation that weakens the mechanism under test is the operator's
+call, however good your reasoning is.
 
 This classification governs runtime observability ONLY. It does not license
 omitting anything from the specification — see the firewall in Phase 5.
