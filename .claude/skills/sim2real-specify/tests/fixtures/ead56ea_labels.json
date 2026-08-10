@@ -1,0 +1,52 @@
+{
+  "fixture": {
+    "repo_hint": "pd-infocomm",
+    "commit": "08203b4",
+    "focal_arm": "causal_slo_externality",
+    "clean_arms": ["least_ttft_joint", "kairos_paper"],
+    "authority": "pd-infocomm commit ead56ea",
+    "note": "Line numbers are in algorithms/causal_slo_externality.go at 08203b4 (773 lines), NOT the current post-fix file."
+  },
+  "labels": [
+    {
+      "id": "missing-prefill-attention-charge",
+      "file": "algorithms/causal_slo_externality.go",
+      "lines": [483],
+      "symbol": "cLocalAfter",
+      "found_by": ["audit", "rederive"],
+      "detail": "overlap*tIterOverlap replaces the baseline rate plus the arrival's exact marginal prefill work; the causal prefill-attention term is absent. Upstream charges it in both branches of varReTiming.cLocalAfter and the focal arm force-selects the exact one."
+    },
+    {
+      "id": "kv-usage-fraction-not-percent",
+      "file": "algorithms/causal_slo_externality.go",
+      "lines": [335],
+      "symbol": "kvTokensFor",
+      "found_by": ["audit"],
+      "detail": "spurious /100.0 -- KVCacheUsagePercent is a fraction in [0,1] despite its name, so KV is under-counted 100x, collapsing the C1*KV term that carries hardware heterogeneity. PORTED, not BRIDGE: the summed-context quantity exists upstream and the unit error is settled against the target checkout."
+    },
+    {
+      "id": "admission-steps-not-ceiled",
+      "file": "algorithms/causal_slo_externality.go",
+      "lines": [567, 589],
+      "symbol": "Score",
+      "found_by": ["audit", "rederive"],
+      "detail": "admissionSteps and arrivalSteps must be math.Ceil -- admission lands on an iteration boundary, so the wait is a whole number of baseline decode steps."
+    },
+    {
+      "id": "chunk-not-clamped-to-uncached-suffix",
+      "file": "algorithms/causal_slo_externality.go",
+      "lines": [718],
+      "symbol": "chunkTerms",
+      "found_by": ["audit", "rederive"],
+      "detail": "chunk = ChunkTokens where upstream recomputes min(ap, ChunkTokens) at every call site. Hides because nChunks is algebraically identical either way; only the token count differs."
+    },
+    {
+      "id": "undeclared-colloc-prefill-omission",
+      "file": "algorithms/causal_slo_externality.go",
+      "lines": [500],
+      "symbol": "externality",
+      "found_by": ["rederive"],
+      "detail": "upstream externality is a three-way breakdown and the focal arm enables all three; this port returns only the decode component and declares neither omission. Findable only by re-derivation -- there is no claim to audit."
+    }
+  ]
+}
