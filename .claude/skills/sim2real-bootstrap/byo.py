@@ -859,6 +859,11 @@ def run_byo(
             defaults_stems=defaults_stems,
         )
         write_transfer_yaml(inputs.exp_root, doc, inputs.force, non_interactive)
+        # Scaffold the pre-commit secret scan (issue #822), create-if-missing.
+        # Function-scope import avoids a module-load cycle (scaffold_precommit
+        # imports byo at top level).
+        from scaffold_precommit import scaffold_precommit
+        scaffold_precommit(skill_dir, inputs.exp_root)
         register_cmd = emit_register_command(inputs.exp_root, inputs.algorithms)
         return 0, register_cmd
     except BYOError as exc:

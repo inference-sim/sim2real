@@ -88,6 +88,30 @@ tmp/
 
 ---
 
+### Task 0b: Scaffold pre-commit secret scan
+
+**action:** shell
+
+Experiment repos track their `workspace/` tree (the `.gitignore` from Task 0
+excludes only state files), so collected artifacts — and anything hand-copied
+beside them — become committed, published surface. The collect-time redactor
+(`pipeline/lib/redact.py`, issue #819) is a single point of failure: anything
+it misses lands in git history the moment the operator commits. Scaffold an
+independent second layer — a blocking, whole-repo `detect-secrets` pre-commit
+hook (issue #822). Create-if-missing, so re-running bootstrap never clobbers
+an operator-edited config or an audited baseline.
+
+```bash
+python "$SKILL_DIR/scaffold_precommit.py" --experiment-root "$EXPERIMENT_ROOT"
+```
+
+This writes `.pre-commit-config.yaml` and `.secrets.baseline` (empty results —
+nothing pre-whitelisted) into the experiment root. It only installs the files;
+tell the operator to activate the hook (see **After Bootstrap**). The `--byo`
+flow runs this same step automatically.
+
+---
+
 ### Task 1: Derive target component repository
 
 **action:** derive-and-approve
@@ -468,6 +492,8 @@ Exit code 0 and all fields printed = success.
   workloads/
     <workload>.yaml              <- pre-existing
   .gitignore                     <- task-0
+  .pre-commit-config.yaml        <- task-0b
+  .secrets.baseline              <- task-0b
 ```
 
 ## After Bootstrap
@@ -495,6 +521,27 @@ to produce the plugin sources, then `sim2real build` compiles them into images):
 ```
 
 For pre-built EPP images (no skill-driven translation), see the [`--byo` mode](#--byo-mode) section below — the operator supplies baseline + overlays directly and bootstrap emits a batched `translation register` command that skips steps 2-5 above.
+
+### Activate the secret-scan hook
+
+Task 0b scaffolds `.pre-commit-config.yaml` + `.secrets.baseline` but cannot
+install git hooks for the operator. Tell the user:
+
+```
+Activate the committed secret scan (blocking, whole-repo detect-secrets):
+    pip install pre-commit detect-secrets
+    pre-commit install
+
+Every collaborator who clones must run `pre-commit install` once — git hooks
+are not cloneable. For a known-clean commit the scanner false-positives on,
+audit the finding into .secrets.baseline (preferred) or `git commit --no-verify`.
+
+Retrofitting a repo that ALREADY committed secrets: rotate/scrub the live
+tokens FIRST, then regenerate the baseline over the cleaned tree
+(`detect-secrets scan --baseline .secrets.baseline`). Never regenerate over a
+tree that still contains a live token — that audits it as "known" and
+permanently whitelists it.
+```
 
 ## `--byo` mode
 
@@ -554,9 +601,11 @@ If stdin is not a TTY OR the operator passed `--non-interactive`, do not prompt 
     <algo-1>/<algo-1>_config.yaml                <- copy of operator's overlay
     <algo-2>/<algo-2>_config.yaml                <- copy of operator's overlay
   workloads/*.yaml                               <- pre-existing (operator brought)
+  .pre-commit-config.yaml                        <- secret-scan hook (issue #822, create-if-missing)
+  .secrets.baseline                              <- detect-secrets baseline (empty results)
 ```
 
-Copies are atomic (write-to-temp + rename). Destinations validated to lie inside `<experiment-root>`; symlinks that escape are rejected. YAML inputs are parse-validated (single-doc, mapping root, non-empty) before any writes.
+Copies are atomic (write-to-temp + rename). Destinations validated to lie inside `<experiment-root>`; symlinks that escape are rejected. YAML inputs are parse-validated (single-doc, mapping root, non-empty) before any writes. The pre-commit secret scan is scaffolded create-if-missing (same as BLIS Task 0b); activate it per the [Activate the secret-scan hook](#activate-the-secret-scan-hook) instructions.
 
 ### Emitted register command
 
