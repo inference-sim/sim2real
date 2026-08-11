@@ -10,6 +10,7 @@ lives at ``baselines/baseline.yaml``).
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -38,6 +39,41 @@ HARDWARE_LABELS = {
     "A100_PCIE_40GB": "NVIDIA-A100-PCIE-40GB",
 }
 
+# Separators an author might use to name several GPU types in one value
+# (issue #824). Kept in sync with generate_from_config.py's equivalent.
+_GPU_LIST_SPLIT_RE = re.compile(r"\s*(?:,|/|\+|\band\b)\s*", re.IGNORECASE)
+
+
+def split_hardware_value(raw: str) -> list[str]:
+    """Split a hardware value into the types it names. Single type -> one element."""
+    cleaned = str(raw).strip()
+    if not cleaned:
+        return []
+    return [part for part in _GPU_LIST_SPLIT_RE.split(cleaned) if part]
+
+
+def resolve_role_hardware(raw: str, role: str) -> str:
+    """Resolve one role's accelerator label, warning if the value names several.
+
+    A role is one Deployment, so it carries one node selector and its replicas are
+    fungible -- replica 0 and replica 1 cannot be pinned to different GPU types.
+    When a value names more than one, say what was dropped rather than emitting a
+    permissive `labelValues` list that would look like support for heterogeneity
+    while allowing a homogeneous placement (issue #824).
+    """
+    types = split_hardware_value(raw)
+    if len(types) > 1:
+        print(
+            f"  WARNING: {role} names {len(types)} GPU types ({', '.join(types)}); "
+            f"a Deployment carries one node selector, so '{types[0]}' was used and "
+            f"the {role} block is HOMOGENEOUS in the generated scenario. "
+            f"Heterogeneity within one role is not expressible on the target -- "
+            f"see issue #824.",
+            file=sys.stderr,
+        )
+    chosen = types[0] if types else str(raw)
+    return HARDWARE_LABELS.get(chosen, chosen)
+
 
 # ---------------------------------------------------------------------------
 # Field registry: declares which fields we handle vs intentionally ignore.
@@ -46,7 +82,7 @@ HARDWARE_LABELS = {
 
 KNOWN_FIELDS = {
     "workload": {
-        "mapped": {"model", "hardware"},
+        "mapped": {"model", "hardware", "prefill_hardware"},
         "ignored": {
             "preset", "num_requests", "isl_mean", "isl_max",
             "osl_mean", "osl_max", "arrival_pattern",
@@ -56,7 +92,7 @@ KNOWN_FIELDS = {
     "vllm_args": {
         "mapped": {
             "tensor_parallel_size", "pipeline_parallel_size",
-            "num_instances", "data_parallel_size",
+            "num_instances", "data_parallel_size", "prefill_instances",
             "max_num_seqs", "max_num_batched_tokens",
             "enable_chunked_prefill", "block_size",
             "gpu_memory_utilization", "dtype", "kv_cache_dtype",
@@ -143,7 +179,7 @@ def build_scenario(entry: dict, name: str) -> dict:
     hardware = workload["hardware"]
 
     meta = MODEL_METADATA.get(model_name, {})
-    hw_label = HARDWARE_LABELS.get(hardware, hardware)
+    hw_label = resolve_role_hardware(hardware, "decode") if hardware else hardware
 
     tp = vllm_args.get("tensor_parallel_size", 1)
     replicas = vllm_args.get("num_instances", 1)
@@ -190,6 +226,35 @@ def build_scenario(entry: dict, name: str) -> dict:
         scenario["vllmCommon"] = {"flags": {"enforceEager": False}}
 
     scenario["decode"] = decode
+
+    # --- Prefill role (issue #824) ---
+    # Only when the entry names a prefill pod count, so entries without one
+    # produce exactly the single-`decode:` scenario they always have.
+    #
+    # `enabled: true` is load-bearing: pipeline/lib/capacity.py defaults prefill
+    # to disabled with 0 replicas, so a prefill block without it plans zero
+    # prefill GPUs while reading as disaggregated.
+    prefill_replicas = vllm_args.get("prefill_instances")
+    if prefill_replicas:
+        prefill = {"enabled": True, "replicas": prefill_replicas}
+        prefill_hw = workload.get("prefill_hardware") or hardware
+        if prefill_hw:
+            prefill["acceleratorType"] = {
+                "labelKey": "nvidia.com/gpu.product",
+                "labelValue": resolve_role_hardware(prefill_hw, "prefill"),
+            }
+        # Parallelism and flags are shared, not per-role -- no input states them
+        # per role, so inventing per-role keys would add unsourced vocabulary.
+        if tp > 1 or dp > 1:
+            prefill["parallelism"] = {
+                "data": dp,
+                "dataLocal": dp,
+                "tensor": tp,
+                "workers": tp,
+            }
+        if flags:
+            prefill["vllm"] = {"additionalFlags": flags}
+        scenario["prefill"] = prefill
 
     return scenario
 
@@ -239,6 +304,38 @@ def write_commented_yaml(scenario: dict, entry: dict, out_path: str):
         for flag in scenario["decode"]["vllm"]["additionalFlags"]:
             source = _flag_source(flag)
             lines.append(f"      - \"{flag}\"  # from vllm_args.{source}")
+
+    # Prefill role, emitted only when the entry named a prefill pod count. Placed
+    # after decode so the decode bytes above are untouched when it is absent.
+    if "prefill" in scenario:
+        p_role = scenario["prefill"]
+        lines.append("")
+        lines.append("  prefill:")
+        lines.append(
+            "    enabled: true  # required: capacity planning defaults prefill to "
+            "disabled with 0 replicas (pipeline/lib/capacity.py)"
+        )
+        lines.append(f"    replicas: {p_role['replicas']}  # from vllm_args.prefill_instances")
+        if "acceleratorType" in p_role:
+            lines.append("    acceleratorType:")
+            lines.append(f"      labelKey: {p_role['acceleratorType']['labelKey']}")
+            lines.append(
+                f"      labelValue: {p_role['acceleratorType']['labelValue']}"
+                f"  # from workload.prefill_hardware (lookup table)"
+            )
+        if "parallelism" in p_role:
+            pp = p_role["parallelism"]
+            lines.append("    parallelism:")
+            lines.append(f"      data: {pp['data']}  # from vllm_args.data_parallel_size")
+            lines.append(f"      dataLocal: {pp['dataLocal']}  # from vllm_args.data_parallel_size")
+            lines.append(f"      tensor: {pp['tensor']}  # from vllm_args.tensor_parallel_size")
+            lines.append(f"      workers: {pp['workers']}  # from vllm_args.tensor_parallel_size")
+        if "vllm" in p_role:
+            lines.append("    vllm:")
+            lines.append("      additionalFlags:")
+            for flag in p_role["vllm"]["additionalFlags"]:
+                source = _flag_source(flag)
+                lines.append(f"      - \"{flag}\"  # from vllm_args.{source}")
 
     lines.append("")
 

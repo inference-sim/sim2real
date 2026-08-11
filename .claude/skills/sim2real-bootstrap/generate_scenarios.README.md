@@ -64,12 +64,31 @@ Maps simulation hardware identifiers → Kubernetes node selector label values.
 |---|---|
 | `workload.model` | `model.name`, `model.huggingfaceId` |
 | `workload.hardware` | `decode.acceleratorType.labelValue` |
+| `workload.prefill_hardware` | `prefill.acceleratorType.labelValue` (optional; falls back to `workload.hardware`) |
 | `vllm_args.num_instances` | `decode.replicas` |
+| `vllm_args.prefill_instances` | `prefill.replicas` (optional; omitted or `0` produces no `prefill:` block) |
 | `vllm_args.tensor_parallel_size` | `decode.parallelism.tensor`, `decode.parallelism.workers` |
 | `vllm_args.data_parallel_size` | `decode.parallelism.data`, `decode.parallelism.dataLocal` |
 | `vllm_args.block_size` | `model.blockSize` |
 | `vllm_args.gpu_memory_utilization` | `model.gpuMemoryUtilization` |
 | `vllm_args.enforce_eager` | `vllmCommon.flags.enforceEager` |
+
+### Disaggregation (issue #824)
+
+`prefill.enabled: true` is emitted with every `prefill:` block. It is required,
+not decorative: `pipeline/lib/capacity.py` defaults prefill to disabled with 0
+replicas, so a block without it reads as disaggregated while planning no prefill
+GPUs.
+
+`parallelism` and `vllm.additionalFlags` are shared, not per-role — the input has
+no per-role form for them, so both roles receive the same values.
+
+One GPU type per role. A hardware value naming several types (`"H100, A100"`)
+emits the first and warns, naming every type found and the one used: a role is
+one Deployment, so it carries one node selector and its replicas cannot be split
+across types. `labelValues` (the permissive plural form) is deliberately never
+emitted — it would read as heterogeneity support while allowing a homogeneous
+placement. Heterogeneity within one role is an llm-d-side concern.
 
 ### Mapped to additionalFlags
 

@@ -77,6 +77,22 @@ PARAMETER_ALIASES = {
         "replicas",
         "num_instances",
     },
+    # Per-role overrides (issue #824). All optional: a config.md with none of
+    # these produces exactly the single-`decode:` output it always has, so
+    # existing bundles regenerate byte-identically.
+    #
+    # `replicas` above stays the decode/aggregated count -- it is the one every
+    # existing bundle uses -- and `hardware` stays the required shared GPU. These
+    # rows only add a second role and let either role name a different GPU.
+    "prefill_replicas": {
+        "number of prefill pods",
+        "number of prefill instances",
+        "prefill replicas",
+        "prefill_replicas",
+        "prefill instances",
+    },
+    "prefill_hardware": {"prefill gpu", "prefill hardware"},
+    "decode_hardware": {"decode gpu", "decode hardware"},
     "dtype": {"dtype", "--dtype"},
     "pipeline_parallel_size": {"pipeline_parallel_size", "--pipeline-parallel-size"},
     "data_parallel_size": {"data_parallel_size", "--data-parallel-size"},
@@ -297,6 +313,46 @@ def canonicalize_parameter(raw: str) -> str | None:
     return None
 
 
+# A parameter label that names a replica count but matches no alias. Before
+# issue #824 such a row was skipped in silence, so `| Number of prefill pods |`
+# read as twelve rows and eleven extracted fields with exit 0 -- the operator's
+# stated topology discarded with no diagnostic.
+#
+# Deliberately narrow, and only ever applied to the PARAMETER column of the one
+# table find_vllm_table selected. A file-wide or value-column check would fire on
+# every known-good bundle: `| 4 instances |` is a value cell in
+# admission-control-pf's BLIS mapping table, `| --num-instances |` is a flag row
+# in three others, and a simulation->deployment mapping table legitimately has
+# `| prefill replicas |` in its parameter column. None of those is the vLLM table.
+_REPLICA_COUNT_LABEL_RE = re.compile(r"\b(pods|instances|replicas)\b")
+
+
+def is_unrecognized_replica_label(raw: str) -> bool:
+    """True when a vLLM-table parameter label names a replica count we cannot map.
+
+    Flags are excluded: a label beginning with `-` is a CLI flag being documented
+    (`--num-instances`), not a parameter this generator is expected to resolve.
+    """
+    cleaned = normalize_cell(raw).lower().strip()
+    if not cleaned or cleaned.startswith("-"):
+        return False
+    if canonicalize_parameter(raw) is not None:
+        return False
+    return bool(_REPLICA_COUNT_LABEL_RE.search(cleaned))
+
+
+# Separators an operator might use to name several GPU types in one cell.
+_GPU_LIST_SPLIT_RE = re.compile(r"\s*(?:,|/|\+|\band\b)\s*", re.IGNORECASE)
+
+
+def split_hardware_cell(raw: str) -> list[str]:
+    """Split a GPU cell into the types it names. Single type -> one element."""
+    cleaned = normalize_cell(raw)
+    if not cleaned:
+        return []
+    return [part for part in _GPU_LIST_SPLIT_RE.split(cleaned) if part]
+
+
 def find_vllm_table(tables: list[TableSection]) -> TableSection | None:
     """Select the table most likely to contain vLLM pod configuration."""
     # First pass: match by section heading
@@ -377,6 +433,17 @@ def extract_fields(table: TableSection) -> dict[str, ProvenanceValue]:
         canonical = canonicalize_parameter(raw_param)
 
         if canonical is None:
+            if is_unrecognized_replica_label(raw_param):
+                recognized = sorted(
+                    PARAMETER_ALIASES["replicas"] | PARAMETER_ALIASES["prefill_replicas"]
+                )
+                print(
+                    f"ERROR: unrecognized replica-count row in the vLLM configuration "
+                    f"table: '{normalize_cell(raw_param)}'. Dropping it would discard a "
+                    f"stated pod count. Use one of: {', '.join(recognized)}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
             continue
 
         source = f'config.md row "{normalize_cell(raw_param)}"'
@@ -524,8 +591,40 @@ def build_scenario(
         sys.exit(1)
 
     model_name = fields["model"].value
-    hardware_raw = fields["hardware"].value
-    hardware_key = normalize_hardware_key(hardware_raw)
+
+    def resolve_role_hardware(role: str, field_name: str) -> tuple[str, str]:
+        """Resolve one role's accelerator label, warning if the cell names several.
+
+        A role is one Deployment, so it carries one node selector and its replicas
+        are fungible -- there is no way to place replica 0 and replica 1 on
+        different GPU types. When a cell names more than one, the extra types
+        cannot be honored, so say exactly what was dropped instead of emitting a
+        permissive `labelValues` list that would look like support while allowing
+        a homogeneous placement (issue #824).
+        """
+        field = fields.get(field_name) or fields["hardware"]
+        types = split_hardware_cell(str(field.value))
+        if len(types) > 1:
+            print(
+                f"  WARNING: {role} names {len(types)} GPU types "
+                f"({', '.join(types)}); a Deployment carries one node selector, so "
+                f"'{types[0]}' was used and the {role} block is HOMOGENEOUS in the "
+                f"generated baseline. Heterogeneity within one role is not "
+                f"expressible on the target -- see issue #824.",
+                file=sys.stderr,
+            )
+        chosen = types[0] if types else str(field.value)
+        key = normalize_hardware_key(chosen)
+        label = HARDWARE_LABELS.get(key)
+        if label is None:
+            print(f"  warning: hardware '{key}' not in HARDWARE_LABELS", file=sys.stderr)
+            return f"NVIDIA-{key}", f"best-effort ('{key}' not in lookup table)"
+        source = f'lookup: HARDWARE_LABELS["{key}"]'
+        if len(types) > 1:
+            source += f" (first of {len(types)}; see warning)"
+        elif field_name in fields:
+            source += f' via {field.source}'
+        return label, source
 
     # --- Model metadata ---
     meta = MODEL_METADATA.get(model_name)
@@ -554,14 +653,8 @@ def build_scenario(
     else:
         max_model_len_source = meta_source + ".maxModelLen"
 
-    # --- Hardware ---
-    hw_label = HARDWARE_LABELS.get(hardware_key)
-    if hw_label is None:
-        print(f"  warning: hardware '{hardware_key}' not in HARDWARE_LABELS", file=sys.stderr)
-        hw_label = f"NVIDIA-{hardware_key}"
-        hw_source = f"best-effort ('{hardware_key}' not in lookup table)"
-    else:
-        hw_source = f'lookup: HARDWARE_LABELS["{hardware_key}"]'
+    # --- Hardware, per role ---
+    hw_label, hw_source = resolve_role_hardware("decode", "decode_hardware")
 
     # --- Numeric fields with defaults ---
     def get_int(field_name, default, default_source="default (not in config.md)"):
@@ -618,6 +711,41 @@ def build_scenario(
 
     scenario["decode"] = decode
 
+    # --- Prefill role (issue #824) ---
+    # Only when config.md names a prefill pod count. Absent, the output is exactly
+    # what it has always been, so existing bundles regenerate byte-identically.
+    #
+    # `enabled: true` is NOT decoration. pipeline/lib/capacity.py:238-241 defaults
+    # prefill to ("prefill", False, 0), so a prefill block without it is skipped by
+    # capacity planning -- the scenario would read as disaggregated while planning
+    # zero prefill GPUs. config/scenarios/guides/pd-disaggregation.yaml sets it
+    # explicitly for the same reason.
+    prefill_hw_label = None
+    prefill_hw_source = None
+    if "prefill_replicas" in fields:
+        prefill_replicas = int(fields["prefill_replicas"].value)
+        prefill_hw_label, prefill_hw_source = resolve_role_hardware(
+            "prefill", "prefill_hardware"
+        )
+        prefill = {"enabled": True, "replicas": prefill_replicas}
+        prefill["acceleratorType"] = {
+            "labelKey": "nvidia.com/gpu.product",
+            "labelValue": prefill_hw_label,
+        }
+        # Parallelism and vLLM flags are shared, not per-role: no bundle to date
+        # states them per role, and inventing per-role aliases for values nobody
+        # supplies would add vocabulary with no source to cite.
+        if tp > 1 or dp > 1:
+            prefill["parallelism"] = {
+                "data": dp,
+                "dataLocal": dp,
+                "tensor": tp,
+                "workers": tp,
+            }
+        if additional_flags:
+            prefill["vllm"] = {"additionalFlags": additional_flags}
+        scenario["prefill"] = prefill
+
     # --- Build provenance map ---
     provenance = {
         "model.name": fields["model"].source,
@@ -635,6 +763,13 @@ def build_scenario(
     if tp > 1 or dp > 1:
         provenance["decode.parallelism.tensor"] = tp_source
         provenance["decode.parallelism.data"] = dp_source
+
+    if "prefill" in scenario:
+        provenance["prefill.replicas"] = fields["prefill_replicas"].source
+        provenance["prefill.acceleratorType.labelValue"] = prefill_hw_source
+        if tp > 1 or dp > 1:
+            provenance["prefill.parallelism.tensor"] = tp_source
+            provenance["prefill.parallelism.data"] = dp_source
 
     return scenario, provenance
 
@@ -690,6 +825,36 @@ def write_provenance_yaml(
         lines.append("      additionalFlags:")
         for flag, source in scenario["decode"]["vllm"]["additionalFlags"]:
             lines.append(f'      - "{flag}"  # {source}')
+
+    # Prefill role, emitted only when config.md named a prefill pod count. Placed
+    # after decode so the decode bytes above are untouched when it is absent.
+    if "prefill" in scenario:
+        p_role = scenario["prefill"]
+        lines.append("")
+        lines.append("  prefill:")
+        lines.append(
+            "    enabled: true  # required: capacity planning defaults prefill to "
+            "disabled with 0 replicas (pipeline/lib/capacity.py)"
+        )
+        lines.append(f"    replicas: {p_role['replicas']}  # {provenance['prefill.replicas']}")
+        lines.append("    acceleratorType:")
+        lines.append("      labelKey: nvidia.com/gpu.product")
+        lines.append(
+            f"      labelValue: {p_role['acceleratorType']['labelValue']}"
+            f"  # {provenance['prefill.acceleratorType.labelValue']}"
+        )
+        if "parallelism" in p_role:
+            pp = p_role["parallelism"]
+            lines.append("    parallelism:")
+            lines.append(f"      data: {pp['data']}  # {provenance['prefill.parallelism.data']}")
+            lines.append(f"      dataLocal: {pp['dataLocal']}  # {provenance['prefill.parallelism.data']}")
+            lines.append(f"      tensor: {pp['tensor']}  # {provenance['prefill.parallelism.tensor']}")
+            lines.append(f"      workers: {pp['workers']}  # {provenance['prefill.parallelism.tensor']}")
+        if "vllm" in p_role:
+            lines.append("    vllm:")
+            lines.append("      additionalFlags:")
+            for flag, source in p_role["vllm"]["additionalFlags"]:
+                lines.append(f'      - "{flag}"  # {source}')
 
     lines.append("")
 
