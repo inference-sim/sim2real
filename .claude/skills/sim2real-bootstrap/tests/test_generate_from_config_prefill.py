@@ -209,6 +209,46 @@ def test_labelvalues_never_emitted(tmp_path):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("label", [
+    # Singular phrasings: an operator stating one pod writes "pod". These dropped
+    # silently while the detector matched plurals only.
+    "Number of prefill pod",
+    "Prefill pod count",
+    "Prefill replica count",
+    "Decode replica count",
+])
+def test_singular_replica_labels_are_flagged(label):
+    assert gfc.is_unrecognized_replica_label(label) is True
+
+
+@pytest.mark.parametrize("label", [
+    # Ratio labels mention a counted noun without naming a fleet size. Rejecting
+    # them would break config.md files that work on main, with advice ("use
+    # `number of pods`") that is wrong for the row.
+    "Pods per node",
+    "Pods per GPU",
+    "GPUs per pod",
+    "Instances per node",
+])
+def test_ratio_labels_are_not_replica_counts(label):
+    assert gfc.is_unrecognized_replica_label(label) is False
+
+
+def test_ratio_row_in_vllm_table_does_not_abort(tmp_path):
+    """End-to-end: a descriptive row must not turn a working config.md into exit 1."""
+    fields = gfc.extract_fields(make_table([row("Pods per node", "1"), row("Number of pods", "2")]))
+    scenario, prov = gfc.build_scenario(fields, "test")
+    assert scenario["decode"]["replicas"] == 2
+    assert "prefill" not in scenario
+
+
+def test_workers_label_is_left_alone():
+    """`workers` collides with parallelism.workers, which derives from
+    tensor_parallel_size rather than a replica count, so flagging it would emit
+    the same misleading guidance the ratio exclusion exists to prevent."""
+    assert gfc.is_unrecognized_replica_label("Prefill workers") is False
+
+
+@pytest.mark.parametrize("label", [
     "Number of sidecar pods",
     "Number of router instances",
     "worker replicas",
@@ -249,6 +289,45 @@ def test_recognized_replica_labels_are_not_flagged():
 # ---------------------------------------------------------------------------
 # Emitted YAML is well-formed
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# End-to-end golden: the single-pool path must not move
+# ---------------------------------------------------------------------------
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def test_single_pool_config_regenerates_byte_identically(tmp_path):
+    """The issue's hard acceptance criterion, as an end-to-end guard.
+
+    The synthetic-table tests above prove "no prefill rows -> no prefill block",
+    which is a proxy. This drives a realistic config.md through parse -> extract ->
+    build -> emit and compares bytes against a golden captured from the generator
+    BEFORE this feature existed, so a change to hardware-source formatting, key
+    ordering, or comment text in the resolve_role_hardware refactor cannot slip
+    through while the unit tests stay green.
+
+    The fixture deliberately includes a `Pods per node` ratio row, which an
+    over-broad replica-count check would reject.
+    """
+    out = tmp_path / "baseline.yaml"
+    fields = gfc.extract_fields(
+        gfc.find_vllm_table(
+            gfc.parse_md_tables((FIXTURES / "single_pool_config.md").read_text().split("\n"))
+        )
+    )
+    scenario, prov = gfc.build_scenario(fields, "golden")
+    gfc.write_provenance_yaml(scenario, prov, str(out))
+    assert out.read_text() == (FIXTURES / "single_pool_baseline.golden.yaml").read_text()
+
+
+def test_single_pool_golden_has_no_prefill_artifacts():
+    """Guards the golden itself: if someone regenerates it from a future version
+    that emits prefill unconditionally, this fails rather than blessing it."""
+    golden = (FIXTURES / "single_pool_baseline.golden.yaml").read_text()
+    assert "prefill:" not in golden
+    assert "labelValues" not in golden
+
 
 def test_emitted_yaml_round_trips_both_roles(tmp_path):
     scenario, prov = build(

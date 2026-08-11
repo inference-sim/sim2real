@@ -324,21 +324,42 @@ def canonicalize_parameter(raw: str) -> str | None:
 # admission-control-pf's BLIS mapping table, `| --num-instances |` is a flag row
 # in three others, and a simulation->deployment mapping table legitimately has
 # `| prefill replicas |` in its parameter column. None of those is the vLLM table.
-_REPLICA_COUNT_LABEL_RE = re.compile(r"\b(pods|instances|replicas)\b")
+# A replica COUNT is the head of its label: the label ends with the counted noun,
+# optionally followed by "count" ("Number of prefill pods", "prefill replicas",
+# "Prefill pod count", "Instances"). Singular and plural both, since an operator
+# writing one pod says "pod".
+_COUNT_NOUN_TAIL_RE = re.compile(r"\b(?:pods?|instances?|replicas?)(?:\s+count)?$")
+
+# A RATIO mentions the same nouns but is describing a per-unit quantity, not a
+# fleet size: "Pods per node", "Pods per GPU", "GPUs per pod". These are
+# informational rows that this generator has always ignored, and treating them as
+# malformed replica counts would reject config.md files that work on main.
+_RATIO_LABEL_RE = re.compile(r"\b(?:per|each)\s+\S+$")
 
 
 def is_unrecognized_replica_label(raw: str) -> bool:
     """True when a vLLM-table parameter label names a replica count we cannot map.
 
-    Flags are excluded: a label beginning with `-` is a CLI flag being documented
-    (`--num-instances`), not a parameter this generator is expected to resolve.
+    Two exclusions keep this from firing on rows it has no business rejecting:
+
+    - Labels beginning with `-` are CLI flags being documented (`--num-instances`),
+      not parameters this generator resolves.
+    - Ratio labels (`Pods per node`) mention a counted noun without naming a fleet
+      size. Erroring on them would both break working inputs and offer advice
+      ("use `number of pods`") that is wrong for the row.
+
+    "workers" is deliberately NOT a counted noun here: it collides with
+    `parallelism.workers`, which derives from tensor_parallel_size rather than a
+    replica count, so flagging it would emit the same misleading guidance.
     """
     cleaned = normalize_cell(raw).lower().strip()
     if not cleaned or cleaned.startswith("-"):
         return False
     if canonicalize_parameter(raw) is not None:
         return False
-    return bool(_REPLICA_COUNT_LABEL_RE.search(cleaned))
+    if _RATIO_LABEL_RE.search(cleaned):
+        return False
+    return bool(_COUNT_NOUN_TAIL_RE.search(cleaned))
 
 
 # Separators an operator might use to name several GPU types in one cell.

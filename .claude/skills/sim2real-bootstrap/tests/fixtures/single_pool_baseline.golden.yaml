@@ -1,0 +1,25 @@
+scenario:
+- name: golden
+
+  model:
+    name: Qwen/Qwen3-14B  # config.md row "Model"
+    shortName: qwen-qwen3-14b  # lookup: MODEL_METADATA["Qwen/Qwen3-14B"].shortName
+    path: models/Qwen/Qwen3-14B  # lookup: MODEL_METADATA["Qwen/Qwen3-14B"].path
+    huggingfaceId: Qwen/Qwen3-14B  # config.md row "Model"
+    size: 1Ti  # lookup: MODEL_METADATA["Qwen/Qwen3-14B"].size
+    maxModelLen: 40960  # config.md row "max_model_len"
+    blockSize: 16  # config.md row "block_size"
+    gpuMemoryUtilization: 0.9  # config.md row "gpu_memory_utilization"
+
+  decode:
+    replicas: 4  # config.md row "Number of pods"
+    acceleratorType:
+      labelKey: nvidia.com/gpu.product
+      labelValue: NVIDIA-H100-80GB-HBM3  # lookup: HARDWARE_LABELS["H100_SXM_80GB"]
+    vllm:
+      additionalFlags:
+      - "--max-num-seqs=256"  # config.md row "max_num_seqs"
+      - "--max-num-batched-tokens=2048"  # config.md row "max_num_batched_tokens"
+      - "--enable-chunked-prefill"  # config.md row "enable_chunked_prefill"
+      - "--enable-prefix-caching"  # sim2real-bootstrap default (config.md silent; deployed vLLM requires explicit ON)
+
