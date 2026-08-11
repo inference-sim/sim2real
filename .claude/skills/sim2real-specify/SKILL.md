@@ -221,7 +221,11 @@ no margin attached and say that no measurement backs it.
 ### What `config.md` must contain
 
 `config.md` states the deployment the transfer targets and every knob the arms
-read. Five parts, in this order:
+read. Five parts. All five must be PRESENT; their order is presentational, and
+the numbering below is a reading order rather than a requirement. The parser
+locates the table by its heading, not its position
+(`generate_from_config.py:300-322`) — so the only ordering rule is not to author
+a SECOND table whose heading also matches, because the first match wins.
 
 1. **vLLM pod configuration** — a table headed `## vLLM Pod Configuration`. This
    table is MACHINE-READ: `/sim2real-bootstrap` Task 3 derives
@@ -253,6 +257,16 @@ has stated the fact and still fails bootstrap, because the consumer reads
 Do not restate bootstrap's field list here — it lives in that skill's
 `PARAMETER_ALIASES` and `VLLM_SECTION_KEYWORDS`, and the Phase 6 consumer check
 verifies agreement mechanically. Duplicating it invites drift.
+
+**Adding these parts to an EXISTING `config.md` — do not renumber its sections.**
+The specification layer cites `config.md` by section number (`§2`, `§4`, `§5`),
+and those citations are silent when broken: the reference still reads plausibly
+and now points at the wrong section. Insert the new parts around the established
+numbering instead, and check what cites them first:
+
+```bash
+grep -noE "config\.md[^ ]*|§[0-9]+" <experiment-root>/algorithms/*.go
+```
 
 ### Deployment values the simulation cannot supply
 
