@@ -274,7 +274,41 @@ scenario:
     vllm:
       additionalFlags:
       - "--flag=value"
+
+  # Emitted ONLY when config.md names a prefill pod count (issue #824).
+  # Without those rows the output is exactly the single-decode shape above.
+  prefill:
+    enabled: true                      # required — see note below
+    replicas: <from config>
+    acceleratorType:
+      labelKey: nvidia.com/gpu.product
+      labelValue: <prefill GPU, else the shared GPU>
+    vllm:
+      additionalFlags:
+      - "--flag=value"                 # shared with decode, not per-role
 ```
+
+**Disaggregation (issue #824).** To get a `prefill:` block, `config.md`'s vLLM
+table needs a prefill pod-count row — `Number of prefill pods`, `Number of
+prefill instances`, or `prefill replicas`. `Prefill GPU` and `Decode GPU` are
+optional per-role accelerator overrides; without them both roles use the shared
+`GPU` row.
+
+- `enabled: true` is **required**, not decorative. `pipeline/lib/capacity.py`
+  defaults prefill to disabled with 0 replicas, so a `prefill:` block lacking it
+  reads as disaggregated while planning zero prefill GPUs.
+- `parallelism` and `vllm.additionalFlags` are shared across roles — `config.md`
+  has no per-role form for them.
+- **One GPU type per role.** A GPU cell naming several types (`H100, A100`) emits
+  the first and prints a `WARNING` naming every type found and the one used: a
+  role is one Deployment, so it carries one node selector and its replicas cannot
+  be split across types. The permissive `labelValues` plural form is deliberately
+  never emitted — it would read as heterogeneity support while allowing a
+  homogeneous placement. Heterogeneity *within* one role is an llm-d-side
+  concern, not something bootstrap can express.
+- A replica-count row the alias table does not recognize (`Number of sidecar
+  pods`) is a **hard error**, not a silent skip — dropping it would discard a
+  stated pod count.
 
 **Constraints:**
 - Scenario names MUST be lowercase alphanumeric only (1-20 chars, no hyphens).

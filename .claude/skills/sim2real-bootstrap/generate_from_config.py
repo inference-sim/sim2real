@@ -73,10 +73,29 @@ PARAMETER_ALIASES = {
         "number of pods",
         "number of vllm pods",   # BLIS experiment folders use this exact label (issue #549)
         "number of decode pods",  # anticipate variant label names
+        "number of decode instances",
+        "decode replicas",        # symmetric with prefill_replicas' "prefill replicas"
+        "decode instances",
         "instances",
         "replicas",
         "num_instances",
     },
+    # Per-role overrides (issue #824). All optional: a config.md with none of
+    # these produces exactly the single-`decode:` output it always has, so
+    # existing bundles regenerate byte-identically.
+    #
+    # `replicas` above stays the decode/aggregated count -- it is the one every
+    # existing bundle uses -- and `hardware` stays the required shared GPU. These
+    # rows only add a second role and let either role name a different GPU.
+    "prefill_replicas": {
+        "number of prefill pods",
+        "number of prefill instances",
+        "prefill replicas",
+        "prefill_replicas",
+        "prefill instances",
+    },
+    "prefill_hardware": {"prefill gpu", "prefill hardware"},
+    "decode_hardware": {"decode gpu", "decode hardware"},
     "dtype": {"dtype", "--dtype"},
     "pipeline_parallel_size": {"pipeline_parallel_size", "--pipeline-parallel-size"},
     "data_parallel_size": {"data_parallel_size", "--data-parallel-size"},
@@ -297,6 +316,120 @@ def canonicalize_parameter(raw: str) -> str | None:
     return None
 
 
+# A parameter label that names a replica count but matches no alias. Before
+# issue #824 such a row was skipped in silence, so `| Number of prefill pods |`
+# read as twelve rows and eleven extracted fields with exit 0 -- the operator's
+# stated topology discarded with no diagnostic.
+#
+# Deliberately narrow, and only ever applied to the PARAMETER column of the one
+# table find_vllm_table selected. A file-wide or value-column check would fire on
+# every known-good bundle: `| 4 instances |` is a value cell in
+# admission-control-pf's BLIS mapping table, `| --num-instances |` is a flag row
+# in three others, and a simulation->deployment mapping table legitimately has
+# `| prefill replicas |` in its parameter column. None of those is the vLLM table.
+# A replica COUNT is the head of its label: the label ends with the counted noun,
+# optionally followed by "count" ("Number of prefill pods", "prefill replicas",
+# "Prefill pod count", "Instances"). Singular and plural both, since an operator
+# writing one pod says "pod".
+_COUNT_NOUN_TAIL_RE = re.compile(r"\b(?:pods?|instances?|replicas?|nodes?)(?:\s+count)?$")
+
+# A RATIO mentions the same nouns but is describing a per-unit quantity, not a
+# fleet size: "Pods per node", "Pods per GPU", "GPUs per pod". These are
+# informational rows that this generator has always ignored, and treating them as
+# malformed replica counts would reject config.md files that work on main.
+_RATIO_LABEL_RE = re.compile(r"\b(?:per|each)\s+\S+$")
+
+
+def is_unrecognized_replica_label(raw: str) -> bool:
+    """True when a vLLM-table parameter label names a replica count we cannot map.
+
+    Two exclusions keep this from firing on rows it has no business rejecting:
+
+    - Labels beginning with `-` are CLI flags being documented (`--num-instances`),
+      not parameters this generator resolves.
+    - Ratio labels (`Pods per node`) mention a counted noun without naming a fleet
+      size. Erroring on them would both break working inputs and offer advice
+      ("use `number of pods`") that is wrong for the row.
+
+    "workers" is deliberately NOT a counted noun here: it collides with
+    `parallelism.workers`, which derives from tensor_parallel_size rather than a
+    replica count, so flagging it would emit the same misleading guidance.
+    """
+    cleaned = normalize_cell(raw).lower().strip()
+    if not cleaned or cleaned.startswith("-"):
+        return False
+    if canonicalize_parameter(raw) is not None:
+        return False
+    if _RATIO_LABEL_RE.search(cleaned):
+        return False
+    return bool(_COUNT_NOUN_TAIL_RE.search(cleaned))
+
+
+# Separators an operator might use to name several GPU types in one cell.
+_GPU_LIST_SPLIT_RE = re.compile(r"\s*(?:,|/|\+|\band\b)\s*", re.IGNORECASE)
+
+
+def split_hardware_cell(raw: str) -> list[str]:
+    """Split a GPU cell into the types it names. Single type -> one element."""
+    cleaned = normalize_cell(raw)
+    if not cleaned:
+        return []
+    return [part for part in _GPU_LIST_SPLIT_RE.split(cleaned) if part]
+
+
+def warn_role_rows_outside_vllm_table(
+    tables: list[TableSection],
+    vllm_table: TableSection,
+    already_extracted: set[str] | None = None,
+) -> list[str]:
+    """Warn when per-role rows sit in a table this generator does not read.
+
+    Only the single table `find_vllm_table` selects is machine-read. A `config.md`
+    that states its prefill count in some other table -- a simulation -> deployment
+    mapping table, say -- produced a decode-only baseline with no diagnostic at
+    all: the decode row IS recognized, so the unrecognized-row check never fires,
+    and the prefill row is simply never seen (issue #824 review).
+
+    These rows are NOT consumed from the other table, deliberately. A mapping
+    table's columns mean something else: in `pd-infocomm-2/config.md` the row is
+    `| prefill replicas | --prefill-instances | 1 | yes |`, so column 1 is the
+    simulator flag name, not a count. Reading it would substitute silent garbage
+    for a silent omission. The fix an operator needs is to move the row into the
+    vLLM table, and that is what the warning says.
+
+    A field already extracted from the vLLM table is NOT warned about. A
+    simulation -> deployment mapping table is a required part of a well-formed
+    config.md -- it exists so the two dialects can be audited against each other --
+    so a bundle that correctly states its counts in the vLLM table and also
+    documents them there would otherwise draw a warning on every run. The warning
+    is for values stated ONLY where they cannot take effect.
+
+    Returns the warning lines emitted, for testability.
+    """
+    role_fields = {"prefill_replicas", "prefill_hardware", "decode_hardware", "replicas"}
+    satisfied = already_extracted or set()
+    emitted = []
+    for table in tables:
+        if table is vllm_table:
+            continue
+        for row in table.rows:
+            if not row:
+                continue
+            raw_param = list(row.values())[0]
+            canonical = canonicalize_parameter(raw_param)
+            if canonical not in role_fields or canonical in satisfied:
+                continue
+            msg = (
+                f"  WARNING: '{normalize_cell(raw_param)}' appears under "
+                f"\"{table.heading}\", which is not the machine-read table. Only "
+                f"\"{vllm_table.heading}\" is parsed, so this row has NO effect on the "
+                f"generated baseline. Move it into that table for it to take effect."
+            )
+            print(msg, file=sys.stderr)
+            emitted.append(msg)
+    return emitted
+
+
 def find_vllm_table(tables: list[TableSection]) -> TableSection | None:
     """Select the table most likely to contain vLLM pod configuration."""
     # First pass: match by section heading
@@ -377,6 +510,19 @@ def extract_fields(table: TableSection) -> dict[str, ProvenanceValue]:
         canonical = canonicalize_parameter(raw_param)
 
         if canonical is None:
+            if is_unrecognized_replica_label(raw_param):
+                recognized = sorted(
+                    PARAMETER_ALIASES["replicas"] | PARAMETER_ALIASES["prefill_replicas"]
+                )
+                print(
+                    f"ERROR: unrecognized fleet-size row in the vLLM configuration "
+                    f"table: '{normalize_cell(raw_param)}'. Dropping it would discard a "
+                    f"stated pod count, and this generator cannot convert other units "
+                    f"(nodes, workers) into replicas. Use one of: "
+                    f"{', '.join(recognized)}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
             continue
 
         source = f'config.md row "{normalize_cell(raw_param)}"'
@@ -524,8 +670,40 @@ def build_scenario(
         sys.exit(1)
 
     model_name = fields["model"].value
-    hardware_raw = fields["hardware"].value
-    hardware_key = normalize_hardware_key(hardware_raw)
+
+    def resolve_role_hardware(role: str, field_name: str) -> tuple[str, str]:
+        """Resolve one role's accelerator label, warning if the cell names several.
+
+        A role is one Deployment, so it carries one node selector and its replicas
+        are fungible -- there is no way to place replica 0 and replica 1 on
+        different GPU types. When a cell names more than one, the extra types
+        cannot be honored, so say exactly what was dropped instead of emitting a
+        permissive `labelValues` list that would look like support while allowing
+        a homogeneous placement (issue #824).
+        """
+        field = fields.get(field_name) or fields["hardware"]
+        types = split_hardware_cell(str(field.value))
+        if len(types) > 1:
+            print(
+                f"  WARNING: {role} names {len(types)} GPU types "
+                f"({', '.join(types)}); a Deployment carries one node selector, so "
+                f"'{types[0]}' was used and the {role} block is HOMOGENEOUS in the "
+                f"generated baseline. Heterogeneity within one role is not "
+                f"expressible on the target -- see issue #824.",
+                file=sys.stderr,
+            )
+        chosen = types[0] if types else str(field.value)
+        key = normalize_hardware_key(chosen)
+        label = HARDWARE_LABELS.get(key)
+        if label is None:
+            print(f"  warning: hardware '{key}' not in HARDWARE_LABELS", file=sys.stderr)
+            return f"NVIDIA-{key}", f"best-effort ('{key}' not in lookup table)"
+        source = f'lookup: HARDWARE_LABELS["{key}"]'
+        if len(types) > 1:
+            source += f" (first of {len(types)}; see warning)"
+        elif field_name in fields:
+            source += f' via {field.source}'
+        return label, source
 
     # --- Model metadata ---
     meta = MODEL_METADATA.get(model_name)
@@ -554,14 +732,8 @@ def build_scenario(
     else:
         max_model_len_source = meta_source + ".maxModelLen"
 
-    # --- Hardware ---
-    hw_label = HARDWARE_LABELS.get(hardware_key)
-    if hw_label is None:
-        print(f"  warning: hardware '{hardware_key}' not in HARDWARE_LABELS", file=sys.stderr)
-        hw_label = f"NVIDIA-{hardware_key}"
-        hw_source = f"best-effort ('{hardware_key}' not in lookup table)"
-    else:
-        hw_source = f'lookup: HARDWARE_LABELS["{hardware_key}"]'
+    # --- Hardware, per role ---
+    hw_label, hw_source = resolve_role_hardware("decode", "decode_hardware")
 
     # --- Numeric fields with defaults ---
     def get_int(field_name, default, default_source="default (not in config.md)"):
@@ -618,6 +790,58 @@ def build_scenario(
 
     scenario["decode"] = decode
 
+    # --- Prefill role (issue #824) ---
+    # Only when config.md names a prefill pod count. Absent, the output is exactly
+    # what it has always been, so existing bundles regenerate byte-identically.
+    #
+    # `enabled: true` is NOT decoration. pipeline/lib/capacity.py:238-241 defaults
+    # prefill to ("prefill", False, 0), so a prefill block without it is skipped by
+    # capacity planning -- the scenario would read as disaggregated while planning
+    # zero prefill GPUs. config/scenarios/guides/pd-disaggregation.yaml sets it
+    # explicitly for the same reason.
+    # A stated count of 0 means aggregated -- the same as saying nothing -- so no
+    # block is emitted. Emitting `enabled: true` with `replicas: 0` would be the
+    # exact "reads as disaggregated while planning zero prefill GPUs" state this
+    # comment warns about, and generate_scenarios.py already skips on 0.
+    prefill_hw_label = None
+    prefill_hw_source = None
+    prefill_field = fields.get("prefill_replicas")
+    prefill_replicas = int(prefill_field.value or 0) if prefill_field else 0
+    if prefill_replicas > 0:
+        prefill_hw_label, prefill_hw_source = resolve_role_hardware(
+            "prefill", "prefill_hardware"
+        )
+        prefill = {"enabled": True, "replicas": prefill_replicas}
+        prefill["acceleratorType"] = {
+            "labelKey": "nvidia.com/gpu.product",
+            "labelValue": prefill_hw_label,
+        }
+        # Parallelism and vLLM flags are shared, not per-role: no bundle to date
+        # states them per role, and inventing per-role aliases for values nobody
+        # supplies would add vocabulary with no source to cite.
+        if tp > 1 or dp > 1:
+            prefill["parallelism"] = {
+                "data": dp,
+                "dataLocal": dp,
+                "tensor": tp,
+                "workers": tp,
+            }
+        if additional_flags:
+            prefill["vllm"] = {"additionalFlags": additional_flags}
+        scenario["prefill"] = prefill
+    elif "prefill_hardware" in fields:
+        # The row was recognized and stored, then never read, because a prefill
+        # accelerator without a prefill pod count describes a pool that does not
+        # exist. Recognizing an input and then discarding it is the silent-drop
+        # this feature exists to remove (issue #824 review).
+        print(
+            f"  WARNING: '{fields['prefill_hardware'].raw_param}' was given but no "
+            f"prefill pod count, so no prefill pool is emitted and the row has NO "
+            f"effect. Add a prefill replica count (e.g. 'Number of prefill pods') "
+            f"for it to apply.",
+            file=sys.stderr,
+        )
+
     # --- Build provenance map ---
     provenance = {
         "model.name": fields["model"].source,
@@ -635,6 +859,13 @@ def build_scenario(
     if tp > 1 or dp > 1:
         provenance["decode.parallelism.tensor"] = tp_source
         provenance["decode.parallelism.data"] = dp_source
+
+    if "prefill" in scenario:
+        provenance["prefill.replicas"] = fields["prefill_replicas"].source
+        provenance["prefill.acceleratorType.labelValue"] = prefill_hw_source
+        if tp > 1 or dp > 1:
+            provenance["prefill.parallelism.tensor"] = tp_source
+            provenance["prefill.parallelism.data"] = dp_source
 
     return scenario, provenance
 
@@ -690,6 +921,36 @@ def write_provenance_yaml(
         lines.append("      additionalFlags:")
         for flag, source in scenario["decode"]["vllm"]["additionalFlags"]:
             lines.append(f'      - "{flag}"  # {source}')
+
+    # Prefill role, emitted only when config.md named a prefill pod count. Placed
+    # after decode so the decode bytes above are untouched when it is absent.
+    if "prefill" in scenario:
+        p_role = scenario["prefill"]
+        lines.append("")
+        lines.append("  prefill:")
+        lines.append(
+            "    enabled: true  # required: capacity planning defaults prefill to "
+            "disabled with 0 replicas (pipeline/lib/capacity.py)"
+        )
+        lines.append(f"    replicas: {p_role['replicas']}  # {provenance['prefill.replicas']}")
+        lines.append("    acceleratorType:")
+        lines.append("      labelKey: nvidia.com/gpu.product")
+        lines.append(
+            f"      labelValue: {p_role['acceleratorType']['labelValue']}"
+            f"  # {provenance['prefill.acceleratorType.labelValue']}"
+        )
+        if "parallelism" in p_role:
+            pp = p_role["parallelism"]
+            lines.append("    parallelism:")
+            lines.append(f"      data: {pp['data']}  # {provenance['prefill.parallelism.data']}")
+            lines.append(f"      dataLocal: {pp['dataLocal']}  # {provenance['prefill.parallelism.data']}")
+            lines.append(f"      tensor: {pp['tensor']}  # {provenance['prefill.parallelism.tensor']}")
+            lines.append(f"      workers: {pp['workers']}  # {provenance['prefill.parallelism.tensor']}")
+        if "vllm" in p_role:
+            lines.append("    vllm:")
+            lines.append("      additionalFlags:")
+            for flag, source in p_role["vllm"]["additionalFlags"]:
+                lines.append(f'      - "{flag}"  # {source}')
 
     lines.append("")
 
@@ -936,6 +1197,12 @@ def main():
     if not fields:
         print("ERROR: no recognized fields extracted from table", file=sys.stderr)
         sys.exit(1)
+
+    # A per-role row stated ONLY in some other table is invisible to the parser.
+    # Say so rather than emitting a decode-only baseline in silence (issue #824
+    # review). Runs after extraction so a value correctly present in the vLLM table
+    # and merely documented elsewhere draws no warning.
+    warn_role_rows_outside_vllm_table(tables, vllm_table, set(fields))
 
     print(f"  extracted {len(fields)} field(s): {list(fields.keys())}")
 
