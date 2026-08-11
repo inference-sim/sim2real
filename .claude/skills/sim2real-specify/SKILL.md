@@ -156,7 +156,9 @@ results will not be attributable.
 
 ## Phase 5 — Specify
 
-Write `algorithms/<arm>.go` per arm, plus `config.md`.
+Write `algorithms/<arm>.go` per arm, plus `README.md` and `config.md`. All three
+have stated contracts below; `config.md`'s is the one most easily lost, because
+its first part is consumed by a machine rather than a reader.
 
 The specification layer:
 
@@ -216,6 +218,57 @@ where the policy did NOT win, the pre-registered expectation, the pins table, an
 the layout. If Phase 1 found no results, write the expectation as a hypothesis with
 no margin attached and say that no measurement backs it.
 
+### What `config.md` must contain
+
+`config.md` states the deployment the transfer targets and every knob the arms
+read. Five parts, in this order:
+
+1. **vLLM pod configuration** — a table headed `## vLLM Pod Configuration`. This
+   table is MACHINE-READ: `/sim2real-bootstrap` Task 3 derives
+   `baselines/baseline.yaml` from it and HALTS without it. `Model` and `GPU` are
+   mandatory. Include `max_model_len` whenever the model is absent from
+   bootstrap's `MODEL_METADATA`, because that pair is what makes the omission
+   fatal rather than merely warned.
+2. **Simulation → deployment mapping** — each simulator flag beside the vLLM
+   parameter it calibrates, so a reader can audit that the two agree.
+3. **Simulator-only knobs** — flags with no deployment equivalent.
+4. **`blis observe` invocation** — a fenced bash block. Emit it even when every
+   value equals the pipeline default, so the values are this bundle's decision
+   and not a downstream fallback.
+5. **Per-arm settings** — the flags distinguishing each arm.
+
+Add a **`## Fleet topology`** section whenever the fleet is not one homogeneous
+pool: state the layout, and state plainly if it is not expressible in the
+scenario schema the target deploys with. Give the operator the options and what
+each costs. Do not let a topology the schema cannot represent reach bootstrap
+undocumented.
+
+Parts 1 and 2 are a PROJECTION of what Phase 1 already read from the campaign
+runner into the dialect the target deploys in. You are not discovering new facts;
+you are restating known ones in the consumer's vocabulary. The simulator dialect
+alone is not enough: a bundle that records `--max-num-running-reqs 256` and stops
+has stated the fact and still fails bootstrap, because the consumer reads
+`max_num_seqs`.
+
+Do not restate bootstrap's field list here — it lives in that skill's
+`PARAMETER_ALIASES` and `VLLM_SECTION_KEYWORDS`, and the Phase 6 consumer check
+verifies agreement mechanically. Duplicating it invites drift.
+
+### Deployment values the simulation cannot supply
+
+Some vLLM parameters are properties of the target cluster, not of the simulation.
+`gpu_memory_utilization` is the common case; `max_model_len` and
+`enable_prefix_caching` are often fixed by no campaign flag.
+
+Do NOT infer them, and do NOT omit the row. Ask the operator. If the operator
+does not know, write the row's value as `**CONFIRM**` and say in the notes column
+what depends on it.
+
+An omitted row becomes a silent downstream default. `CONFIRM` fails loudly.
+Prefer the loud failure. `enable_prefix_caching` earns particular care: bootstrap
+interprets silence as ON rather than flagging it, so a bundle that needs it OFF
+and stays silent gets the opposite of what it meant.
+
 ## Phase 6 — Gate
 
 ### Placeholder substitution
@@ -261,6 +314,27 @@ prompt uses a name absent here, or if a name here is used by no prompt.
    Pass a `--tree` for every checkout the bundle cites, including the inference
    engine if its metrics are cited. A citation into an unpassed tree reports
    `unresolved-path`, which is the tool refusing to guess rather than a defect.
+4. **Consumer check.** The one contract `config.md` has is that
+   `/sim2real-bootstrap` can parse it. Verify with the real consumer rather than
+   by inspection, so the two skills cannot drift and the field list stays
+   single-sourced in bootstrap:
+
+   ```bash
+   python3 .claude/skills/sim2real-bootstrap/generate_from_config.py \
+     <experiment-root>/config.md -o "$(mktemp -d)"
+   python3 .claude/skills/sim2real-bootstrap/generate_from_config.py \
+     <experiment-root>/config.md --emit-observe-yaml
+   ```
+
+   The first must exit 0 — a temp `-o` makes it a dry run, so no bundle file is
+   written. The second must report `# source: config.md` on every key the bundle
+   intends to set; `# source: sim2real-bootstrap default` means part 4 of
+   `config.md` is missing or unparsed.
+
+   Read the warnings, not just the exit code. `model '<x>' not in MODEL_METADATA`
+   and `hardware '<x>' not in HARDWARE_LABELS` are both non-fatal, and both mean
+   bootstrap will need a lookup-table entry before Task 3 produces a usable
+   baseline. Say so in `config.md` where the operator will see it.
 
 ### Reconcile
 
@@ -285,12 +359,16 @@ prompt uses a name absent here, or if a name here is used by no prompt.
   states its top-level score and leaves every operand unimplemented.
 - Every lint failure: correct the citation, or add `lint-skip` on that line if the
   reference is illustrative rather than a citation.
+- Consumer-check failure: fix `config.md`, never the consumer. If the check cannot
+  be made to pass because the fleet is not expressible in the scenario schema,
+  that is a `## Fleet topology` disclosure plus an operator decision — not a
+  reason to ship a `config.md` bootstrap cannot read.
 
 ### Pass condition
 
 Zero `UNSUPPORTED` claims remain, every `BRIDGE` finding has a non-null
-`declared_at`, the lint exits 0, and every re-derivation divergence is resolved or
-declared.
+`declared_at`, the lint exits 0, the consumer check exits 0 with no unintended
+defaults, and every re-derivation divergence is resolved or declared.
 
 If `UNSUPPORTED` findings survive three fix rounds, STOP. Report what remains
 unresolved. Do not describe the bundle as audited.
