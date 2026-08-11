@@ -49,3 +49,8 @@ workspace */
 sim2real_golden/
 sim2real_golden_correct/
 .superpowers
+# pytest-cov artifacts (contain absolute local paths)
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/

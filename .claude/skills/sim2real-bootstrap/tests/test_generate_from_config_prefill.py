@@ -88,6 +88,32 @@ def test_prefill_replica_aliases(label):
     assert scenario["prefill"]["replicas"] == 3
 
 
+def test_stated_prefill_count_of_zero_emits_no_block(tmp_path):
+    """0 means aggregated, the same as saying nothing. Emitting `enabled: true`
+    with `replicas: 0` would be the reads-as-disaggregated-but-plans-nothing
+    state this feature exists to avoid."""
+    scenario, prov = build([row("Number of prefill pods", "0")])
+    assert "prefill" not in scenario
+    assert "prefill:" not in emit(scenario, prov, tmp_path)
+
+
+def test_zero_prefill_agrees_across_both_generators():
+    """The two generators must not disagree on what a stated 0 means."""
+    sys.path.insert(0, str(Path(__file__).parents[1]))
+    import generate_scenarios as gs
+
+    from_config, _ = build([row("Number of prefill pods", "0")])
+    from_json = gs.build_scenario(
+        {
+            "workload": {"model": "Qwen/Qwen3-14B", "hardware": "H100_SXM_80GB"},
+            "vllm_args": {"num_instances": 2, "prefill_instances": 0},
+        },
+        "cand",
+    )
+    assert "prefill" not in from_config
+    assert "prefill" not in from_json
+
+
 # ---------------------------------------------------------------------------
 # Per-role accelerator
 # ---------------------------------------------------------------------------

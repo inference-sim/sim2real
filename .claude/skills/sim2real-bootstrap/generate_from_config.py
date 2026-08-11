@@ -720,10 +720,15 @@ def build_scenario(
     # capacity planning -- the scenario would read as disaggregated while planning
     # zero prefill GPUs. config/scenarios/guides/pd-disaggregation.yaml sets it
     # explicitly for the same reason.
+    # A stated count of 0 means aggregated -- the same as saying nothing -- so no
+    # block is emitted. Emitting `enabled: true` with `replicas: 0` would be the
+    # exact "reads as disaggregated while planning zero prefill GPUs" state this
+    # comment warns about, and generate_scenarios.py already skips on 0.
     prefill_hw_label = None
     prefill_hw_source = None
-    if "prefill_replicas" in fields:
-        prefill_replicas = int(fields["prefill_replicas"].value)
+    prefill_field = fields.get("prefill_replicas")
+    prefill_replicas = int(prefill_field.value or 0) if prefill_field else 0
+    if prefill_replicas > 0:
         prefill_hw_label, prefill_hw_source = resolve_role_hardware(
             "prefill", "prefill_hardware"
         )

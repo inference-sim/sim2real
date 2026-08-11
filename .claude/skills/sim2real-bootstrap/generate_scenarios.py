@@ -72,7 +72,19 @@ def resolve_role_hardware(raw: str, role: str) -> str:
             file=sys.stderr,
         )
     chosen = types[0] if types else str(raw)
-    return HARDWARE_LABELS.get(chosen, chosen)
+    label = HARDWARE_LABELS.get(chosen)
+    if label is None:
+        # Passing an unmapped value straight through makes it the node-selector
+        # labelValue, so a typo or a new SKU becomes a selector that matches no
+        # node and the pods sit Pending with nothing said. Match the diagnostic
+        # generate_from_config.py prints for the same case.
+        print(
+            f"  warning: hardware '{chosen}' not in HARDWARE_LABELS, using it "
+            f"verbatim as the {role} node-selector value",
+            file=sys.stderr,
+        )
+        return chosen
+    return label
 
 
 # ---------------------------------------------------------------------------
@@ -317,11 +329,20 @@ def write_commented_yaml(scenario: dict, entry: dict, out_path: str):
         )
         lines.append(f"    replicas: {p_role['replicas']}  # from vllm_args.prefill_instances")
         if "acceleratorType" in p_role:
+            # Name the key the value actually came from: prefill_hardware is
+            # optional and falls back to workload.hardware, so citing it
+            # unconditionally would attribute the value to a key the input may
+            # not contain.
+            prefill_hw_source = (
+                "workload.prefill_hardware (lookup table)"
+                if entry.get("workload", {}).get("prefill_hardware")
+                else "workload.hardware (lookup table; no prefill_hardware given)"
+            )
             lines.append("    acceleratorType:")
             lines.append(f"      labelKey: {p_role['acceleratorType']['labelKey']}")
             lines.append(
                 f"      labelValue: {p_role['acceleratorType']['labelValue']}"
-                f"  # from workload.prefill_hardware (lookup table)"
+                f"  # from {prefill_hw_source}"
             )
         if "parallelism" in p_role:
             pp = p_role["parallelism"]

@@ -152,6 +152,49 @@ def test_genuinely_unknown_field_still_warns():
     assert any("not_a_real_knob" in w for w in warnings)
 
 
+# ---------------------------------------------------------------------------
+# Provenance comments must name the key the value actually came from
+# ---------------------------------------------------------------------------
+
+def test_inherited_prefill_hardware_is_not_attributed_to_prefill_hardware(tmp_path):
+    """`prefill_hardware` is optional; citing it when absent misattributes."""
+    src = entry(vllm_extra={"prefill_instances": 1})
+    assert "prefill_hardware" not in src["workload"]
+    text = emit(gs.build_scenario(src, "cand"), src, tmp_path)
+    prefill_block = text[text.index("prefill:"):]
+    assert "from workload.hardware (lookup table; no prefill_hardware given)" in prefill_block
+    assert "from workload.prefill_hardware" not in prefill_block
+
+
+def test_explicit_prefill_hardware_is_attributed_to_it(tmp_path):
+    src = entry(
+        workload_extra={"prefill_hardware": "A100_SXM_80GB"},
+        vllm_extra={"prefill_instances": 1},
+    )
+    text = emit(gs.build_scenario(src, "cand"), src, tmp_path)
+    prefill_block = text[text.index("prefill:"):]
+    assert "from workload.prefill_hardware (lookup table)" in prefill_block
+
+
+# ---------------------------------------------------------------------------
+# Unmapped GPU values are surfaced, not passed through in silence
+# ---------------------------------------------------------------------------
+
+def test_unmapped_hardware_warns(capsys):
+    """An unmapped value becomes the node-selector verbatim; a selector that
+    matches no node leaves pods Pending, so it must not be silent."""
+    result = gs.resolve_role_hardware("H200_SXM_141GB", "decode")
+    err = capsys.readouterr().err
+    assert result == "H200_SXM_141GB"
+    assert "not in HARDWARE_LABELS" in err
+    assert "decode" in err
+
+
+def test_mapped_hardware_does_not_warn(capsys):
+    assert gs.resolve_role_hardware("H100_SXM_80GB", "decode") == "NVIDIA-H100-80GB-HBM3"
+    assert "HARDWARE_LABELS" not in capsys.readouterr().err
+
+
 def test_emitted_yaml_round_trips_both_roles(tmp_path):
     src = entry(
         workload_extra={"prefill_hardware": "A100_SXM_80GB"},
