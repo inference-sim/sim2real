@@ -1,15 +1,29 @@
 """YAML redaction for collected plan files.
 
-Stubs out sensitive field values in Kubernetes objects whose `kind`
-matches a denylist, so collected plan YAMLs do not carry credentials
-into developer laptops or shared run dirs.
+Stubs out sensitive field values so collected plan YAMLs do not carry
+credentials into developer laptops or shared run dirs. Two independent
+mechanisms run over every file (defense in depth):
+
+  1. **Kind-based** — for Kubernetes objects whose `kind` matches a
+     denylist (default: ``Secret``), every value under `data` /
+     `stringData` is replaced with ``REDACTED``.
+  2. **Key-name-based** — for *any* document regardless of `kind`, a
+     recursive walk replaces values whose key names a credential
+     (``token``, ``password``, ``apiKey`` … — see ``SENSITIVE_KEYS``).
+     This catches credentials inlined as ordinary config fields, e.g.
+     an llm-d-benchmark harness plan's ``huggingface.token`` (issue
+     #819), which is neither a ``Secret`` nor under `data`/`stringData`.
 
 Behavior:
-  - `data` and `stringData` values in matching docs are replaced with
-    the literal string ``REDACTED``. Key names are preserved.
-  - Multi-doc YAML files are processed per-document; non-matching docs
-    pass through unchanged.
-  - Files without any matching docs are not rewritten.
+  - Matching values are replaced with the literal string ``REDACTED``.
+    Key names are always preserved.
+  - Reference/name fields that merely point at a secret (``secretName``,
+    ``tokenKey``, ``contextSecretName``) are NOT credentials and are left
+    intact — key matching is exact (case-insensitive), not substring.
+  - Multi-doc YAML files are processed per-document. A document is
+    counted once if either mechanism changed it; documents with no
+    `kind` are labelled ``document`` in the summary header.
+  - Files with no changes are not rewritten.
   - Unreadable / unparseable files are left untouched (warning logged).
   - Writes go through a sibling tmp file + atomic ``os.replace`` so a
     process crash mid-write cannot leave a half-redacted file on disk.
@@ -27,6 +41,68 @@ from pipeline.lib.log import warn
 REDACTED = "REDACTED"
 
 DEFAULT_REDACT_KINDS: frozenset[str] = frozenset({"Secret"})
+
+# Key names whose values are credentials and must be stubbed wherever they
+# appear, in any document. Matching is exact against a normalized form of
+# the key: lowercased with ``_`` / ``-`` separators stripped (see
+# ``_normalize_key``), so ``accessKey``, ``access_key``, ``access-key`` and
+# ``ACCESSKEY`` all match the single entry ``accesskey``. Entries here are
+# therefore stored in that same separator-free lowercase form.
+#
+# Deliberately NOT matched — these reference or name a secret but are not
+# themselves secret; none normalizes to an entry below: ``secretName``
+# (→ ``secretname``), ``tokenKey`` (→ ``tokenkey``), ``contextSecretName``
+# (→ ``contextsecretname``).
+SENSITIVE_KEYS: frozenset[str] = frozenset({
+    "token",
+    "tokenbase64",
+    "password",
+    "apikey",
+    "accesskey",
+    "secretaccesskey",
+    "authorization",
+    "bearertoken",
+})
+
+
+def _normalize_key(key: str) -> str:
+    """Lowercase and strip ``_`` / ``-`` so separator style doesn't matter.
+
+    ``accessKey``, ``access_key``, ``access-key`` and ``ACCESSKEY`` all
+    normalize to ``accesskey``. This keeps the denylist a single entry per
+    key while catching every common YAML spelling — without it, camelCase
+    and snake_case forms of the same field would need separate entries and
+    a missing one would silently bypass redaction (the class of bug in #819).
+    """
+    return key.lower().replace("_", "").replace("-", "")
+
+
+def _stub_sensitive_keys(node: object) -> bool:
+    """Recursively stub values under sensitive keys, in-place.
+
+    Walks nested dicts and lists. A value is replaced with ``REDACTED``
+    when its key matches ``SENSITIVE_KEYS`` after normalization (see
+    ``_normalize_key`` — case- and separator-insensitive exact match); the
+    sensitive value is stubbed wholesale and not descended into. Recursion
+    continues through every other container value.
+
+    Already-redacted values are left as-is (so a re-run over a scrubbed
+    file reports no change). Returns True if any value was changed.
+    """
+    changed = False
+    if isinstance(node, dict):
+        for key, value in list(node.items()):
+            if isinstance(key, str) and _normalize_key(key) in SENSITIVE_KEYS:
+                if value != REDACTED:
+                    node[key] = REDACTED
+                    changed = True
+            elif _stub_sensitive_keys(value):
+                changed = True
+    elif isinstance(node, list):
+        for item in node:
+            if _stub_sensitive_keys(item):
+                changed = True
+    return changed
 
 
 def _stub_data_fields(doc: dict) -> bool:
@@ -57,11 +133,16 @@ def _format_header(counts: Counter) -> str:
 
 
 def redact_yaml_file(path: Path, kinds: Iterable[str] | None = None) -> int:
-    """Redact data/stringData values for kind-matching docs in `path`.
+    """Redact credentials in `path`, in place.
 
-    Returns the count of docs that were redacted. Returns 0 (without
-    rewriting the file) for: files with no matching docs, files that
-    aren't valid YAML, or files that can't be read.
+    Two mechanisms run per document (see the module docstring): the
+    kind-based `data`/`stringData` scrub for docs whose `kind` is in
+    `kinds`, and the key-name scrub (`_stub_sensitive_keys`) on every doc
+    regardless of `kind`.
+
+    Returns the count of docs changed by either mechanism. Returns 0
+    (without rewriting the file) for: files with nothing to redact, files
+    that aren't valid YAML, or files that can't be read.
     """
     redact_set = frozenset(kinds) if kinds is not None else DEFAULT_REDACT_KINDS
 
@@ -82,8 +163,12 @@ def redact_yaml_file(path: Path, kinds: Iterable[str] | None = None) -> int:
         if not isinstance(doc, dict):
             continue
         kind = doc.get("kind")
-        if kind in redact_set and _stub_data_fields(doc):
-            counts[kind] += 1
+        changed = kind in redact_set and _stub_data_fields(doc)
+        # Key-name scrub runs on every document, regardless of kind.
+        changed = _stub_sensitive_keys(doc) or changed
+        if changed:
+            label = kind if isinstance(kind, str) else "document"
+            counts[label] += 1
 
     total = sum(counts.values())
     if total == 0:

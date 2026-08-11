@@ -23,7 +23,13 @@ jobs:
           python-version: "3.14"
 
       - name: Install test dependencies
-        run: pip install pytest pytest-cov ruff -r requirements.txt
+        run: |
+          pip install pytest pytest-cov ruff -r requirements.txt
+          # Pinned to the same rev the scaffolded .secrets.baseline / config use,
+          # so the sim2real-bootstrap behavioral secret-scan tests (#822) run
+          # under the merge gate instead of skipping. Verified to install and run
+          # on the CI Python (3.14).
+          pip install "detect-secrets @ git+https://github.com/ibm/detect-secrets.git@0.13.1+ibm.64.dss"
 
       - name: Lint
         run: ruff check pipeline/ .claude/skills/ --select F
