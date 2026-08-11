@@ -73,6 +73,9 @@ PARAMETER_ALIASES = {
         "number of pods",
         "number of vllm pods",   # BLIS experiment folders use this exact label (issue #549)
         "number of decode pods",  # anticipate variant label names
+        "number of decode instances",
+        "decode replicas",        # symmetric with prefill_replicas' "prefill replicas"
+        "decode instances",
         "instances",
         "replicas",
         "num_instances",
@@ -328,7 +331,7 @@ def canonicalize_parameter(raw: str) -> str | None:
 # optionally followed by "count" ("Number of prefill pods", "prefill replicas",
 # "Prefill pod count", "Instances"). Singular and plural both, since an operator
 # writing one pod says "pod".
-_COUNT_NOUN_TAIL_RE = re.compile(r"\b(?:pods?|instances?|replicas?)(?:\s+count)?$")
+_COUNT_NOUN_TAIL_RE = re.compile(r"\b(?:pods?|instances?|replicas?|nodes?)(?:\s+count)?$")
 
 # A RATIO mentions the same nouns but is describing a per-unit quantity, not a
 # fleet size: "Pods per node", "Pods per GPU", "GPUs per pod". These are
@@ -372,6 +375,49 @@ def split_hardware_cell(raw: str) -> list[str]:
     if not cleaned:
         return []
     return [part for part in _GPU_LIST_SPLIT_RE.split(cleaned) if part]
+
+
+def warn_role_rows_outside_vllm_table(
+    tables: list[TableSection], vllm_table: TableSection
+) -> list[str]:
+    """Warn when per-role rows sit in a table this generator does not read.
+
+    Only the single table `find_vllm_table` selects is machine-read. A `config.md`
+    that states its prefill count in some other table -- a simulation -> deployment
+    mapping table, say -- produced a decode-only baseline with no diagnostic at
+    all: the decode row IS recognized, so the unrecognized-row check never fires,
+    and the prefill row is simply never seen (issue #824 review).
+
+    These rows are NOT consumed from the other table, deliberately. A mapping
+    table's columns mean something else: in `pd-infocomm-2/config.md` the row is
+    `| prefill replicas | --prefill-instances | 1 | yes |`, so column 1 is the
+    simulator flag name, not a count. Reading it would substitute silent garbage
+    for a silent omission. The fix an operator needs is to move the row into the
+    vLLM table, and that is what the warning says.
+
+    Returns the warning lines emitted, for testability.
+    """
+    role_fields = {"prefill_replicas", "prefill_hardware", "decode_hardware", "replicas"}
+    emitted = []
+    for table in tables:
+        if table is vllm_table:
+            continue
+        for row in table.rows:
+            if not row:
+                continue
+            raw_param = list(row.values())[0]
+            canonical = canonicalize_parameter(raw_param)
+            if canonical not in role_fields:
+                continue
+            msg = (
+                f"  WARNING: '{normalize_cell(raw_param)}' appears under "
+                f"\"{table.heading}\", which is not the machine-read table. Only "
+                f"\"{vllm_table.heading}\" is parsed, so this row has NO effect on the "
+                f"generated baseline. Move it into that table for it to take effect."
+            )
+            print(msg, file=sys.stderr)
+            emitted.append(msg)
+    return emitted
 
 
 def find_vllm_table(tables: list[TableSection]) -> TableSection | None:
@@ -459,9 +505,11 @@ def extract_fields(table: TableSection) -> dict[str, ProvenanceValue]:
                     PARAMETER_ALIASES["replicas"] | PARAMETER_ALIASES["prefill_replicas"]
                 )
                 print(
-                    f"ERROR: unrecognized replica-count row in the vLLM configuration "
+                    f"ERROR: unrecognized fleet-size row in the vLLM configuration "
                     f"table: '{normalize_cell(raw_param)}'. Dropping it would discard a "
-                    f"stated pod count. Use one of: {', '.join(recognized)}",
+                    f"stated pod count, and this generator cannot convert other units "
+                    f"(nodes, workers) into replicas. Use one of: "
+                    f"{', '.join(recognized)}",
                     file=sys.stderr,
                 )
                 sys.exit(1)
@@ -771,6 +819,18 @@ def build_scenario(
         if additional_flags:
             prefill["vllm"] = {"additionalFlags": additional_flags}
         scenario["prefill"] = prefill
+    elif "prefill_hardware" in fields:
+        # The row was recognized and stored, then never read, because a prefill
+        # accelerator without a prefill pod count describes a pool that does not
+        # exist. Recognizing an input and then discarding it is the silent-drop
+        # this feature exists to remove (issue #824 review).
+        print(
+            f"  WARNING: '{fields['prefill_hardware'].raw_param}' was given but no "
+            f"prefill pod count, so no prefill pool is emitted and the row has NO "
+            f"effect. Add a prefill replica count (e.g. 'Number of prefill pods') "
+            f"for it to apply.",
+            file=sys.stderr,
+        )
 
     # --- Build provenance map ---
     provenance = {
@@ -1121,6 +1181,10 @@ def main():
         sys.exit(1)
 
     print(f"  found table under: \"{vllm_table.heading}\" ({len(vllm_table.rows)} rows)")
+
+    # A per-role row in some other table is invisible to the parser. Say so rather
+    # than emitting a decode-only baseline in silence (issue #824 review).
+    warn_role_rows_outside_vllm_table(tables, vllm_table)
 
     # Extract fields
     fields = extract_fields(vllm_table)

@@ -291,6 +291,102 @@ def test_recognized_replica_labels_are_not_flagged():
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
+# Per-role rows in a table the parser does not read
+# ---------------------------------------------------------------------------
+
+def _two_table_doc(other_heading: str, other_rows: str) -> list[str]:
+    """A config.md with the vLLM table plus a second table, as real bundles have."""
+    return (
+        "# Configuration\n\n"
+        f"## {other_heading}\n\n"
+        "| Deployment parameter | Simulator flag | Value | Passed? |\n"
+        "|---|---|---|---|\n"
+        f"{other_rows}\n"
+        "\n## vLLM Pod Configuration\n\n"
+        "| Parameter | Value | Notes |\n"
+        "|---|---|---|\n"
+        "| Model | `Qwen/Qwen3-14B` | |\n"
+        "| GPU | H100_SXM_80GB | |\n"
+        "| Number of decode pods | 2 | |\n"
+    ).split("\n")
+
+
+def test_prefill_row_in_another_table_warns_and_is_not_consumed(capsys):
+    """The review's motivating case: pd-infocomm-2 states its prefill count in a
+    simulation->deployment mapping table, so the parser never saw it and emitted a
+    decode-only baseline with no diagnostic at all."""
+    lines = _two_table_doc(
+        "Simulation → deployment mapping",
+        "| prefill replicas | --prefill-instances | 1 | yes |",
+    )
+    tables = gfc.parse_md_tables(lines)
+    vllm = gfc.find_vllm_table(tables)
+    emitted = gfc.warn_role_rows_outside_vllm_table(tables, vllm)
+    err = capsys.readouterr().err
+
+    assert len(emitted) == 1
+    assert "prefill replicas" in err
+    assert "Simulation → deployment mapping" in err   # names where it found it
+    assert "NO effect" in err                          # says what that means
+    assert "Move it into that table" in err            # and what to do
+
+    # Crucially NOT consumed: column 1 of a mapping table is a flag name, not a
+    # count, so reading it would swap a silent omission for silent garbage.
+    scenario, _ = gfc.build_scenario(gfc.extract_fields(vllm), "test")
+    assert "prefill" not in scenario
+
+
+def test_no_warning_when_role_rows_live_in_the_vllm_table(capsys):
+    lines = _two_table_doc("Notes", "| something | else | 1 | yes |")
+    tables = gfc.parse_md_tables(lines)
+    vllm = gfc.find_vllm_table(tables)
+    assert gfc.warn_role_rows_outside_vllm_table(tables, vllm) == []
+    assert "NO effect" not in capsys.readouterr().err
+
+
+def test_decode_row_in_another_table_also_warns(capsys):
+    """Not prefill-specific: any per-role row in an unread table is inert."""
+    lines = _two_table_doc(
+        "Simulation → deployment mapping",
+        "| decode replicas | --decode-instances | 2 | yes |",
+    )
+    tables = gfc.parse_md_tables(lines)
+    emitted = gfc.warn_role_rows_outside_vllm_table(tables, gfc.find_vllm_table(tables))
+    assert len(emitted) == 1
+    assert "decode replicas" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# A per-role accelerator with no pod count
+# ---------------------------------------------------------------------------
+
+def test_prefill_gpu_without_a_count_warns(capsys):
+    """The row is recognized and stored, then never read. Recognizing an input and
+    discarding it is the silent drop this feature exists to remove."""
+    scenario, _ = build([row("Prefill GPU", "A100_SXM_80GB"), row("Number of pods", "2")])
+    err = capsys.readouterr().err
+    assert "prefill" not in scenario
+    assert "Prefill GPU" in err
+    assert "NO effect" in err
+    assert "Number of prefill pods" in err  # names the fix
+
+
+def test_prefill_gpu_with_a_count_does_not_warn(capsys):
+    scenario, _ = build(
+        [row("Prefill GPU", "A100_SXM_80GB"), row("Number of prefill pods", "1")]
+    )
+    assert scenario["prefill"]["acceleratorType"]["labelValue"] == "NVIDIA-A100-SXM4-80GB"
+    assert "NO effect" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("label", ["Number of prefill nodes", "prefill node count"])
+def test_node_counts_are_flagged_not_dropped(label):
+    """A node count states fleet size in a unit this generator cannot convert to
+    replicas, so it must fail loudly rather than vanish."""
+    assert gfc.is_unrecognized_replica_label(label) is True
+
+
+# ---------------------------------------------------------------------------
 # End-to-end golden: the single-pool path must not move
 # ---------------------------------------------------------------------------
 

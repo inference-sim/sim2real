@@ -76,8 +76,12 @@ def resolve_role_hardware(raw: str, role: str) -> str:
     if label is None:
         # Passing an unmapped value straight through makes it the node-selector
         # labelValue, so a typo or a new SKU becomes a selector that matches no
-        # node and the pods sit Pending with nothing said. Match the diagnostic
-        # generate_from_config.py prints for the same case.
+        # node and the pods sit Pending with nothing said.
+        #
+        # The fallback VALUE differs from generate_from_config.py's on purpose:
+        # that one synthesizes `NVIDIA-{key}` while this one returns the input
+        # verbatim, and each preserves its own generator's long-standing output.
+        # Only the fact that a diagnostic is printed at all is now shared.
         print(
             f"  warning: hardware '{chosen}' not in HARDWARE_LABELS, using it "
             f"verbatim as the {role} node-selector value",
@@ -267,6 +271,16 @@ def build_scenario(entry: dict, name: str) -> dict:
         if flags:
             prefill["vllm"] = {"additionalFlags": flags}
         scenario["prefill"] = prefill
+    elif workload.get("prefill_hardware"):
+        # Declared in KNOWN_FIELDS so check_unknown_fields stays quiet, but unused
+        # without a count -- a recognized input silently discarded (issue #824
+        # review). Same hole as generate_from_config.py's.
+        print(
+            "  WARNING: workload.prefill_hardware was given but no "
+            "vllm_args.prefill_instances, so no prefill pool is emitted and the "
+            "field has NO effect. Set prefill_instances for it to apply.",
+            file=sys.stderr,
+        )
 
     return scenario
 

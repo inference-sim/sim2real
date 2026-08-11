@@ -146,6 +146,27 @@ def test_new_fields_do_not_trip_unknown_field_warning():
     assert gs.check_unknown_fields(src, "cand") == []
 
 
+def test_prefill_hardware_without_instances_warns(capsys):
+    """Declared in KNOWN_FIELDS so check_unknown_fields stays quiet, but unused
+    without a count — a recognized input silently discarded."""
+    src = entry(workload_extra={"prefill_hardware": "A100_SXM_80GB"})
+    scenario = gs.build_scenario(src, "cand")
+    err = capsys.readouterr().err
+    assert "prefill" not in scenario
+    assert "prefill_hardware" in err
+    assert "NO effect" in err
+    assert gs.check_unknown_fields(src, "cand") == []  # not an unknown-field case
+
+
+def test_prefill_hardware_with_instances_does_not_warn(capsys):
+    src = entry(
+        workload_extra={"prefill_hardware": "A100_SXM_80GB"},
+        vllm_extra={"prefill_instances": 1},
+    )
+    gs.build_scenario(src, "cand")
+    assert "NO effect" not in capsys.readouterr().err
+
+
 def test_genuinely_unknown_field_still_warns():
     src = entry(vllm_extra={"not_a_real_knob": 1})
     warnings = gs.check_unknown_fields(src, "cand")
