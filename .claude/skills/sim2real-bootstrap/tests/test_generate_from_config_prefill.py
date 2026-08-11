@@ -344,6 +344,38 @@ def test_no_warning_when_role_rows_live_in_the_vllm_table(capsys):
     assert "NO effect" not in capsys.readouterr().err
 
 
+def test_documented_duplicate_in_a_mapping_table_does_not_warn(capsys):
+    """A simulation->deployment mapping table is a required part of a well-formed
+    config.md. A bundle that states its count in the vLLM table AND documents it
+    there must not draw a warning on every run — only values stated ONLY where
+    they cannot take effect are worth flagging."""
+    lines = (
+        "# Configuration\n\n"
+        "## Simulation → deployment mapping\n\n"
+        "| Deployment parameter | Simulator flag | Value | Passed? |\n"
+        "|---|---|---|---|\n"
+        "| prefill replicas | --prefill-instances | 1 | yes |\n"
+        "| decode replicas | --decode-instances | 2 | yes |\n"
+        "\n## vLLM Pod Configuration\n\n"
+        "| Parameter | Value | Notes |\n"
+        "|---|---|---|\n"
+        "| Model | `Qwen/Qwen3-14B` | |\n"
+        "| GPU | H100_SXM_80GB | |\n"
+        "| Number of decode pods | 2 | |\n"
+        "| Number of prefill pods | 1 | |\n"
+    ).split("\n")
+    tables = gfc.parse_md_tables(lines)
+    vllm = gfc.find_vllm_table(tables)
+    fields = gfc.extract_fields(vllm)
+    emitted = gfc.warn_role_rows_outside_vllm_table(tables, vllm, set(fields))
+    assert emitted == []
+    assert "NO effect" not in capsys.readouterr().err
+    # and the values that DO take effect are the vLLM table's
+    scenario, _ = gfc.build_scenario(fields, "test")
+    assert scenario["prefill"]["replicas"] == 1
+    assert scenario["decode"]["replicas"] == 2
+
+
 def test_decode_row_in_another_table_also_warns(capsys):
     """Not prefill-specific: any per-role row in an unread table is inert."""
     lines = _two_table_doc(

@@ -378,7 +378,9 @@ def split_hardware_cell(raw: str) -> list[str]:
 
 
 def warn_role_rows_outside_vllm_table(
-    tables: list[TableSection], vllm_table: TableSection
+    tables: list[TableSection],
+    vllm_table: TableSection,
+    already_extracted: set[str] | None = None,
 ) -> list[str]:
     """Warn when per-role rows sit in a table this generator does not read.
 
@@ -395,9 +397,17 @@ def warn_role_rows_outside_vllm_table(
     for a silent omission. The fix an operator needs is to move the row into the
     vLLM table, and that is what the warning says.
 
+    A field already extracted from the vLLM table is NOT warned about. A
+    simulation -> deployment mapping table is a required part of a well-formed
+    config.md -- it exists so the two dialects can be audited against each other --
+    so a bundle that correctly states its counts in the vLLM table and also
+    documents them there would otherwise draw a warning on every run. The warning
+    is for values stated ONLY where they cannot take effect.
+
     Returns the warning lines emitted, for testability.
     """
     role_fields = {"prefill_replicas", "prefill_hardware", "decode_hardware", "replicas"}
+    satisfied = already_extracted or set()
     emitted = []
     for table in tables:
         if table is vllm_table:
@@ -407,7 +417,7 @@ def warn_role_rows_outside_vllm_table(
                 continue
             raw_param = list(row.values())[0]
             canonical = canonicalize_parameter(raw_param)
-            if canonical not in role_fields:
+            if canonical not in role_fields or canonical in satisfied:
                 continue
             msg = (
                 f"  WARNING: '{normalize_cell(raw_param)}' appears under "
@@ -1182,15 +1192,17 @@ def main():
 
     print(f"  found table under: \"{vllm_table.heading}\" ({len(vllm_table.rows)} rows)")
 
-    # A per-role row in some other table is invisible to the parser. Say so rather
-    # than emitting a decode-only baseline in silence (issue #824 review).
-    warn_role_rows_outside_vllm_table(tables, vllm_table)
-
     # Extract fields
     fields = extract_fields(vllm_table)
     if not fields:
         print("ERROR: no recognized fields extracted from table", file=sys.stderr)
         sys.exit(1)
+
+    # A per-role row stated ONLY in some other table is invisible to the parser.
+    # Say so rather than emitting a decode-only baseline in silence (issue #824
+    # review). Runs after extraction so a value correctly present in the vLLM table
+    # and merely documented elsewhere draws no warning.
+    warn_role_rows_outside_vllm_table(tables, vllm_table, set(fields))
 
     print(f"  extracted {len(fields)} field(s): {list(fields.keys())}")
 
