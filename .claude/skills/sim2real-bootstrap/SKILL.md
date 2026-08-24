@@ -346,10 +346,10 @@ ls "$EXPERIMENT_ROOT"/workloads/*.yaml
 
 **action:** shell
 
-Framework workarounds documented in `docs/troubleshooting.md` (EPP llm-d.ai
-RBAC, request-id preservation, EPP/vLLM verbosity, routing-proxy resource
-requests) are applied automatically by `sim2real assemble` from
-`<experiment-root>/baselines/defaults/`. Copy the framework templates into
+Framework workarounds documented in `docs/troubleshooting.md` (request-id
+preservation, EPP/vLLM verbosity, sidecar resource requests, model-PVC sizing,
+topology and tokenizer wiring) are applied automatically by `sim2real assemble`
+from `<experiment-root>/baselines/defaults/`. Copy the framework templates into
 the experiment so each experiment is self-contained and reproducible.
 
 ```bash
@@ -361,6 +361,13 @@ ls "$EXPERIMENT_ROOT/baselines/defaults/"
 Each fragment is a partial scenario YAML — operators can edit individual
 fragments in place to tweak them for the experiment, or list a fragment
 stem under `defaults.disable` in `transfer.yaml` to opt out entirely.
+
+**Not every fragment is universally correct.** `epponly` is a topology decision,
+`model-pvc-size` is sized for a 70B-class model, `tokenizer-sidecar` matters only
+when the arms declare a `token-producer` plugin, and `preserve-request-id` matches
+nothing under an epponly / externally-managed gateway. Each fragment's header
+comment states its own applicability and when to disable it. Making emission
+conditional rather than leaving that to the operator is tracked as #840.
 
 ---
 
@@ -448,9 +455,13 @@ defaults:
   disable: []
   # Available fragments (filename stems in baselines/defaults/):
   #   - epp-verbosity
+  #   - epponly
   #   - externally-managed-gateway
+  #   - model-pvc-size
   #   - preserve-request-id
   #   - routing-proxy-resources
+  #   - tokenizer-sidecar
+  #   - vllm-keepalive
   #   - vllm-logging
 ```
 
@@ -515,11 +526,15 @@ Exit code 0 and all fields printed = success.
   baselines/
     <name>.yaml                  <- task-3
     defaults/                    <- task-4b
-      preserve-request-id.yaml
       epp-verbosity.yaml
-      vllm-logging.yaml
+      epponly.yaml
       externally-managed-gateway.yaml
+      model-pvc-size.yaml
+      preserve-request-id.yaml
       routing-proxy-resources.yaml
+      tokenizer-sidecar.yaml
+      vllm-keepalive.yaml
+      vllm-logging.yaml
   <component-name>/             <- task-2 (submodule)
   algorithms/
     <algorithm>.go               <- pre-existing
@@ -674,4 +689,4 @@ This skill ships with supporting files in its directory. Invoke in place — do 
 | `generate_scenarios.py` | Converts JSON config (`top3_selection.json`) → scenario YAMLs. Use when JSON input exists (BLIS). |
 | `generate_scenarios.README.md` | Coverage map for the JSON-input path. Documents field mappings, omission rules, and gaps. |
 | `byo.py` | Implements the `--byo` branch — argument parsing, YAML validation, path-safe copy operations, `transfer.yaml` emission, batched `sim2real translation register` command generation. Invoked by SKILL.md's dispatch when `--byo` (or any BYO-only flag) is passed. |
-| `templates/defaults/*.yaml` | Framework-owned baseline workaround fragments (RBAC, request-id, verbosity). Copied into `<experiment-root>/baselines/defaults/` at BLIS task-4b and at BYO run time, so every experiment is self-contained and reproducible. |
+| `templates/defaults/*.yaml` | Framework-owned baseline workaround fragments (request-id, verbosity, sidecar sizing, model-PVC size, topology, tokenizer). Copied into `<experiment-root>/baselines/defaults/` at BLIS task-4b and at BYO run time, so every experiment is self-contained and reproducible. Shape and merge-safety are asserted by `tests/test_defaults_templates.py`. |
