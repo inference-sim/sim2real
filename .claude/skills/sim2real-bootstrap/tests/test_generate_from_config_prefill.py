@@ -516,3 +516,39 @@ def test_dp_only_still_emits_workers_one():
     p = scenario["decode"]["parallelism"]
     assert p["tensor"] == 1
     assert p["workers"] == 1
+
+
+def test_prefill_workers_comment_also_avoids_tensor_parallel_size(tmp_path):
+    """The prefill emit line is a separate code path from decode's.
+
+    A transposed provenance key would raise KeyError and be caught by the
+    existing round-trip test, but citing `tp_source` instead of the workers
+    string would emit silently-wrong text that nothing else asserts.
+    """
+    scenario, prov = build([
+        row("Number of decode pods", "2"),
+        row("Number of prefill pods", "1"),
+        row("tensor_parallel_size", "4"),
+    ])
+    text = emit(scenario, prov, tmp_path)
+    workers_lines = [ln for ln in text.splitlines() if ln.strip().startswith("workers:")]
+    assert len(workers_lines) == 2, "expected one workers line per role"
+    for line in workers_lines:
+        assert "tensor_parallel_size" not in line
+        assert "pods per replica" in line
+    parsed = yaml.safe_load(text)["scenario"][0]
+    assert parsed["prefill"]["parallelism"]["workers"] == 1
+    assert parsed["decode"]["parallelism"]["workers"] == 1
+
+
+def test_workers_is_one_when_both_tp_and_dp_exceed_one():
+    """The gate is `tp > 1 or dp > 1`; the AND case is the one a future
+    formula-based derivation would break first."""
+    scenario, _ = build([
+        row("Number of pods", "2"),
+        row("tensor_parallel_size", "4"),
+        row("data_parallel_size", "2"),
+    ])
+    p = scenario["decode"]["parallelism"]
+    assert (p["tensor"], p["data"], p["dataLocal"]) == (4, 2, 2)
+    assert p["workers"] == 1
