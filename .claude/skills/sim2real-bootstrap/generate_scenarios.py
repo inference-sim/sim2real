@@ -14,6 +14,10 @@ import re
 import sys
 from pathlib import Path
 
+# See #831: `workers` is the LeaderWorkerSet group size (pods per replica), not a
+# parallelism degree, and no input field states it -- so it is a stated default.
+_WORKERS_COMMENT = "single-node default (LWS pods per replica, not a parallelism degree)"
+
 # ---------------------------------------------------------------------------
 # Lookup tables
 # ---------------------------------------------------------------------------
@@ -229,7 +233,10 @@ def build_scenario(entry: dict, name: str) -> dict:
             "data": dp,
             "dataLocal": dp,
             "tensor": tp,
-            "workers": tp,
+            # LWS group size (pods per replica), NOT a parallelism degree. A
+            # single pod holding `tensor` GPUs is workers: 1. Multi-pod model
+            # instances need an input field that does not exist yet (#843).
+            "workers": 1,
         }
 
     flags = build_additional_flags(vllm_args)
@@ -266,7 +273,7 @@ def build_scenario(entry: dict, name: str) -> dict:
                 "data": dp,
                 "dataLocal": dp,
                 "tensor": tp,
-                "workers": tp,
+                "workers": 1,
             }
         if flags:
             prefill["vllm"] = {"additionalFlags": flags}
@@ -322,7 +329,7 @@ def write_commented_yaml(scenario: dict, entry: dict, out_path: str):
         lines.append(f"      data: {p['data']}  # from vllm_args.data_parallel_size")
         lines.append(f"      dataLocal: {p['dataLocal']}  # from vllm_args.data_parallel_size")
         lines.append(f"      tensor: {p['tensor']}  # from vllm_args.tensor_parallel_size")
-        lines.append(f"      workers: {p['workers']}  # from vllm_args.tensor_parallel_size")
+        lines.append(f"      workers: {p['workers']}  # {_WORKERS_COMMENT}")
 
     if "vllm" in scenario["decode"]:
         lines.append("    vllm:")
@@ -364,7 +371,7 @@ def write_commented_yaml(scenario: dict, entry: dict, out_path: str):
             lines.append(f"      data: {pp['data']}  # from vllm_args.data_parallel_size")
             lines.append(f"      dataLocal: {pp['dataLocal']}  # from vllm_args.data_parallel_size")
             lines.append(f"      tensor: {pp['tensor']}  # from vllm_args.tensor_parallel_size")
-            lines.append(f"      workers: {pp['workers']}  # from vllm_args.tensor_parallel_size")
+            lines.append(f"      workers: {pp['workers']}  # {_WORKERS_COMMENT}")
         if "vllm" in p_role:
             lines.append("    vllm:")
             lines.append("      additionalFlags:")

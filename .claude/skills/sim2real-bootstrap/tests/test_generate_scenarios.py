@@ -226,3 +226,40 @@ def test_emitted_yaml_round_trips_both_roles(tmp_path):
     assert parsed["prefill"]["replicas"] == 1
     assert parsed["decode"]["replicas"] == 2
     assert parsed["prefill"]["parallelism"]["tensor"] == 4
+
+
+# ---------------------------------------------------------------------------
+# parallelism.workers (issue #831)
+# ---------------------------------------------------------------------------
+
+def test_workers_is_one_not_tensor_parallel_size():
+    """`workers` is the LWS pods-per-replica count, not a parallelism degree."""
+    scenario = gs.build_scenario(entry(vllm_extra={"tensor_parallel_size": 4}), "cand")
+    p = scenario["decode"]["parallelism"]
+    assert p["tensor"] == 4
+    assert p["workers"] == 1
+
+
+def test_prefill_workers_is_one():
+    src = entry(vllm_extra={"prefill_instances": 1, "tensor_parallel_size": 4})
+    scenario = gs.build_scenario(src, "cand")
+    assert scenario["prefill"]["parallelism"]["tensor"] == 4
+    assert scenario["prefill"]["parallelism"]["workers"] == 1
+
+
+def test_workers_comment_does_not_cite_tensor_parallel_size(tmp_path):
+    src = entry(vllm_extra={"tensor_parallel_size": 4})
+    scenario = gs.build_scenario(src, "cand")
+    text = emit(scenario, src, tmp_path)
+    workers_lines = [ln for ln in text.splitlines() if ln.strip().startswith("workers:")]
+    assert len(workers_lines) == 1
+    assert "tensor_parallel_size" not in workers_lines[0]
+    assert "pods per replica" in workers_lines[0]
+    assert yaml.safe_load(text)["scenario"][0]["decode"]["parallelism"]["workers"] == 1
+
+
+def test_dp_only_still_emits_workers_one():
+    scenario = gs.build_scenario(entry(vllm_extra={"data_parallel_size": 2}), "cand")
+    p = scenario["decode"]["parallelism"]
+    assert p["tensor"] == 1
+    assert p["workers"] == 1
