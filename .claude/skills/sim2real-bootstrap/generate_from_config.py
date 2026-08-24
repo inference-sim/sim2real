@@ -339,6 +339,12 @@ _COUNT_NOUN_TAIL_RE = re.compile(r"\b(?:pods?|instances?|replicas?|nodes?)(?:\s+
 # malformed replica counts would reject config.md files that work on main.
 _RATIO_LABEL_RE = re.compile(r"\b(?:per|each)\s+\S+$")
 
+# `parallelism.workers` is the LeaderWorkerSet group size -- pods per replica --
+# not a parallelism degree. Nothing in config.md states it today, so it is a
+# stated default rather than a derived value (#831). A config.md input for
+# multi-pod model instances is tracked by #843.
+_WORKERS_PROVENANCE = "single-node default (LWS pods per replica, not a parallelism degree)"
+
 
 def is_unrecognized_replica_label(raw: str) -> bool:
     """True when a vLLM-table parameter label names a replica count we cannot map.
@@ -351,9 +357,11 @@ def is_unrecognized_replica_label(raw: str) -> bool:
       size. Erroring on them would both break working inputs and offer advice
       ("use `number of pods`") that is wrong for the row.
 
-    "workers" is deliberately NOT a counted noun here: it collides with
-    `parallelism.workers`, which derives from tensor_parallel_size rather than a
-    replica count, so flagging it would emit the same misleading guidance.
+    "workers" is deliberately NOT in `_COUNT_NOUN_TAIL_RE`. It *is* a pod count --
+    `parallelism.workers` is the LeaderWorkerSet group size -- but this generator
+    has no input field for it, so a `workers` row cannot be resolved and the
+    "use `number of pods`" advice this function offers would be wrong for it.
+    #843 adds the input field; flagging the label belongs with that change.
     """
     cleaned = normalize_cell(raw).lower().strip()
     if not cleaned or cleaned.startswith("-"):
@@ -777,7 +785,10 @@ def build_scenario(
             "data": dp,
             "dataLocal": dp,
             "tensor": tp,
-            "workers": tp,
+            # LWS group size (pods per replica), NOT a parallelism degree. A
+            # single pod holding `tensor` GPUs is workers: 1. Multi-pod model
+            # instances need a config.md input that does not exist yet (#843).
+            "workers": 1,
         }
 
     additional_flags = build_additional_flags(fields)
@@ -824,7 +835,7 @@ def build_scenario(
                 "data": dp,
                 "dataLocal": dp,
                 "tensor": tp,
-                "workers": tp,
+                "workers": 1,
             }
         if additional_flags:
             prefill["vllm"] = {"additionalFlags": additional_flags}
@@ -859,6 +870,7 @@ def build_scenario(
     if tp > 1 or dp > 1:
         provenance["decode.parallelism.tensor"] = tp_source
         provenance["decode.parallelism.data"] = dp_source
+        provenance["decode.parallelism.workers"] = _WORKERS_PROVENANCE
 
     if "prefill" in scenario:
         provenance["prefill.replicas"] = fields["prefill_replicas"].source
@@ -866,6 +878,7 @@ def build_scenario(
         if tp > 1 or dp > 1:
             provenance["prefill.parallelism.tensor"] = tp_source
             provenance["prefill.parallelism.data"] = dp_source
+            provenance["prefill.parallelism.workers"] = _WORKERS_PROVENANCE
 
     return scenario, provenance
 
@@ -914,7 +927,7 @@ def write_provenance_yaml(
         lines.append(f"      data: {p['data']}  # {provenance['decode.parallelism.data']}")
         lines.append(f"      dataLocal: {p['dataLocal']}  # {provenance['decode.parallelism.data']}")
         lines.append(f"      tensor: {p['tensor']}  # {provenance['decode.parallelism.tensor']}")
-        lines.append(f"      workers: {p['workers']}  # {provenance['decode.parallelism.tensor']}")
+        lines.append(f"      workers: {p['workers']}  # {provenance['decode.parallelism.workers']}")
 
     if "vllm" in scenario["decode"]:
         lines.append("    vllm:")
@@ -945,7 +958,7 @@ def write_provenance_yaml(
             lines.append(f"      data: {pp['data']}  # {provenance['prefill.parallelism.data']}")
             lines.append(f"      dataLocal: {pp['dataLocal']}  # {provenance['prefill.parallelism.data']}")
             lines.append(f"      tensor: {pp['tensor']}  # {provenance['prefill.parallelism.tensor']}")
-            lines.append(f"      workers: {pp['workers']}  # {provenance['prefill.parallelism.tensor']}")
+            lines.append(f"      workers: {pp['workers']}  # {provenance['prefill.parallelism.workers']}")
         if "vllm" in p_role:
             lines.append("    vllm:")
             lines.append("      additionalFlags:")

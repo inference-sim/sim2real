@@ -242,9 +242,9 @@ def test_ratio_row_in_vllm_table_does_not_abort(tmp_path):
 
 
 def test_workers_label_is_left_alone():
-    """`workers` collides with parallelism.workers, which derives from
-    tensor_parallel_size rather than a replica count, so flagging it would emit
-    the same misleading guidance the ratio exclusion exists to prevent."""
+    """`workers` is a pod count -- parallelism.workers is the LWS group size --
+    but no input field resolves it yet (#843), so the "use `number of pods`"
+    advice this check offers would be wrong for it; left unflagged (#831)."""
     assert gfc.is_unrecognized_replica_label("Prefill workers") is False
 
 
@@ -471,3 +471,48 @@ def test_emitted_yaml_round_trips_both_roles(tmp_path):
     assert parsed["decode"]["replicas"] == 2
     assert parsed["prefill"]["acceleratorType"]["labelValue"] == "NVIDIA-A100-SXM4-80GB"
     assert parsed["decode"]["acceleratorType"]["labelValue"] == "NVIDIA-H100-80GB-HBM3"
+
+
+# ---------------------------------------------------------------------------
+# parallelism.workers (issue #831)
+# ---------------------------------------------------------------------------
+
+def test_workers_is_one_not_tensor_parallel_size():
+    """`workers` is the LWS pods-per-replica count, not a parallelism degree.
+
+    A single pod holding 4 GPUs at TP=4 is `tensor: 4, workers: 1`. Emitting
+    `workers: 4` claims four pods per replica.
+    """
+    scenario, _ = build([row("Number of pods", "2"), row("tensor_parallel_size", "4")])
+    p = scenario["decode"]["parallelism"]
+    assert p["tensor"] == 4
+    assert p["workers"] == 1
+
+
+def test_prefill_workers_is_one():
+    scenario, _ = build([
+        row("Number of pods", "2"),
+        row("Number of prefill pods", "1"),
+        row("tensor_parallel_size", "4"),
+    ])
+    assert scenario["prefill"]["parallelism"]["tensor"] == 4
+    assert scenario["prefill"]["parallelism"]["workers"] == 1
+
+
+def test_workers_provenance_does_not_cite_tensor_parallel_size(tmp_path):
+    """The emitted comment must not claim `workers` came from TP."""
+    scenario, prov = build([row("Number of pods", "2"), row("tensor_parallel_size", "4")])
+    text = emit(scenario, prov, tmp_path)
+    workers_lines = [ln for ln in text.splitlines() if ln.strip().startswith("workers:")]
+    assert len(workers_lines) == 1
+    assert "tensor_parallel_size" not in workers_lines[0]
+    assert "pods per replica" in workers_lines[0]
+    assert yaml.safe_load(text)["scenario"][0]["decode"]["parallelism"]["workers"] == 1
+
+
+def test_dp_only_still_emits_workers_one():
+    """dp>1 with tp==1 already produced workers: 1; guard against regression."""
+    scenario, _ = build([row("Number of pods", "2"), row("data_parallel_size", "2")])
+    p = scenario["decode"]["parallelism"]
+    assert p["tensor"] == 1
+    assert p["workers"] == 1
