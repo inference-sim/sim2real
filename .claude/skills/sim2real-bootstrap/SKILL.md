@@ -275,7 +275,7 @@ scenario:
       additionalFlags:
       - "--flag=value"
 
-  # Emitted ONLY when config.md names a prefill pod count (issue #824).
+  # Emitted ONLY when config.md names a prefill pod count (issues #824, #830).
   # Without those rows the output is exactly the single-decode shape above.
   prefill:
     enabled: true                      # required — see note below
@@ -286,6 +286,14 @@ scenario:
     vllm:
       additionalFlags:
       - "--flag=value"                 # shared with decode, not per-role
+
+  # Also emitted with a prefill pool, and only then (issue #830). This is what
+  # makes the pool do anything; see the note below.
+  vllmCommon:
+    kvTransfer:
+      enabled: true
+      connector: NixlConnector
+      role: kv_both
 ```
 
 **Disaggregation (issue #824).** To get a `prefill:` block, `config.md`'s vLLM
@@ -297,6 +305,16 @@ optional per-role accelerator overrides; without them both roles use the shared
 - `enabled: true` is **required**, not decorative. `pipeline/lib/capacity.py`
   defaults prefill to disabled with 0 replicas, so a `prefill:` block lacking it
   reads as disaggregated while planning zero prefill GPUs.
+- **`vllmCommon.kvTransfer` is equally required (issue #830)** — same failure
+  shape, one layer down. `vllmCommon.kvTransfer.enabled` defaults to `false`
+  upstream and vLLM's `--kv-transfer-config` flag is gated on it, so a prefill
+  pool without it gets no KV connector: the prefill pod is never routed to and
+  logs zero requests, while the decode pods prefill their own requests. Nothing
+  errors — the run completes and the results are silently not P/D. Both
+  generators emit it whenever they emit a prefill pool.
+  `role: kv_both` is deprecated for NixlConnector, which wants `kv_producer` on
+  prefill and `kv_consumer` on decode; `vllmCommon` is shared by both roles so
+  per-role values are not expressible today (tracked as #845).
 - `parallelism` and `vllm.additionalFlags` are shared across roles — `config.md`
   has no per-role form for them.
 - **One GPU type per role.** A GPU cell naming several types (`H100, A100`) emits

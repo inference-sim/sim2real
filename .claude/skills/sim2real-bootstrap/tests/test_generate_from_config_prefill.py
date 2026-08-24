@@ -471,3 +471,118 @@ def test_emitted_yaml_round_trips_both_roles(tmp_path):
     assert parsed["decode"]["replicas"] == 2
     assert parsed["prefill"]["acceleratorType"]["labelValue"] == "NVIDIA-A100-SXM4-80GB"
     assert parsed["decode"]["acceleratorType"]["labelValue"] == "NVIDIA-H100-80GB-HBM3"
+
+
+# ---------------------------------------------------------------------------
+# KV transfer (issue #830)
+#
+# A prefill pool with no KV transport reads as disaggregated and is not: vLLM's
+# --kv-transfer-config is gated on vllmCommon.kvTransfer.enabled, which defaults
+# to false upstream, so the prefill pod is never routed to and decode prefills
+# its own requests -- silently, with no error.
+#
+# These assert on the EMITTED TEXT (and its parse), never on the intermediate
+# scenario dict alone. Both generators hand-roll their YAML and hardcode which
+# keys under vllmCommon get rendered, so a dict-only assertion passes while the
+# emitter silently drops the key -- the same shape of gap that produced #830.
+# ---------------------------------------------------------------------------
+
+
+def test_prefill_pool_emits_kv_transfer(tmp_path):
+    """Stating a prefill count must turn KV transfer ON in the emitted YAML."""
+    scenario, prov = build([row("Number of prefill pods", "1")])
+    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
+    kv = parsed["vllmCommon"]["kvTransfer"]
+    assert kv["enabled"] is True
+    assert kv["connector"] == "NixlConnector"
+    assert kv["role"] == "kv_both"
+
+
+def test_no_prefill_pool_emits_no_kv_transfer(tmp_path):
+    """Aggregated bundles must regenerate byte-identically — no kvTransfer at all."""
+    scenario, prov = build([])
+    text = emit(scenario, prov, tmp_path)
+    assert "kvTransfer" not in text
+    assert "vllmCommon" not in text
+
+
+def test_stated_zero_prefill_emits_no_kv_transfer(tmp_path):
+    """A stated 0 means aggregated, so it must not enable the transport either."""
+    scenario, prov = build([row("Number of prefill pods", "0")])
+    assert "kvTransfer" not in emit(scenario, prov, tmp_path)
+
+
+def test_kv_transfer_and_enforce_eager_coexist(tmp_path):
+    """Neither vllmCommon subtree may clobber or hide the other.
+
+    `enforce_eager: false` creates scenario["vllmCommon"] before the prefill block
+    runs. A plain assignment in either place drops the other; a hand-rolled emitter
+    rendering only one branch hides the other. Both must survive into the output.
+    """
+    scenario, prov = build(
+        [row("Number of prefill pods", "1"), row("enforce_eager", "false")]
+    )
+    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
+    assert parsed["vllmCommon"]["flags"]["enforceEager"] is False
+    assert parsed["vllmCommon"]["kvTransfer"]["enabled"] is True
+
+
+def test_enforce_eager_alone_still_emits_flags(tmp_path):
+    """The flags-only path must not regress now that the branch is conditional."""
+    scenario, prov = build([row("enforce_eager", "false")])
+    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
+    assert parsed["vllmCommon"]["flags"]["enforceEager"] is False
+    assert "kvTransfer" not in parsed["vllmCommon"]
+
+
+def test_kv_transfer_carries_provenance(tmp_path):
+    """Every emitted key gets a provenance comment; these are no exception."""
+    scenario, prov = build([row("Number of prefill pods", "1")])
+    text = emit(scenario, prov, tmp_path)
+    lines = text.split("\n")
+    start = next(i for i, ln in enumerate(lines) if ln.strip() == "kvTransfer:")
+    block = lines[start + 1 : start + 4]
+    for key in ("enabled:", "connector:", "role:"):
+        line = next(ln for ln in block if key in ln)
+        assert "#" in line, f"{key} emitted without a provenance comment: {line!r}"
+    # kv_both is a known-deprecated value shipped knowingly, so the emitted file
+    # must point at the issue tracking it rather than stay silent about it.
+    assert "#845" in text
+
+
+def test_kv_transfer_agrees_across_both_generators(tmp_path):
+    """generate_scenarios.py has the same prefill block and had the same hole.
+
+    Issue #830 named only generate_from_config.py. Fixing one path and not the
+    other would leave half of bootstrap emitting an inert prefill pool, so the two
+    generators must agree — both that a prefill pool enables the transport, and
+    that no prefill pool leaves it absent.
+    """
+    sys.path.insert(0, str(Path(__file__).parents[1]))
+    import generate_scenarios as gs
+
+    def gs_emit(prefill_instances):
+        entry = {
+            "workload": {"model": "Qwen/Qwen3-14B", "hardware": "H100_SXM_80GB"},
+            "vllm_args": {
+                "num_instances": 2,
+                "prefill_instances": prefill_instances,
+            },
+        }
+        scenario = gs.build_scenario(entry, "cand")
+        out = tmp_path / f"cand-{prefill_instances}.yaml"
+        gs.write_commented_yaml(scenario, entry, str(out))
+        return out.read_text()
+
+    with_prefill = yaml.safe_load(gs_emit(1))["scenario"][0]
+    assert with_prefill["vllmCommon"]["kvTransfer"]["enabled"] is True
+    assert with_prefill["vllmCommon"]["kvTransfer"]["connector"] == "NixlConnector"
+
+    assert "kvTransfer" not in gs_emit(0)
+
+    # The two generators must emit identical transport settings for the same intent.
+    from_config, prov = build([row("Number of prefill pods", "1")])
+    from_config_kv = yaml.safe_load(emit(from_config, prov, tmp_path))["scenario"][0][
+        "vllmCommon"
+    ]["kvTransfer"]
+    assert from_config_kv == with_prefill["vllmCommon"]["kvTransfer"]
