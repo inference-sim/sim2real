@@ -288,3 +288,66 @@ def test_workers_is_one_when_both_tp_and_dp_exceed_one():
     p = scenario["decode"]["parallelism"]
     assert (p["tensor"], p["data"], p["dataLocal"]) == (4, 2, 2)
     assert p["workers"] == 1
+
+
+# ---------------------------------------------------------------------------
+# KV transfer (issue #830)
+#
+# A prefill pool with no KV transport reads as disaggregated and is not: vLLM's
+# --kv-transfer-config is gated on vllmCommon.kvTransfer.enabled, which defaults
+# to false upstream, so the prefill pod is never routed to and decode prefills
+# its own requests -- silently.
+#
+# `vllmCommon` has TWO independent populators in build_scenario: the enforce_eager
+# override, and the prefill block's kvTransfer. Each of the tests below fails on a
+# specific regression that the code comments warn about but nothing previously
+# caught (both were confirmed to leave the whole suite green when injected):
+#   - plain assignment instead of setdefault in either populator, which drops the
+#     other one
+#   - a hand-rolled emitter branch that renders only one of the two subtrees
+# Assertions are on the EMITTED YAML, never the intermediate dict: the emitter
+# hardcodes which keys it renders, so a dict-only assertion passes while the
+# output silently lacks the key.
+# ---------------------------------------------------------------------------
+
+
+def test_prefill_input_emits_kv_transfer(tmp_path):
+    src = entry(vllm_extra={"prefill_instances": 1})
+    parsed = yaml.safe_load(emit(gs.build_scenario(src, "cand"), src, tmp_path))
+    kv = parsed["scenario"][0]["vllmCommon"]["kvTransfer"]
+    assert kv["enabled"] is True
+    assert kv["connector"] == "NixlConnector"
+    assert kv["role"] == "kv_both"
+
+
+def test_no_prefill_input_emits_no_kv_transfer(tmp_path):
+    src = entry()
+    assert "kvTransfer" not in emit(gs.build_scenario(src, "cand"), src, tmp_path)
+
+
+def test_kv_transfer_and_enforce_eager_coexist(tmp_path):
+    """Both vllmCommon populators must survive together, in the emitted YAML.
+
+    `enforce_eager: false` assigns scenario["vllmCommon"] = {"flags": ...} before
+    the prefill block runs. A plain assignment in the prefill block drops those
+    flags; an emitter that renders only one subtree hides the other. Either
+    regression leaves every other test in this suite passing.
+    """
+    src = entry(vllm_extra={"prefill_instances": 1, "enforce_eager": False})
+    parsed = yaml.safe_load(emit(gs.build_scenario(src, "cand"), src, tmp_path))
+    vc = parsed["scenario"][0]["vllmCommon"]
+    assert vc["flags"]["enforceEager"] is False
+    assert vc["kvTransfer"]["enabled"] is True
+
+
+def test_enforce_eager_alone_still_emits_flags(tmp_path):
+    """The flags-only path must survive the emitter branch becoming conditional.
+
+    Narrowing the `if "flags" in ...` guard to also require kvTransfer would drop
+    enforceEager from every aggregated bundle that sets it.
+    """
+    src = entry(vllm_extra={"enforce_eager": False})
+    parsed = yaml.safe_load(emit(gs.build_scenario(src, "cand"), src, tmp_path))
+    vc = parsed["scenario"][0]["vllmCommon"]
+    assert vc["flags"]["enforceEager"] is False
+    assert "kvTransfer" not in vc

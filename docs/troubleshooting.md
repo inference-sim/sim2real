@@ -8,13 +8,21 @@ The workarounds below are applied automatically by `sim2real assemble` via a def
 
 The fragments shipped today:
 
-| Fragment stem | What it adds |
-|---------------|--------------|
-| `epp-verbosity` | `router.epp.verbosity: "5"` |
-| `externally-managed-gateway` | `gateway.externallyManaged: true` — tells the chart to assume the gateway (Istio, AgentGateway, etc.) is managed externally and skip in-chart gateway provisioning |
-| `preserve-request-id` | `EnvoyFilter` that preserves the external request-id |
-| `routing-proxy-resources` | `routing.proxy.resources.requests` set to `memory: 16Gi`, `cpu: 4` (chart leaves it unset) |
-| `vllm-logging` | `vllm.additionalFlags: [--no-disable-uvicorn-access-log]` + `loggingLevel: INFO` |
+| Fragment stem | What it adds | Universally correct? |
+|---------------|--------------|----------------------|
+| `epp-verbosity` | `router.epp.verbosity: "3"` — VERBOSE, the floor for `/sim2real-check` §5c.6 | yes |
+| `epponly` | `gateway.className: epponly` plus sizing and args for the Envoy sidecar **inside the EPP pod** (`router.proxy`) | no — a topology decision |
+| `externally-managed-gateway` | `gateway.externallyManaged: true` — tells the chart to assume the gateway (Istio, AgentGateway, etc.) is managed externally and skip in-chart gateway provisioning | no — topology-dependent |
+| `model-pvc-size` | `storage.modelPvc.size: 1Ti` (framework default 300Gi cannot hold a 70B-class model as `hf download` fetches it) | no — sized for a 70B-class model |
+| `preserve-request-id` | `EnvoyFilter` that preserves the external request-id | no — matches nothing under epponly / externally-managed, and needs Istio CRDs |
+| `routing-proxy-resources` | `routing.proxy.resources.requests` set to `memory: 16Gi`, `cpu: 4` — the nixl routing sidecar **beside each model server** (chart leaves it unset) | yes |
+| `tokenizer-sidecar` | `router.tokenizer.enabled: true` + HF_TOKEN / HF_HOME env, so a `token-producer` plugin's `localhost:8000` resolves | no — only when the arms declare that plugin |
+| `vllm-keepalive` | `VLLM_HTTP_TIMEOUT_KEEP_ALIVE=120` on prefill, above the routing sidecar's 90s idle timeout | yes, until the llm-d-benchmark pin advances (#838) |
+| `vllm-logging` | `vllmCommon.flags.disableUvicornAccessLog: false` — restores vLLM's own default on **both** roles | yes |
+
+`epponly` and `routing-proxy-resources` size **different** sidecars — `router.proxy` is the Envoy inside the EPP pod, `routing.proxy` is the nixl sidecar next to each model server. They are not duplicates. Each fragment's header comment carries the full reasoning and cites.
+
+Making emission conditional for the "no" rows, rather than leaving it to the operator to notice, is tracked as [#840](https://github.com/inference-sim/sim2real/issues/840). Detecting a fragment that has no effect on the resolved scenario is [#841](https://github.com/inference-sim/sim2real/issues/841).
 
 **Opt out** by listing fragment stems under `defaults.disable` in `transfer.yaml`:
 
@@ -121,20 +129,32 @@ Add to the `scenario` in `baselines/*.yaml`:
 ```yaml
 router:
   epp:
-    verbosity: "5"
+    verbosity: "3"
 ```
 
-> **Note:** The `epp-verbosity` framework defaults fragment applies this automatically — it is enabled by default for all bootstrapped experiments. The `/sim2real-check` §4.2 InferenceObjectives check is **INAPPLICABLE** when EPP verbosity is below `-v=3`; `verbosity: "5"` (V(5) = VERBOSE) satisfies this requirement.
+**The scale is named constants, not raw numbers** (`llm-d-router pkg/common/observability/logging/const.go:20-23`, v0.9.0):
+
+| value | constant | when to use it |
+|-------|----------|----------------|
+| `"1"` | — | the llm-d-benchmark default; below `DEFAULT`, so the EPP is near-silent |
+| `"2"` | `DEFAULT` | |
+| `"3"` | `VERBOSE` | **what `epp-verbosity` sets.** The floor for `/sim2real-check` §5c.6 |
+| `"4"` | `DEBUG` | escalation for prefill-selection problems — the P/D decider explains itself here |
+| `"5"` | `TRACE` | only for a specific TRACE call site you have already identified |
+
+> **Note:** The `epp-verbosity` framework defaults fragment applies `"3"` automatically — it is enabled by default for all bootstrapped experiments. `/sim2real-check` §5c.6 (InferenceObjective resolution at runtime) reads `objectiveKey` off `Request handled` lines, which are attached under `V(logging.VERBOSE)` — so `"3"` is exactly the floor at which that check runs, and anything lower makes it **INAPPLICABLE**. Going above `"3"` costs CPU on every request, since the EPP is in the request path; prefer `"4"` over `"5"` when you need more, as it keeps the decider diagnostics while dropping every TRACE site.
 
 ### vLLM
 
-Add to `**.vllm` in `baselines/*.yaml`:
+Add to the `scenario` in `baselines/*.yaml`:
 
 ```yaml
-additionalFlags:
-- --no-disable-uvicorn-access-log
-loggingLevel: INFO
+vllmCommon:
+  flags:
+    disableUvicornAccessLog: false
 ```
+
+> **Note:** Use this typed key, not `**.vllm.additionalFlags: [--no-disable-uvicorn-access-log]`. `additionalFlags` is a list of scalars, so `pipeline/lib/values.py:_merge_lists` has each later layer *replace* it rather than append — a flag set from the defaults overlay is discarded by `baselines/<name>.yaml` and again by the registered overlay. The typed key also applies to **both** roles; `decode.vllm.loggingLevel: INFO` was additionally a no-op, since `INFO` is already the framework default (`defaults.yaml:51`).
 
 ## Correlate requests with pods (and hence nodes)
 

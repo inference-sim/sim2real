@@ -840,6 +840,43 @@ def build_scenario(
         if additional_flags:
             prefill["vllm"] = {"additionalFlags": additional_flags}
         scenario["prefill"] = prefill
+
+        # KV transfer is what makes the prefill pool actually do anything (#830).
+        # vllmCommon.kvTransfer.enabled defaults to false upstream
+        # (llm-d-benchmark config/templates/values/defaults.yaml:725-726) and the
+        # --kv-transfer-config flag is gated on it: _macros.j2:103 sets
+        # has_kv_transfer inside the single mode-parameterized macro
+        # build_vllm_command(mode) (:83-180), which emits the flag at :111 and
+        # :169 and is invoked for BOTH roles from 13_ms-values.yaml.j2 (:409
+        # decode, :826 prefill). So a prefill pool WITHOUT this
+        # block reads as disaggregated and is not: no KV connector is
+        # instantiated, the prefill pod is never routed to and logs zero
+        # requests, and the decode pods do the prefill work themselves. Nothing
+        # errors -- observed as 415 requests all served by decode with prefill
+        # idle throughout.
+        #
+        # Same failure class as `enabled: true` above, one layer down: an upstream
+        # default of "off" turning a stated intention into silence. That one is
+        # guarded at the capacity-planning layer; this is the model-server layer.
+        #
+        # connector/role are stated rather than inherited from the upstream
+        # anchors (defaults.yaml:56-57, NixlConnector / kv_both) so the values are
+        # this bundle's decision and not a downstream fallback -- the same
+        # principle the specify skill applies to the `blis observe` block.
+        #
+        # `role: kv_both` is DEPRECATED for NixlConnector, which wants
+        # kv_producer on prefill and kv_consumer on decode. Not expressible today:
+        # vllmCommon is shared by both roles and there is no prefill.kvTransfer.
+        # Tracked as #845; kv_both works and warns until then.
+        #
+        # setdefault, NOT assignment: the enforce_eager override above may already
+        # have created scenario["vllmCommon"], and a plain assignment here would
+        # silently drop it.
+        scenario.setdefault("vllmCommon", {})["kvTransfer"] = {
+            "enabled": True,
+            "connector": "NixlConnector",
+            "role": "kv_both",
+        }
     elif "prefill_hardware" in fields:
         # The row was recognized and stored, then never read, because a prefill
         # accelerator without a prefill pod count describes a pool that does not
@@ -879,6 +916,18 @@ def build_scenario(
             provenance["prefill.parallelism.tensor"] = tp_source
             provenance["prefill.parallelism.data"] = dp_source
             provenance["prefill.parallelism.workers"] = _WORKERS_PROVENANCE
+        # Not from config.md -- implied by stating a prefill pool at all, since a
+        # pool without the transport does nothing (#830).
+        provenance["vllmCommon.kvTransfer.enabled"] = (
+            "implied by prefill pod count; P/D requires a KV transfer backend"
+        )
+        provenance["vllmCommon.kvTransfer.connector"] = (
+            "framework default, stated explicitly (llm-d-benchmark defaults.yaml:56)"
+        )
+        provenance["vllmCommon.kvTransfer.role"] = (
+            "framework default, stated explicitly; kv_both is deprecated for "
+            "NixlConnector but per-role values are not expressible (see #845)"
+        )
 
     return scenario, provenance
 
@@ -905,14 +954,38 @@ def write_provenance_yaml(
     lines.append(f"    blockSize: {scenario['model']['blockSize']}  # {provenance['model.blockSize']}")
     lines.append(f"    gpuMemoryUtilization: {scenario['model']['gpuMemoryUtilization']}  # {provenance['model.gpuMemoryUtilization']}")
 
+    # This emitter is hand-rolled, so every key under vllmCommon needs a branch
+    # here or it is silently dropped from the output no matter what the scenario
+    # dict says. `flags` and `kvTransfer` are independent: enforce_eager sets the
+    # first, a prefill pool sets the second, and either can appear alone.
     if "vllmCommon" in scenario:
-        source = "config.md row \"enforce_eager\""
-        if "enforce_eager" in provenance:
-            source = provenance["enforce_eager"]
         lines.append("")
         lines.append("  vllmCommon:")
-        lines.append("    flags:")
-        lines.append(f"      enforceEager: false  # {source}")
+        if "flags" in scenario["vllmCommon"]:
+            source = "config.md row \"enforce_eager\""
+            if "enforce_eager" in provenance:
+                source = provenance["enforce_eager"]
+            lines.append("    flags:")
+            lines.append(f"      enforceEager: false  # {source}")
+        if "kvTransfer" in scenario["vllmCommon"]:
+            kv = scenario["vllmCommon"]["kvTransfer"]
+            lines.append("    # Required for the prefill pool to do anything: the")
+            lines.append("    # --kv-transfer-config flag is gated on `enabled`, which")
+            lines.append("    # defaults to false, so without this the prefill pod is")
+            lines.append("    # never routed to and decode prefills its own requests.")
+            lines.append("    kvTransfer:")
+            lines.append(
+                f"      enabled: {str(kv['enabled']).lower()}  "
+                f"# {provenance['vllmCommon.kvTransfer.enabled']}"
+            )
+            lines.append(
+                f"      connector: {kv['connector']}  "
+                f"# {provenance['vllmCommon.kvTransfer.connector']}"
+            )
+            lines.append(
+                f"      role: {kv['role']}  "
+                f"# {provenance['vllmCommon.kvTransfer.role']}"
+            )
 
     lines.append("")
     lines.append("  decode:")
