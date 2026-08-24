@@ -67,8 +67,9 @@ Maps simulation hardware identifiers → Kubernetes node selector label values.
 | `workload.prefill_hardware` | `prefill.acceleratorType.labelValue` (optional; falls back to `workload.hardware`) |
 | `vllm_args.num_instances` | `decode.replicas` |
 | `vllm_args.prefill_instances` | `prefill.replicas` (optional; omitted or `0` produces no `prefill:` block) |
-| `vllm_args.tensor_parallel_size` | `decode.parallelism.tensor`, `decode.parallelism.workers` |
+| `vllm_args.tensor_parallel_size` | `decode.parallelism.tensor` |
 | `vllm_args.data_parallel_size` | `decode.parallelism.data`, `decode.parallelism.dataLocal` |
+| _(no input)_ | `decode.parallelism.workers` — always `1`; LWS pods per replica, not a parallelism degree (#831). Multi-pod model instances tracked by #843 |
 | `vllm_args.block_size` | `model.blockSize` |
 | `vllm_args.gpu_memory_utilization` | `model.gpuMemoryUtilization` |
 | `vllm_args.enforce_eager` | `vllmCommon.flags.enforceEager` |

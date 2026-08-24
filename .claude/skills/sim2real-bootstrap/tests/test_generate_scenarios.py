@@ -229,6 +229,68 @@ def test_emitted_yaml_round_trips_both_roles(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# parallelism.workers (issue #831)
+# ---------------------------------------------------------------------------
+
+def test_workers_is_one_not_tensor_parallel_size():
+    """`workers` is the LWS pods-per-replica count, not a parallelism degree."""
+    scenario = gs.build_scenario(entry(vllm_extra={"tensor_parallel_size": 4}), "cand")
+    p = scenario["decode"]["parallelism"]
+    assert p["tensor"] == 4
+    assert p["workers"] == 1
+
+
+def test_prefill_workers_is_one():
+    src = entry(vllm_extra={"prefill_instances": 1, "tensor_parallel_size": 4})
+    scenario = gs.build_scenario(src, "cand")
+    assert scenario["prefill"]["parallelism"]["tensor"] == 4
+    assert scenario["prefill"]["parallelism"]["workers"] == 1
+
+
+def test_workers_comment_does_not_cite_tensor_parallel_size(tmp_path):
+    src = entry(vllm_extra={"tensor_parallel_size": 4})
+    scenario = gs.build_scenario(src, "cand")
+    text = emit(scenario, src, tmp_path)
+    workers_lines = [ln for ln in text.splitlines() if ln.strip().startswith("workers:")]
+    assert len(workers_lines) == 1
+    assert "tensor_parallel_size" not in workers_lines[0]
+    assert "pods per replica" in workers_lines[0]
+    assert yaml.safe_load(text)["scenario"][0]["decode"]["parallelism"]["workers"] == 1
+
+
+def test_dp_only_still_emits_workers_one():
+    scenario = gs.build_scenario(entry(vllm_extra={"data_parallel_size": 2}), "cand")
+    p = scenario["decode"]["parallelism"]
+    assert p["tensor"] == 1
+    assert p["workers"] == 1
+
+
+def test_prefill_workers_comment_also_avoids_tensor_parallel_size(tmp_path):
+    """The prefill emit line is a separate code path from decode's."""
+    src = entry(vllm_extra={"prefill_instances": 1, "tensor_parallel_size": 4})
+    scenario = gs.build_scenario(src, "cand")
+    text = emit(scenario, src, tmp_path)
+    workers_lines = [ln for ln in text.splitlines() if ln.strip().startswith("workers:")]
+    assert len(workers_lines) == 2, "expected one workers line per role"
+    for line in workers_lines:
+        assert "tensor_parallel_size" not in line
+        assert "pods per replica" in line
+    parsed = yaml.safe_load(text)["scenario"][0]
+    assert parsed["prefill"]["parallelism"]["workers"] == 1
+    assert parsed["decode"]["parallelism"]["workers"] == 1
+
+
+def test_workers_is_one_when_both_tp_and_dp_exceed_one():
+    """The gate is `tp > 1 or dp > 1`; cover the AND case too."""
+    scenario = gs.build_scenario(
+        entry(vllm_extra={"tensor_parallel_size": 4, "data_parallel_size": 2}), "cand"
+    )
+    p = scenario["decode"]["parallelism"]
+    assert (p["tensor"], p["data"], p["dataLocal"]) == (4, 2, 2)
+    assert p["workers"] == 1
+
+
+# ---------------------------------------------------------------------------
 # KV transfer (issue #830)
 #
 # A prefill pool with no KV transport reads as disaggregated and is not: vLLM's
