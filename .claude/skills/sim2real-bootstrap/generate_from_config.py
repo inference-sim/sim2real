@@ -835,7 +835,7 @@ def build_scenario(
         # (llm-d-benchmark config/templates/values/defaults.yaml:725-726) and the
         # --kv-transfer-config flag is gated on it: _macros.j2:103 sets
         # has_kv_transfer inside the single mode-parameterized macro
-        # build_vllm_command(mode) (:83-188), which emits the flag at :111 and
+        # build_vllm_command(mode) (:83-180), which emits the flag at :111 and
         # :169 and is invoked for BOTH roles from 13_ms-values.yaml.j2 (:409
         # decode, :826 prefill). So a prefill pool WITHOUT this
         # block reads as disaggregated and is not: no KV connector is
