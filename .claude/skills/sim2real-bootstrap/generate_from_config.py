@@ -833,8 +833,11 @@ def build_scenario(
         # KV transfer is what makes the prefill pool actually do anything (#830).
         # vllmCommon.kvTransfer.enabled defaults to false upstream
         # (llm-d-benchmark config/templates/values/defaults.yaml:725-726) and the
-        # --kv-transfer-config flag is gated on it (_macros.j2:103, emitted at
-        # :110 for decode and :354 for prefill). So a prefill pool WITHOUT this
+        # --kv-transfer-config flag is gated on it: _macros.j2:103 sets
+        # has_kv_transfer inside the single mode-parameterized macro
+        # build_vllm_command(mode) (:83-188), which emits the flag at :111 and
+        # :169 and is invoked for BOTH roles from 13_ms-values.yaml.j2 (:409
+        # decode, :826 prefill). So a prefill pool WITHOUT this
         # block reads as disaggregated and is not: no KV connector is
         # instantiated, the prefill pod is never routed to and logs zero
         # requests, and the decode pods do the prefill work themselves. Nothing
