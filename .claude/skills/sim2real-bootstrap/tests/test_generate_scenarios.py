@@ -121,8 +121,12 @@ def test_multi_gpu_value_warns_and_uses_first(value, capsys):
 
 
 def test_single_gpu_value_does_not_warn(capsys):
+    """Asserts on the multi-type GPU warning specifically, not on any warning at
+    all: generation legitimately emits unrelated warnings (e.g. #850's unmeasured
+    pod-resources default), and a blanket check makes each new one a spurious
+    failure here. Mirrors the config.md path's twin test."""
     gs.build_scenario(entry(), "cand")
-    assert "WARNING" not in capsys.readouterr().err
+    assert "GPU types" not in capsys.readouterr().err
 
 
 def test_labelvalues_never_emitted(tmp_path):
@@ -461,3 +465,92 @@ def test_both_generators_emit_identical_plumbing_text(tmp_path):
         block = "\n".join(fragment_lines)
         assert block in from_config_text, "config.md path drifted from pd_plumbing"
         assert block in json_text, "json path drifted from pd_plumbing"
+
+
+# ---------------------------------------------------------------------------
+# Pod CPU/memory resources (issue #850) -- parity with generate_from_config.py
+# ---------------------------------------------------------------------------
+# This generator has its own emitter, so it needs its own coverage. #846 and #848
+# both had to fix both paths; so does this.
+
+
+def res_emit(tmp_path, **vllm_extra):
+    e = entry(vllm_extra=vllm_extra)
+    return emit(gs.build_scenario(e, "test"), e, tmp_path)
+
+
+def test_resources_emitted_with_role_defaults_json_path(tmp_path):
+    parsed = yaml.safe_load(res_emit(tmp_path, prefill_instances=1))["scenario"][0]
+    assert parsed["decode"]["resources"]["limits"] == {
+        "memory": "128Gi", "cpu": "32"}
+    assert parsed["decode"]["resources"]["requests"] == {
+        "memory": "64Gi", "cpu": "16"}
+    assert parsed["prefill"]["resources"]["limits"] == {
+        "memory": "16Gi", "cpu": "8"}
+
+
+def test_decode_sized_above_prefill_json_path(tmp_path):
+    parsed = yaml.safe_load(res_emit(tmp_path, prefill_instances=1))["scenario"][0]
+    d = int(parsed["decode"]["resources"]["limits"]["cpu"])
+    p = int(parsed["prefill"]["resources"]["limits"]["cpu"])
+    assert d > p
+
+
+def test_shared_key_applies_to_both_roles_json_path(tmp_path):
+    parsed = yaml.safe_load(
+        res_emit(tmp_path, prefill_instances=1, cpu_limit="64"))["scenario"][0]
+    assert parsed["decode"]["resources"]["limits"]["cpu"] == "64"
+    assert parsed["prefill"]["resources"]["limits"]["cpu"] == "64"
+
+
+def test_per_role_key_beats_shared_json_path(tmp_path):
+    parsed = yaml.safe_load(res_emit(
+        tmp_path, prefill_instances=1,
+        cpu_limit="64", decode_cpu_limit="96"))["scenario"][0]
+    assert parsed["decode"]["resources"]["limits"]["cpu"] == "96"
+    assert parsed["prefill"]["resources"]["limits"]["cpu"] == "64"
+
+
+def test_all_four_stated_suppresses_warning_json_path(tmp_path):
+    text = res_emit(tmp_path, cpu_limit="64", memory_limit="200Gi",
+                    cpu_request="8", memory_request="32Gi")
+    assert "Reducing Torch parallelism" not in text
+
+
+def test_resource_keys_do_not_trip_unknown_field_warning(capsys):
+    """New vllm_args keys must be declared in KNOWN_FIELDS, or the unknown-field
+    check that exists to catch unmapped input warns on every bundle using them."""
+    e = entry(vllm_extra={"cpu_limit": "64", "decode_memory_limit": "200Gi",
+                          "prefill_cpu_request": "2"})
+    gs.check_unknown_fields(e, "test")
+    err = capsys.readouterr().err
+    for key in ("cpu_limit", "decode_memory_limit", "prefill_cpu_request"):
+        assert key not in err
+
+
+def test_both_generators_emit_identical_resources_text(tmp_path):
+    """Anti-drift: two hand-rolled emitters, one shared module. The resources text
+    must match character-for-character or one path is wrong."""
+    import generate_from_config as gfc
+    import pod_resources as pres
+
+    rows = [
+        {"Parameter": "Model", "Value": "Qwen/Qwen3-14B", "Notes": ""},
+        {"Parameter": "GPU", "Value": "H100_SXM_80GB", "Notes": ""},
+        {"Parameter": "Number of prefill pods", "Value": "1", "Notes": ""},
+    ]
+    table = gfc.TableSection(
+        heading="vLLM Pod Configuration", rows=rows, line_number=0)
+    s, p = gfc.build_scenario(gfc.extract_fields(table), "test")
+    out = tmp_path / "baseline.yaml"
+    gfc.write_provenance_yaml(s, p, str(out))
+    from_config_text = out.read_text()
+
+    # Same directory is safe: gfc writes baseline.yaml, gs writes cand.yaml.
+    json_text = res_emit(tmp_path, prefill_instances=1)
+
+    for role in ("decode", "prefill"):
+        values, _ = pres.resolve_resources(role, dict.fromkeys(pres.KEYS))
+        block = "\n".join(pres.resource_lines(values, warn=True))
+        assert block in from_config_text, f"config.md path drifted for {role}"
+        assert block in json_text, f"json path drifted for {role}"
