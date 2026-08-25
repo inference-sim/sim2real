@@ -84,6 +84,28 @@ GPUs.
 `parallelism` and `vllm.additionalFlags` are shared, not per-role — the input has
 no per-role form for them, so both roles receive the same values.
 
+`vllmCommon.kvTransfer` is emitted with every `prefill:` block too (issue #830).
+`kvTransfer.enabled` defaults to `false` upstream and vLLM's
+`--kv-transfer-config` is gated on it, so a prefill pool without it gets no KV
+connector: the prefill pod is never routed to and the decode pods prefill their
+own requests. Nothing errors — the run completes and is silently not P/D.
+
+So is the pod plumbing that makes KV transfer actually initialise (issue #848),
+on two gates. Both come from `pd_plumbing.py`, shared with
+`generate_from_config.py` so the two paths cannot drift:
+
+| Gate | Condition | Emitted |
+|---|---|---|
+| 1 | `vllm_args.prefill_instances > 0` | `preprocess` init container on both roles, `shared-config` emptyDir + mount, `vllmCommon.preprocessScript`, `NIXL_LOG_LEVEL`, `routing.connector` |
+| 2 | `tensor_parallel_size > 1` or `data_parallel_size > 1` | `dshm` tmpfs at `/dev/shm` + mount, `NCCL_DEBUG`, `NVSHMEM_DEBUG` |
+
+Gate 1's first three are one unit — the init container writes
+`/shared-config/llmdbench_env.sh`, `preprocessScript` sources it, the volume is
+the handoff — so any one missing makes the other two inert. Gate 2 keys on either
+parallelism degree because `dataLocal` equals `dp`, so either puts more than one
+GPU in a pod. Neither gate fires for a single-GPU aggregated entry, so those
+regenerate byte-identically.
+
 One GPU type per role. A hardware value naming several types (`"H100, A100"`)
 emits the first and warns, naming every type found and the one used: a role is
 one Deployment, so it carries one node selector and its replicas cannot be split

@@ -195,6 +195,11 @@ def init_container_lines() -> list[str]:
     build_ms_env_vars(mode) only for an init container that declares none, and
     set_llmdbench_environment.py reads NVSHMEM_DEBUG from its own environment
     (:539-541). Adding an `env` block here would suppress that inheritance.
+
+    Declares NO `resources`, and must not: pipeline/lib/capacity.py:98-99 excludes
+    initContainers from GPU accounting on the stated assumption that llm-d
+    workloads have no GPU-requesting init containers. Giving this container a GPU
+    request would silently under-count demand in the capacity probe.
     """
     return [
         "    # Computes network and GPU-routing values and writes them to the",

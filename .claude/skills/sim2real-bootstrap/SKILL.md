@@ -207,6 +207,10 @@ Generate llm-d-benchmark scenario YAML(s) for baseline arm(s).
   scenario YAMLs. Use only when a JSON input file exists.
 - `generate_scenarios.README.md` — documents field mappings, lookup tables,
   omission rules, and coverage gaps for the JSON-input path.
+- `pd_plumbing.py` — the P/D and multi-GPU pod fragments (init container,
+  `shared-config` / `dshm` volumes, `preprocessScript`, NIXL/NCCL/NVSHMEM env
+  vars, `routing.connector`) plus the two gates that decide when they apply.
+  Imported by BOTH generators so the emitted text cannot drift between paths.
 
 **Process:**
 
@@ -287,13 +291,52 @@ scenario:
       additionalFlags:
       - "--flag=value"                 # shared with decode, not per-role
 
-  # Also emitted with a prefill pool, and only then (issue #830). This is what
-  # makes the pool do anything; see the note below.
+  # Also emitted with a prefill pool, and only then (issues #830, #848). This is
+  # what makes the pool do anything; see the note below.
   vllmCommon:
     kvTransfer:
       enabled: true
       connector: NixlConnector
       role: kv_both
+    # Sources the env file the preprocess init container writes (#848).
+    preprocessScript: |
+      export LD_LIBRARY_PATH=...libcuda.so.1 discovery...
+      . /shared-config/llmdbench_env.sh
+    volumes:
+    - name: shared-config              # prefill pool   (Gate 1)
+      type: emptyDir
+      emptyDir: {}
+    - name: dshm                       # >1 GPU per pod (Gate 2)
+      type: emptyDir
+      emptyDir:
+        medium: Memory
+        sizeLimit: 16Gi
+    volumeMounts:
+    - name: shared-config
+      mountPath: /shared-config
+    - name: dshm
+      mountPath: /dev/shm
+
+  # Per-role, on BOTH decode: and prefill: — each role is a separate pod, and
+  # upstream has no vllmCommon form for either key.
+  decode:                              # ...and the same under prefill:
+    initContainers:                    # Gate 1
+    - name: preprocess
+      imageKey: benchmark
+      command: ["set_llmdbench_environment.py", "-e", "/shared-config/llmdbench_env.sh", "-i"]
+      volumeMounts:                    # explicit — init containers do not
+      - name: shared-config            # inherit vllmCommon.volumeMounts
+        mountPath: /shared-config
+    extraEnvVars:
+    - name: NIXL_LOG_LEVEL             # Gate 1
+      value: debug
+    - name: NCCL_DEBUG                 # Gate 2
+      value: "INFO"
+    - name: NVSHMEM_DEBUG              # Gate 2
+      value: "INFO"
+
+  routing:                             # Gate 1
+    connector: nixlv2
 ```
 
 **Disaggregation (issue #824).** To get a `prefill:` block, `config.md`'s vLLM
@@ -315,6 +358,38 @@ optional per-role accelerator overrides; without them both roles use the shared
   `role: kv_both` is deprecated for NixlConnector, which wants `kv_producer` on
   prefill and `kv_consumer` on decode; `vllmCommon` is shared by both roles so
   per-role values are not expressible today (tracked as #845).
+- **The plumbing that makes `kvTransfer` work is emitted on the same gate (issue
+  #848).** `kvTransfer.enabled: true` on its own is *worse* than leaving it off:
+  the worker dies during "Initializing NIXL wrapper" because nothing configured
+  the network and GPU-routing state. Two gates, both additive, both derived from
+  rows `config.md` already declares:
+  - **Gate 1 — a prefill pool exists** (the same gate as `kvTransfer`): the
+    `preprocess` init container on *both* roles, the `shared-config` emptyDir,
+    `vllmCommon.preprocessScript`, `NIXL_LOG_LEVEL`, and `routing.connector`.
+    The first three are one unit — the init container *computes* the values and
+    writes them to `/shared-config/llmdbench_env.sh`, `preprocessScript`
+    *sources* them, and the volume is the handoff. Any one missing makes the
+    other two inert, which is why they are emitted together rather than split
+    across the fragment layer where a `defaults.disable` entry could break the
+    pair. `routing.connector` is the sidecar half of the connector decision
+    `kvTransfer.connector` makes engine-side; both spellings come from
+    `pd_plumbing.KV_CONNECTOR_*` so they cannot drift.
+  - **Gate 2 — more than one GPU per pod** (`tensor_parallel_size > 1` *or*
+    `data_parallel_size > 1`; `dataLocal` equals `dp`, so either puts several
+    GPUs in one pod): the `dshm` tmpfs at `/dev/shm` and `NCCL_DEBUG` /
+    `NVSHMEM_DEBUG`. The K8s default 64 MB `/dev/shm` is a latency-jitter and
+    hang risk for multi-GPU collectives. `NVSHMEM_DEBUG` is load-bearing rather
+    than diagnostic: `set_llmdbench_environment.py` adds `NVSHMEM_HCA_LIST` to
+    the generated env file only when it is not `"none"`.
+
+  Neither gate fires for a single-GPU aggregated bundle, so existing bundles
+  regenerate byte-identically. Both generators emit the fragments from
+  `pd_plumbing.py`, so the two paths cannot drift.
+
+  Cluster-specific pieces are deliberately *not* emitted and stay in the
+  fragment layer (tracked on #840): pod capabilities, which need an SCC grant
+  first; the NIC exclusion list, which names literal devices; and the RDMA
+  device reservation.
 - `parallelism` and `vllm.additionalFlags` are shared across roles — `config.md`
   has no per-role form for them.
 - **One GPU type per role.** A GPU cell naming several types (`H100, A100`) emits
@@ -706,5 +781,6 @@ This skill ships with supporting files in its directory. Invoke in place — do 
 | `generate_from_config.py` | Parses `config.md` markdown tables → scenario YAMLs with provenance comments. Preferred for most BLIS experiments. Handles hardware normalization, bare-flag prefix-caching input/output, and unknown model/hardware detection. |
 | `generate_scenarios.py` | Converts JSON config (`top3_selection.json`) → scenario YAMLs. Use when JSON input exists (BLIS). |
 | `generate_scenarios.README.md` | Coverage map for the JSON-input path. Documents field mappings, omission rules, and gaps. |
+| `pd_plumbing.py` | The P/D and multi-GPU pod plumbing (issue #848): one connector decision in two spellings (`kvTransfer.connector` engine-side, `routing.connector` sidecar-side), the two gate predicates, and one line-emitter per YAML fragment. Imported by both generators — the fragments are identical literal YAML, so a single copy is what keeps the two hand-rolled emitters in agreement. Asserted by `tests/test_pd_plumbing.py` and by the cross-generator check in `tests/test_generate_scenarios.py`. |
 | `byo.py` | Implements the `--byo` branch — argument parsing, YAML validation, path-safe copy operations, `transfer.yaml` emission, batched `sim2real translation register` command generation. Invoked by SKILL.md's dispatch when `--byo` (or any BYO-only flag) is passed. |
 | `templates/defaults/*.yaml` | Framework-owned baseline workaround fragments (request-id, verbosity, sidecar sizing, model-PVC size, topology, tokenizer). Copied into `<experiment-root>/baselines/defaults/` at BLIS task-4b and at BYO run time, so every experiment is self-contained and reproducible. Shape and merge-safety are asserted by `tests/test_defaults_templates.py`. |
