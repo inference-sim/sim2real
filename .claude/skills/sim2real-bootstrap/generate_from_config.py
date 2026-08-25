@@ -22,6 +22,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pd_plumbing as pdp
+
 
 # ---------------------------------------------------------------------------
 # Lookup tables
@@ -874,7 +876,10 @@ def build_scenario(
         # silently drop it.
         scenario.setdefault("vllmCommon", {})["kvTransfer"] = {
             "enabled": True,
-            "connector": "NixlConnector",
+            # The engine half of the connector decision. The sidecar half
+            # (routing.connector) comes from the same module so the two cannot
+            # drift apart -- see pd_plumbing and issue #848.
+            "connector": pdp.KV_CONNECTOR_ENGINE,
             "role": "kv_both",
         }
     elif "prefill_hardware" in fields:
@@ -889,6 +894,36 @@ def build_scenario(
             f"for it to apply.",
             file=sys.stderr,
         )
+
+    # --- Pod plumbing (issue #848) ---
+    # #846 turns kvTransfer on with a prefill pool. On its own that crashloops the
+    # worker during "Initializing NIXL wrapper", because nothing sets up the
+    # network and GPU-routing state NIXL needs. Two gates, both additive.
+    #
+    # The keys set below are markers for readers and for tests that inspect the
+    # scenario dict -- the hand-rolled emitter prints from the `_gates` booleans,
+    # not by walking the dict, so a marker alone changes no output.
+    kv_plumbing = pdp.needs_kv_plumbing(prefill_replicas)
+    multigpu_plumbing = pdp.needs_multigpu_plumbing(tp, dp)
+
+    if kv_plumbing or multigpu_plumbing:
+        vc = scenario.setdefault("vllmCommon", {})
+        vc["volumes"] = True
+        vc["volumeMounts"] = True
+        for role in ("decode", "prefill"):
+            if role in scenario:
+                scenario[role]["extraEnvVars"] = True
+
+    if kv_plumbing:
+        scenario.setdefault("vllmCommon", {})["preprocessScript"] = True
+        for role in ("decode", "prefill"):
+            if role in scenario:
+                scenario[role]["initContainers"] = True
+        scenario["routing"] = {"connector": pdp.KV_CONNECTOR_SIDECAR}
+
+    # Internal channel to the emitter. Leading underscore marks it as not part of
+    # the emitted schema; write_provenance_yaml reads it and never prints it.
+    scenario["_gates"] = {"kv": kv_plumbing, "multigpu": multigpu_plumbing}
 
     # --- Build provenance map ---
     provenance = {
@@ -940,6 +975,10 @@ def write_provenance_yaml(
     scenario: dict, provenance: dict[str, str], out_path: str, dry_run: bool = False
 ):
     """Write scenario YAML with inline provenance comments."""
+    # Pod-plumbing gates (#848), computed by build_scenario. Defaulted rather than
+    # indexed so a caller that hand-builds a scenario dict still emits.
+    gates = scenario.get("_gates", {"kv": False, "multigpu": False})
+
     lines = []
     lines.append("scenario:")
     lines.append(f"- name: {scenario['name']}")
@@ -986,6 +1025,13 @@ def write_provenance_yaml(
                 f"      role: {kv['role']}  "
                 f"# {provenance['vllmCommon.kvTransfer.role']}"
             )
+        # Plumbing (#848). Both gates write volumes/volumeMounts, so those are
+        # rendered in one call rather than appended per gate.
+        if gates["kv"]:
+            lines.extend(pdp.preprocess_script_lines())
+        lines.extend(
+            pdp.volume_lines(shared_config=gates["kv"], dshm=gates["multigpu"])
+        )
 
     lines.append("")
     lines.append("  decode:")
@@ -1007,6 +1053,14 @@ def write_provenance_yaml(
         lines.append("      additionalFlags:")
         for flag, source in scenario["decode"]["vllm"]["additionalFlags"]:
             lines.append(f'      - "{flag}"  # {source}')
+
+    # Per-role plumbing (#848). Each role is a separate pod, so each needs its own
+    # init container and env vars -- there is no vllmCommon form for either.
+    if gates["kv"]:
+        lines.extend(pdp.init_container_lines())
+    lines.extend(
+        pdp.extra_env_var_lines(nixl=gates["kv"], multigpu=gates["multigpu"])
+    )
 
     # Prefill role, emitted only when config.md named a prefill pod count. Placed
     # after decode so the decode bytes above are untouched when it is absent.
@@ -1037,6 +1091,20 @@ def write_provenance_yaml(
             lines.append("      additionalFlags:")
             for flag, source in p_role["vllm"]["additionalFlags"]:
                 lines.append(f'      - "{flag}"  # {source}')
+
+        # Same per-role plumbing as decode above. Inside the prefill `if`, so it is
+        # reached only when a prefill pool exists -- which is also Gate 1's
+        # condition, but the nesting keeps the two independent.
+        if gates["kv"]:
+            lines.extend(pdp.init_container_lines())
+        lines.extend(
+            pdp.extra_env_var_lines(nixl=gates["kv"], multigpu=gates["multigpu"])
+        )
+
+    # Scenario-level plumbing (#848), last so every block above keeps its bytes.
+    if gates["kv"]:
+        lines.append("")
+        lines.extend(pdp.routing_lines())
 
     lines.append("")
 

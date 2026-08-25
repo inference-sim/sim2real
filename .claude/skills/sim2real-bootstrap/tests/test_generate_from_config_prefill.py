@@ -667,3 +667,162 @@ def test_kv_transfer_agrees_across_both_generators(tmp_path):
         "vllmCommon"
     ]["kvTransfer"]
     assert from_config_kv == with_prefill["vllmCommon"]["kvTransfer"]
+
+
+# ---------------------------------------------------------------------------
+# Pod plumbing gates (issue #848)
+# ---------------------------------------------------------------------------
+# #846 emits kvTransfer.enabled: true on a prefill pool. Without the plumbing
+# below that flag crashloops the worker during "Initializing NIXL wrapper".
+# Assertions are on emitted TEXT: the emitter is a hand-rolled line appender, so
+# a key present in the scenario dict proves nothing about the output.
+
+
+def test_no_gates_emits_no_plumbing(tmp_path):
+    """The byte-identity contract: no prefill pool and a single-GPU pod must
+    regenerate exactly what it did before #848."""
+    scenario, prov = build([])
+    text = emit(scenario, prov, tmp_path)
+    for key in (
+        "initContainers",
+        "preprocessScript",
+        "volumes:",
+        "volumeMounts:",
+        "extraEnvVars",
+        "routing:",
+        "shared-config",
+        "dshm",
+        "NIXL_LOG_LEVEL",
+        "NCCL_DEBUG",
+        "NVSHMEM_DEBUG",
+    ):
+        assert key not in text, f"{key} leaked into an ungated scenario"
+
+
+def test_internal_gate_marker_never_reaches_output(tmp_path):
+    """build_scenario stashes the gate booleans on the dict for the emitter. That
+    is an internal channel, not part of the emitted schema."""
+    scenario, prov = build([row("Number of prefill pods", "1")])
+    assert "_gates" not in emit(scenario, prov, tmp_path)
+
+
+def test_gate1_emits_the_full_kv_unit(tmp_path):
+    scenario, prov = build([row("Number of prefill pods", "1")])
+    text = emit(scenario, prov, tmp_path)
+    parsed = yaml.safe_load(text)["scenario"][0]
+
+    # init container on BOTH roles -- each role is a separate pod
+    for role in ("decode", "prefill"):
+        ics = parsed[role]["initContainers"]
+        assert [ic["name"] for ic in ics] == ["preprocess"]
+        assert ics[0]["command"][0] == "set_llmdbench_environment.py"
+
+    assert ". /shared-config/llmdbench_env.sh" in parsed["vllmCommon"]["preprocessScript"]
+    assert [v["name"] for v in parsed["vllmCommon"]["volumes"]] == ["shared-config"]
+    assert parsed["routing"]["connector"] == "nixlv2"
+
+    for role in ("decode", "prefill"):
+        assert {e["name"] for e in parsed[role]["extraEnvVars"]} == {"NIXL_LOG_LEVEL"}
+
+
+def test_gate1_does_not_emit_gate2_pieces(tmp_path):
+    """A single-GPU P/D pod needs no tmpfs and runs no collectives."""
+    scenario, prov = build([row("Number of prefill pods", "1")])
+    text = emit(scenario, prov, tmp_path)
+    assert "dshm" not in text
+    assert "NCCL_DEBUG" not in text
+    assert "NVSHMEM_DEBUG" not in text
+
+
+def test_gate2_emits_dshm_and_collective_vars_without_a_prefill_pool(tmp_path):
+    """Gate 2 is independent of Gate 1: an aggregated multi-GPU pod gets the
+    tmpfs and the collective variables and nothing else."""
+    scenario, prov = build([row("tensor_parallel_size", "4")])
+    text = emit(scenario, prov, tmp_path)
+    parsed = yaml.safe_load(text)["scenario"][0]
+
+    vols = parsed["vllmCommon"]["volumes"]
+    assert [v["name"] for v in vols] == ["dshm"]
+    assert vols[0]["emptyDir"]["medium"] == "Memory"
+    assert {m["mountPath"] for m in parsed["vllmCommon"]["volumeMounts"]} == {"/dev/shm"}
+    assert {e["name"] for e in parsed["decode"]["extraEnvVars"]} == {
+        "NCCL_DEBUG",
+        "NVSHMEM_DEBUG",
+    }
+
+    # Gate 1 pieces stay absent
+    assert "prefill" not in parsed
+    assert "initContainers" not in parsed["decode"]
+    assert "preprocessScript" not in parsed["vllmCommon"]
+    assert "routing" not in parsed
+
+
+def test_gate2_fires_on_data_parallel_alone(tmp_path):
+    """Plan D1: dataLocal == dp, so dp>1 is also several GPUs in one pod."""
+    scenario, prov = build([row("data_parallel_size", "2")])
+    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
+    assert [v["name"] for v in parsed["vllmCommon"]["volumes"]] == ["dshm"]
+
+
+def test_both_gates_accumulate_volumes_and_env(tmp_path):
+    """The regression this shape invites: two gates writing the same two keys,
+    the second clobbering the first."""
+    scenario, prov = build(
+        [row("Number of prefill pods", "2"), row("tensor_parallel_size", "4")]
+    )
+    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
+
+    assert [v["name"] for v in parsed["vllmCommon"]["volumes"]] == [
+        "shared-config",
+        "dshm",
+    ]
+    assert [m["mountPath"] for m in parsed["vllmCommon"]["volumeMounts"]] == [
+        "/shared-config",
+        "/dev/shm",
+    ]
+    for role in ("decode", "prefill"):
+        assert {e["name"] for e in parsed[role]["extraEnvVars"]} == {
+            "NIXL_LOG_LEVEL",
+            "NCCL_DEBUG",
+            "NVSHMEM_DEBUG",
+        }
+
+
+def test_kv_transfer_and_routing_connector_agree(tmp_path):
+    """The issue's requirement: both halves from one connector value. A bundle
+    with the engine on NixlConnector and the sidecar on something else is the
+    half-configuration #830 was."""
+    import pd_plumbing as pdp
+
+    scenario, prov = build([row("Number of prefill pods", "1")])
+    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
+    assert parsed["vllmCommon"]["kvTransfer"]["connector"] == pdp.KV_CONNECTOR_ENGINE
+    assert parsed["routing"]["connector"] == pdp.KV_CONNECTOR_SIDECAR
+
+
+def test_plumbing_coexists_with_enforce_eager_override(tmp_path):
+    """vllmCommon now has four independent sub-keys. enforce_eager creates the
+    dict first; a plain assignment anywhere downstream would drop it."""
+    scenario, prov = build(
+        [row("enforce_eager", "false"), row("Number of prefill pods", "1")]
+    )
+    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
+    vc = parsed["vllmCommon"]
+    assert vc["flags"]["enforceEager"] is False
+    assert vc["kvTransfer"]["enabled"] is True
+    assert "preprocessScript" in vc
+    assert [v["name"] for v in vc["volumes"]] == ["shared-config"]
+
+
+def test_emitted_plumbing_is_valid_yaml_in_every_gate_combination(tmp_path):
+    """Hand-rolled emitter: indentation is the contract."""
+    combos = [
+        [],
+        [row("Number of prefill pods", "1")],
+        [row("tensor_parallel_size", "4")],
+        [row("Number of prefill pods", "2"), row("tensor_parallel_size", "4")],
+    ]
+    for i, extra in enumerate(combos):
+        scenario, prov = build(extra)
+        parsed = yaml.safe_load(emit(scenario, prov, tmp_path / f"c{i}"))
+        assert parsed["scenario"][0]["name"] == "test"
