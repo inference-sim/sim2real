@@ -207,6 +207,8 @@ Generate llm-d-benchmark scenario YAML(s) for baseline arm(s).
   scenario YAMLs. Use only when a JSON input file exists.
 - `generate_scenarios.README.md` — documents field mappings, lookup tables,
   omission rules, and coverage gaps for the JSON-input path.
+- `pod_resources.py` — per-role CPU/memory: the fixed default table, the
+  stated-value resolver, and the line emitter. Imported by BOTH generators.
 - `pd_plumbing.py` — the P/D and multi-GPU pod fragments (init container,
   `shared-config` / `dshm` volumes, `preprocessScript`, NIXL/NCCL/NVSHMEM env
   vars, `routing.connector`) plus the two gates that decide when they apply.
@@ -395,6 +397,49 @@ optional per-role accelerator overrides; without them both roles use the shared
   device reservation.
 - `parallelism` and `vllm.additionalFlags` are shared across roles — `config.md`
   has no per-role form for them.
+- **CPU/memory is always emitted, per role (issue #850).** Bootstrap used to emit
+  none, so bundles inherited the framework default of `limits: {memory: 40Gi,
+  cpu: "4"}` with no `requests` — four CPU for a pod that may hold four GPUs and
+  shares its cgroup with the routing sidecar. That starves vLLM, and the signal
+  (`Reducing Torch parallelism from N threads to 1`) surfaces as ITL noise rather
+  than a failure, so it corrupts the metric the arms are compared on.
+
+  **Rows `config.md` may state**, each optional, resolved *per-role row → shared
+  row → role default* (the same precedence as `Decode GPU` over `GPU`):
+
+  | Shared row | Per-role override |
+  |---|---|
+  | `cpu limit` | `decode cpu limit`, `prefill cpu limit` |
+  | `memory limit` | `decode memory limit`, `prefill memory limit` |
+  | `cpu request` | `decode cpu request`, `prefill cpu request` |
+  | `memory request` | `decode memory request`, `prefill memory request` |
+
+  Values are passed through verbatim as strings — `32`, `500m`, `1.5`, `128Gi`,
+  `1536Mi` are all valid Kubernetes quantities and re-serializing risks changing
+  them. Stating only some is fine; the rest take defaults.
+
+  **Defaults when a row is absent** — decode is sized above prefill, which is both
+  upstream's own sizing and the observed-working configuration:
+
+  | Role | limits | requests |
+  |---|---|---|
+  | decode | `128Gi` / `32` | `64Gi` / `16` |
+  | prefill | `16Gi` / `8` | `8Gi` / `4` |
+
+  Limits come from llm-d's `pd-disaggregation` guide verbatim. Requests are half
+  those limits, and are **emitted explicitly on purpose**: omitting `requests` is
+  not "no reservation" — Kubernetes copies the limit into the request when the
+  request is absent, so limits-only would reserve the whole generous figure on
+  every replica, and a 2-replica decode pool would reserve 256Gi before prefill is
+  scheduled at all.
+
+  **The defaults are not measured.** They come from one cluster, one model, one
+  tensor-parallel degree. Whenever any quantity falls back to a default, bootstrap
+  prints a `WARNING` naming the starvation signal, and the emitted YAML carries the
+  same caveat as a comment. State all four rows for a role and both warnings go
+  away, because then the numbers are the operator's. Fixed starting values were
+  chosen over deriving from GPU count deliberately: a wrong fixed number is visible
+  and correctable, a wrong formula looks principled.
 - **One GPU type per role.** A GPU cell naming several types (`H100, A100`) emits
   the first and prints a `WARNING` naming every type found and the one used: a
   role is one Deployment, so it carries one node selector and its replicas cannot
@@ -814,6 +859,7 @@ This skill ships with supporting files in its directory. Invoke in place — do 
 | `generate_from_config.py` | Parses `config.md` markdown tables → scenario YAMLs with provenance comments. Preferred for most BLIS experiments. Handles hardware normalization, bare-flag prefix-caching input/output, and unknown model/hardware detection. |
 | `generate_scenarios.py` | Converts JSON config (`top3_selection.json`) → scenario YAMLs. Use when JSON input exists (BLIS). |
 | `generate_scenarios.README.md` | Coverage map for the JSON-input path. Documents field mappings, omission rules, and gaps. |
+| `pod_resources.py` | Per-role CPU/memory for the model-server pods (issue #850): the fixed per-role default table (decode sized above prefill), `resolve_resources` (per-role row → shared row → default, values passed through as strings), and the line emitter including the unmeasured-defaults comment. Imported by both generators so the emitted text cannot drift. Asserted by `tests/test_pod_resources.py` plus the cross-generator check in `tests/test_generate_scenarios.py`. |
 | `pd_plumbing.py` | The P/D and multi-GPU pod plumbing (issue #848): one connector decision in two spellings (`kvTransfer.connector` engine-side, `routing.connector` sidecar-side), the two gate predicates, and one line-emitter per YAML fragment. Imported by both generators — the fragments are identical literal YAML, so a single copy is what keeps the two hand-rolled emitters in agreement. Asserted by `tests/test_pd_plumbing.py` and by the cross-generator check in `tests/test_generate_scenarios.py`. |
 | `byo.py` | Implements the `--byo` branch — argument parsing, YAML validation, path-safe copy operations, `transfer.yaml` emission, batched `sim2real translation register` command generation. Invoked by SKILL.md's dispatch when `--byo` (or any BYO-only flag) is passed. |
 | `templates/defaults/*.yaml` | Framework-owned baseline workaround fragments (request-id, verbosity, sidecar sizing, model-PVC size, topology, tokenizer) plus the P/D cluster-specific ones that ship disabled (pod capabilities, NIC exclusion, RDMA reservation — issue #853). Copied into `<experiment-root>/baselines/defaults/` at BLIS task-4b and at BYO run time, so every experiment is self-contained and reproducible. Shape and merge-safety are asserted by `tests/test_defaults_templates.py`. |
