@@ -22,4 +22,26 @@ scenario:
       - "--max-num-batched-tokens=2048"  # config.md row "max_num_batched_tokens"
       - "--enable-chunked-prefill"  # config.md row "enable_chunked_prefill"
       - "--enable-prefix-caching"  # sim2real-bootstrap default (config.md silent; deployed vLLM requires explicit ON)
+    # Generous headroom, NOT measured. Limits are the llm-d
+    # pd-disaggregation guide's observed-working figures; requests are
+    # half of them. Watch for 'Reducing Torch parallelism from N
+    # threads to 1' in the pod log -- that is CPU starvation, and it
+    # shows up as ITL noise rather than a failure.
+    #
+    # requests are stated explicitly on purpose: omitting them does
+    # NOT mean 'no reservation'. Kubernetes copies the limit into the
+    # request when the request is absent, so limits-only would reserve
+    # the whole generous figure on every replica.
+    #
+    # `resources` is a mapping, so a downstream baseline overriding
+    # e.g. limits.cpu deep-merges key by key -- the requests below
+    # survive. That differs from the scalar lists elsewhere in this
+    # skill, which are replaced wholesale.
+    resources:
+      limits:
+        memory: 128Gi
+        cpu: '32'
+      requests:
+        memory: 64Gi
+        cpu: '16'
 

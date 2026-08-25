@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pd_plumbing as pdp
+import pod_resources as pres
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +99,21 @@ PARAMETER_ALIASES = {
     },
     "prefill_hardware": {"prefill gpu", "prefill hardware"},
     "decode_hardware": {"decode gpu", "decode hardware"},
+    # Pod CPU/memory (issue #850). Shared keys with optional per-role overrides,
+    # the same shape as `hardware` / `decode_hardware` / `prefill_hardware` above.
+    # Absent any of these, pod_resources supplies generous per-role defaults.
+    "cpu_limit": {"cpu limit", "cpu_limit", "cpu limits"},
+    "memory_limit": {"memory limit", "memory_limit", "memory limits"},
+    "cpu_request": {"cpu request", "cpu_request", "cpu requests"},
+    "memory_request": {"memory request", "memory_request", "memory requests"},
+    "decode_cpu_limit": {"decode cpu limit", "decode_cpu_limit"},
+    "decode_memory_limit": {"decode memory limit", "decode_memory_limit"},
+    "decode_cpu_request": {"decode cpu request", "decode_cpu_request"},
+    "decode_memory_request": {"decode memory request", "decode_memory_request"},
+    "prefill_cpu_limit": {"prefill cpu limit", "prefill_cpu_limit"},
+    "prefill_memory_limit": {"prefill memory limit", "prefill_memory_limit"},
+    "prefill_cpu_request": {"prefill cpu request", "prefill_cpu_request"},
+    "prefill_memory_request": {"prefill memory request", "prefill_memory_request"},
     "dtype": {"dtype", "--dtype"},
     "pipeline_parallel_size": {"pipeline_parallel_size", "--pipeline-parallel-size"},
     "data_parallel_size": {"data_parallel_size", "--data-parallel-size"},
@@ -895,6 +911,33 @@ def build_scenario(
             file=sys.stderr,
         )
 
+    # --- Pod CPU/memory (issue #850) ---
+    # Bootstrap emitted nothing here, so bundles inherited 4 CPU / 40Gi for a pod
+    # that may hold four GPUs -- which starves vLLM and shows up as ITL noise
+    # rather than a failure. Resolved per role: a `decode cpu limit` row beats a
+    # shared `cpu limit` row beats the role default, matching how `Decode GPU`
+    # beats `GPU`. Values stay strings; see pod_resources.
+    # `provenance` does not exist yet (it is built below), so the per-quantity
+    # sources are collected here and merged into it once it does.
+    resource_provenance: dict[str, str] = {}
+    for role_name in ("decode", "prefill"):
+        if role_name not in scenario:
+            continue
+        stated = {}
+        for key in pres.KEYS:
+            field_obj = fields.get(f"{role_name}_{key}") or fields.get(key)
+            stated[key] = None if field_obj is None else str(field_obj.value)
+        values, res_prov = pres.resolve_resources(role_name, stated)
+        scenario[role_name]["resources"] = values
+        warn = pres.used_any_default(res_prov)
+        if warn:
+            print(pres.starvation_warning(role_name), file=sys.stderr)
+        # Read by the emitter to decide whether to print the unmeasured-defaults
+        # comment. Underscore-prefixed: internal, never emitted.
+        scenario[role_name]["_resources_warn"] = warn
+        for key, src in res_prov.items():
+            resource_provenance[f"{role_name}.resources.{key}"] = src
+
     # --- Pod plumbing (issue #848) ---
     # #846 turns kvTransfer on with a prefill pool. On its own that crashloops the
     # worker during "Initializing NIXL wrapper", because nothing sets up the
@@ -933,6 +976,7 @@ def build_scenario(
 
     # --- Build provenance map ---
     provenance = {
+        **resource_provenance,
         "model.name": fields["model"].source,
         "model.shortName": meta_source + ".shortName" if meta else "derived from model name",
         "model.path": meta_source + ".path" if meta else "derived from model name",
@@ -1068,6 +1112,15 @@ def write_provenance_yaml(
         pdp.extra_env_var_lines(nixl=gates["kv"], multigpu=gates["multigpu"])
     )
 
+    # CPU/memory (#850), also per-role and also with no vllmCommon form.
+    if "resources" in scenario["decode"]:
+        lines.extend(
+            pres.resource_lines(
+                scenario["decode"]["resources"],
+                warn=scenario["decode"].get("_resources_warn", True),
+            )
+        )
+
     # Prefill role, emitted only when config.md named a prefill pod count. Placed
     # after decode so the decode bytes above are untouched when it is absent.
     if "prefill" in scenario:
@@ -1106,6 +1159,14 @@ def write_provenance_yaml(
         lines.extend(
             pdp.extra_env_var_lines(nixl=gates["kv"], multigpu=gates["multigpu"])
         )
+
+        if "resources" in p_role:
+            lines.extend(
+                pres.resource_lines(
+                    p_role["resources"],
+                    warn=p_role.get("_resources_warn", True),
+                )
+            )
 
     # Scenario-level plumbing (#848), last so every block above keeps its bytes.
     if gates["kv"]:

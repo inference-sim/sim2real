@@ -180,8 +180,12 @@ def test_multi_gpu_cell_warns_and_uses_first(cell, capsys):
 
 
 def test_single_gpu_cell_does_not_warn(capsys):
+    """Asserts on the multi-type GPU warning specifically, not on the presence of
+    any warning at all: generation legitimately emits unrelated warnings (e.g. the
+    unmeasured pod-resources default of #850), and a blanket `"WARNING" not in`
+    check turns every new one into a spurious failure here."""
     build([row("Number of pods", "2")])
-    assert "WARNING" not in capsys.readouterr().err
+    assert "GPU types" not in capsys.readouterr().err
 
 
 def test_multi_gpu_warning_is_per_role(capsys):
@@ -454,6 +458,24 @@ def test_single_pool_golden_has_no_prefill_artifacts():
     that emits prefill unconditionally, this fails rather than blessing it."""
     golden = (FIXTURES / "single_pool_baseline.golden.yaml").read_text()
     assert "prefill:" not in golden
+
+
+def test_single_pool_golden_carries_pod_resources():
+    """The other direction of the same guard (issue #850).
+
+    The golden was regenerated when resources emission landed — a pure addition of
+    22 lines with nothing removed. If a future version stops emitting `resources`
+    and someone regenerates the golden to match, the byte-identity test above would
+    happily bless the regression. This makes that fail instead.
+    """
+    golden = (FIXTURES / "single_pool_baseline.golden.yaml").read_text()
+    parsed = yaml.safe_load(golden)["scenario"][0]
+    resources = parsed["decode"]["resources"]
+    assert set(resources) == {"limits", "requests"}, (
+        "the golden lost its requests block — limits-only means Kubernetes "
+        "reserves the whole generous limit (#850)"
+    )
+    assert resources["limits"]["cpu"] == "32"
     assert "labelValues" not in golden
 
 
@@ -826,3 +848,137 @@ def test_emitted_plumbing_is_valid_yaml_in_every_gate_combination(tmp_path):
         scenario, prov = build(extra)
         parsed = yaml.safe_load(emit(scenario, prov, tmp_path / f"c{i}"))
         assert parsed["scenario"][0]["name"] == "test"
+
+
+# ---------------------------------------------------------------------------
+# Pod CPU/memory resources (issue #850)
+# ---------------------------------------------------------------------------
+# Bootstrap emitted no `resources`, so bundles inherited 4 CPU / 40Gi for a pod
+# that may hold four GPUs. Assertions are on emitted TEXT: the emitter is a
+# hand-rolled line appender, so a key in the scenario dict proves nothing.
+
+
+def _res(parsed, role):
+    return parsed[role]["resources"]
+
+
+def test_resources_emitted_for_decode_with_role_defaults(tmp_path):
+    scenario, prov = build([])
+    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
+    assert _res(parsed, "decode")["limits"] == {"memory": "128Gi", "cpu": "32"}
+    assert _res(parsed, "decode")["requests"] == {"memory": "64Gi", "cpu": "16"}
+
+
+def test_each_role_gets_its_own_defaults(tmp_path):
+    """decode must be sized above prefill -- upstream's sizing and the operator's
+    stated constraint."""
+    scenario, prov = build([row("Number of prefill pods", "1")])
+    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
+    assert _res(parsed, "decode")["limits"]["cpu"] == "32"
+    assert _res(parsed, "prefill")["limits"]["cpu"] == "8"
+    assert _res(parsed, "prefill")["limits"]["memory"] == "16Gi"
+
+
+def test_no_prefill_pool_emits_resources_for_decode_only(tmp_path):
+    scenario, prov = build([])
+    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
+    assert "resources" in parsed["decode"]
+    assert "prefill" not in parsed
+
+
+def test_shared_row_applies_to_both_roles(tmp_path):
+    scenario, prov = build(
+        [row("Number of prefill pods", "1"), row("cpu limit", "64")]
+    )
+    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
+    assert _res(parsed, "decode")["limits"]["cpu"] == "64"
+    assert _res(parsed, "prefill")["limits"]["cpu"] == "64"
+    # the three unstated quantities still take their per-role defaults
+    assert _res(parsed, "decode")["limits"]["memory"] == "128Gi"
+    assert _res(parsed, "prefill")["limits"]["memory"] == "16Gi"
+
+
+def test_per_role_row_overrides_only_that_role(tmp_path):
+    scenario, prov = build(
+        [row("Number of prefill pods", "1"), row("decode cpu limit", "64")]
+    )
+    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
+    assert _res(parsed, "decode")["limits"]["cpu"] == "64"
+    assert _res(parsed, "prefill")["limits"]["cpu"] == "8"
+
+
+def test_per_role_row_beats_shared_row(tmp_path):
+    """Mirrors `Decode GPU` beating the shared `GPU` row."""
+    scenario, prov = build(
+        [
+            row("Number of prefill pods", "1"),
+            row("cpu limit", "64"),
+            row("decode cpu limit", "96"),
+        ]
+    )
+    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
+    assert _res(parsed, "decode")["limits"]["cpu"] == "96"
+    assert _res(parsed, "prefill")["limits"]["cpu"] == "64"
+
+
+def test_all_four_stated_suppresses_the_warning_comment(tmp_path):
+    scenario, prov = build(
+        [
+            row("cpu limit", "64"),
+            row("memory limit", "200Gi"),
+            row("cpu request", "8"),
+            row("memory request", "32Gi"),
+        ]
+    )
+    text = emit(scenario, prov, tmp_path)
+    assert "Reducing Torch parallelism" not in text
+    parsed = yaml.safe_load(text)["scenario"][0]
+    assert _res(parsed, "decode")["limits"] == {"memory": "200Gi", "cpu": "64"}
+    assert _res(parsed, "decode")["requests"] == {"memory": "32Gi", "cpu": "8"}
+
+
+def test_any_default_keeps_the_warning_comment(tmp_path):
+    scenario, prov = build([row("cpu limit", "64")])
+    assert "Reducing Torch parallelism" in emit(scenario, prov, tmp_path)
+
+
+def test_stderr_warning_when_defaults_used(capsys):
+    build([row("Number of prefill pods", "1")])
+    err = capsys.readouterr().err
+    assert "Reducing Torch parallelism" in err
+    assert "decode" in err and "prefill" in err
+
+
+def test_no_stderr_warning_when_all_four_stated(capsys):
+    build(
+        [
+            row("cpu limit", "64"),
+            row("memory limit", "200Gi"),
+            row("cpu request", "8"),
+            row("memory request", "32Gi"),
+        ]
+    )
+    assert "Reducing Torch parallelism" not in capsys.readouterr().err
+
+
+def test_kubernetes_quantity_forms_pass_through(tmp_path):
+    """500m and Mi units must survive verbatim, not be re-serialized."""
+    scenario, prov = build(
+        [row("cpu request", "500m"), row("memory request", "1536Mi")]
+    )
+    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
+    assert _res(parsed, "decode")["requests"] == {
+        "memory": "1536Mi", "cpu": "500m"}
+
+
+def test_resources_parse_in_every_row_combination(tmp_path):
+    combos = [
+        [],
+        [row("Number of prefill pods", "2")],
+        [row("cpu limit", "64"), row("Number of prefill pods", "2")],
+        [row("prefill memory limit", "64Gi"), row("Number of prefill pods", "2")],
+    ]
+    for i, extra in enumerate(combos):
+        scenario, prov = build(extra)
+        parsed = yaml.safe_load(emit(scenario, prov, tmp_path / f"r{i}"))
+        assert "resources" in parsed["scenario"][0]["decode"]
