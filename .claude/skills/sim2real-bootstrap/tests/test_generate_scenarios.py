@@ -467,11 +467,12 @@ def test_both_generators_emit_identical_plumbing_text(tmp_path):
         assert block in json_text, "json path drifted from pd_plumbing"
 
 
+
 # ---------------------------------------------------------------------------
-# Pod CPU/memory resources (issue #850) -- parity with generate_from_config.py
+# Pod CPU/memory resources (issue #850) — parity with generate_from_config.py
 # ---------------------------------------------------------------------------
 # This generator has its own emitter, so it needs its own coverage. #846 and #848
-# both had to fix both paths; so does this.
+# both had to fix both paths.
 
 
 def res_emit(tmp_path, **vllm_extra):
@@ -491,41 +492,72 @@ def test_resources_emitted_with_role_defaults_json_path(tmp_path):
 
 def test_decode_sized_above_prefill_json_path(tmp_path):
     parsed = yaml.safe_load(res_emit(tmp_path, prefill_instances=1))["scenario"][0]
-    d = int(parsed["decode"]["resources"]["limits"]["cpu"])
-    p = int(parsed["prefill"]["resources"]["limits"]["cpu"])
-    assert d > p
+    assert int(parsed["decode"]["resources"]["limits"]["cpu"]) > int(
+        parsed["prefill"]["resources"]["limits"]["cpu"])
 
 
-def test_shared_key_applies_to_both_roles_json_path(tmp_path):
+def test_stated_key_applies_to_both_roles_json_path(tmp_path):
     parsed = yaml.safe_load(
         res_emit(tmp_path, prefill_instances=1, cpu_limit="64"))["scenario"][0]
     assert parsed["decode"]["resources"]["limits"]["cpu"] == "64"
     assert parsed["prefill"]["resources"]["limits"]["cpu"] == "64"
 
 
-def test_per_role_key_beats_shared_json_path(tmp_path):
-    parsed = yaml.safe_load(res_emit(
-        tmp_path, prefill_instances=1,
-        cpu_limit="64", decode_cpu_limit="96"))["scenario"][0]
-    assert parsed["decode"]["resources"]["limits"]["cpu"] == "96"
-    assert parsed["prefill"]["resources"]["limits"]["cpu"] == "64"
+@pytest.mark.parametrize("hostile", ["128", "0.5"])
+def test_yaml_hostile_values_stay_strings_json_path(hostile, tmp_path):
+    parsed = yaml.safe_load(
+        res_emit(tmp_path, memory_limit=hostile))["scenario"][0]
+    assert parsed["decode"]["resources"]["limits"]["memory"] == hostile
 
 
-def test_all_four_stated_suppresses_warning_json_path(tmp_path):
+@pytest.mark.parametrize("bad", ["-", "TBD", "16 Gi", "128GB"])
+def test_invalid_quantity_is_a_hard_error_json_path(bad, capsys):
+    with pytest.raises(SystemExit) as exc:
+        gs.build_scenario(entry(vllm_extra={"memory_limit": bad}), "cand")
+    assert exc.value.code == 1
+    assert "invalid Kubernetes quantities" in capsys.readouterr().err
+
+
+def test_all_four_stated_suppresses_warning_json_path(tmp_path, capsys):
     text = res_emit(tmp_path, cpu_limit="64", memory_limit="200Gi",
                     cpu_request="8", memory_request="32Gi")
     assert "Reducing Torch parallelism" not in text
+    assert "Reducing Torch parallelism" not in capsys.readouterr().err
+
+
+def test_any_default_warns_on_stderr_json_path(capsys):
+    """The JSON path's stderr had no coverage at all, which is how a config.md
+    remediation message on a JSON input went unnoticed."""
+    gs.build_scenario(entry(), "cand")
+    err = capsys.readouterr().err
+    assert "Reducing Torch parallelism" in err
+    assert "decode" in err
+
+
+def test_stderr_names_no_input_file_json_path(capsys):
+    """pod_resources is shared by both generators, which read different inputs, so
+    the message must name neither."""
+    gs.build_scenario(entry(), "cand")
+    err = capsys.readouterr().err
+    resource_lines = [ln for ln in err.splitlines() if "Torch parallelism" in ln]
+    assert resource_lines
+    for ln in resource_lines:
+        assert "config.md" not in ln
+
+
+def test_prefill_warn_suppression_is_independent_json_path(tmp_path):
+    text = res_emit(tmp_path, prefill_instances=1, cpu_limit="64",
+                    memory_limit="200Gi", cpu_request="8", memory_request="32Gi")
+    prefill_block = text[text.index("  prefill:"):]
+    assert "GENEROUS DEFAULTS" not in prefill_block
 
 
 def test_resource_keys_do_not_trip_unknown_field_warning(capsys):
-    """New vllm_args keys must be declared in KNOWN_FIELDS, or the unknown-field
-    check that exists to catch unmapped input warns on every bundle using them."""
-    e = entry(vllm_extra={"cpu_limit": "64", "decode_memory_limit": "200Gi",
-                          "prefill_cpu_request": "2"})
-    gs.check_unknown_fields(e, "test")
-    err = capsys.readouterr().err
-    for key in ("cpu_limit", "decode_memory_limit", "prefill_cpu_request"):
-        assert key not in err
+    """The four keys must be declared in KNOWN_FIELDS, or the unknown-field check
+    that exists to catch unmapped input warns on every bundle using them."""
+    e = entry(vllm_extra={"cpu_limit": "64", "memory_limit": "200Gi",
+                          "cpu_request": "8", "memory_request": "32Gi"})
+    assert gs.check_unknown_fields(e, "test") == []
 
 
 def test_both_generators_emit_identical_resources_text(tmp_path):
@@ -554,40 +586,3 @@ def test_both_generators_emit_identical_resources_text(tmp_path):
         block = "\n".join(pres.resource_lines(values, prov, warn=True))
         assert block in from_config_text, f"config.md path drifted for {role}"
         assert block in json_text, f"json path drifted for {role}"
-
-
-# ---------------------------------------------------------------------------
-# Review findings, iteration 2 — the JSON path's own stderr and precedence
-# ---------------------------------------------------------------------------
-# The reviewer noted no capsys test asserted the JSON path's stderr text, which
-# is why config.md remediation on a JSON input went unnoticed.
-
-def test_json_path_stderr_names_vllm_args_not_config_md(capsys):
-    gs.build_scenario(entry(), "cand")
-    err = capsys.readouterr().err
-    assert "config.md" not in err, (
-        "the JSON generator is selected precisely when no config.md exists, so "
-        "remediation naming it points at a file that is not the input"
-    )
-    assert "vllm_args" in err
-
-
-def test_json_path_null_per_role_key_falls_back_to_shared(tmp_path):
-    """The finding: `{"cpu_limit": "64", "decode_cpu_limit": null}` resolved to the
-    built-in 32, silently discarding the stated shared 64, because
-    `.get(role_key, .get(shared))` returns None for a key present with a null."""
-    parsed = yaml.safe_load(
-        res_emit(tmp_path, cpu_limit="64", decode_cpu_limit=None))["scenario"][0]
-    assert parsed["decode"]["resources"]["limits"]["cpu"] == "64"
-
-
-def test_json_path_empty_string_per_role_key_falls_back_to_shared(tmp_path):
-    parsed = yaml.safe_load(
-        res_emit(tmp_path, cpu_limit="64", decode_cpu_limit=""))["scenario"][0]
-    assert parsed["decode"]["resources"]["limits"]["cpu"] == "64"
-
-
-def test_json_path_source_comments_cite_vllm_args(tmp_path):
-    text = res_emit(tmp_path, cpu_limit="64")
-    cpu = next(ln for ln in text.splitlines() if "cpu: '64'" in ln)
-    assert "vllm_args" in cpu and "config.md" not in cpu

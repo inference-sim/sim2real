@@ -99,21 +99,14 @@ PARAMETER_ALIASES = {
     },
     "prefill_hardware": {"prefill gpu", "prefill hardware"},
     "decode_hardware": {"decode gpu", "decode hardware"},
-    # Pod CPU/memory (issue #850). Shared keys with optional per-role overrides,
-    # the same shape as `hardware` / `decode_hardware` / `prefill_hardware` above.
-    # Absent any of these, pod_resources supplies generous per-role defaults.
+    # Pod CPU/memory (issue #850). Four keys, applied to both roles. Per-role
+    # overrides were considered and left out: nothing asked for them, and an
+    # operator who needs decode and prefill to differ edits baselines/baseline.yaml
+    # after bootstrap, as they do for everything else the generator does not model.
     "cpu_limit": {"cpu limit", "cpu_limit", "cpu limits"},
     "memory_limit": {"memory limit", "memory_limit", "memory limits"},
     "cpu_request": {"cpu request", "cpu_request", "cpu requests"},
     "memory_request": {"memory request", "memory_request", "memory requests"},
-    "decode_cpu_limit": {"decode cpu limit", "decode_cpu_limit"},
-    "decode_memory_limit": {"decode memory limit", "decode_memory_limit"},
-    "decode_cpu_request": {"decode cpu request", "decode_cpu_request"},
-    "decode_memory_request": {"decode memory request", "decode_memory_request"},
-    "prefill_cpu_limit": {"prefill cpu limit", "prefill_cpu_limit"},
-    "prefill_memory_limit": {"prefill memory limit", "prefill_memory_limit"},
-    "prefill_cpu_request": {"prefill cpu request", "prefill_cpu_request"},
-    "prefill_memory_request": {"prefill memory request", "prefill_memory_request"},
     "dtype": {"dtype", "--dtype"},
     "pipeline_parallel_size": {"pipeline_parallel_size", "--pipeline-parallel-size"},
     "data_parallel_size": {"data_parallel_size", "--data-parallel-size"},
@@ -935,48 +928,36 @@ def build_scenario(
 
     # --- Pod CPU/memory (issue #850) ---
     # Bootstrap emitted nothing here, so bundles inherited 4 CPU / 40Gi for a pod
-    # that may hold four GPUs -- which starves vLLM and shows up as ITL noise
-    # rather than a failure. Resolved per role: a `decode cpu limit` row beats a
-    # shared `cpu limit` row beats the role default, matching how `Decode GPU`
-    # beats `GPU`. Values stay strings; see pod_resources.
-    # `provenance` does not exist yet (it is built below), so the per-quantity
-    # sources are collected here and merged into it once it does.
+    # that may hold four GPUs -- which starves vLLM and shows up as ITL noise rather
+    # than a failure. `provenance` does not exist yet, so sources are collected here
+    # and merged into it below.
     resource_provenance: dict[str, str] = {}
     for role_name in ("decode", "prefill"):
         if role_name not in scenario:
             continue
-        # Per-role and shared are handed over SEPARATELY: pod_resources owns the
-        # precedence, so a blank per-role cell falls through to the shared row
-        # rather than skipping straight to the default.
-        per_role = {}
-        shared = {}
+        stated = {}
         for key in pres.KEYS:
-            role_field = fields.get(f"{role_name}_{key}")
-            shared_field = fields.get(key)
-            per_role[key] = None if role_field is None else str(role_field.value)
-            shared[key] = None if shared_field is None else str(shared_field.value)
-        values, res_prov = pres.resolve_resources(
-            role_name, per_role, shared, pres.CONFIG_MD_INPUT
-        )
+            field_obj = fields.get(key)
+            stated[key] = None if field_obj is None else str(field_obj.value)
+        values, res_prov = pres.resolve_resources(role_name, stated)
         scenario[role_name]["resources"] = values
-        warn = pres.used_any_default(res_prov)
+        warn = bool(pres.defaulted_keys(res_prov))
         if warn:
+            print(pres.starvation_warning(role_name, values, res_prov),
+                  file=sys.stderr)
+        bad = pres.invalid_quantities(values)
+        if bad:
+            # Hard error, matching the unrecognized-replica-row branch above: an
+            # invalid quantity produces a pod the cluster rejects at admission, far
+            # from the row that caused it, so failing here is the cheap place.
             print(
-                pres.starvation_warning(
-                    role_name, values, res_prov, pres.CONFIG_MD_INPUT
-                ),
+                f"  ERROR: {role_name} has invalid Kubernetes quantities: "
+                f"{', '.join(bad)}. Use e.g. 32, 500m, 128Gi, 1536Mi -- no spaces, "
+                f"no trailing words, no placeholders.",
                 file=sys.stderr,
             )
-        for problem in pres.request_exceeds_limit(values):
-            print(
-                f"  WARNING: {role_name} {problem}. Kubernetes rejects that pod "
-                f"at admission. Each quantity resolves independently, so a "
-                f"stated request with an unstated limit takes the default limit "
-                f"-- state both.",
-                file=sys.stderr,
-            )
-        # Read by the emitter to decide whether to print the unmeasured-defaults
-        # comment. Underscore-prefixed: internal, never emitted.
+            sys.exit(1)
+        # Read by the emitter to decide whether to print the defaults preamble.
         scenario[role_name]["_resources_warn"] = warn
         scenario[role_name]["_resources_provenance"] = res_prov
         for key, src in res_prov.items():

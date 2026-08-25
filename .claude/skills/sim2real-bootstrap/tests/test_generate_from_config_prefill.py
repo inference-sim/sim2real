@@ -857,33 +857,31 @@ def test_emitted_plumbing_is_valid_yaml_in_every_gate_combination(tmp_path):
         assert parsed["scenario"][0]["name"] == "test"
 
 
+
+
 # ---------------------------------------------------------------------------
 # Pod CPU/memory resources (issue #850)
 # ---------------------------------------------------------------------------
-# Bootstrap emitted no `resources`, so bundles inherited 4 CPU / 40Gi for a pod
-# that may hold four GPUs. Assertions are on emitted TEXT: the emitter is a
-# hand-rolled line appender, so a key in the scenario dict proves nothing.
+# Bootstrap emitted none, so bundles inherited 40Gi / 4 CPU for a pod that may hold
+# four GPUs. Four keys, applied to both roles; no per-role rows (an operator who
+# needs the roles to differ edits baselines/baseline.yaml, as for anything else the
+# generator does not model).
+#
+# Assertions are on emitted TEXT: the emitter is a hand-rolled line appender, so a
+# key in the scenario dict proves nothing about the output.
 
 
 def _res(parsed, role):
     return parsed[role]["resources"]
 
 
-def test_resources_emitted_for_decode_with_role_defaults(tmp_path):
-    scenario, prov = build([])
+def test_resources_emitted_with_role_defaults(tmp_path):
+    scenario, prov = build([row("Number of prefill pods", "1")])
     parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
     assert _res(parsed, "decode")["limits"] == {"memory": "128Gi", "cpu": "32"}
     assert _res(parsed, "decode")["requests"] == {"memory": "64Gi", "cpu": "16"}
-
-
-def test_each_role_gets_its_own_defaults(tmp_path):
-    """decode must be sized above prefill -- upstream's sizing and the operator's
-    stated constraint."""
-    scenario, prov = build([row("Number of prefill pods", "1")])
-    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
-    assert _res(parsed, "decode")["limits"]["cpu"] == "32"
-    assert _res(parsed, "prefill")["limits"]["cpu"] == "8"
-    assert _res(parsed, "prefill")["limits"]["memory"] == "16Gi"
+    assert _res(parsed, "prefill")["limits"] == {"memory": "16Gi", "cpu": "8"}
+    assert _res(parsed, "prefill")["requests"] == {"memory": "8Gi", "cpu": "4"}
 
 
 def test_no_prefill_pool_emits_resources_for_decode_only(tmp_path):
@@ -893,42 +891,87 @@ def test_no_prefill_pool_emits_resources_for_decode_only(tmp_path):
     assert "prefill" not in parsed
 
 
-def test_shared_row_applies_to_both_roles(tmp_path):
+def test_stated_row_applies_to_both_roles(tmp_path):
     scenario, prov = build(
         [row("Number of prefill pods", "1"), row("cpu limit", "64")]
     )
     parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
     assert _res(parsed, "decode")["limits"]["cpu"] == "64"
     assert _res(parsed, "prefill")["limits"]["cpu"] == "64"
-    # the three unstated quantities still take their per-role defaults
+    # the three unstated quantities keep their per-role defaults
     assert _res(parsed, "decode")["limits"]["memory"] == "128Gi"
     assert _res(parsed, "prefill")["limits"]["memory"] == "16Gi"
 
 
-def test_per_role_row_overrides_only_that_role(tmp_path):
-    scenario, prov = build(
-        [row("Number of prefill pods", "1"), row("decode cpu limit", "64")]
-    )
+@pytest.mark.parametrize(
+    "label", ["cpu limit", "cpu_limit", "cpu limits"]
+)
+def test_each_declared_alias_spelling_resolves(label, tmp_path):
+    """Every spelling PARAMETER_ALIASES declares must actually reach the resolver.
+    Deleting an alias would otherwise revert a stated row to a generous default with
+    no error at all."""
+    scenario, prov = build([row(label, "64")])
     parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
     assert _res(parsed, "decode")["limits"]["cpu"] == "64"
-    assert _res(parsed, "prefill")["limits"]["cpu"] == "8"
 
 
-def test_per_role_row_beats_shared_row(tmp_path):
-    """Mirrors `Decode GPU` beating the shared `GPU` row."""
-    scenario, prov = build(
-        [
-            row("Number of prefill pods", "1"),
-            row("cpu limit", "64"),
-            row("decode cpu limit", "96"),
-        ]
-    )
+@pytest.mark.parametrize("key", ["cpu_limit", "memory_limit",
+                                 "cpu_request", "memory_request"])
+def test_every_resource_field_is_declared_and_string_valued(key):
+    """A resource field handed to parse_numeric would lose its unit: `parse_numeric`
+    takes only the first whitespace token."""
+    assert key in gfc.PARAMETER_ALIASES
+    assert key in gfc._STRING_VALUED_FIELDS
+
+
+@pytest.mark.parametrize(
+    "stated,emitted",
+    [("128Gi", "128Gi"), ("1536Mi", "1536Mi"), ("2Ti", "2Ti"), ("512M", "512M")]
+)
+def test_memory_quantity_keeps_its_unit(stated, emitted, tmp_path):
+    scenario, prov = build([row("memory limit", stated)])
     parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
-    assert _res(parsed, "decode")["limits"]["cpu"] == "96"
-    assert _res(parsed, "prefill")["limits"]["cpu"] == "64"
+    assert _res(parsed, "decode")["limits"]["memory"] == emitted
 
 
-def test_all_four_stated_suppresses_the_warning_comment(tmp_path):
+@pytest.mark.parametrize("stated", ["500m", "1.50", "1.5", "32", "0.5"])
+def test_cpu_quantity_passes_through_verbatim(stated, tmp_path):
+    """`1.50` must not become `1.5`: it is an opaque string the chart forwards to
+    Kubernetes, not a number to normalize."""
+    scenario, prov = build([row("cpu limit", stated)])
+    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
+    assert _res(parsed, "decode")["limits"]["cpu"] == stated
+
+
+@pytest.mark.parametrize("hostile", ["128", "0.5"])
+def test_yaml_hostile_values_stay_strings(hostile, tmp_path):
+    """Valid quantities that a YAML reader re-types when unquoted: `128` to an int,
+    `0.5` to a float. memory used to be emitted unquoted while cpu was quoted, which
+    is how these lost their string-ness.
+
+    Values that are BOTH YAML-hostile and invalid quantities (`yes`, `null`, `~`,
+    `-`) never reach the emitter now — the validator rejects them first, which is
+    covered by test_invalid_quantity_is_a_hard_error below.
+    """
+    scenario, prov = build([row("memory limit", hostile)])
+    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
+    assert _res(parsed, "decode")["limits"]["memory"] == hostile
+
+
+@pytest.mark.parametrize(
+    "bad", ["-", "TBD", "N/A", "16 Gi", "32 cores", "yes", "null", "~", "128GB"])
+def test_invalid_quantity_is_a_hard_error(bad, capsys):
+    """A quantity the cluster rejects at admission must fail here instead. `-` is the
+    conventional markdown placeholder and used to produce an unparseable YAML file
+    under a zero exit code."""
+    with pytest.raises(SystemExit) as exc:
+        build([row("memory limit", bad)])
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "not a valid" in err or "invalid Kubernetes quantities" in err
+
+
+def test_all_four_stated_suppresses_the_warning(tmp_path, capsys):
     scenario, prov = build(
         [
             row("cpu limit", "64"),
@@ -939,43 +982,55 @@ def test_all_four_stated_suppresses_the_warning_comment(tmp_path):
     )
     text = emit(scenario, prov, tmp_path)
     assert "Reducing Torch parallelism" not in text
+    assert "Reducing Torch parallelism" not in capsys.readouterr().err
     parsed = yaml.safe_load(text)["scenario"][0]
     assert _res(parsed, "decode")["limits"] == {"memory": "200Gi", "cpu": "64"}
     assert _res(parsed, "decode")["requests"] == {"memory": "32Gi", "cpu": "8"}
 
 
-def test_any_default_keeps_the_warning_comment(tmp_path):
+def test_any_default_keeps_the_warning(tmp_path, capsys):
     scenario, prov = build([row("cpu limit", "64")])
     assert "Reducing Torch parallelism" in emit(scenario, prov, tmp_path)
-
-
-def test_stderr_warning_when_defaults_used(capsys):
-    build([row("Number of prefill pods", "1")])
     err = capsys.readouterr().err
     assert "Reducing Torch parallelism" in err
-    assert "decode" in err and "prefill" in err
+    assert "cpu_limit" not in err, "warning names a quantity the operator stated"
 
 
-def test_no_stderr_warning_when_all_four_stated(capsys):
-    build(
+def test_prefill_warn_suppression_is_independent_of_decode(tmp_path):
+    """Both roles gate the preamble separately. Only decode's half was pinned
+    before, so forcing prefill's on above stated values went unnoticed."""
+    scenario, prov = build(
         [
+            row("Number of prefill pods", "1"),
             row("cpu limit", "64"),
             row("memory limit", "200Gi"),
             row("cpu request", "8"),
             row("memory request", "32Gi"),
         ]
     )
-    assert "Reducing Torch parallelism" not in capsys.readouterr().err
+    text = emit(scenario, prov, tmp_path)
+    prefill_block = text[text.index("  prefill:"):]
+    assert "GENEROUS DEFAULTS" not in prefill_block
 
 
-def test_kubernetes_quantity_forms_pass_through(tmp_path):
-    """500m and Mi units must survive verbatim, not be re-serialized."""
-    scenario, prov = build(
-        [row("cpu request", "500m"), row("memory request", "1536Mi")]
+def test_emitted_values_carry_per_value_sources(tmp_path):
+    scenario, prov = build([row("cpu limit", "64")])
+    text = emit(scenario, prov, tmp_path)
+    cpu = next(ln for ln in text.splitlines() if "cpu: '64'" in ln)
+    mem = next(ln for ln in text.splitlines() if "memory: '128Gi'" in ln)
+    assert "operator-stated" in cpu
+    assert "UNMEASURED" in mem
+
+
+def test_source_comments_name_no_input_file(tmp_path):
+    """Both generators share pod_resources and read different inputs."""
+    scenario, prov = build([row("cpu limit", "64")])
+    resources_text = "\n".join(
+        ln for ln in emit(scenario, prov, tmp_path).splitlines()
+        if "operator-stated" in ln or "UNMEASURED" in ln
     )
-    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
-    assert _res(parsed, "decode")["requests"] == {
-        "memory": "1536Mi", "cpu": "500m"}
+    assert "vllm_args" not in resources_text
+    assert "{" not in resources_text
 
 
 def test_resources_parse_in_every_row_combination(tmp_path):
@@ -983,75 +1038,9 @@ def test_resources_parse_in_every_row_combination(tmp_path):
         [],
         [row("Number of prefill pods", "2")],
         [row("cpu limit", "64"), row("Number of prefill pods", "2")],
-        [row("prefill memory limit", "64Gi"), row("Number of prefill pods", "2")],
+        [row("memory request", "20Gi"), row("Number of prefill pods", "2")],
     ]
     for i, extra in enumerate(combos):
         scenario, prov = build(extra)
         parsed = yaml.safe_load(emit(scenario, prov, tmp_path / f"r{i}"))
         assert "resources" in parsed["scenario"][0]["decode"]
-
-
-# ---------------------------------------------------------------------------
-# Review findings from PR #857
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize(
-    "stated,expected",
-    [
-        # The defect: parse_numeric takes only the first whitespace token, so
-        # `16 Gi` became `16` -- sixteen BYTES -- with no warning, because the
-        # field counted as stated. The forms the original tests used (500m,
-        # 1536Mi) passed only because int() happens to fail on them.
-        ("16 Gi", "16 Gi"),
-        ("128Gi", "128Gi"),
-        ("1536Mi", "1536Mi"),
-        ("2 Ti", "2 Ti"),
-    ],
-)
-def test_memory_quantity_keeps_its_unit(stated, expected, tmp_path):
-    scenario, prov = build([row("decode memory limit", stated)])
-    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
-    assert parsed["decode"]["resources"]["limits"]["memory"] == expected
-
-
-@pytest.mark.parametrize("stated", ["500m", "1.50", "1.5", "32", "500 m"])
-def test_cpu_quantity_passes_through_verbatim(stated, tmp_path):
-    """`1.50` must not become `1.5`: it is a string the chart forwards to
-    Kubernetes, not a number to normalize."""
-    scenario, prov = build([row("decode cpu limit", stated)])
-    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
-    assert parsed["decode"]["resources"]["limits"]["cpu"] == stated
-
-
-def test_every_resource_field_is_string_valued():
-    """Guards the derivation rather than the instance: a future `*_limit` or
-    `*_request` alias must join _STRING_VALUED_FIELDS automatically."""
-    resource_fields = {
-        name for name in gfc.PARAMETER_ALIASES
-        if name.endswith(("_limit", "_request"))
-    }
-    assert resource_fields, "no resource aliases found — did the naming change?"
-    assert resource_fields <= gfc._STRING_VALUED_FIELDS
-
-
-def test_stderr_warning_reports_the_value_actually_emitted(capsys):
-    """Stating one quantity used to still announce the full default table, so the
-    operator saw 'limits 32 CPU' next to an emitted 64."""
-    build([row("decode cpu limit", "64")])
-    err = capsys.readouterr().err
-    assert "cpu_limit" not in err
-    assert "memory_limit=128Gi" in err
-
-
-def test_request_exceeding_limit_warns_at_generation_time(capsys):
-    build([row("decode cpu request", "40")])
-    err = capsys.readouterr().err
-    assert "request 40 > limit 32" in err
-    assert "admission" in err
-
-
-def test_emitted_values_carry_per_value_sources(tmp_path):
-    scenario, prov = build([row("decode cpu limit", "64")])
-    text = emit(scenario, prov, tmp_path)
-    cpu = next(ln for ln in text.splitlines() if "cpu: '64'" in ln)
-    assert "config.md" in cpu

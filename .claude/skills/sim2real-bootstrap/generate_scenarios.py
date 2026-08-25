@@ -120,13 +120,8 @@ KNOWN_FIELDS = {
             "enable_chunked_prefill", "block_size",
             "gpu_memory_utilization", "dtype", "kv_cache_dtype",
             "enable_prefix_caching", "enforce_eager", "swap_space",
-            # Pod CPU/memory (issue #850): four shared keys plus per-role
-            # overrides, resolved by pod_resources.
+            # Pod CPU/memory (issue #850), applied to both roles.
             "cpu_limit", "memory_limit", "cpu_request", "memory_request",
-            "decode_cpu_limit", "decode_memory_limit",
-            "decode_cpu_request", "decode_memory_request",
-            "prefill_cpu_limit", "prefill_memory_limit",
-            "prefill_cpu_request", "prefill_memory_request",
         },
         "ignored": set(),
     },
@@ -325,38 +320,26 @@ def build_scenario(entry: dict, name: str) -> dict:
         )
 
     # --- Pod CPU/memory (issue #850) ---
-    # Same resolution order and the same shared module as the config.md path:
-    # per-role key beats shared key beats the role default.
+    # Same four keys and the same resolver as the config.md path.
     for role_name in ("decode", "prefill"):
         if role_name not in scenario:
             continue
-        # Handed over separately so pod_resources applies the precedence. The old
-        # `vllm_args.get(f"{role}_{key}", vllm_args.get(key))` returned None for a
-        # per-role key PRESENT with a JSON null or "", never consulting the shared
-        # key, so a stated shared value was silently replaced by the default.
-        per_role = {key: vllm_args.get(f"{role_name}_{key}") for key in pres.KEYS}
-        shared = {key: vllm_args.get(key) for key in pres.KEYS}
-        values, res_prov = pres.resolve_resources(
-            role_name, per_role, shared, pres.JSON_INPUT
-        )
+        stated = {key: vllm_args.get(key) for key in pres.KEYS}
+        values, res_prov = pres.resolve_resources(role_name, stated)
         scenario[role_name]["resources"] = values
-        warn = pres.used_any_default(res_prov)
+        warn = bool(pres.defaulted_keys(res_prov))
         if warn:
+            print(pres.starvation_warning(role_name, values, res_prov),
+                  file=sys.stderr)
+        bad = pres.invalid_quantities(values)
+        if bad:
             print(
-                pres.starvation_warning(
-                    role_name, values, res_prov, pres.JSON_INPUT
-                ),
+                f"  ERROR: {role_name} has invalid Kubernetes quantities: "
+                f"{', '.join(bad)}. Use e.g. 32, 500m, 128Gi, 1536Mi -- no spaces, "
+                f"no trailing words, no placeholders.",
                 file=sys.stderr,
             )
-        for problem in pres.request_exceeds_limit(values):
-            print(
-                f"  WARNING: {role_name} {problem}. Kubernetes rejects that pod "
-                f"at admission. Each quantity resolves independently, so a "
-                f"stated request with an unstated limit takes the default limit "
-                f"-- state both.",
-                file=sys.stderr,
-            )
-        # Internal, read by the emitter; never printed. See generate_from_config.py.
+            sys.exit(1)
         scenario[role_name]["_resources_warn"] = warn
         scenario[role_name]["_resources_provenance"] = res_prov
 

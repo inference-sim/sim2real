@@ -22,27 +22,22 @@ scenario:
       - "--max-num-batched-tokens=2048"  # config.md row "max_num_batched_tokens"
       - "--enable-chunked-prefill"  # config.md row "enable_chunked_prefill"
       - "--enable-prefix-caching"  # sim2real-bootstrap default (config.md silent; deployed vLLM requires explicit ON)
-    # Some or all of the figures below are GENEROUS DEFAULTS, NOT
-    # measured -- see the per-value sources. The defaults' limits come
-    # from llm-d's pd-disaggregation guide; their requests are half
-    # that. Watch for 'Reducing Torch parallelism from N threads to 1'
-    # in the pod log -- that is CPU starvation, and it shows up as ITL
-    # noise rather than a failure.
+    # Some or all of these are GENEROUS DEFAULTS, NOT measured -- see
+    # the per-value sources. Defaults' limits come from llm-d's
+    # pd-disaggregation guide; their requests are half that. Watch for
+    # 'Reducing Torch parallelism from N threads to 1' in the pod log:
+    # that is CPU starvation, and it shows up as ITL noise rather than
+    # a failure.
     #
-    # requests are stated explicitly on purpose: omitting them does
-    # NOT mean 'no reservation'. Kubernetes copies the limit into the
-    # request when the request is absent, so limits-only would reserve
-    # the whole generous figure on every replica.
-    #
-    # `resources` is a mapping, so a downstream baseline overriding
-    # e.g. limits.cpu deep-merges key by key -- the requests below
-    # survive. That differs from the scalar lists elsewhere in this
-    # skill, which are replaced wholesale.
+    # requests sit below limits so the scheduler reserves less than the
+    # ceiling. Both halves are stated because the framework default
+    # sets both, and emitting only limits would leave requests at the
+    # inherited 40Gi/4.
     resources:
       limits:
-        memory: 128Gi  # sim2real-bootstrap default (generous, UNMEASURED)
-        cpu: '32'  # sim2real-bootstrap default (generous, UNMEASURED)
+        memory: '128Gi'  # sim2real-bootstrap default (UNMEASURED)
+        cpu: '32'  # sim2real-bootstrap default (UNMEASURED)
       requests:
-        memory: 64Gi  # sim2real-bootstrap default (generous, UNMEASURED)
-        cpu: '16'  # sim2real-bootstrap default (generous, UNMEASURED)
+        memory: '64Gi'  # sim2real-bootstrap default (UNMEASURED)
+        cpu: '16'  # sim2real-bootstrap default (UNMEASURED)
 

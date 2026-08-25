@@ -398,35 +398,34 @@ optional per-role accelerator overrides; without them both roles use the shared
 - `parallelism` and `vllm.additionalFlags` are shared across roles — `config.md`
   has no per-role form for them.
 - **CPU/memory is always emitted, per role (issue #850).** Bootstrap used to emit
-  none, so bundles inherited the framework default of `limits: {memory: 40Gi,
-  cpu: "4"}` with no `requests` — four CPU for a pod that may hold four GPUs and
-  shares its cgroup with the routing sidecar. That starves vLLM, and the signal
-  (`Reducing Torch parallelism from N threads to 1`) surfaces as ITL noise rather
-  than a failure, so it corrupts the metric the arms are compared on.
+  none, so bundles inherited the framework default — `limits` **and** `requests`
+  both `{memory: 40Gi, cpu: "4"}` for each role (`defaults.yaml:848-858` decode,
+  `:993-1000` prefill). Four CPU for a pod that may hold four GPUs and shares its
+  cgroup with the routing sidecar starves vLLM, and the signal (`Reducing Torch
+  parallelism from N threads to 1`) surfaces as ITL noise rather than a failure, so
+  it corrupts the metric the arms are compared on.
 
-  **Rows `config.md` may state**, each optional, resolved *per-role row → shared
-  row → role default* (the same precedence as `Decode GPU` over `GPU`):
+  **Rows `config.md` may state**, each optional, applied to **both** roles:
 
-  | Shared row | Per-role override |
+  | Row | Also accepted as |
   |---|---|
-  | `cpu limit` | `decode cpu limit`, `prefill cpu limit` |
-  | `memory limit` | `decode memory limit`, `prefill memory limit` |
-  | `cpu request` | `decode cpu request`, `prefill cpu request` |
-  | `memory request` | `decode memory request`, `prefill memory request` |
+  | `cpu limit` | `cpu_limit`, `cpu limits` |
+  | `memory limit` | `memory_limit`, `memory limits` |
+  | `cpu request` | `cpu_request`, `cpu requests` |
+  | `memory request` | `memory_request`, `memory requests` |
 
-  Values are passed through verbatim as strings — `32`, `500m`, `1.5`, `128Gi`,
-  `1536Mi` are all valid Kubernetes quantities and re-serializing risks changing
-  them. Stating only some is fine; the rest take defaults. A per-role row left
-  **blank** counts as unset and falls through to the shared row, not to the
-  default — writing an empty row is not an instruction to ignore the shared row
-  you did fill in.
+  Stating only some is fine; the rest take their per-role default. There are
+  deliberately **no per-role rows** — an operator who needs decode and prefill to
+  differ edits `baselines/baseline.yaml` after bootstrap, as they do for everything
+  else the generator does not model. The JSON-input path takes the same four names
+  as `vllm_args` keys.
 
-  The JSON-input path (`generate_scenarios.py`) takes the same values as
-  `vllm_args` keys — `cpu_limit`, `decode_memory_request`, and so on — with the
-  same precedence, and cites `vllm_args` rather than `config.md` in its warnings
-  and source comments, since it is selected only when no `config.md` exists. Both
-  paths resolve through `pod_resources.resolve_resources`, so the precedence
-  cannot differ between them.
+  Values are emitted verbatim as **quoted** strings — `32`, `500m`, `1.5`, `128Gi`,
+  `1536Mi` are all valid Kubernetes quantities, and an unquoted one is re-typed by
+  any YAML reader (`128` to an int, `yes` to a bool). A value that is **not** a
+  valid quantity — `TBD`, `16 Gi`, `32 cores`, or a bare `-` placeholder — is a hard
+  error at generation, because the cluster would otherwise reject the pod at
+  admission far from the row that caused it.
 
   **Defaults when a row is absent** — decode is sized above prefill, which is both
   upstream's own sizing and the observed-working configuration:
@@ -437,19 +436,21 @@ optional per-role accelerator overrides; without them both roles use the shared
   | prefill | `16Gi` / `8` | `8Gi` / `4` |
 
   Limits come from llm-d's `pd-disaggregation` guide verbatim. Requests are half
-  those limits, and are **emitted explicitly on purpose**: omitting `requests` is
-  not "no reservation" — Kubernetes copies the limit into the request when the
-  request is absent, so limits-only would reserve the whole generous figure on
-  every replica, and a 2-replica decode pool would reserve 256Gi before prefill is
-  scheduled at all.
+  those limits: requests are what the scheduler actually reserves, and reserving the
+  generous ceiling on every replica would make a multi-replica pool unschedulable on
+  a busy cluster. **Both halves are stated** because the framework default sets
+  both, and a scenario is deep-merged over it — emitting only `limits` would leave
+  `requests` at the inherited 40Gi/`"4"`, so a decode pod would ask for 40Gi while
+  permitted 128Gi. That pairing would be implicit and surprising.
 
   **The defaults are not measured.** They come from one cluster, one model, one
   tensor-parallel degree. Whenever any quantity falls back to a default, bootstrap
-  prints a `WARNING` naming the starvation signal, and the emitted YAML carries the
-  same caveat as a comment. State all four rows for a role and both warnings go
-  away, because then the numbers are the operator's. Fixed starting values were
-  chosen over deriving from GPU count deliberately: a wrong fixed number is visible
-  and correctable, a wrong formula looks principled.
+  prints a `WARNING` naming the starvation signal and the quantities that defaulted,
+  and the emitted YAML carries the same caveat plus a per-value source comment.
+  State all four rows and both go quiet, because then the numbers are the
+  operator's. Fixed starting values were chosen over deriving from GPU count
+  deliberately: a wrong fixed number is visible and correctable, a wrong formula
+  looks principled.
 - **One GPU type per role.** A GPU cell naming several types (`H100, A100`) emits
   the first and prints a `WARNING` naming every type found and the one used: a
   role is one Deployment, so it carries one node selector and its replicas cannot
