@@ -322,8 +322,12 @@ def build_scenario(entry: dict, name: str) -> dict:
     #
     # `prefill_instances` is absent-or-int (unlike the config.md path, which
     # normalises to 0 upstream), so it is coerced before the gate sees it.
+    #
+    # Gate 2 takes dataLocal, not dp -- see generate_from_config.py's note and
+    # pd_plumbing.needs_multigpu_plumbing. Same single input feeds both today.
+    data_local = dp
     kv_plumbing = pdp.needs_kv_plumbing(prefill_replicas or 0)
-    multigpu_plumbing = pdp.needs_multigpu_plumbing(tp, dp)
+    multigpu_plumbing = pdp.needs_multigpu_plumbing(tp, data_local)
 
     if kv_plumbing or multigpu_plumbing:
         vc = scenario.setdefault("vllmCommon", {})

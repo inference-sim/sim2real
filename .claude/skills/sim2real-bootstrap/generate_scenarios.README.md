@@ -97,14 +97,17 @@ on two gates. Both come from `pd_plumbing.py`, shared with
 | Gate | Condition | Emitted |
 |---|---|---|
 | 1 | `vllm_args.prefill_instances > 0` | `preprocess` init container on both roles, `shared-config` emptyDir + mount, `vllmCommon.preprocessScript`, `NIXL_LOG_LEVEL`, `routing.connector` |
-| 2 | `tensor_parallel_size > 1` or `data_parallel_size > 1` | `dshm` tmpfs at `/dev/shm` + mount, `NCCL_DEBUG`, `NVSHMEM_DEBUG` |
+| 2 | `tensor × dataLocal > 1` (more than one GPU in the pod) | `dshm` tmpfs at `/dev/shm` + mount, `NCCL_DEBUG`, `NVSHMEM_DEBUG` |
 
 Gate 1's first three are one unit — the init container writes
 `/shared-config/llmdbench_env.sh`, `preprocessScript` sources it, the volume is
-the handoff — so any one missing makes the other two inert. Gate 2 keys on either
-parallelism degree because `dataLocal` equals `dp`, so either puts more than one
-GPU in a pod. Neither gate fires for a single-GPU aggregated entry, so those
-regenerate byte-identically.
+the handoff — so any one missing makes the other two inert. Gate 2 uses upstream's
+own accelerator-count arithmetic (`tensor × dataLocal`, per
+`13_ms-values.yaml.j2:269-271`) — `dataLocal` rather than `data`, since `data`
+counts DP ranks across the whole deployment and only same-pod ranks share memory.
+Both derive from `vllm_args.data_parallel_size` today, that being the only input,
+so the distinction is latent until #843 adds a real per-pod split. Neither gate
+fires for a single-GPU aggregated entry, so those regenerate byte-identically.
 
 One GPU type per role. A hardware value naming several types (`"H100, A100"`)
 emits the first and warns, naming every type found and the one used: a role is

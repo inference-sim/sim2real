@@ -903,8 +903,14 @@ def build_scenario(
     # The keys set below are markers for readers and for tests that inspect the
     # scenario dict -- the hand-rolled emitter prints from the `_gates` booleans,
     # not by walking the dict, so a marker alone changes no output.
+    #
+    # Gate 2 takes dataLocal, not dp: GPUs-per-pod is tensor x dataLocal, and dp
+    # counts ranks across the whole deployment rather than inside one pod. Both are
+    # `dp` today because that is the only input, but the emitted key is what the
+    # gate must agree with -- see pd_plumbing.needs_multigpu_plumbing.
+    data_local = dp
     kv_plumbing = pdp.needs_kv_plumbing(prefill_replicas)
-    multigpu_plumbing = pdp.needs_multigpu_plumbing(tp, dp)
+    multigpu_plumbing = pdp.needs_multigpu_plumbing(tp, data_local)
 
     if kv_plumbing or multigpu_plumbing:
         vc = scenario.setdefault("vllmCommon", {})

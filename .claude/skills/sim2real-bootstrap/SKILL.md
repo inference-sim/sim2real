@@ -291,15 +291,16 @@ scenario:
       additionalFlags:
       - "--flag=value"                 # shared with decode, not per-role
 
-  # Also emitted with a prefill pool, and only then (issues #830, #848). This is
-  # what makes the pool do anything; see the note below.
+  # Emitted only under the gates tagged per key below (issues #830, #848):
+  # kvTransfer and preprocessScript need a prefill pool; volumes/volumeMounts are
+  # written by BOTH gates and appear whenever either fires. See the note below.
   vllmCommon:
-    kvTransfer:
+    kvTransfer:                        # prefill pool   (Gate 1)
       enabled: true
       connector: NixlConnector
       role: kv_both
     # Sources the env file the preprocess init container writes (#848).
-    preprocessScript: |
+    preprocessScript: |                # prefill pool   (Gate 1)
       export LD_LIBRARY_PATH=...libcuda.so.1 discovery...
       . /shared-config/llmdbench_env.sh
     volumes:
@@ -374,9 +375,11 @@ optional per-role accelerator overrides; without them both roles use the shared
     pair. `routing.connector` is the sidecar half of the connector decision
     `kvTransfer.connector` makes engine-side; both spellings come from
     `pd_plumbing.KV_CONNECTOR_*` so they cannot drift.
-  - **Gate 2 — more than one GPU per pod** (`tensor_parallel_size > 1` *or*
-    `data_parallel_size > 1`; `dataLocal` equals `dp`, so either puts several
-    GPUs in one pod): the `dshm` tmpfs at `/dev/shm` and `NCCL_DEBUG` /
+  - **Gate 2 — more than one GPU per pod** (`tensor × dataLocal > 1`, which is
+    upstream's own accelerator-count arithmetic; `dataLocal` and not `data`,
+    because `data` counts ranks across the whole deployment while only same-pod
+    ranks share memory. Both are `data_parallel_size` today, since that is the
+    only input either comes from): the `dshm` tmpfs at `/dev/shm` and `NCCL_DEBUG` /
     `NVSHMEM_DEBUG`. The K8s default 64 MB `/dev/shm` is a latency-jitter and
     hang risk for multi-GPU collectives. `NVSHMEM_DEBUG` is load-bearing rather
     than diagnostic: `set_llmdbench_environment.py` adds `NVSHMEM_HCA_LIST` to

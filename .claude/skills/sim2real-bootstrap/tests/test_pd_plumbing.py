@@ -53,19 +53,39 @@ def test_needs_kv_plumbing_gates_on_prefill_count(replicas, expected):
 
 
 @pytest.mark.parametrize(
-    "tp,dp,expected",
+    "tensor,data_local,expected",
     [
         (1, 1, False),
         (2, 1, True),
-        # dataLocal == dp in both generators, so dp>1 also means several GPUs in
-        # one pod -- same collectives, same /dev/shm pressure. Issue #848 says
-        # "tensor_parallel_size > 1"; this is the deliberate superset (plan D1).
+        # Intra-pod data parallelism: dataLocal>1 with tensor==1 still puts several
+        # GPUs in one pod. Issue #848 says "tensor_parallel_size > 1"; this is the
+        # deliberate superset (plan D1).
         (1, 2, True),
         (2, 2, True),
+        (8, 4, True),
     ],
 )
-def test_needs_multigpu_plumbing_gates_on_either_degree(tp, dp, expected):
-    assert pdp.needs_multigpu_plumbing(tp, dp) is expected
+def test_needs_multigpu_plumbing_gates_on_gpus_per_pod(tensor, data_local, expected):
+    assert pdp.needs_multigpu_plumbing(tensor, data_local) is expected
+
+
+def test_gate2_measures_data_local_not_deployment_wide_data():
+    """The gate must key on GPUs *in this pod*, which is tensor x dataLocal
+    (13_ms-values.yaml.j2:269-271), not on the deployment-wide `data` degree.
+
+    A scenario with data: 8, dataLocal: 1, tensor: 1 is a SINGLE-GPU pod -- the
+    other seven DP ranks live in other pods and talk over the network, so there are
+    no intra-pod shared-memory collectives and nothing for /dev/shm or
+    NCCL/NVSHMEM to do locally. A gate fed the deployment-wide degree would emit a
+    16Gi tmpfs (charged against the pod memory limit, #850) plus dead env vars.
+
+    Both generators feed dataLocal from the single data_parallel_size input today,
+    so this is latent rather than live -- it goes live with #843's multinode split.
+    """
+    deployment_wide_data = 8
+    assert pdp.needs_multigpu_plumbing(1, 1) is False
+    # Sanity: the value that must NOT be what the gate consults would flip it.
+    assert pdp.needs_multigpu_plumbing(1, deployment_wide_data) is True
 
 
 # --- preprocessScript ------------------------------------------------------

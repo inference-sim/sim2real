@@ -10,6 +10,14 @@
 
 **Spec:** GitHub issue #848 (`bootstrap: emit the P/D and multi-GPU pod plumbing on the same gates as #846, or kvTransfer:true crashloops`). Vetted against HEAD `bc9c7a9`; submodule pin `llm-d-benchmark@76473d0`.
 
+> **Superseded in one place.** Gate 2's predicate changed after review, from
+> `needs_multigpu_plumbing(tp, dp) -> tp > 1 or dp > 1` to
+> `needs_multigpu_plumbing(tensor, data_local) -> tensor * data_local > 1`. See
+> **D1-revised** below for why. The Task 1 / 2 / 3 code blocks in this plan still
+> show the original signature and the `(tp, dp)` call sites; `pd_plumbing.py` and
+> the two generators are the current truth. Everything else in this plan shipped
+> as written.
+
 ## Global Constraints
 
 - Python >= 3.10. No new third-party dependencies.
@@ -28,7 +36,46 @@
 
 ## Design decisions locked before implementation
 
-**D1 — Gate 2 is `tp > 1 or dp > 1`, not `tp > 1`.** The issue says `tensor_parallel_size > 1`. GPUs-per-pod is `tensor × dataLocal`, and both generators set `dataLocal: dp`, so `dp>1, tp=1` also puts several GPUs in one pod — the same collectives and the same `/dev/shm` pressure the issue's mechanism argument invokes. `tp > 1 or dp > 1` is also the exact predicate the adjacent `parallelism` block already uses in both generators, so the plumbing appears precisely when a `parallelism` block appears. Strict superset of the issue's ask. Must be called out in the PR body.
+**D1 — Gate 2 is `tensor × dataLocal > 1`, not `tp > 1`.** The issue says
+`tensor_parallel_size > 1`.
+
+This decision was **revised after review** (see D1-revised below); the original
+form is kept here because the revision is the interesting part.
+
+*Originally implemented as `tp > 1 or dp > 1`*, reasoned as: GPUs-per-pod is
+`tensor × dataLocal`, both generators set `dataLocal: dp`, so `dp>1, tp=1` is also
+a multi-GPU pod. That reasoning states the formula correctly and then gates on the
+wrong variable — `dp` is the deployment-wide DP degree, `dataLocal` is the per-pod
+one.
+
+**D1-revised — the gate consults `dataLocal`, and is expressed as the product.**
+Upstream resolves the accelerator count itself at `13_ms-values.yaml.j2:269-271`:
+`accelerator.count if explicit, else tensor * dataLocal`, commented "each DP-local
+rank needs its own GPU". Bootstrap never emits `accelerator.count`, only
+`acceleratorType`, so for generated scenarios the product *is* the count.
+
+`data` counts ranks across the whole deployment; `dataLocal` counts the ones in
+this pod. A `data: 8, dataLocal: 1, tensor: 1` scenario is a single-GPU pod whose
+siblings communicate over the network — no intra-pod shared-memory collectives, so
+no `/dev/shm` pressure and nothing for NCCL/NVSHMEM to do locally. Gating on `data`
+would emit a 16Gi tmpfs (charged against the pod memory limit, #850) plus dead env
+vars for a pod that needs none.
+
+Latent, not live: both generators feed `dataLocal` from the single
+`data_parallel_size` input, so `data == dataLocal` today and all 18 tp×dp×prefill
+combinations emit byte-identically under either predicate (verified by diff). It
+goes live with #843's multinode/LWS per-pod split — precisely when a gate on the
+wrong quantity would begin silently over-emitting.
+
+Still a deliberate superset of the issue's literal wording: it also fires for an
+intra-pod data-parallel pod (`dataLocal > 1, tensor == 1`), which is multi-GPU by
+the same mechanism the issue argues from. The gap between the issue's wording and
+this gate is now just that case, rather than every `dp > 1` deployment.
+
+Expressed as `tensor * data_local > 1` rather than the equivalent disjunction so it
+reads as the same quantity upstream computes. (A control fault-injection confirms
+the two forms are behaviourally identical for integers ≥ 1, so this is a
+readability choice, not a behavioural one.)
 
 **D2 — One connector decision, two spellings.** The issue requires that `kvTransfer.connector` (engine) and `routing.connector` (sidecar) "come from one 'which connector' value". Implemented as two module constants in one place with a comment binding them, and the existing `"NixlConnector"` literals in both generators replaced by the constant. Changing connectors is then a one-place edit.
 
@@ -425,19 +472,19 @@ def needs_kv_plumbing(prefill_replicas: int) -> bool:
     return bool(prefill_replicas) and prefill_replicas > 0
 
 
-def needs_multigpu_plumbing(tp: int, dp: int) -> bool:
+# NOTE: this signature and predicate were REVISED after review -- see D1-revised.
+# The shipped version takes (tensor, data_local) and returns
+# `tensor * data_local > 1`. The docstring below is superseded by the one in
+# pd_plumbing.py; read that file, not this block, for the current rationale.
+def needs_multigpu_plumbing(tensor: int, data_local: int) -> bool:
     """Gate 2: more than one GPU in a pod, so collectives and /dev/shm matter.
 
-    Issue #848 words this gate as `tensor_parallel_size > 1`. It is implemented as
-    `tp > 1 or dp > 1` because GPUs-per-pod is tensor x dataLocal and both
-    generators set `dataLocal: dp` -- so dp>1 with tp=1 is also a multi-GPU pod
-    running the same collectives against the same /dev/shm. This is also the exact
-    predicate the adjacent `parallelism` block already uses in both generators, so
-    the plumbing appears precisely when a `parallelism` block appears rather than
-    on a third gate spelling that has to be kept in sync. Strict superset of the
-    issue's wording: it never emits less.
+    GPUs-per-pod is `tensor x dataLocal` -- upstream's own arithmetic at
+    13_ms-values.yaml.j2:269-271. `dataLocal`, NOT `data`: `data` is the
+    deployment-wide DP degree, `dataLocal` is the ranks in THIS pod, and only the
+    latter implies intra-pod shared-memory collectives.
     """
-    return tp > 1 or dp > 1
+    return tensor * data_local > 1
 
 
 # ---------------------------------------------------------------------------

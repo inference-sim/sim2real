@@ -72,19 +72,37 @@ def needs_kv_plumbing(prefill_replicas: int) -> bool:
     return bool(prefill_replicas) and prefill_replicas > 0
 
 
-def needs_multigpu_plumbing(tp: int, dp: int) -> bool:
+def needs_multigpu_plumbing(tensor: int, data_local: int) -> bool:
     """Gate 2: more than one GPU in a pod, so collectives and /dev/shm matter.
 
-    Issue #848 words this gate as `tensor_parallel_size > 1`. It is implemented as
-    `tp > 1 or dp > 1` because GPUs-per-pod is tensor x dataLocal and both
-    generators set `dataLocal: dp` -- so dp>1 with tp=1 is also a multi-GPU pod
-    running the same collectives against the same /dev/shm. This is also the exact
-    predicate the adjacent `parallelism` block already uses in both generators, so
-    the plumbing appears precisely when a `parallelism` block appears rather than
-    on a third gate spelling that has to be kept in sync. Strict superset of the
-    issue's wording: it never emits less.
+    GPUs-per-pod is `tensor x dataLocal`, which is upstream's own arithmetic:
+    13_ms-values.yaml.j2:269-271 resolves the accelerator count as
+    `accelerator.count if explicit, else tensor * dataLocal`, commented "each
+    DP-local rank needs its own GPU". Bootstrap never emits `accelerator.count`
+    (only `acceleratorType`), so for generated scenarios the product is always the
+    count. Stated as the product rather than `tensor > 1 or data_local > 1` so it
+    reads as the same quantity upstream computes; for integers >= 1 the two are
+    equivalent.
+
+    `dataLocal`, NOT `data`: `data` is the deployment-wide DP degree, while
+    `dataLocal` is the ranks resident in THIS pod. A scenario with `data: 8,
+    dataLocal: 1, tensor: 1` is a single-GPU pod whose seven sibling ranks live in
+    other pods and communicate over the network -- no intra-pod shared-memory
+    collectives, so no /dev/shm pressure and nothing for NCCL/NVSHMEM to do
+    locally. Gating on `data` would emit a 16Gi tmpfs (charged against the pod
+    memory limit -- see #850) plus dead env vars for a pod that needs none.
+
+    Both generators currently derive `dataLocal` from the single
+    `data_parallel_size` input, so today `data == dataLocal` and either spelling
+    emits identically. The distinction becomes load-bearing when #843 adds a real
+    multinode/LWS per-pod split, which is exactly when a gate keyed on the wrong
+    quantity would start silently over-emitting.
+
+    Issue #848 words this gate as `tensor_parallel_size > 1`. This is a deliberate
+    superset: it also fires for an intra-pod data-parallel pod (`dataLocal > 1`,
+    `tensor == 1`), which is multi-GPU by the same mechanism the issue argues from.
     """
-    return tp > 1 or dp > 1
+    return tensor * data_local > 1
 
 
 # ---------------------------------------------------------------------------
