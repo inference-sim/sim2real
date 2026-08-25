@@ -338,9 +338,21 @@ def build_scenario(entry: dict, name: str) -> dict:
         scenario[role_name]["resources"] = values
         warn = pres.used_any_default(res_prov)
         if warn:
-            print(pres.starvation_warning(role_name), file=sys.stderr)
+            print(
+                pres.starvation_warning(role_name, values, res_prov),
+                file=sys.stderr,
+            )
+        for problem in pres.request_exceeds_limit(values):
+            print(
+                f"  WARNING: {role_name} {problem}. Kubernetes rejects that pod "
+                f"at admission. Each quantity resolves independently, so a "
+                f"stated request with an unstated limit takes the default limit "
+                f"-- state both.",
+                file=sys.stderr,
+            )
         # Internal, read by the emitter; never printed. See generate_from_config.py.
         scenario[role_name]["_resources_warn"] = warn
+        scenario[role_name]["_resources_provenance"] = res_prov
 
     # --- Pod plumbing (issue #848) ---
     # Same two gates and the same fragments as generate_from_config.py -- see
@@ -461,6 +473,7 @@ def write_commented_yaml(scenario: dict, entry: dict, out_path: str):
         lines.extend(
             pres.resource_lines(
                 scenario["decode"]["resources"],
+                scenario["decode"]["_resources_provenance"],
                 warn=scenario["decode"].get("_resources_warn", True),
             )
         )
@@ -517,6 +530,7 @@ def write_commented_yaml(scenario: dict, entry: dict, out_path: str):
             lines.extend(
                 pres.resource_lines(
                     p_role["resources"],
+                    p_role["_resources_provenance"],
                     warn=p_role.get("_resources_warn", True),
                 )
             )

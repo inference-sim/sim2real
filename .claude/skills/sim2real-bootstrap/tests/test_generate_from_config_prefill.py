@@ -455,18 +455,26 @@ def test_single_pool_config_regenerates_byte_identically(tmp_path):
 
 def test_single_pool_golden_has_no_prefill_artifacts():
     """Guards the golden itself: if someone regenerates it from a future version
-    that emits prefill unconditionally, this fails rather than blessing it."""
+    that emits prefill unconditionally, this fails rather than blessing it.
+
+    The `labelValues` assertion belongs to this test, not to the pod-resources one
+    below: #850's test was originally spliced between the two, which left this
+    guard trailing a docstring about CPU and memory.
+    """
     golden = (FIXTURES / "single_pool_baseline.golden.yaml").read_text()
     assert "prefill:" not in golden
+    assert "labelValues" not in golden
 
 
 def test_single_pool_golden_carries_pod_resources():
     """The other direction of the same guard (issue #850).
 
-    The golden was regenerated when resources emission landed — a pure addition of
-    22 lines with nothing removed. If a future version stops emitting `resources`
-    and someone regenerates the golden to match, the byte-identity test above would
-    happily bless the regression. This makes that fail instead.
+    The golden was regenerated when resources emission landed — verified as a pure
+    addition, then again after the review fixes, where the diff was confined to the
+    resources block and no emitted value changed. If a future version stops
+    emitting `resources` and someone regenerates the golden to match, the
+    byte-identity test above would happily bless the regression. This makes that
+    fail instead.
     """
     golden = (FIXTURES / "single_pool_baseline.golden.yaml").read_text()
     parsed = yaml.safe_load(golden)["scenario"][0]
@@ -476,7 +484,6 @@ def test_single_pool_golden_carries_pod_resources():
         "reserves the whole generous limit (#850)"
     )
     assert resources["limits"]["cpu"] == "32"
-    assert "labelValues" not in golden
 
 
 def test_emitted_yaml_round_trips_both_roles(tmp_path):
@@ -982,3 +989,69 @@ def test_resources_parse_in_every_row_combination(tmp_path):
         scenario, prov = build(extra)
         parsed = yaml.safe_load(emit(scenario, prov, tmp_path / f"r{i}"))
         assert "resources" in parsed["scenario"][0]["decode"]
+
+
+# ---------------------------------------------------------------------------
+# Review findings from PR #857
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "stated,expected",
+    [
+        # The defect: parse_numeric takes only the first whitespace token, so
+        # `16 Gi` became `16` -- sixteen BYTES -- with no warning, because the
+        # field counted as stated. The forms the original tests used (500m,
+        # 1536Mi) passed only because int() happens to fail on them.
+        ("16 Gi", "16 Gi"),
+        ("128Gi", "128Gi"),
+        ("1536Mi", "1536Mi"),
+        ("2 Ti", "2 Ti"),
+    ],
+)
+def test_memory_quantity_keeps_its_unit(stated, expected, tmp_path):
+    scenario, prov = build([row("decode memory limit", stated)])
+    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
+    assert parsed["decode"]["resources"]["limits"]["memory"] == expected
+
+
+@pytest.mark.parametrize("stated", ["500m", "1.50", "1.5", "32", "500 m"])
+def test_cpu_quantity_passes_through_verbatim(stated, tmp_path):
+    """`1.50` must not become `1.5`: it is a string the chart forwards to
+    Kubernetes, not a number to normalize."""
+    scenario, prov = build([row("decode cpu limit", stated)])
+    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
+    assert parsed["decode"]["resources"]["limits"]["cpu"] == stated
+
+
+def test_every_resource_field_is_string_valued():
+    """Guards the derivation rather than the instance: a future `*_limit` or
+    `*_request` alias must join _STRING_VALUED_FIELDS automatically."""
+    resource_fields = {
+        name for name in gfc.PARAMETER_ALIASES
+        if name.endswith(("_limit", "_request"))
+    }
+    assert resource_fields, "no resource aliases found — did the naming change?"
+    assert resource_fields <= gfc._STRING_VALUED_FIELDS
+
+
+def test_stderr_warning_reports_the_value_actually_emitted(capsys):
+    """Stating one quantity used to still announce the full default table, so the
+    operator saw 'limits 32 CPU' next to an emitted 64."""
+    build([row("decode cpu limit", "64")])
+    err = capsys.readouterr().err
+    assert "cpu_limit" not in err
+    assert "memory_limit=128Gi" in err
+
+
+def test_request_exceeding_limit_warns_at_generation_time(capsys):
+    build([row("decode cpu request", "40")])
+    err = capsys.readouterr().err
+    assert "request 40 > limit 32" in err
+    assert "admission" in err
+
+
+def test_emitted_values_carry_per_value_sources(tmp_path):
+    scenario, prov = build([row("decode cpu limit", "64")])
+    text = emit(scenario, prov, tmp_path)
+    cpu = next(ln for ln in text.splitlines() if "cpu: '64'" in ln)
+    assert "config.md" in cpu

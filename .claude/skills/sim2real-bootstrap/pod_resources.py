@@ -106,35 +106,103 @@ def used_any_default(provenance: dict) -> bool:
     return any(src == _DEFAULT_SOURCE for src in provenance.values())
 
 
-def starvation_warning(role: str) -> str:
-    """The generation-time (stderr) warning text, shared by both generators."""
+def defaulted_keys(provenance: dict) -> "list[str]":
+    """Which quantities fell back to a default, in KEYS order."""
+    return [k for k in KEYS if provenance.get(k) == _DEFAULT_SOURCE]
+
+
+def starvation_warning(role: str, values: dict, provenance: dict) -> str:
+    """The generation-time (stderr) warning, shared by both generators.
+
+    Reports the ACTUAL emitted numbers for the quantities that defaulted, and
+    names only those. Printing the whole default table would contradict the
+    emitted YAML whenever the operator overrode part of it -- e.g. stating only
+    `decode cpu limit: 64` would still have announced "limits 32 CPU", which
+    reads as the override having been ignored.
+    """
+    missing = defaulted_keys(provenance)
+    shown = ", ".join(f"{k}={values[k]}" for k in missing)
     return (
-        f"  WARNING: no CPU/memory rows for {role}, so generous UNMEASURED "
-        f"defaults were emitted (limits "
-        f"{DEFAULTS[role]['cpu_limit']} CPU / {DEFAULTS[role]['memory_limit']}, "
-        f"requests {DEFAULTS[role]['cpu_request']} CPU / "
-        f"{DEFAULTS[role]['memory_request']}). They are headroom, not a "
+        f"  WARNING: {role} has no config.md row for {len(missing)} of "
+        f"{len(KEYS)} CPU/memory quantities, so generous UNMEASURED defaults "
+        f"were emitted for them ({shown}). They are headroom, not a "
         f"measurement. Watch the {role} logs for 'Reducing Torch parallelism "
         f"from N threads to 1' -- that is CPU starvation, and it surfaces as ITL "
-        f"noise rather than a failure. State '{role} cpu limit' and "
-        f"'{role} memory limit' rows in config.md to override."
+        f"noise rather than a failure. Add "
+        f"'{role} <cpu|memory> <limit|request>' rows to config.md to override."
     )
 
 
-def resource_lines(values: dict, *, warn: bool) -> "list[str]":
+def _quantity_exceeds(request: str, limit: str) -> bool:
+    """True when `request` provably exceeds `limit`.
+
+    Deliberately conservative. Kubernetes quantities carry suffixes (`500m`,
+    `1536Mi`, `2Gi`) whose comparison needs a real unit parser, which this module
+    does not have. So it compares only when both values share a form it can read
+    exactly -- bare numbers, or the same suffix -- and returns False otherwise.
+    A False here means "not proven", never "verified fine".
+    """
+    req, lim = request.strip(), limit.strip()
+    try:
+        return float(req) > float(lim)
+    except ValueError:
+        pass
+    for suffix in ("Gi", "Mi", "Ki", "G", "M", "K", "m"):
+        if req.endswith(suffix) and lim.endswith(suffix):
+            try:
+                return float(req[: -len(suffix)]) > float(lim[: -len(suffix)])
+            except ValueError:
+                return False
+    return False
+
+
+def request_exceeds_limit(values: dict) -> "list[str]":
+    """Quantities whose request provably exceeds its limit.
+
+    Kubernetes rejects such a pod at admission, and because each quantity is
+    resolved independently, a config.md stating only `decode cpu request: 40`
+    against the default limit of 32 produces exactly that -- failing on the
+    cluster, far from the row that caused it. Returns the offending pairs so the
+    generator can say so at generation time instead.
+    """
+    bad = []
+    for kind in ("cpu", "memory"):
+        req, lim = values[f"{kind}_request"], values[f"{kind}_limit"]
+        if _quantity_exceeds(req, lim):
+            bad.append(f"{kind}: request {req} > limit {lim}")
+    return bad
+
+
+_SHORT_SOURCE = {
+    _STATED_SOURCE: "config.md row",
+    _DEFAULT_SOURCE: "sim2real-bootstrap default (generous, UNMEASURED)",
+}
+
+
+def resource_lines(values: dict, provenance: dict, *, warn: bool) -> "list[str]":
     """`resources` for one role block, as YAML lines.
 
-    Emitted inside a role block the caller has already printed. `warn` adds the
-    unmeasured-defaults comment; pass False when every quantity was stated.
+    Emitted inside a role block the caller has already printed.
+
+    Every value carries its own `# source` comment, the convention the rest of
+    this generator's output follows. That matters here because the four
+    quantities resolve independently: a header comment claiming the figures come
+    from the upstream guide would be false for whichever ones the operator
+    overrode, so the per-line sources are the only honest way to say which is
+    which.
+
+    `warn` adds the unmeasured-defaults preamble; pass False when every quantity
+    was stated, since then the numbers are the operator's.
     """
     lines: list[str] = []
     if warn:
         lines += [
-            "    # Generous headroom, NOT measured. Limits are the llm-d",
-            "    # pd-disaggregation guide's observed-working figures; requests are",
-            "    # half of them. Watch for 'Reducing Torch parallelism from N",
-            "    # threads to 1' in the pod log -- that is CPU starvation, and it",
-            "    # shows up as ITL noise rather than a failure.",
+            "    # Some or all of the figures below are GENEROUS DEFAULTS, NOT",
+            "    # measured -- see the per-value sources. The defaults' limits come",
+            "    # from llm-d's pd-disaggregation guide; their requests are half",
+            "    # that. Watch for 'Reducing Torch parallelism from N threads to 1'",
+            "    # in the pod log -- that is CPU starvation, and it shows up as ITL",
+            "    # noise rather than a failure.",
             "    #",
             "    # requests are stated explicitly on purpose: omitting them does",
             "    # NOT mean 'no reservation'. Kubernetes copies the limit into the",
@@ -146,13 +214,17 @@ def resource_lines(values: dict, *, warn: bool) -> "list[str]":
             "    # survive. That differs from the scalar lists elsewhere in this",
             "    # skill, which are replaced wholesale.",
         ]
+
+    def src(key: str) -> str:
+        return _SHORT_SOURCE.get(provenance.get(key, ""), "unknown source")
+
     lines += [
         "    resources:",
         "      limits:",
-        f"        memory: {values['memory_limit']}",
-        f"        cpu: '{values['cpu_limit']}'",
+        f"        memory: {values['memory_limit']}  # {src('memory_limit')}",
+        f"        cpu: '{values['cpu_limit']}'  # {src('cpu_limit')}",
         "      requests:",
-        f"        memory: {values['memory_request']}",
-        f"        cpu: '{values['cpu_request']}'",
+        f"        memory: {values['memory_request']}  # {src('memory_request')}",
+        f"        cpu: '{values['cpu_request']}'  # {src('cpu_request')}",
     ]
     return lines

@@ -550,7 +550,7 @@ def test_both_generators_emit_identical_resources_text(tmp_path):
     json_text = res_emit(tmp_path, prefill_instances=1)
 
     for role in ("decode", "prefill"):
-        values, _ = pres.resolve_resources(role, dict.fromkeys(pres.KEYS))
-        block = "\n".join(pres.resource_lines(values, warn=True))
+        values, prov = pres.resolve_resources(role, dict.fromkeys(pres.KEYS))
+        block = "\n".join(pres.resource_lines(values, prov, warn=True))
         assert block in from_config_text, f"config.md path drifted for {role}"
         assert block in json_text, f"json path drifted for {role}"

@@ -121,6 +121,28 @@ PARAMETER_ALIASES = {
     "enforce_eager": {"enforce_eager", "--enforce-eager"},
 }
 
+# Canonical fields whose value is free-form text, never a number.
+#
+# Everything NOT listed here is handed to `parse_numeric`, which takes only the
+# FIRST whitespace-delimited token. That silently truncates any value a human
+# might reasonably space out: a Kubernetes quantity typed `16 Gi` becomes `16`
+# -- sixteen BYTES of memory rather than 16Gi -- and because the field then
+# counts as stated, no warning fires. The pod-resource fields are derived from
+# PARAMETER_ALIASES rather than listed by hand so a newly added `*_limit` /
+# `*_request` alias cannot forget to join this set.
+#
+# `prefill_hardware` / `decode_hardware` are here for the same reason. They
+# happen to survive `parse_numeric` today only because a GPU label's first token
+# is not numeric -- accident, not design.
+_STRING_VALUED_FIELDS = frozenset(
+    {"model", "hardware", "prefill_hardware", "decode_hardware", "dtype"}
+    | {
+        name
+        for name in PARAMETER_ALIASES
+        if name.endswith(("_limit", "_request"))
+    }
+)
+
 # Section heading keywords that indicate a vLLM configuration table
 VLLM_SECTION_KEYWORDS = [
     "vllm pod configuration",
@@ -579,7 +601,7 @@ def extract_fields(table: TableSection) -> dict[str, ProvenanceValue]:
             continue
 
         # Parse value based on field type
-        if canonical in ("model", "hardware", "dtype"):
+        if canonical in _STRING_VALUED_FIELDS:
             value = normalize_cell(raw_value)
         elif canonical in ("enable_chunked_prefill", "enforce_eager"):
             value = parse_boolean(raw_value)
@@ -931,10 +953,22 @@ def build_scenario(
         scenario[role_name]["resources"] = values
         warn = pres.used_any_default(res_prov)
         if warn:
-            print(pres.starvation_warning(role_name), file=sys.stderr)
+            print(
+                pres.starvation_warning(role_name, values, res_prov),
+                file=sys.stderr,
+            )
+        for problem in pres.request_exceeds_limit(values):
+            print(
+                f"  WARNING: {role_name} {problem}. Kubernetes rejects that pod "
+                f"at admission. Each quantity resolves independently, so a "
+                f"stated request with an unstated limit takes the default limit "
+                f"-- state both.",
+                file=sys.stderr,
+            )
         # Read by the emitter to decide whether to print the unmeasured-defaults
         # comment. Underscore-prefixed: internal, never emitted.
         scenario[role_name]["_resources_warn"] = warn
+        scenario[role_name]["_resources_provenance"] = res_prov
         for key, src in res_prov.items():
             resource_provenance[f"{role_name}.resources.{key}"] = src
 
@@ -1117,6 +1151,7 @@ def write_provenance_yaml(
         lines.extend(
             pres.resource_lines(
                 scenario["decode"]["resources"],
+                scenario["decode"]["_resources_provenance"],
                 warn=scenario["decode"].get("_resources_warn", True),
             )
         )
@@ -1164,6 +1199,7 @@ def write_provenance_yaml(
             lines.extend(
                 pres.resource_lines(
                     p_role["resources"],
+                    p_role["_resources_provenance"],
                     warn=p_role.get("_resources_warn", True),
                 )
             )
