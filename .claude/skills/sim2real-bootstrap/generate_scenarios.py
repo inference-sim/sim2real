@@ -330,16 +330,22 @@ def build_scenario(entry: dict, name: str) -> dict:
     for role_name in ("decode", "prefill"):
         if role_name not in scenario:
             continue
-        stated = {
-            key: vllm_args.get(f"{role_name}_{key}", vllm_args.get(key))
-            for key in pres.KEYS
-        }
-        values, res_prov = pres.resolve_resources(role_name, stated)
+        # Handed over separately so pod_resources applies the precedence. The old
+        # `vllm_args.get(f"{role}_{key}", vllm_args.get(key))` returned None for a
+        # per-role key PRESENT with a JSON null or "", never consulting the shared
+        # key, so a stated shared value was silently replaced by the default.
+        per_role = {key: vllm_args.get(f"{role_name}_{key}") for key in pres.KEYS}
+        shared = {key: vllm_args.get(key) for key in pres.KEYS}
+        values, res_prov = pres.resolve_resources(
+            role_name, per_role, shared, pres.JSON_INPUT
+        )
         scenario[role_name]["resources"] = values
         warn = pres.used_any_default(res_prov)
         if warn:
             print(
-                pres.starvation_warning(role_name, values, res_prov),
+                pres.starvation_warning(
+                    role_name, values, res_prov, pres.JSON_INPUT
+                ),
                 file=sys.stderr,
             )
         for problem in pres.request_exceeds_limit(values):

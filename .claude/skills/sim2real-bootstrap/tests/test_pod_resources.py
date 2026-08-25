@@ -222,7 +222,98 @@ def test_request_limit_check_compares_matching_suffixes():
 
 def test_request_limit_check_stays_silent_on_units_it_cannot_compare():
     """Conservative by design: a False must mean 'not proven', never 'verified
-    fine'. Comparing 500m against 1 needs a real quantity parser."""
+    fine'.
+
+    `2000m` is two CPUs and genuinely exceeds a limit of `1`, so this IS a real
+    admission failure that the check misses — comparing across a bare number and an
+    `m` suffix needs a quantity parser this module does not have. The docstring used
+    to cite `500m`, which would not exceed a limit of 1 even under a correct parser
+    and so inverted the point.
+    """
     v, _ = pres.resolve_resources(
         "decode", {**NONE, "cpu_request": "2000m", "cpu_limit": "1"})
     assert pres.request_exceeds_limit(v) == []
+
+
+# ---------------------------------------------------------------------------
+# Review findings, iteration 2 (PR #857) — precedence and input-style wording
+# ---------------------------------------------------------------------------
+# Both generators used to own the precedence themselves and the two copies
+# diverged. It now lives in pod_resources, so these tests pin it once.
+
+SHARED_ONLY = {"cpu_limit": "64"}
+
+
+def test_per_role_beats_shared_beats_default():
+    v, prov = pres.resolve_resources(
+        "decode", {"cpu_limit": "96"}, {"cpu_limit": "64", "memory_limit": "200Gi"})
+    assert v["cpu_limit"] == "96"          # per-role wins
+    assert v["memory_limit"] == "200Gi"    # shared, no per-role
+    assert v["cpu_request"] == "16"        # neither, so default
+    assert "per-role" in prov["cpu_limit"]
+    assert "shared" in prov["memory_limit"]
+    assert "default" in prov["cpu_request"]
+
+
+@pytest.mark.parametrize("blank", [None, "", "   "])
+def test_blank_per_role_falls_through_to_shared(blank):
+    """The finding: a per-role key PRESENT but null/empty skipped the shared value
+    and took the built-in default, silently discarding a stated 64. An operator who
+    leaves a per-role row empty has not asked to ignore the shared row they did
+    fill in."""
+    v, prov = pres.resolve_resources("decode", {"cpu_limit": blank}, SHARED_ONLY)
+    assert v["cpu_limit"] == "64"
+    assert "shared" in prov["cpu_limit"]
+
+
+@pytest.mark.parametrize("blank", [None, "", "  "])
+def test_blank_at_both_levels_takes_the_default(blank):
+    v, prov = pres.resolve_resources(
+        "decode", {"cpu_limit": blank}, {"cpu_limit": blank})
+    assert v["cpu_limit"] == pres.DEFAULTS["decode"]["cpu_limit"]
+    assert "default" in prov["cpu_limit"]
+
+
+def test_shared_argument_is_optional():
+    """Callers with no shared level must still work."""
+    v, _ = pres.resolve_resources("prefill", {"cpu_limit": "9"})
+    assert v["cpu_limit"] == "9"
+
+
+def test_json_style_never_mentions_config_md():
+    """The other finding: SKILL.md picks the JSON generator precisely when no
+    config.md exists, so citing 'config.md row' and advising to add rows to it
+    pointed the operator at a file that is not the input."""
+    v, prov = pres.resolve_resources(
+        "decode", {"cpu_limit": "64"}, {}, pres.JSON_INPUT)
+    assert "config.md" not in prov["cpu_limit"]
+    assert "vllm_args" in prov["cpu_limit"]
+    msg = pres.starvation_warning("decode", v, prov, pres.JSON_INPUT)
+    assert "config.md" not in msg
+    assert "vllm_args" in msg
+
+
+def test_config_md_style_does_mention_config_md():
+    v, prov = pres.resolve_resources(
+        "decode", {"cpu_limit": "64"}, {}, pres.CONFIG_MD_INPUT)
+    assert "config.md" in prov["cpu_limit"]
+    msg = pres.starvation_warning("decode", v, prov, pres.CONFIG_MD_INPUT)
+    assert "config.md" in msg
+
+
+def test_emitted_source_comments_follow_the_input_style():
+    v, prov = pres.resolve_resources(
+        "decode", {}, {"cpu_limit": "64"}, pres.JSON_INPUT)
+    text = "\n".join(pres.resource_lines(v, prov, warn=True))
+    cpu = next(ln for ln in text.splitlines() if "cpu: '64'" in ln)
+    assert "vllm_args" in cpu and "config.md" not in cpu
+
+
+@pytest.mark.parametrize("style", [pres.CONFIG_MD_INPUT, pres.JSON_INPUT])
+def test_every_style_renders_its_role_placeholder(style):
+    """`{role}` in a style string must be substituted, not emitted literally."""
+    v, prov = pres.resolve_resources("prefill", {}, {}, style)
+    msg = pres.starvation_warning("prefill", v, prov, style)
+    assert "{role}" not in msg
+    text = "\n".join(pres.resource_lines(v, prov, warn=True))
+    assert "{role}" not in text

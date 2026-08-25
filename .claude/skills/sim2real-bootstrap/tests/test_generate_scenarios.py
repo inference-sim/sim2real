@@ -554,3 +554,40 @@ def test_both_generators_emit_identical_resources_text(tmp_path):
         block = "\n".join(pres.resource_lines(values, prov, warn=True))
         assert block in from_config_text, f"config.md path drifted for {role}"
         assert block in json_text, f"json path drifted for {role}"
+
+
+# ---------------------------------------------------------------------------
+# Review findings, iteration 2 — the JSON path's own stderr and precedence
+# ---------------------------------------------------------------------------
+# The reviewer noted no capsys test asserted the JSON path's stderr text, which
+# is why config.md remediation on a JSON input went unnoticed.
+
+def test_json_path_stderr_names_vllm_args_not_config_md(capsys):
+    gs.build_scenario(entry(), "cand")
+    err = capsys.readouterr().err
+    assert "config.md" not in err, (
+        "the JSON generator is selected precisely when no config.md exists, so "
+        "remediation naming it points at a file that is not the input"
+    )
+    assert "vllm_args" in err
+
+
+def test_json_path_null_per_role_key_falls_back_to_shared(tmp_path):
+    """The finding: `{"cpu_limit": "64", "decode_cpu_limit": null}` resolved to the
+    built-in 32, silently discarding the stated shared 64, because
+    `.get(role_key, .get(shared))` returns None for a key present with a null."""
+    parsed = yaml.safe_load(
+        res_emit(tmp_path, cpu_limit="64", decode_cpu_limit=None))["scenario"][0]
+    assert parsed["decode"]["resources"]["limits"]["cpu"] == "64"
+
+
+def test_json_path_empty_string_per_role_key_falls_back_to_shared(tmp_path):
+    parsed = yaml.safe_load(
+        res_emit(tmp_path, cpu_limit="64", decode_cpu_limit=""))["scenario"][0]
+    assert parsed["decode"]["resources"]["limits"]["cpu"] == "64"
+
+
+def test_json_path_source_comments_cite_vllm_args(tmp_path):
+    text = res_emit(tmp_path, cpu_limit="64")
+    cpu = next(ln for ln in text.splitlines() if "cpu: '64'" in ln)
+    assert "vllm_args" in cpu and "config.md" not in cpu

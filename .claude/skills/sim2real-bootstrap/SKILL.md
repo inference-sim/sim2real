@@ -416,7 +416,17 @@ optional per-role accelerator overrides; without them both roles use the shared
 
   Values are passed through verbatim as strings — `32`, `500m`, `1.5`, `128Gi`,
   `1536Mi` are all valid Kubernetes quantities and re-serializing risks changing
-  them. Stating only some is fine; the rest take defaults.
+  them. Stating only some is fine; the rest take defaults. A per-role row left
+  **blank** counts as unset and falls through to the shared row, not to the
+  default — writing an empty row is not an instruction to ignore the shared row
+  you did fill in.
+
+  The JSON-input path (`generate_scenarios.py`) takes the same values as
+  `vllm_args` keys — `cpu_limit`, `decode_memory_request`, and so on — with the
+  same precedence, and cites `vllm_args` rather than `config.md` in its warnings
+  and source comments, since it is selected only when no `config.md` exists. Both
+  paths resolve through `pod_resources.resolve_resources`, so the precedence
+  cannot differ between them.
 
   **Defaults when a row is absent** — decode is sized above prefill, which is both
   upstream's own sizing and the observed-working configuration:

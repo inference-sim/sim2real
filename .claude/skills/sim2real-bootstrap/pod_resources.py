@@ -41,6 +41,8 @@ Indentation contract: emitted lines sit INSIDE a role block (`decode:` /
 `limits:`/`requests:` at 6, their leaves at 8. Callers own blank-line separation.
 """
 
+from typing import NamedTuple
+
 # The four quantities, in emission order within each of limits/requests.
 KEYS = ("cpu_limit", "memory_limit", "cpu_request", "memory_request")
 
@@ -67,29 +69,90 @@ _DEFAULT_SOURCE = (
     "sim2real-bootstrap default (generous, UNMEASURED; limits from llm-d "
     "pd-disaggregation guide, requests half)"
 )
-_STATED_SOURCE = "config.md row"
+
+
+class InputStyle(NamedTuple):
+    """How to describe this generator's input when citing or advising about it.
+
+    The two generators read different inputs -- `config.md` markdown rows and
+    `top3_selection.json`'s `vllm_args` -- and SKILL.md selects the JSON path
+    precisely when no config.md exists. Hardcoding "config.md row" here therefore
+    printed remediation naming a file that is not the input, and cited a source the
+    JSON path never had. Every other source comment `generate_scenarios.py` emits
+    uses its own "from vllm_args.X" convention; this keeps that consistent.
+    """
+
+    per_role_source: str
+    shared_source: str
+    remediation: str
+
+
+CONFIG_MD_INPUT = InputStyle(
+    per_role_source="config.md per-role row",
+    shared_source="config.md shared row",
+    remediation=(
+        "Add '{role} <cpu|memory> <limit|request>' rows to config.md to override"
+    ),
+)
+
+JSON_INPUT = InputStyle(
+    per_role_source="from vllm_args.{role}_<key>",
+    shared_source="from vllm_args.<key>",
+    remediation=(
+        "Set vllm_args.{role}_cpu_limit / _memory_limit (or the unprefixed "
+        "shared keys) in the input JSON to override"
+    ),
+)
 
 
 def resolve_resources(
-    role: str, stated: "dict[str, str | None]"
+    role: str,
+    per_role: "dict[str, str | None]",
+    shared: "dict[str, str | None] | None" = None,
+    style: InputStyle = CONFIG_MD_INPUT,
 ) -> "tuple[dict, dict]":
-    """Resolve one role's four quantities, preferring stated values.
+    """Resolve one role's four quantities: per-role value, then shared, then default.
 
-    `stated` maps each of KEYS to the value the input declared, or None. Values
-    pass through as strings and are never parsed: `32`, `500m`, `1.5`, `128Gi` and
-    `1536Mi` are all valid Kubernetes quantities, and re-serializing risks
-    changing them.
+    THE PRECEDENCE LIVES HERE, in the one module both generators import, rather
+    than at each call site. It was duplicated before, and the two copies diverged:
+    the JSON path used `vllm_args.get(f"{role}_{key}", vllm_args.get(key))`, which
+    returns None -- never consulting the shared key -- for a per-role key that is
+    PRESENT with a null or empty value. The config.md path had the same hole for a
+    row whose value cell is blank. Either way a stated shared value was silently
+    discarded in favour of the built-in default. One implementation cannot disagree
+    with itself.
+
+    "Empty" means absent, None, or whitespace-only, for both levels. A per-role key
+    present but blank is treated as unset -- the operator wrote a row and left it
+    empty, which is not an instruction to ignore the shared row they did fill in.
+
+    Values pass through as strings and are never parsed: `32`, `500m`, `1.5`,
+    `128Gi` and `1536Mi` are all valid Kubernetes quantities, and re-serializing
+    risks changing them.
 
     Returns (values, provenance), both keyed by KEYS.
     """
+    shared = shared or {}
     defaults = DEFAULTS[role]
     values: dict = {}
     provenance: dict = {}
+
+    def stated(source: dict, key: str) -> "str | None":
+        given = source.get(key)
+        if given is None:
+            return None
+        text = str(given).strip()
+        return text or None
+
     for key in KEYS:
-        given = stated.get(key)
-        if given is not None and str(given).strip():
-            values[key] = str(given).strip()
-            provenance[key] = _STATED_SOURCE
+        role_value = stated(per_role, key)
+        shared_value = stated(shared, key)
+        if role_value is not None:
+            values[key] = role_value
+            provenance[key] = style.per_role_source.format(role=role)
+        elif shared_value is not None:
+            values[key] = shared_value
+            provenance[key] = style.shared_source.format(role=role)
         else:
             values[key] = defaults[key]
             provenance[key] = _DEFAULT_SOURCE
@@ -111,7 +174,12 @@ def defaulted_keys(provenance: dict) -> "list[str]":
     return [k for k in KEYS if provenance.get(k) == _DEFAULT_SOURCE]
 
 
-def starvation_warning(role: str, values: dict, provenance: dict) -> str:
+def starvation_warning(
+    role: str,
+    values: dict,
+    provenance: dict,
+    style: InputStyle = CONFIG_MD_INPUT,
+) -> str:
     """The generation-time (stderr) warning, shared by both generators.
 
     Reports the ACTUAL emitted numbers for the quantities that defaulted, and
@@ -123,13 +191,14 @@ def starvation_warning(role: str, values: dict, provenance: dict) -> str:
     missing = defaulted_keys(provenance)
     shown = ", ".join(f"{k}={values[k]}" for k in missing)
     return (
-        f"  WARNING: {role} has no config.md row for {len(missing)} of "
+        f"  WARNING: {role} has no stated value for {len(missing)} of "
         f"{len(KEYS)} CPU/memory quantities, so generous UNMEASURED defaults "
         f"were emitted for them ({shown}). They are headroom, not a "
         f"measurement. Watch the {role} logs for 'Reducing Torch parallelism "
         f"from N threads to 1' -- that is CPU starvation, and it surfaces as ITL "
-        f"noise rather than a failure. Add "
-        f"'{role} <cpu|memory> <limit|request>' rows to config.md to override."
+        f"noise rather than a failure. "
+        + style.remediation.format(role=role)
+        + "."
     )
 
 
@@ -173,10 +242,9 @@ def request_exceeds_limit(values: dict) -> "list[str]":
     return bad
 
 
-_SHORT_SOURCE = {
-    _STATED_SOURCE: "config.md row",
-    _DEFAULT_SOURCE: "sim2real-bootstrap default (generous, UNMEASURED)",
-}
+# The emitted `# source` comment. Stated sources vary by input style, so they are
+# passed through as-is; only the long default string is shortened for the comment.
+_DEFAULT_COMMENT = "sim2real-bootstrap default (generous, UNMEASURED)"
 
 
 def resource_lines(values: dict, provenance: dict, *, warn: bool) -> "list[str]":
@@ -216,7 +284,8 @@ def resource_lines(values: dict, provenance: dict, *, warn: bool) -> "list[str]"
         ]
 
     def src(key: str) -> str:
-        return _SHORT_SOURCE.get(provenance.get(key, ""), "unknown source")
+        source = provenance.get(key, "unknown source")
+        return _DEFAULT_COMMENT if source == _DEFAULT_SOURCE else source
 
     lines += [
         "    resources:",

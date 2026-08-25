@@ -945,16 +945,26 @@ def build_scenario(
     for role_name in ("decode", "prefill"):
         if role_name not in scenario:
             continue
-        stated = {}
+        # Per-role and shared are handed over SEPARATELY: pod_resources owns the
+        # precedence, so a blank per-role cell falls through to the shared row
+        # rather than skipping straight to the default.
+        per_role = {}
+        shared = {}
         for key in pres.KEYS:
-            field_obj = fields.get(f"{role_name}_{key}") or fields.get(key)
-            stated[key] = None if field_obj is None else str(field_obj.value)
-        values, res_prov = pres.resolve_resources(role_name, stated)
+            role_field = fields.get(f"{role_name}_{key}")
+            shared_field = fields.get(key)
+            per_role[key] = None if role_field is None else str(role_field.value)
+            shared[key] = None if shared_field is None else str(shared_field.value)
+        values, res_prov = pres.resolve_resources(
+            role_name, per_role, shared, pres.CONFIG_MD_INPUT
+        )
         scenario[role_name]["resources"] = values
         warn = pres.used_any_default(res_prov)
         if warn:
             print(
-                pres.starvation_warning(role_name, values, res_prov),
+                pres.starvation_warning(
+                    role_name, values, res_prov, pres.CONFIG_MD_INPUT
+                ),
                 file=sys.stderr,
             )
         for problem in pres.request_exceeds_limit(values):
