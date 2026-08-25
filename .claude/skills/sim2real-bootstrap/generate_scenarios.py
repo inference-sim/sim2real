@@ -14,6 +14,8 @@ import re
 import sys
 from pathlib import Path
 
+import pd_plumbing as pdp
+
 # See #831: `workers` is the LeaderWorkerSet group size (pods per replica), not a
 # parallelism degree, and no input field states it -- so it is a stated default.
 _WORKERS_COMMENT = "single-node default (LWS pods per replica, not a parallelism degree)"
@@ -298,7 +300,9 @@ def build_scenario(entry: dict, name: str) -> dict:
         # have created scenario["vllmCommon"].
         scenario.setdefault("vllmCommon", {})["kvTransfer"] = {
             "enabled": True,
-            "connector": "NixlConnector",
+            # Engine half of the connector decision; routing.connector is the
+            # sidecar half. Both come from pd_plumbing so they cannot drift (#848).
+            "connector": pdp.KV_CONNECTOR_ENGINE,
             "role": "kv_both",
         }
     elif workload.get("prefill_hardware"):
@@ -312,11 +316,46 @@ def build_scenario(entry: dict, name: str) -> dict:
             file=sys.stderr,
         )
 
+    # --- Pod plumbing (issue #848) ---
+    # Same two gates and the same fragments as generate_from_config.py -- see
+    # pd_plumbing's module docstring for why both generators must agree here.
+    #
+    # `prefill_instances` is absent-or-int (unlike the config.md path, which
+    # normalises to 0 upstream), so it is coerced before the gate sees it.
+    #
+    # Gate 2 takes dataLocal, not dp -- see generate_from_config.py's note and
+    # pd_plumbing.needs_multigpu_plumbing. Same single input feeds both today.
+    data_local = dp
+    kv_plumbing = pdp.needs_kv_plumbing(prefill_replicas or 0)
+    multigpu_plumbing = pdp.needs_multigpu_plumbing(tp, data_local)
+
+    if kv_plumbing or multigpu_plumbing:
+        vc = scenario.setdefault("vllmCommon", {})
+        vc["volumes"] = True
+        vc["volumeMounts"] = True
+        for role in ("decode", "prefill"):
+            if role in scenario:
+                scenario[role]["extraEnvVars"] = True
+
+    if kv_plumbing:
+        scenario.setdefault("vllmCommon", {})["preprocessScript"] = True
+        for role in ("decode", "prefill"):
+            if role in scenario:
+                scenario[role]["initContainers"] = True
+        scenario["routing"] = {"connector": pdp.KV_CONNECTOR_SIDECAR}
+
+    # Internal channel to the emitter; never printed. See generate_from_config.py.
+    scenario["_gates"] = {"kv": kv_plumbing, "multigpu": multigpu_plumbing}
+
     return scenario
 
 
 def write_commented_yaml(scenario: dict, entry: dict, out_path: str):
     """Write scenario YAML with comments explaining the source of each field."""
+    # Pod-plumbing gates (#848), computed by build_scenario. Defaulted rather than
+    # indexed so a caller that hand-builds a scenario dict still emits.
+    gates = scenario.get("_gates", {"kv": False, "multigpu": False})
+
     lines = []
     lines.append("scenario:")
     lines.append(f"- name: {scenario['name']}")
@@ -351,6 +390,13 @@ def write_commented_yaml(scenario: dict, entry: dict, out_path: str):
             lines.append(f"      enabled: {str(kv['enabled']).lower()}  # implied by prefill_instances; P/D requires a KV transfer backend")
             lines.append(f"      connector: {kv['connector']}  # framework default, stated explicitly")
             lines.append(f"      role: {kv['role']}  # framework default, stated explicitly; kv_both is deprecated for NixlConnector (see #845)")
+        # Plumbing (#848). Both gates write volumes/volumeMounts, so those are
+        # rendered in one call rather than appended per gate.
+        if gates["kv"]:
+            lines.extend(pdp.preprocess_script_lines())
+        lines.extend(
+            pdp.volume_lines(shared_config=gates["kv"], dshm=gates["multigpu"])
+        )
 
     lines.append("")
     lines.append("  decode:")
@@ -375,6 +421,14 @@ def write_commented_yaml(scenario: dict, entry: dict, out_path: str):
         for flag in scenario["decode"]["vllm"]["additionalFlags"]:
             source = _flag_source(flag)
             lines.append(f"      - \"{flag}\"  # from vllm_args.{source}")
+
+    # Per-role plumbing (#848). Each role is a separate pod, so each needs its own
+    # init container and env vars -- there is no vllmCommon form for either.
+    if gates["kv"]:
+        lines.extend(pdp.init_container_lines())
+    lines.extend(
+        pdp.extra_env_var_lines(nixl=gates["kv"], multigpu=gates["multigpu"])
+    )
 
     # Prefill role, emitted only when the entry named a prefill pod count. Placed
     # after decode so the decode bytes above are untouched when it is absent.
@@ -416,6 +470,18 @@ def write_commented_yaml(scenario: dict, entry: dict, out_path: str):
             for flag in p_role["vllm"]["additionalFlags"]:
                 source = _flag_source(flag)
                 lines.append(f"      - \"{flag}\"  # from vllm_args.{source}")
+
+        # Same per-role plumbing as decode above (#848).
+        if gates["kv"]:
+            lines.extend(pdp.init_container_lines())
+        lines.extend(
+            pdp.extra_env_var_lines(nixl=gates["kv"], multigpu=gates["multigpu"])
+        )
+
+    # Scenario-level plumbing (#848), last so every block above keeps its bytes.
+    if gates["kv"]:
+        lines.append("")
+        lines.extend(pdp.routing_lines())
 
     lines.append("")
 

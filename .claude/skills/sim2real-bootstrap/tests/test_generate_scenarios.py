@@ -351,3 +351,113 @@ def test_enforce_eager_alone_still_emits_flags(tmp_path):
     vc = parsed["scenario"][0]["vllmCommon"]
     assert vc["flags"]["enforceEager"] is False
     assert "kvTransfer" not in vc
+
+
+# ---------------------------------------------------------------------------
+# Pod plumbing gates (issue #848) -- parity with generate_from_config.py
+# ---------------------------------------------------------------------------
+# This generator has its own prefill block and its own hand-rolled emitter. #846
+# had to fix both; so does #848. Any drift between the two paths means half of
+# bootstrap emits an inert or crashlooping bundle.
+
+
+def build_and_emit(tmp_path, **vllm_extra):
+    """entry -> build_scenario -> write_commented_yaml -> text."""
+    e = entry(vllm_extra=vllm_extra)
+    return emit(gs.build_scenario(e, "test"), e, tmp_path)
+
+
+def test_no_gates_emits_no_plumbing_json_path(tmp_path):
+    text = build_and_emit(tmp_path)
+    for key in ("initContainers", "preprocessScript", "volumes:", "volumeMounts:",
+                "extraEnvVars", "routing:", "shared-config", "dshm",
+                "NIXL_LOG_LEVEL", "NCCL_DEBUG", "NVSHMEM_DEBUG"):
+        assert key not in text, f"{key} leaked into an ungated scenario"
+
+
+def test_internal_gate_marker_never_reaches_output_json_path(tmp_path):
+    assert "_gates" not in build_and_emit(tmp_path, prefill_instances=1)
+
+
+def test_gate1_emits_the_full_kv_unit_json_path(tmp_path):
+    text = build_and_emit(tmp_path, prefill_instances=1)
+    parsed = yaml.safe_load(text)["scenario"][0]
+    for role in ("decode", "prefill"):
+        assert parsed[role]["initContainers"][0]["name"] == "preprocess"
+        assert {e["name"] for e in parsed[role]["extraEnvVars"]} == {"NIXL_LOG_LEVEL"}
+    assert ". /shared-config/llmdbench_env.sh" in parsed["vllmCommon"]["preprocessScript"]
+    assert [v["name"] for v in parsed["vllmCommon"]["volumes"]] == ["shared-config"]
+    assert parsed["routing"]["connector"] == "nixlv2"
+
+
+def test_gate2_emits_dshm_without_prefill_json_path(tmp_path):
+    text = build_and_emit(tmp_path, tensor_parallel_size=4)
+    parsed = yaml.safe_load(text)["scenario"][0]
+    assert [v["name"] for v in parsed["vllmCommon"]["volumes"]] == ["dshm"]
+    assert {e["name"] for e in parsed["decode"]["extraEnvVars"]} == {
+        "NCCL_DEBUG", "NVSHMEM_DEBUG"}
+    assert "routing" not in parsed
+    assert "prefill" not in parsed
+
+
+def test_gate2_fires_on_data_parallel_alone_json_path(tmp_path):
+    text = build_and_emit(tmp_path, data_parallel_size=2)
+    parsed = yaml.safe_load(text)["scenario"][0]
+    assert [v["name"] for v in parsed["vllmCommon"]["volumes"]] == ["dshm"]
+
+
+def test_both_gates_accumulate_json_path(tmp_path):
+    text = build_and_emit(tmp_path, prefill_instances=2, tensor_parallel_size=4)
+    parsed = yaml.safe_load(text)["scenario"][0]
+    assert [v["name"] for v in parsed["vllmCommon"]["volumes"]] == [
+        "shared-config", "dshm"]
+    assert [m["mountPath"] for m in parsed["vllmCommon"]["volumeMounts"]] == [
+        "/shared-config", "/dev/shm"]
+    for role in ("decode", "prefill"):
+        assert {e["name"] for e in parsed[role]["extraEnvVars"]} == {
+            "NIXL_LOG_LEVEL", "NCCL_DEBUG", "NVSHMEM_DEBUG"}
+
+
+def test_plumbing_coexists_with_enforce_eager_json_path(tmp_path):
+    text = build_and_emit(tmp_path, prefill_instances=1, enforce_eager=False)
+    vc = yaml.safe_load(text)["scenario"][0]["vllmCommon"]
+    assert vc["flags"]["enforceEager"] is False
+    assert vc["kvTransfer"]["enabled"] is True
+    assert "preprocessScript" in vc
+    assert [v["name"] for v in vc["volumes"]] == ["shared-config"]
+
+
+def test_both_generators_emit_identical_plumbing_text(tmp_path):
+    """The anti-drift assertion. Two hand-rolled emitters, one set of fragments:
+    the plumbing lines must match character-for-character, or one path is wrong."""
+    import generate_from_config as gfc
+    import pd_plumbing as pdp
+
+    rows = [
+        {"Parameter": "Model", "Value": "Qwen/Qwen3-14B", "Notes": ""},
+        {"Parameter": "GPU", "Value": "H100_SXM_80GB", "Notes": ""},
+        {"Parameter": "Number of prefill pods", "Value": "2", "Notes": ""},
+        {"Parameter": "tensor_parallel_size", "Value": "4", "Notes": ""},
+    ]
+    table = gfc.TableSection(
+        heading="vLLM Pod Configuration", rows=rows, line_number=0)
+    s, p = gfc.build_scenario(gfc.extract_fields(table), "test")
+    out = tmp_path / "baseline.yaml"
+    gfc.write_provenance_yaml(s, p, str(out))
+    from_config_text = out.read_text()
+
+    # Same directory is safe: gfc writes baseline.yaml, gs writes cand.yaml.
+    # Do NOT pass a subdirectory here -- write_commented_yaml does not makedirs
+    # (unlike write_provenance_yaml, which does).
+    json_text = build_and_emit(tmp_path, prefill_instances=2, tensor_parallel_size=4)
+
+    for fragment_lines in (
+        pdp.routing_lines(),
+        pdp.preprocess_script_lines(),
+        pdp.volume_lines(shared_config=True, dshm=True),
+        pdp.init_container_lines(),
+        pdp.extra_env_var_lines(nixl=True, multigpu=True),
+    ):
+        block = "\n".join(fragment_lines)
+        assert block in from_config_text, "config.md path drifted from pd_plumbing"
+        assert block in json_text, "json path drifted from pd_plumbing"

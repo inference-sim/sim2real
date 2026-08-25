@@ -224,7 +224,8 @@ no margin attached and say that no measurement backs it.
 read. Five parts. All five must be PRESENT; their order is presentational, and
 the numbering below is a reading order rather than a requirement. The parser
 locates the table by its heading, not its position
-(`generate_from_config.py:300-322`) — so the only ordering rule is not to author
+(`generate_from_config.py:443-450`, `find_vllm_table`'s heading pass) — so the
+only ordering rule is not to author
 a SECOND table whose heading also matches, because the first match wins.
 
 1. **vLLM pod configuration** — a table headed `## vLLM Pod Configuration`. This
