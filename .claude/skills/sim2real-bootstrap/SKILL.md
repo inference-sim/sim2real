@@ -459,11 +459,27 @@ fragments in place to tweak them for the experiment, or list a fragment
 stem under `defaults.disable` in `transfer.yaml` to opt out entirely.
 
 **Not every fragment is universally correct.** `epponly` is a topology decision,
-`model-pvc-size` is sized for a 70B-class model, `tokenizer-sidecar` matters only
-when the arms declare a `token-producer` plugin, and `preserve-request-id` matches
-nothing under an epponly / externally-managed gateway. Each fragment's header
+`model-pvc-size` is sized for a 70B-class model, and `tokenizer-sidecar` matters
+only when the arms declare a `token-producer` plugin. Each fragment's header
 comment states its own applicability and when to disable it. Making emission
 conditional rather than leaving that to the operator is tracked as #840.
+
+**Fragments that ship disabled (issue #853).** Four are copied but listed in
+`defaults.disable` by Task 5, because none can be a correct always-on default.
+Shipping them anyway means an operator has something to enable rather than
+reinvent; enabling one is deleting its line from `defaults.disable`.
+
+| Fragment | Why it cannot default to on |
+|---|---|
+| `pod-capabilities` | Cannot grant the permission it depends on. On OpenShift the pod will not admit until someone runs `oc adm policy add-scc-to-user privileged` out of band, so enabled-by-default yields unschedulable pods. |
+| `nic-exclusion` | The value is a literal device list for one cluster's cards. A default naming another cluster's devices would exclude the wrong ones — worse than excluding none. |
+| `rdma-device-reservation` | Does not work on the cluster it was written for: the pod netns has no RDMA-capable device, so it reserves an `rdma/roce_gdr` to advertise a capability the pod cannot use. |
+| `preserve-request-id` | An Istio `EnvoyFilter` selecting on a hardcoded gateway name. Under `epponly` + `externallyManaged` no Gateway is deployed, so it matches nothing — and it is the only fragment using `extraObjects`, so it is the only one that can fail at *apply* time rather than being silently inert. |
+
+Note the two bootstrap modes reach the same place by different routes: `--byo`
+already lists **every** stem in `defaults.disable` (`byo.py`'s
+`copy_framework_defaults`), so these four are disabled there without a special
+case. Reconciling that broader BLIS/BYO difference is #840's, not this list's.
 
 ---
 
@@ -548,13 +564,24 @@ context:
   files: <list of context files>
 
 defaults:
-  disable: []
+  # These four ship DISABLED. Each is copied into baselines/defaults/ so an
+  # operator has something to enable rather than reinvent, but none can be a
+  # correct always-on default — see "Fragments that ship disabled" below.
+  # Enabling one is deleting its line.
+  disable:
+    - nic-exclusion
+    - pod-capabilities
+    - preserve-request-id
+    - rdma-device-reservation
   # Available fragments (filename stems in baselines/defaults/):
   #   - epp-verbosity
   #   - epponly
   #   - externally-managed-gateway
   #   - model-pvc-size
-  #   - preserve-request-id
+  #   - nic-exclusion               (ships disabled)
+  #   - pod-capabilities            (ships disabled)
+  #   - preserve-request-id         (ships disabled)
+  #   - rdma-device-reservation     (ships disabled)
   #   - routing-proxy-resources
   #   - tokenizer-sidecar
   #   - vllm-keepalive
@@ -626,7 +653,10 @@ Exit code 0 and all fields printed = success.
       epponly.yaml
       externally-managed-gateway.yaml
       model-pvc-size.yaml
-      preserve-request-id.yaml
+      nic-exclusion.yaml              <- in defaults.disable
+      pod-capabilities.yaml           <- in defaults.disable
+      preserve-request-id.yaml        <- in defaults.disable
+      rdma-device-reservation.yaml    <- in defaults.disable
       routing-proxy-resources.yaml
       tokenizer-sidecar.yaml
       vllm-keepalive.yaml
@@ -786,4 +816,4 @@ This skill ships with supporting files in its directory. Invoke in place — do 
 | `generate_scenarios.README.md` | Coverage map for the JSON-input path. Documents field mappings, omission rules, and gaps. |
 | `pd_plumbing.py` | The P/D and multi-GPU pod plumbing (issue #848): one connector decision in two spellings (`kvTransfer.connector` engine-side, `routing.connector` sidecar-side), the two gate predicates, and one line-emitter per YAML fragment. Imported by both generators — the fragments are identical literal YAML, so a single copy is what keeps the two hand-rolled emitters in agreement. Asserted by `tests/test_pd_plumbing.py` and by the cross-generator check in `tests/test_generate_scenarios.py`. |
 | `byo.py` | Implements the `--byo` branch — argument parsing, YAML validation, path-safe copy operations, `transfer.yaml` emission, batched `sim2real translation register` command generation. Invoked by SKILL.md's dispatch when `--byo` (or any BYO-only flag) is passed. |
-| `templates/defaults/*.yaml` | Framework-owned baseline workaround fragments (request-id, verbosity, sidecar sizing, model-PVC size, topology, tokenizer). Copied into `<experiment-root>/baselines/defaults/` at BLIS task-4b and at BYO run time, so every experiment is self-contained and reproducible. Shape and merge-safety are asserted by `tests/test_defaults_templates.py`. |
+| `templates/defaults/*.yaml` | Framework-owned baseline workaround fragments (request-id, verbosity, sidecar sizing, model-PVC size, topology, tokenizer) plus the P/D cluster-specific ones that ship disabled (pod capabilities, NIC exclusion, RDMA reservation — issue #853). Copied into `<experiment-root>/baselines/defaults/` at BLIS task-4b and at BYO run time, so every experiment is self-contained and reproducible. Shape and merge-safety are asserted by `tests/test_defaults_templates.py`. |

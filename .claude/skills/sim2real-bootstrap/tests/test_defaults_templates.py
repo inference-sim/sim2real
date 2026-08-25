@@ -14,6 +14,7 @@ them. The `additionalFlags` guard below is the narrow, statically-decidable slic
 #841 — it catches keys that provably cannot survive the merge chain, rather than
 comparing resolved scenarios, which is what #841 tracks.
 """
+import itertools
 from pathlib import Path
 
 import pytest
@@ -113,6 +114,18 @@ _ALLOWED_SCALAR_LISTS = {
     # itself takes the whole list and keeps the fragment's CPU limit, breaking the
     # coupling silently. epponly.yaml's header says so.
     "epponly": {"router.proxy.args"},
+    # Linux capabilities to add to the vLLM container, per role. `capabilities.add`
+    # has no key field to merge on — it is a bare list of capability names — so
+    # Tier 1 applies and a baseline setting the same key takes the whole list. The
+    # fragment is the right home anyway: the capability set is inseparable from the
+    # SCC grant its header documents, and splitting it across two files would let
+    # the two drift the way epponly's coupling did. Ships DISABLED, so it reaches a
+    # rendered pod only when an operator has enabled it deliberately.
+    # pod-capabilities.yaml's header says so.
+    "pod-capabilities": {
+        "decode.extraContainerConfig.securityContext.capabilities.add",
+        "prefill.extraContainerConfig.securityContext.capabilities.add",
+    },
 }
 
 
@@ -193,33 +206,157 @@ def test_all_fragments_merge_without_error(deep_merge):
     assert merged["scenario"][0]["name"] == "defaults"
 
 
-def test_no_two_fragments_set_the_same_leaf_key(deep_merge):
-    """Two fragments writing the same leaf make one of them silently order-dependent.
+def test_no_fragment_contribution_is_lost_to_another_fragment(deep_merge):
+    """A fragment's value must survive the merge with every other fragment.
 
-    Merge order is filename-sorted (`load_defaults_overlay`), so the later stem wins
-    and the earlier fragment's value never reaches the output — the inert-fragment
-    failure mode of #839, in its within-layer form. Distinct leaves are fine; this
-    only fires on a genuine collision.
+    Merge order is filename-sorted (`load_defaults_overlay`), so when two fragments
+    write the same leaf the later stem can silently displace the earlier one — the
+    inert-fragment failure mode of #839, in its within-layer form.
+
+    Sharing a leaf key is NOT sufficient for that to happen, which is why this
+    asserts on the merged result rather than on key overlap. `_merge_lists` keeps
+    both sides for a list of dicts with a common key field (Tier 2b, merge by key)
+    and for Kubernetes manifest lists (Tier 2a, merge by identity); it discards the
+    base only for scalar lists (Tier 1, wholesale replace) and for plain scalars
+    (later dict value wins). `prefill.extraEnvVars` is the real case: nic-exclusion
+    and vllm-keepalive both set it and all of their variables reach the pod, because
+    the entries are keyed by `name`.
+
+    So: merge each pair, then check that every leaf value each fragment contributed
+    is still present. That tests the property the guard exists for — nothing goes
+    inert — instead of a proxy for it that forbids a working combination.
     """
-    seen: dict[str, str] = {}
-    collisions = []
-
-    def walk(node, trail, stem):
+    def leaves(node, trail=()):
+        """Flatten to {dotted path: value}, treating lists as leaf values."""
+        out = {}
         if isinstance(node, dict):
             for key, value in node.items():
-                walk(value, trail + [str(key)], stem)
-            return
-        path_key = ".".join(trail)
-        if path_key in seen and seen[path_key] != stem:
-            collisions.append(f"{path_key} (set by {seen[path_key]} and {stem})")
+                out.update(leaves(value, trail + (str(key),)))
         else:
-            seen[path_key] = stem
+            out[".".join(trail)] = node
+        return out
 
-    for path in _fragments():
-        entry = yaml.safe_load(path.read_text())["scenario"][0]
-        walk({k: v for k, v in entry.items() if k != "name"}, [], path.stem)
+    def survives(contributed, merged_value):
+        """Is `contributed` still recoverable from the merged value?"""
+        if isinstance(contributed, list):
+            # Every contributed element must still appear somewhere in the result.
+            if not isinstance(merged_value, list):
+                return False
+            return all(item in merged_value for item in contributed)
+        return contributed == merged_value
 
-    assert not collisions, (
-        "fragments set overlapping leaf keys; filename-sorted merge order decides "
-        f"the winner and the loser is inert: {collisions}"
+    entries = {
+        path.stem: yaml.safe_load(path.read_text())["scenario"][0]
+        for path in _fragments()
+    }
+    losses = []
+
+    for a, b in itertools.combinations(sorted(entries), 2):
+        body_a = {k: v for k, v in entries[a].items() if k != "name"}
+        body_b = {k: v for k, v in entries[b].items() if k != "name"}
+        shared = set(leaves(body_a)) & set(leaves(body_b))
+        if not shared:
+            continue
+        # Filename-sorted order is what load_defaults_overlay applies.
+        merged = deep_merge(deep_merge({}, body_a), body_b)
+        merged_leaves = leaves(merged)
+        for path_key in sorted(shared):
+            for stem, body in ((a, body_a), (b, body_b)):
+                contributed = leaves(body)[path_key]
+                if not survives(contributed, merged_leaves.get(path_key)):
+                    losses.append(
+                        f"{path_key}: {stem}'s value is discarded when "
+                        f"{a} and {b} merge"
+                    )
+
+    assert not losses, (
+        "a fragment's contribution does not survive merging with another fragment, "
+        "so it is inert whenever both are enabled: " + "; ".join(losses)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fragments that ship disabled (issue #853)
+# ---------------------------------------------------------------------------
+# Four fragments are copied into baselines/defaults/ but listed in transfer.yaml's
+# `defaults.disable`, because none can be a correct always-on default. The list
+# lives in SKILL.md's Task 5 template (BLIS mode writes transfer.yaml from it), and
+# each fragment declares its own status with a `DISABLED BY DEFAULT` header line.
+#
+# Two places holding the same fact is exactly how #550 happened -- SKILL.md
+# documented an `llm-d-rbac.yaml` fragment that templates/defaults/ never shipped.
+# These tests pin the two against each other so neither can drift alone.
+
+_DISABLED_MARKER = "DISABLED BY DEFAULT"
+_SKILL_MD = _SKILL_DIR / "SKILL.md"
+
+
+def _fragments_marked_disabled() -> set[str]:
+    return {p.stem for p in _fragments() if _DISABLED_MARKER in p.read_text()}
+
+
+def _skill_md_disable_list() -> list[str]:
+    """Read the `disable:` list items out of SKILL.md's Task 5 transfer.yaml block.
+
+    Line-oriented rather than a YAML parse because the surrounding template holds
+    placeholders (`<derived summary>`) that are not valid YAML values.
+    """
+    lines = _SKILL_MD.read_text().splitlines()
+    stems: list[str] = []
+    for i, line in enumerate(lines):
+        if line.rstrip() != "  disable:":
+            continue
+        for follow in lines[i + 1:]:
+            stripped = follow.strip()
+            if stripped.startswith("- "):
+                stems.append(stripped[2:].strip())
+            elif stripped.startswith("#"):
+                continue  # the "Available fragments" comment block
+            else:
+                break
+        break
+    return stems
+
+
+def test_skill_md_disable_list_matches_the_marked_fragments():
+    """SKILL.md's `defaults.disable` must name exactly the self-declared ones."""
+    in_skill_md = set(_skill_md_disable_list())
+    marked = _fragments_marked_disabled()
+    assert in_skill_md == marked, (
+        "SKILL.md's defaults.disable and the fragments' own "
+        f"'{_DISABLED_MARKER}' headers disagree — "
+        f"only in SKILL.md: {sorted(in_skill_md - marked)}; "
+        f"only in fragment headers: {sorted(marked - in_skill_md)}"
+    )
+
+
+def test_skill_md_disable_list_is_non_empty_and_sorted():
+    """Sorted so a new entry lands deterministically rather than wherever."""
+    stems = _skill_md_disable_list()
+    assert stems, "SKILL.md's defaults.disable is empty — the #853 list is missing"
+    assert stems == sorted(stems), f"defaults.disable is not sorted: {stems}"
+
+
+def test_every_disable_entry_names_a_real_fragment():
+    """A stem that matches no file is a silent no-op in load_defaults_overlay."""
+    all_stems = {p.stem for p in _fragments()}
+    unknown = [s for s in _skill_md_disable_list() if s not in all_stems]
+    assert not unknown, (
+        f"defaults.disable names stems with no fragment file: {unknown} "
+        "(load_defaults_overlay skips by stem, so these disable nothing)"
+    )
+
+
+@pytest.mark.parametrize("path", _fragments(), ids=_fragment_ids())
+def test_disabled_fragment_says_why_in_its_header(path):
+    """A disabled default is only useful if the operator can tell when to enable it."""
+    text = path.read_text()
+    if _DISABLED_MARKER not in text:
+        pytest.skip("fragment ships enabled")
+    header = "\n".join(
+        ln for ln in text.splitlines() if ln.startswith("#")
+    )
+    assert "WHY OFF BY DEFAULT" in header, (
+        f"{path.name}: marked disabled but its header never says why, so an "
+        "operator cannot judge whether their cluster is the exception"
     )
