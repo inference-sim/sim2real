@@ -299,7 +299,7 @@ def _skill_md_disable_list() -> list[str]:
     """Read the `disable:` list items out of SKILL.md's Task 5 transfer.yaml block.
 
     Line-oriented rather than a YAML parse because the surrounding template holds
-    placeholders (`<derived summary>`) that are not valid YAML values.
+    placeholders (`scenario: <derived>`) that are not valid YAML values.
     """
     lines = _SKILL_MD.read_text().splitlines()
     stems: list[str] = []

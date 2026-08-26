@@ -714,7 +714,63 @@ Assemble transfer manifest from all prior task outputs.
 7. `workloads`: from task-4 output
 8. `context.files`: files in experiment root with deployment config or signal
    mapping (README.md, config.md, etc.)
-9. `context.text`: summary of target interface and placement from algorithm source
+9. `context.text`: summary of the algorithm and where it plugs into the component.
+
+   Read it from the operator-supplied context files listed in step 8 — in practice
+   `README.md`, which is where `/sim2real-specify` records its Phase 2 "Shape"
+   conclusion. Fall back to the algorithm source only when no context file states it.
+   (Earlier wording said "from algorithm source"; in practice the placement claim is
+   almost always already written in `README.md` and bootstrap is transcribing it.)
+
+   This text is substituted into the `/sim2real-translate` writer and reviewer prompts
+   as `{CONTEXT_TEXT}` and is treated as authoritative for the science. Two accuracy
+   constraints follow from that, and both are the operator's to satisfy — no gate
+   downstream checks either one.
+
+   **(a) Every `path:line` citation must bound the construct it names.** Open each
+   cited range and confirm its first and last line are the construct's own start and
+   end. `/sim2real-specify`'s `lint_citations.py` cannot do this for you — it verifies
+   that a path resolves in exactly one pinned tree and that the line numbers fall
+   inside the file, and its own docstring says it "cannot detect a correct citation
+   attached to a wrong transcription." A range that starts correctly and stops early
+   passes the linter and still misdescribes the code.
+
+   **(b) Separate what is ruled out from what is proposed.** These carry different
+   confidence and must not be written in the same voice:
+
+   - **Eliminations** — extension points shown NOT to work, each with the citation and
+     the mechanism that rules it out. These are conclusions. State them as settled;
+     they are the expensive, reusable part.
+   - **Placement** — the extension point(s) proposed to carry the algorithm. Unless
+     you have confirmed it is constructible, this is a **declared unknown**, in the
+     same sense `/sim2real-specify` already uses for target-API adapters: *declared
+     unknowns rather than guesses, so a wrong guess fails loudly rather than
+     mis-scoring silently* (`sim2real-specify/SKILL.md:166-167`). Write it as a
+     candidate, not as *the* extension point.
+
+   Confirming a placement is constructible means more than "the data can flow."
+   Citations showing that a value is reachable do not show that one type can carry
+   the interface set you are naming: two interfaces that declare the same method name
+   with different signatures cannot coexist on one Go type, and no citation about data
+   flow will reveal that. If you have not checked the method sets, the placement stays
+   a declared unknown.
+
+   State the count too — how many separate plugin registrations the placement implies.
+   "A custom X plus a custom Y" is ambiguous between one type implementing both and
+   two registrations, and a reader who resolves it the cheap way discovers the
+   difference as a compile error after designing around it.
+
+   **Say what happens if the placement fails.** The writer's build gate has a finite
+   retry budget, and a placement asserted as settled leaves it no licence to look
+   elsewhere — it will spend the budget trying to make the stated shape work. Say
+   explicitly that if the candidate does not hold, the eliminations still do, and the
+   search continues within them. That tells the writer where NOT to spend retries.
+   Where no extension point fits at all, see #862 — a core modification is a legitimate
+   outcome, not a dead end.
+
+   Do not invent a new marker convention for any of this. Bundles already carry
+   `PLACEMENT` and `DECLARED DEGRADATION (Dn)` as plain prose labels in this field;
+   reuse them.
 10. `blis_observe`: obtained by invoking
     `python3 "$SKILL_DIR/generate_from_config.py" "$EXPERIMENT_ROOT/config.md" --emit-observe-yaml`
     and pasting its stdout verbatim between `workloads:` and `context:`. The
@@ -776,7 +832,24 @@ blis_observe:
   extraArgs: <value>       # source: config.md | sim2real-bootstrap default
 
 context:
-  text: <derived summary>
+  # Substituted into the /sim2real-translate writer and reviewer prompts as
+  # {CONTEXT_TEXT} and treated as authoritative for the science. See derivation
+  # step 9 for the two accuracy constraints: every path:line citation must bound
+  # the construct it names, and eliminations (settled) must be written in a
+  # different voice from the proposed placement (a declared unknown until its
+  # interface set is confirmed constructible on one type).
+  text: |
+    <what the algorithm computes, and the required shape of the decision>
+
+    <ELIMINATIONS -- extension points ruled out, each with citation + mechanism.
+    Settled conclusions.>
+
+    <PLACEMENT -- the candidate extension point(s), how many separate plugin
+    registrations it implies, and every interface each type must implement. A
+    declared unknown until the method sets are checked. State what still holds
+    if it fails, so the writer knows where to search next.>
+
+    <DECLARED DEGRADATION (Dn) -- any substitution, with the direction of bias.>
   files: <list of context files>
 
 defaults:

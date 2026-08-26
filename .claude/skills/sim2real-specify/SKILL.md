@@ -119,6 +119,37 @@ HALT if no extension point can express the required shape. The hazard is silent
 fallback to the weaker natural decomposition, which transfers a different
 algorithm while resembling success. Say so loudly instead.
 
+**Expressible is not constructible.** Finding an extension point that can express the
+shape shows that the data can reach the decision — that the candidates are all visible,
+that a pair fits in the return type, that a result can be split downstream. It does not
+show that the placement you are about to name can be built. Two interfaces declaring the
+same method name with different signatures cannot coexist on one Go type, and no
+citation about data flow will reveal that.
+
+So the placement is subject to the same rule this skill already applies to target-API
+adapters — a **declared unknown rather than a guess, so a wrong guess fails loudly
+rather than mis-scoring silently** (see the specification-layer contract below). Until
+you have read the method sets of every interface you are naming and confirmed they can
+sit on the types you are proposing:
+
+- Write the placement as a **candidate**, not as *the* extension point that can express
+  it. `/sim2real-bootstrap` copies this sentence into `transfer.yaml:context.text`, and
+  `/sim2real-translate`'s writer treats it as authoritative — so a flat assertion here
+  leaves the writer no licence to look elsewhere when it does not compile.
+- State **how many separate plugin registrations** the placement implies, and every
+  interface each type must implement. "A custom X plus a custom Y" is ambiguous between
+  one type doing both and two registrations; a reader who resolves it the cheap way
+  discovers the difference as a compile error after designing around it.
+
+Keep the eliminations in a different voice from the placement. An extension point ruled
+out with a cited mechanism is a settled conclusion and the durable half of this phase's
+output — it stays true even when the candidate placement fails, and it tells a later
+reader where the remaining search space is. Say so explicitly: if the candidate does not
+hold, the eliminations still do.
+
+Where no extension point fits at all, see #862 — modifying the component's own code is a
+legitimate outcome to plan rather than only a reason to halt.
+
 ## Phase 3 — Observability
 
 Enumerate every quantity the decision rule reads. Classify each:
