@@ -869,7 +869,7 @@ The same success gate applies — `trace_data.csv` under `workspace/runs/<run-na
 | `translation_ref.py` | Shared alias/algorithm-name validator, on-read shim for `translation_output.json` (handles both step-1 legacy and step-2 per-algo shapes), and `resolve_translation_ref` (accepts alias / hash prefix / full hash) |
 | `build.py` | Shared build primitives — image-ref construction, skopeo digest probe, buildkit-pod dispatch, atomic JSON write. Consumed by `sim2real build`. |
 | `assemble_run.py` | Assembly logic behind `sim2real assemble` (deep-merge + PipelineRun generation, additive-grow / drift / legacy-run decision tree) |
-| `values.py` | Deep-merge utility used by `assemble_run.py` |
+| `values.py` | Deep-merge utility used by `assemble_run.py`. Lists of scalars are replaced, except CLI-flag lists at `**.vllm.additionalFlags`, which merge by flag name (#851) |
 | `pairkey.py` | Pair-key parser (canonical grammar `wl-<w>\|<p>\|iN` with legacy `wl-<w>\|<p>` fallback) and `--iteration` spec parser (list + range) |
 | `tekton.py` | Generates PipelineRun YAMLs; `validate_pipelinerun_name` enforces the RFC 1123 253-char limit at assemble time |
 | `pod_pending.py` | Classifies pod scheduling failures (recoverable vs not) |
@@ -1067,8 +1067,40 @@ Where `baseline_bundle` is the experiment's `baselines/baseline.yaml` (issue #54
   a malformed manifest missing one of them — the fold raises `ValueError` instead of
   silently smearing them. (Two malformed manifests with identical markers still fold;
   malformed manifests are out of scope — kubectl/Helm reject them.)
-- Lists of scalars are replaced entirely
+- Lists of scalars are replaced entirely — **except** CLI-flag lists (see below)
 - Treatment overlay only needs the delta from baseline_resolved (shared config propagates automatically)
+
+#### CLI-flag lists merge by flag name (issue #851)
+
+Scalar lists at key paths ending in `vllm.additionalFlags` — matched as a **suffix**,
+so `decode` and `prefill` are both covered — merge by flag name instead of being
+replaced. Before #851, a flag list set by two layers kept only the last writer's copy,
+so a `config.md`-derived flag reached the cluster only if the generated overlay happened
+to restate it verbatim.
+
+- Each entry is keyed on its flag name: `--max-num-seqs=256` keys on `--max-num-seqs`;
+  a bare `--enable-chunked-prefill` is its own key.
+- `--no-X` and `--X` canonicalize to **one** key, so a later layer stating either form
+  overrides the earlier rather than emitting two contradictory flags whose winner would
+  depend on vLLM's argparse ordering.
+- Base entries come first in base order; overlay-only entries are appended — the same
+  convention the named-key dict tier uses.
+- **Removal:** state the `--no-` form to flip an inherited boolean flag, or set the list
+  to `[]` to clear it entirely. There is deliberately no per-entry deletion sentinel for
+  `--key=value` flags.
+- **Refused:** an entry that is not a `--`-prefixed string (so a space-separated arg list
+  such as `router.proxy.args` cannot be mis-keyed if pasted in), and two entries in one
+  list that collapse to the same key. Both guards apply only when two layers actually
+  contribute, since a single contributor has nothing to merge.
+
+The scoping is by key path because `router.proxy.args` is also a scalar list, but its
+values are separate elements (`["--concurrency", "8"]`) rather than `--key=value` pairs;
+flag-name merging there would treat `8` as a flag name.
+
+Scalar lists that still replace — `router.proxy.args` and
+`{decode,prefill}.extraContainerConfig.securityContext.capabilities.add` — now produce a
+warning from `sim2real assemble` when two layers both set one, naming the key path, the
+discarded values, and which two layers disagreed.
 
 ### Required structure
 

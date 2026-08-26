@@ -10,9 +10,15 @@ These tests are deliberately glob-driven: adding a fragment requires no test edi
 but the new fragment must satisfy the same contract as the existing ones.
 
 Issue #839 (two shipped fragments were wrong, five were missing) is what motivated
-them. The `additionalFlags` guard below is the narrow, statically-decidable slice of
+them. The scalar-list guard below is the narrow, statically-decidable slice of
 #841 — it catches keys that provably cannot survive the merge chain, rather than
 comparing resolved scenarios, which is what #841 tracks.
+
+Note on scope since #851: `**.vllm.additionalFlags` no longer replaces — it merges
+by flag name, so a value set from this layer does survive downstream layers. The
+guard therefore no longer applies to that key (and no fragment sets it today). It
+still applies to every other scalar list, which `_merge_lists` Tier 1 continues to
+replace wholesale.
 """
 import itertools
 from pathlib import Path
@@ -102,6 +108,8 @@ def test_fragment_sets_something_beyond_its_name(path):
 #
 # A scalar list set from the defaults layer only survives if NO downstream layer
 # sets the same key, because `_merge_lists` Tier 1 replaces rather than appends.
+# (`**.vllm.additionalFlags` is the one exception since #851 — it merges by flag
+# name, so it needs no allowlist entry. Every key below still replaces.)
 # That makes every entry here a standing fragility, not an endorsement: an
 # experiment whose `baselines/<name>.yaml` sets the same key silently wins, and the
 # fragment's value never reaches the rendered output. Each entry must be justified
@@ -137,7 +145,11 @@ def test_fragment_sets_no_unacknowledged_scalar_list_key(path):
     a non-dict item. The defaults overlay is the FIRST layer in `resolve_baseline`'s
     chain — `deep_merge(defaults, bundle)` then `deep_merge(..., overlay)` — so a
     scalar list it sets is discarded the moment any downstream layer sets the same
-    key. `vllm.additionalFlags` is the case that shipped inert for months (#839).
+    key. `vllm.additionalFlags` is the case that shipped inert for months (#839);
+    it is no longer subject to this (Tier 0 merges it by flag name since #851), but
+    every other scalar list still is. Since #851, `sim2real assemble` also warns at
+    resolve time when two layers both set a still-replacing scalar list, so a
+    fragment that slips past this static guard is caught at run time too.
 
     Rather than forbid scalar lists outright (which would rule out a fragment that
     legitimately owns a key nothing downstream touches), require that each one be
@@ -165,9 +177,10 @@ def test_fragment_sets_no_unacknowledged_scalar_list_key(path):
         "REPLACED by any downstream layer (_merge_lists Tier 1), so a value set here "
         "cannot be relied on to reach the rendered output. Prefer a typed "
         "scalar/bool key, or a list of dicts carrying `name` (which merges by key). "
-        "If the key genuinely belongs in this layer, add it to "
-        "_ALLOWED_SCALAR_LISTS with a reason and warn about it in the fragment's "
-        "header comment."
+        "`**.vllm.additionalFlags` is exempt — it merges by flag name since #851 — "
+        "but no other scalar-list path is. If the key genuinely belongs in this "
+        "layer, add it to _ALLOWED_SCALAR_LISTS with a reason and warn about it in "
+        "the fragment's header comment."
     )
 
     stale = sorted(allowed - found)
