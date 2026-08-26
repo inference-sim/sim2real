@@ -334,9 +334,10 @@ class TestDeriveGpuResourceType:
         scenario = {"scenario": [{"name": "test"}]}
         assert derive_gpu_resource_type(scenario, defaults) == "nvidia.com/gpu"
 
-    def test_malformed_flag_list_falls_back_instead_of_raising(self):
+    def test_malformed_flag_list_falls_back_instead_of_raising(self, capsys):
         """#851's flag tier rejects malformed entries with ValueError; this
-        function's contract is to always return a resource name."""
+        function's contract is to always return a resource name — but it must
+        say so, since a silent fallback would mis-probe a non-NVIDIA cluster."""
         defaults = {
             "accelerator": {"resource": "habana.ai/gaudi"},
             "decode": {"vllm": {"additionalFlags": ["--max-num-seqs=256"]}},
@@ -346,6 +347,21 @@ class TestDeriveGpuResourceType:
             "decode": {"vllm": {"additionalFlags": ["bare-value"]}},
         }]}
         assert derive_gpu_resource_type(scenario, defaults) == "nvidia.com/gpu"
+        out = capsys.readouterr()
+        assert "merge failed" in (out.out + out.err)
+
+    def test_non_flag_merge_error_also_warns_before_falling_back(self, capsys):
+        """deep_merge raises for more than the flag tier — duplicate k8s object
+        identity does too, and that fallback must not be silent either."""
+        obj = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "m"}}
+        defaults = {
+            "accelerator": {"resource": "habana.ai/gaudi"},
+            "extraObjects": [dict(obj), dict(obj)],
+        }
+        scenario = {"scenario": [{"name": "test", "extraObjects": [dict(obj)]}]}
+        assert derive_gpu_resource_type(scenario, defaults) == "nvidia.com/gpu"
+        out = capsys.readouterr()
+        assert "merge failed" in (out.out + out.err)
 
     def test_valid_flag_lists_do_not_disturb_resource_derivation(self):
         defaults = {

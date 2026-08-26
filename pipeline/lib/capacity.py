@@ -196,11 +196,16 @@ def derive_gpu_resource_type(resolved_scenario: dict, defaults: dict) -> str:
     Merges the first scenario entry over defaults, then reads
     accelerator.resource. Falls back to "nvidia.com/gpu".
 
-    Never raises: the flag-list merge tier (issue #851) rejects a malformed or
-    duplicated CLI-flag entry with ValueError, but this function's contract is
-    to always return a resource name, so such a merge failure falls back to the
-    default like every other missing-or-bad-data case here. GPU resource type
-    does not depend on vLLM flags, so the fallback loses nothing.
+    Never raises: this function's contract is to always return a resource name,
+    so a merge failure falls back to the default like every other
+    missing-or-bad-data case here. GPU resource type does not depend on vLLM
+    flags, so the fallback itself loses nothing.
+
+    It does warn first, though. ``deep_merge`` can raise for more than the
+    flag-list tier (issue #851) — duplicate Kubernetes object identity and a
+    Tier-3 marker conflict both raise ValueError too — and on a non-NVIDIA
+    cluster a silent fallback to ``nvidia.com/gpu`` would mis-probe capacity
+    with nothing in the log to explain why.
     """
     scenario_entry = {}
     scenarios = resolved_scenario.get("scenario", [])
@@ -209,7 +214,11 @@ def derive_gpu_resource_type(resolved_scenario: dict, defaults: dict) -> str:
 
     try:
         merged = deep_merge(defaults, scenario_entry)
-    except ValueError:
+    except ValueError as exc:
+        warn(
+            f"scenario/defaults merge failed ({exc}); falling back to GPU "
+            "resource type 'nvidia.com/gpu' — verify this matches the cluster"
+        )
         return "nvidia.com/gpu"
     return merged.get("accelerator", {}).get("resource", "nvidia.com/gpu")
 
