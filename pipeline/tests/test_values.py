@@ -632,3 +632,70 @@ class TestFlagListMerge:
         step1 = _merge_lists(["--a=1"], ["--b=2"], path=_FP)
         step2 = _merge_lists(step1, ["--c"], path=_FP)
         assert step2 == ["--a=1", "--b=2", "--c"]
+
+
+# ── Stage 1: conflict recording for lists that still replace (#851) ───────────
+
+_ARGS_P = ("scenario", "router", "proxy", "args")
+
+
+class TestScalarReplaceConflictSink:
+    def test_records_conflict_when_both_layers_set_scalar_list(self):
+        sink: list[str] = []
+        _merge_lists(
+            ["--concurrency", "8"], ["--log-level", "warn"], path=_ARGS_P, sink=sink
+        )
+        assert len(sink) == 1
+        assert "scenario.router.proxy.args" in sink[0]
+        assert "--concurrency" in sink[0]
+
+    def test_no_sink_is_silent(self):
+        """capacity.py merges without a sink; must not raise."""
+        assert _merge_lists(["--a"], ["--b"], path=_ARGS_P) == ["--b"]
+
+    def test_identical_lists_record_nothing(self):
+        sink: list[str] = []
+        _merge_lists(["--a"], ["--a"], path=_ARGS_P, sink=sink)
+        assert sink == []
+
+    def test_flag_merged_path_records_nothing(self):
+        sink: list[str] = []
+        _merge_lists(["--a=1"], ["--b"], path=_FP, sink=sink)
+        assert sink == []
+
+    def test_empty_base_records_nothing(self):
+        sink: list[str] = []
+        _merge_lists([], ["--b"], path=_ARGS_P, sink=sink)
+        assert sink == []
+
+    def test_empty_overlay_records_nothing(self):
+        sink: list[str] = []
+        _merge_lists(["--a"], [], path=_ARGS_P, sink=sink)
+        assert sink == []
+
+    def test_dict_list_records_nothing(self):
+        sink: list[str] = []
+        _merge_lists(
+            [{"name": "x"}], [{"name": "x", "v": 1}], path=("containers",), sink=sink
+        )
+        assert sink == []
+
+    def test_scalar_overlay_over_dict_base_records(self):
+        """Dict base clobbered by a scalar overlay is loss too."""
+        sink: list[str] = []
+        _merge_lists([{"name": "x"}], ["c"], path=_ARGS_P, sink=sink)
+        assert len(sink) == 1
+
+    def test_sink_propagates_through_deep_merge(self):
+        sink: list[str] = []
+        base = {"scenario": [{"name": "s", "router": {"proxy": {"args": ["--a"]}}}]}
+        overlay = {"scenario": [{"name": "s", "router": {"proxy": {"args": ["--b"]}}}]}
+        deep_merge(base, overlay, sink=sink)
+        assert len(sink) == 1
+        assert "scenario.router.proxy.args" in sink[0]
+
+    def test_message_reports_both_discarded_and_kept(self):
+        sink: list[str] = []
+        _merge_lists(["--a"], ["--b"], path=_ARGS_P, sink=sink)
+        assert "discarding 1 value" in sink[0]
+        assert "kept:" in sink[0]

@@ -117,6 +117,36 @@ def _merge_flag_lists(
     return result
 
 
+def _record_scalar_list_replace(
+    base_list: list,
+    overlay_list: list,
+    path: tuple[str, ...],
+    sink: list | None,
+) -> None:
+    """Record that a scalar list was replaced wholesale, discarding base values.
+
+    Stage 1 of issue #851, narrowed to the lists that STILL replace now that the
+    flag-merge tier exists — today ``router.proxy.args`` and
+    ``{decode,prefill}.extraContainerConfig.securityContext.capabilities.add``,
+    both allowlisted in the bootstrap skill's
+    ``tests/test_defaults_templates.py:_ALLOWED_SCALAR_LISTS``. Paths that merge
+    by flag name never reach here, so this stays signal rather than noise.
+
+    Identical lists record nothing: restating the same values loses no
+    information, and warning about it would train operators to ignore the
+    warning. ``sink is None`` — every consumer except the assemble resolution
+    chain — is silent, so a merge in a hot path such as ``capacity`` costs
+    nothing.
+    """
+    if sink is None or base_list == overlay_list:
+        return
+    sink.append(
+        f"{'.'.join(path) or '<root>'}: overlay replaces the whole list, "
+        f"discarding {len(base_list)} value(s) set by an earlier layer: "
+        f"{base_list!r} (kept: {overlay_list!r})"
+    )
+
+
 def _k8s_identity(item):
     """Return a Kubernetes identity tuple (apiVersion, kind, metadata.name), or None.
 
@@ -290,6 +320,7 @@ def _merge_lists(
     # Tier 1: any non-dict item → replace
     if not (all(isinstance(x, dict) for x in base_list)
             and all(isinstance(x, dict) for x in overlay_list)):
+        _record_scalar_list_replace(base_list, overlay_list, path, sink)
         return copy.deepcopy(overlay_list)
 
     # Tier 2a: Kubernetes manifest lists — merge by identity, never positionally fold
