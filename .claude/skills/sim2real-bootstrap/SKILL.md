@@ -177,20 +177,64 @@ COMPONENT_REF="<chosen ref>"
 **action:** shell  
 **depends:** task-1
 
+Each step is guarded, and every git call targets the submodule with `git -C` rather
+than a preceding `cd`. Without that, a failed `git submodule add` leaves the shell in
+`$EXPERIMENT_ROOT`, and the following `git checkout "$COMPONENT_REF"` then runs against
+the **experiment repo itself** — detaching its HEAD onto a component ref.
+
 ```bash
 cd "$EXPERIMENT_ROOT"
-git submodule add "$COMPONENT_URL" "$COMPONENT_NAME"
-cd "$COMPONENT_NAME"
-git fetch --tags
-git checkout "$COMPONENT_REF"
-cd ..
+git submodule add "$COMPONENT_URL" "$COMPONENT_NAME" \
+    || { echo "ERROR: git submodule add failed for $COMPONENT_URL"; exit 1; }
+git -C "$COMPONENT_NAME" fetch --tags \
+    || { echo "ERROR: fetch --tags failed in $COMPONENT_NAME"; exit 1; }
+git -C "$COMPONENT_NAME" checkout "$COMPONENT_REF" \
+    || { echo "ERROR: checkout of $COMPONENT_REF failed in $COMPONENT_NAME"; exit 1; }
 git add .gitmodules "$COMPONENT_NAME"
 ```
 
-Verify:
+**Verify (hard stop on failure):**
 ```bash
-test -d "$COMPONENT_NAME/.git" && (cd "$COMPONENT_NAME" && git log --oneline -1)
+# NOTE: `git submodule add` writes .git as a FILE containing a gitlink
+# ("gitdir: ../.git/modules/<name>"), NOT a directory. `test -d` is therefore false
+# even on a perfectly populated checkout — use -e, and let `git -C` resolve the
+# gitlink. Do not "simplify" this back to -d.
+test -e "$COMPONENT_NAME/.git" || { echo "ERROR: submodule $COMPONENT_NAME not populated"; exit 1; }
+git -C "$COMPONENT_NAME" rev-parse --verify HEAD >/dev/null 2>&1 \
+    || { echo "ERROR: $COMPONENT_NAME has no checked-out commit"; exit 1; }
+git -C "$COMPONENT_NAME" log --oneline -1
 ```
+
+A populated checkout is a **precondition for Task 5**, which derives
+`component.build.commands` by reading this component's own build file, CI workflow
+and linter config (Task 5, derivation step 4). Without it there is nothing to
+discover from, and the only remaining option is to invent commands from memory of
+what a component "usually" uses — the defect issue #858 removed.
+
+So if the clone or checkout fails — most commonly a private component repo or an
+expired credential — **halt and ask the operator**. Do not continue to Task 5 with
+an empty checkout. Present a plain-text numbered prompt (do NOT use
+`AskUserQuestion`):
+
+```
+Component submodule could not be populated:
+  repo: <$COMPONENT_URL>
+  ref:  <$COMPONENT_REF>
+  error: <verbatim git stderr>
+
+Task 5 cannot derive component.build.commands without this checkout.
+
+Pick one:
+  (1) I have fixed access — retry the submodule add
+  (2) Read the component's build file, CI workflow and linter config from the
+      remote host at <$COMPONENT_REF> instead (discovery only — the submodule
+      still has to be added before the bundle can build)
+  (3) abort
+```
+
+Wait for the operator's reply before proceeding. On (2), record in `transfer.yaml`
+which files were read remotely and at which ref, so a later reader can tell a
+remote-derived gate from a checkout-derived one.
 
 ---
 
@@ -582,7 +626,87 @@ Assemble transfer manifest from all prior task outputs.
    - `UsageLimitPolicy` / flowcontrol -> `EndpointPickerConfig`
    - `Scorer` / scheduling -> `EndpointPickerConfig`
    - `Admission` -> `AdmissionPolicyConfig`
-4. `component.build.commands`: standard Go build + test for relevant package
+4. `component.build.commands`: the **translation's verification gate** — discover it
+   from the component submodule. Do NOT derive it from algorithm imports.
+
+   Why the distinction matters: "derived from algorithm imports" asks *which packages
+   does this algorithm touch*. It never asks *what are this component's verification
+   commands*. This list has exactly one consumer — `/sim2real-translate`'s writer runs
+   each entry in order, with a 6-retry budget, then escalates `build-failed:`
+   (`sim2real-translate/prompts/agent-writer.md`). The pipeline never executes it:
+   `pipeline/lib/manifest.py` only type-checks the key, and `sim2real build` builds
+   `Dockerfile.epp`, which runs no tests. So this list is the translation's whole
+   verification gate and nothing else. **It should fail when the translation is
+   wrong, not merely when it does not compile.**
+
+   **Precondition.** Discovery reads files inside `$EXPERIMENT_ROOT/$COMPONENT_NAME`
+   at `$COMPONENT_REF`. If Task 2 did not leave a populated checkout there, stop and
+   use Task 2's operator prompt. Never invent commands from memory of what a
+   component "usually" uses.
+
+   **Discovery — take the component's own authoritative gate first, in this order:**
+
+   1. An agent-facing contract, if present: `AGENTS.md`, `CLAUDE.md`,
+      `CONTRIBUTING.md`. When one of these declares which targets are authoritative,
+      that declaration wins over your own reading of the build file.
+   2. The build file (`Makefile`, `Taskfile`, `justfile`, `package.json` scripts) and
+      the CI workflow. **Read what targets expand to, not their names** — a target
+      named for testing may wrap a container build, a coverage upload, or nothing at
+      all.
+   3. The project's own test scope, as *it* defines it — including whatever it
+      excludes.
+
+   **Scoping strategies, applied to whatever discovery returns:**
+
+   - **Prefer the direct invocation when a target wraps a container build.** The
+     writer runs in this environment, not in the component's builder image. When part
+     of the discovered gate genuinely cannot run here, say so in a YAML comment
+     rather than dropping it silently.
+   - **Do not duplicate what a linter already covers.** Read the linter's config
+     before adding a separate step for something it already enables.
+   - **Add the ecosystem's cache-bypass flag** (`-count=1` in Go) when a test reads a
+     file outside the module. Such files are not hashed into the test cache key, so a
+     cached PASS can coexist with a known-bad input. This trigger is derivable by
+     inspection: look for tests that open a path outside their own module.
+   - **Add the race/concurrency flag when the plugin will share state across
+     goroutines.** Do not look for this in `algorithms/*.go` — at bootstrap time the
+     plugin does not exist yet, and simulation source is single-threaded
+     discrete-event code that typically contains no goroutines at all. The
+     concurrency is a property of the *production* extension points, and it is
+     derivable from two things already in hand: derivation step 3's interface scan
+     (which extension points the algorithm binds to), and `/sim2real-specify`'s
+     Phase 2 "Shape" and Phase 3 "Observability" statements, restated in the
+     experiment's `README.md` and listed in `context.files` by step 8. The signal is
+     a decision made on one path that reads a quantity produced on another — a
+     request-path scoring decision reading a response-path value, for instance. That
+     is cross-goroutine shared state by construction, and it is what the race flag
+     exists to catch.
+   - **State the reason for each entry in a YAML comment**, so a future reader can
+     tell a regression check from a check of the new code.
+
+   **Narrowing the project's test scope — allowed, never silent.** The writer's
+   6-retry budget makes a component's full test scope expensive, and inherited lint
+   debt in packages unrelated to this algorithm can exhaust that budget on someone
+   else's problem. Narrowing is therefore acceptable, subject to both of:
+
+   - The narrowed scope MUST still cover the packages the new plugin lives in and the
+     packages its tests exercise. Those are the point of the gate; narrowing past
+     them defeats it.
+   - The deviation MUST be stated in a YAML comment naming what was excluded and why.
+     A narrowing a reader cannot distinguish from an oversight is the wrong default
+     even when the narrowing itself is right.
+
+   **Do not hardcode a known component's commands.** Any commands you have seen for a
+   particular component are an illustration of what these strategies find, not a
+   specification. Run discovery against whatever `$COMPONENT_NAME` actually is —
+   including components that are not `llm-d-router`, and components that are not Go
+   (in which case substitute that ecosystem's equivalents for the cache-bypass and
+   race flags, or omit them if it has none).
+
+   **Editing this field in an existing bundle:** `component.build.commands` is inside
+   the translation slice (`pipeline/lib/slicer.py`), so changing it alters the
+   bundle's `translation_hash` and orphans images already built under the old hash.
+   Land such a fix at a translation boundary.
 5. `baselines`: one entry, always `{ name: baseline, scenario: baselines/baseline.yaml }` (issue #544 — the baseline identifier is hardcoded)
 6. `algorithms`: from `algorithms/*.go` — each file with a Factory function
    or plugin registration pattern is a candidate. Every entry's `defaults`
@@ -619,7 +743,15 @@ component:
     hub: <derived from component repo org, e.g., ghcr.io/llm-d>
     name: <$COMPONENT_NAME>
   build:
-    commands: <derived from algorithm imports>
+    # Discovered from the component submodule, NOT from algorithm imports — see
+    # derivation step 4. This list is the translation's entire verification gate:
+    # /sim2real-translate's writer runs each entry in order (6 retries, then
+    # build-failed:), and nothing else ever executes it. Every entry carries a
+    # comment giving its reason, and a narrowed test scope names what it excluded
+    # and why. The commands are whatever THIS component declares as authoritative —
+    # do not copy another component's.
+    commands:
+      - <command>  # <why this entry is in the gate>
 
 algorithms:
   - name: <lowercase-alphanumeric>
