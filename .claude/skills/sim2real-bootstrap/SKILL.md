@@ -414,11 +414,24 @@ optional per-role accelerator overrides; without them both roles use the shared
   | `cpu request` | `cpu_request`, `cpu requests` |
   | `memory request` | `memory_request`, `memory requests` |
 
-  Stating only some is fine; the rest take their per-role default. There are
-  deliberately **no per-role rows** — an operator who needs decode and prefill to
-  differ edits `baselines/baseline.yaml` after bootstrap, as they do for everything
-  else the generator does not model. The JSON-input path takes the same four names
-  as `vllm_args` keys.
+  There are deliberately **no per-role rows** — an operator who needs decode and
+  prefill to differ edits `baselines/baseline.yaml` after bootstrap, as they do for
+  everything else the generator does not model. The JSON-input path takes the same
+  four names as `vllm_args` keys.
+
+  **The pair is reconciled per role**, which matters because the four rows are shared
+  while the defaults differ 4–8× between roles. Per resource:
+
+  1. the **limit** is the stated value, else that role's default;
+  2. the **request** is the stated value; failing that, half the limit when the limit
+     was stated (the role's default request may not fit a limit you changed), else
+     that role's default request;
+  3. the request is then **clamped to the limit**, with a warning naming the role.
+
+  Step 3 is why stating only some rows is safe. A `cpu request: 20` is sensible for
+  decode (limit 32) and impossible for prefill (limit 8) — the same row feeds both, so
+  prefill's is clamped to 8 rather than emitting a pod Kubernetes would reject at
+  admission. If you want a larger request on prefill, state a `cpu limit` too.
 
   Values are emitted verbatim as **quoted** strings — `32`, `500m`, `1.5`, `128Gi`,
   `1536Mi` are all valid Kubernetes quantities, and an unquoted one is re-typed by
@@ -433,15 +446,28 @@ optional per-role accelerator overrides; without them both roles use the shared
   | Role | limits | requests |
   |---|---|---|
   | decode | `128Gi` / `32` | `64Gi` / `16` |
-  | prefill | `16Gi` / `8` | `8Gi` / `4` |
+  | prefill | `16Gi` / `8` | `16Gi` / `8` |
 
-  Limits come from llm-d's `pd-disaggregation` guide verbatim. Requests are half
-  those limits: requests are what the scheduler actually reserves, and reserving the
-  generous ceiling on every replica would make a multi-replica pool unschedulable on
-  a busy cluster. **Both halves are stated** because the framework default sets
-  both, and a scenario is deep-merged over it — emitting only `limits` would leave
-  `requests` at the inherited 40Gi/`"4"`, so a decode pod would ask for 40Gi while
-  permitted 128Gi. That pairing would be implicit and surprising.
+  Limits come from llm-d's `pd-disaggregation` guide verbatim. Decode's request is
+  half its limit — requests are what the scheduler actually reserves, and reserving
+  the generous ceiling on every replica would make a multi-replica pool
+  unschedulable on a busy cluster.
+
+  **Prefill's request equals its limit**, matching upstream. Issue #848 mounts a
+  `medium: Memory` tmpfs at `/dev/shm` sized `16Gi` in `vllmCommon`, so both roles
+  get it, and tmpfs charges against the pod's memory. A prefill request below that
+  `16Gi` would put the pod above its request as soon as collectives filled
+  `/dev/shm` — an eviction candidate under node pressure, mid-run, on exactly the
+  TP>1 P/D configuration this targets. Guaranteed QoS is what protects it there.
+
+  **Both halves are stated** because the framework default sets both, and a scenario
+  is deep-merged over it — emitting only `limits` would leave `requests` at the
+  inherited 40Gi/`"4"`, so a decode pod would ask for 40Gi while permitted 128Gi.
+  That pairing would be implicit and surprising.
+
+  **Reservations multiply by replicas.** A 4-replica decode pool at the default
+  request reserves 64 CPU and 256Gi before anything else is scheduled. On a busy
+  cluster that is the number to check first if pods stay Pending.
 
   **The defaults are not measured.** They come from one cluster, one model, one
   tensor-parallel degree. Whenever any quantity falls back to a default, bootstrap
@@ -870,7 +896,7 @@ This skill ships with supporting files in its directory. Invoke in place — do 
 | `generate_from_config.py` | Parses `config.md` markdown tables → scenario YAMLs with provenance comments. Preferred for most BLIS experiments. Handles hardware normalization, bare-flag prefix-caching input/output, and unknown model/hardware detection. |
 | `generate_scenarios.py` | Converts JSON config (`top3_selection.json`) → scenario YAMLs. Use when JSON input exists (BLIS). |
 | `generate_scenarios.README.md` | Coverage map for the JSON-input path. Documents field mappings, omission rules, and gaps. |
-| `pod_resources.py` | Per-role CPU/memory for the model-server pods (issue #850): the fixed per-role default table (decode sized above prefill), `resolve_resources` (per-role row → shared row → default, values passed through as strings), and the line emitter including the unmeasured-defaults comment. Imported by both generators so the emitted text cannot drift. Asserted by `tests/test_pod_resources.py` plus the cross-generator check in `tests/test_generate_scenarios.py`. |
+| `pod_resources.py` | CPU/memory for the model-server pods (issue #850): the fixed per-role default table (decode sized above prefill), `resolve_resources` (four shared input keys resolved per role into a coherent limit/request pair — stated value, else derived, else default, with a request clamped to its own role's limit), a Kubernetes quantity validator, and the line emitter. Imported by both generators so the emitted text cannot drift. Asserted by `tests/test_pod_resources.py` plus the cross-generator check in `tests/test_generate_scenarios.py`. |
 | `pd_plumbing.py` | The P/D and multi-GPU pod plumbing (issue #848): one connector decision in two spellings (`kvTransfer.connector` engine-side, `routing.connector` sidecar-side), the two gate predicates, and one line-emitter per YAML fragment. Imported by both generators — the fragments are identical literal YAML, so a single copy is what keeps the two hand-rolled emitters in agreement. Asserted by `tests/test_pd_plumbing.py` and by the cross-generator check in `tests/test_generate_scenarios.py`. |
 | `byo.py` | Implements the `--byo` branch — argument parsing, YAML validation, path-safe copy operations, `transfer.yaml` emission, batched `sim2real translation register` command generation. Invoked by SKILL.md's dispatch when `--byo` (or any BYO-only flag) is passed. |
 | `templates/defaults/*.yaml` | Framework-owned baseline workaround fragments (request-id, verbosity, sidecar sizing, model-PVC size, topology, tokenizer) plus the P/D cluster-specific ones that ship disabled (pod capabilities, NIC exclusion, RDMA reservation — issue #853). Copied into `<experiment-root>/baselines/defaults/` at BLIS task-4b and at BYO run time, so every experiment is self-contained and reproducible. Shape and merge-safety are asserted by `tests/test_defaults_templates.py`. |

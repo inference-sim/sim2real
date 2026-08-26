@@ -881,7 +881,9 @@ def test_resources_emitted_with_role_defaults(tmp_path):
     assert _res(parsed, "decode")["limits"] == {"memory": "128Gi", "cpu": "32"}
     assert _res(parsed, "decode")["requests"] == {"memory": "64Gi", "cpu": "16"}
     assert _res(parsed, "prefill")["limits"] == {"memory": "16Gi", "cpu": "8"}
-    assert _res(parsed, "prefill")["requests"] == {"memory": "8Gi", "cpu": "4"}
+    # prefill's request EQUALS its limit (Guaranteed QoS), because #848 mounts a
+    # 16Gi tmpfs at /dev/shm in vllmCommon and tmpfs charges against pod memory.
+    assert _res(parsed, "prefill")["requests"] == {"memory": "16Gi", "cpu": "8"}
 
 
 def test_no_prefill_pool_emits_resources_for_decode_only(tmp_path):
@@ -907,9 +909,10 @@ def test_stated_row_applies_to_both_roles(tmp_path):
     "label", ["cpu limit", "cpu_limit", "cpu limits"]
 )
 def test_each_declared_alias_spelling_resolves(label, tmp_path):
-    """Every spelling PARAMETER_ALIASES declares must actually reach the resolver.
-    Deleting an alias would otherwise revert a stated row to a generous default with
-    no error at all."""
+    """A declared spelling must actually reach the resolver -- deleting an alias would
+    otherwise revert a stated row to a generous default with no error. Covers
+    cpu_limit's three spellings; the other three keys follow the same pattern in
+    PARAMETER_ALIASES and are covered by test_every_resource_field_is_declared."""
     scenario, prov = build([row(label, "64")])
     parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
     assert _res(parsed, "decode")["limits"]["cpu"] == "64"
@@ -918,8 +921,11 @@ def test_each_declared_alias_spelling_resolves(label, tmp_path):
 @pytest.mark.parametrize("key", ["cpu_limit", "memory_limit",
                                  "cpu_request", "memory_request"])
 def test_every_resource_field_is_declared_and_string_valued(key):
-    """A resource field handed to parse_numeric would lose its unit: `parse_numeric`
-    takes only the first whitespace token."""
+    """A resource field handed to parse_numeric loses its unit whenever the value
+    contains whitespace: parse_numeric takes only the first token, so `16 Gi` becomes
+    `16`. Unspaced quantities like `128Gi` survive by accident -- int()/float() fail on
+    them, so the None fallback returns the whole string. The accident is the reason to
+    be explicit here rather than rely on it."""
     assert key in gfc.PARAMETER_ALIASES
     assert key in gfc._STRING_VALUED_FIELDS
 
@@ -1044,3 +1050,100 @@ def test_resources_parse_in_every_row_combination(tmp_path):
         scenario, prov = build(extra)
         parsed = yaml.safe_load(emit(scenario, prov, tmp_path / f"r{i}"))
         assert "resources" in parsed["scenario"][0]["decode"]
+
+
+# --- pair reconciliation end-to-end (review must_fix) ----------------------
+
+def test_shared_request_row_clamps_prefill_not_decode(tmp_path, capsys):
+    """A `cpu request: 20` row is sensible for decode (limit 32) and impossible for
+    prefill (limit 8), and one row feeds both roles. This used to emit
+    requests {96Gi, 20} against limits {16Gi, 8} for prefill -- a pod Kubernetes
+    rejects at admission -- under a comment claiming requests sit below limits."""
+    scenario, prov = build(
+        [
+            row("Number of prefill pods", "1"),
+            row("cpu request", "20"),
+            row("memory request", "96Gi"),
+        ]
+    )
+    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
+    assert _res(parsed, "decode")["requests"] == {"memory": "96Gi", "cpu": "20"}
+    assert _res(parsed, "prefill")["requests"] == {"memory": "16Gi", "cpu": "8"}
+    assert _res(parsed, "prefill")["requests"] == _res(parsed, "prefill")["limits"]
+    err = capsys.readouterr().err
+    assert "exceeds its limit" in err
+    assert "prefill" in err
+
+
+def test_smaller_stated_limit_derives_a_fitting_request(tmp_path):
+    """Stating only limits used to leave the larger default requests in place:
+    limits {8, 32Gi} with requests {16, 64Gi}."""
+    scenario, prov = build([row("cpu limit", "8"), row("memory limit", "32Gi")])
+    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
+    assert _res(parsed, "decode")["limits"] == {"memory": "32Gi", "cpu": "8"}
+    assert _res(parsed, "decode")["requests"] == {"memory": "16Gi", "cpu": "4"}
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [row("cpu request", "999"), row("memory request", "999Gi")],
+        [row("cpu limit", "1"), row("memory limit", "1Gi")],
+        [row("cpu limit", "1"), row("cpu request", "64")],
+        [row("memory limit", "2Gi"), row("memory request", "128Gi")],
+    ],
+)
+def test_no_config_md_input_emits_a_request_above_its_limit(rows, tmp_path):
+    """The invariant, through the generator, over inputs that previously inverted."""
+    import pod_resources as pres
+
+    scenario, prov = build([row("Number of prefill pods", "1")] + rows)
+    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
+    for role in ("decode", "prefill"):
+        res = _res(parsed, role)
+        for field in ("cpu", "memory"):
+            req = pres._magnitude(res["requests"][field])
+            lim = pres._magnitude(res["limits"][field])
+            assert req <= lim, f"{role} {field}: {res}"
+
+
+def test_binary_kilo_quantity_is_accepted(tmp_path):
+    """`Ki` is valid Kubernetes and the unit `kubectl describe node` reports memory
+    in. The validator used to hard-reject it while accepting `1ki`."""
+    scenario, prov = build(
+        [row("memory limit", "134217728Ki"), row("memory request", "67108864Ki")]
+    )
+    parsed = yaml.safe_load(emit(scenario, prov, tmp_path))["scenario"][0]
+    assert _res(parsed, "decode")["limits"]["memory"] == "134217728Ki"
+    assert _res(parsed, "decode")["requests"]["memory"] == "67108864Ki"
+
+
+# --- rows stated where they cannot take effect ----------------------------
+
+def test_resource_rows_in_another_table_are_reported(capsys):
+    """warn_role_rows_outside_vllm_table exists because a #824 review found a role
+    row in a mapping table producing a wrong baseline with no diagnostic. Its
+    role_fields set did not include the #850 keys, so a `cpu limit` row in any other
+    table was dropped and the defaults warning then asserted nothing was stated."""
+    md = "\n".join([
+        "## Pod Resource Sizing",
+        "",
+        "| Parameter | Value |",
+        "|---|---|",
+        "| cpu limit | 64 |",
+        "| memory limit | 256Gi |",
+        "",
+        "## vLLM Pod Configuration",
+        "",
+        "| Parameter | Value | Notes |",
+        "|---|---|---|",
+        "| Model | Qwen/Qwen3-14B | |",
+        "| GPU | H100_SXM_80GB | |",
+        "",
+    ])
+    tables = gfc.parse_md_tables(md.split("\n"))
+    vllm_table = gfc.find_vllm_table(tables)
+    gfc.warn_role_rows_outside_vllm_table(tables, vllm_table)
+    err = capsys.readouterr().err
+    assert "cpu limit" in err
+    assert "not the machine-read table" in err or "NO effect" in err

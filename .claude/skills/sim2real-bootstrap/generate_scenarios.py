@@ -325,8 +325,10 @@ def build_scenario(entry: dict, name: str) -> dict:
         if role_name not in scenario:
             continue
         stated = {key: vllm_args.get(key) for key in pres.KEYS}
-        values, res_prov = pres.resolve_resources(role_name, stated)
+        values, res_prov, notices = pres.resolve_resources(role_name, stated)
         scenario[role_name]["resources"] = values
+        for notice in notices:
+            print(f"  WARNING: {notice}", file=sys.stderr)
         warn = bool(pres.defaulted_keys(res_prov))
         if warn:
             print(pres.starvation_warning(role_name, values, res_prov),

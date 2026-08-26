@@ -10,9 +10,15 @@
 
 ## Facts established before writing code
 
+> **CORRECTION — this plan was written before the code and two of its "facts" were
+> wrong. They are struck through below rather than deleted, because the wrong
+> reasoning leaked into the first implementation and into `SKILL.md`, and knowing
+> that is more useful than a clean-looking plan. See "What changed after review" at
+> the end for the full list of divergences.**
+
 - Bootstrap emits **no** `resources` today (0 occurrences in either generator).
-- Framework default: `limits: {memory: 40Gi, cpu: "4"}`, **no** `requests`, both roles (`llm-d-benchmark@76473d0 defaults.yaml:848-851`, `:994-997`).
-- Kubernetes copies `limits` into `requests` when `requests` is absent, so "limits only" is not "no reservation". `pd-infocomm-2`'s decode (`limits {128Gi, 32}`, no requests) reserves 128Gi × 2 replicas before prefill is scheduled at all.
+- ~~Framework default: `limits: {memory: 40Gi, cpu: "4"}`, **no** `requests`, both roles (`defaults.yaml:848-851`, `:994-997`).~~ **WRONG.** Those ranges stop one line short of the `requests` block, which exists and sets 40Gi/`"4"` as well. The correct ranges are `defaults.yaml:848-858` (decode) and `:993-1000` (prefill), and the framework sets **both** halves.
+- ~~Kubernetes copies `limits` into `requests` when `requests` is absent, so "limits only" is not "no reservation".~~ **TRUE OF KUBERNETES, IRRELEVANT HERE.** The rule is real, but a scenario is deep-merged over `defaults.yaml`, which supplies `requests` — so the copy never fires in this pipeline, and no "trap" exists. The actual reason to emit both halves is that emitting only `limits` leaves `requests` at the inherited 40Gi/`"4"`, pairing a 128Gi limit with a 40Gi reservation.
 - Upstream `pd-disaggregation.yaml` sizes decode `limits {128Gi, 32}` (`:410-416`) and prefill `limits {16Gi, 8}` (`:321-327`), both with `requests == limits`. **decode > prefill is upstream's own sizing**, not only this cluster's.
 - `pd-infocomm-2` carries the same two figures (decode `:210-211`, prefill `:278-280`), decode without requests.
 - `config.md`'s machine-read table is `| Parameter | Value | Notes |`; `extract_fields` reads column 1 as parameter, column 2 as value. No cpu/memory rows exist in the vocabulary today.
@@ -270,3 +276,45 @@ Reads `vllm_args` keys (`cpu_limit`, `decode_cpu_limit`, …). They must be adde
 - **Every generated scenario changes.** Unlike #848 and #853 there is no byte-identity escape — a bundle regenerated after this gains a `resources` block. Intended, but the PR must say so plainly rather than let it surprise someone re-bootstrapping.
 - **The figures are unmeasured** on any cluster but the one they came from, at one TP and one model. The emitted comment and the stderr warning are the whole mitigation. Fixed-and-learn is the operator's explicit choice; revisit when there is data.
 - **`resources` is a dict, not a list**, so `_merge_lists` tiering does not apply: a downstream baseline setting `resources` deep-merges key by key rather than replacing. An operator overriding only `limits.cpu` keeps the emitted `requests`. Worth stating in the emitted comment, since it differs from the scalar-list behaviour documented elsewhere in this skill.
+
+---
+
+## What changed after review
+
+This plan is kept as the record of what was intended. The shipped code differs in
+five ways, all of them corrections found by review rather than changes of mind.
+
+**1. Two "facts" in the header were wrong** — see the correction banner there. The
+framework default sets `requests` as well as `limits`, and the limits/requests "trap"
+this plan built its rationale on cannot fire in this pipeline. The design decision
+(emit both halves) survives; the reason changed.
+
+**2. D2's per-role vocabulary was never implemented, then removed.** The plan
+proposed four shared keys plus eight `decode_*` / `prefill_*` overrides. The first
+implementation shipped all twelve; the operator judged it over-engineered, and the
+per-role rows were deleted along with the `InputStyle` machinery built around them.
+Four shared keys remain. This plan's D3 wording is what leaked into a `SKILL.md`
+sentence describing a three-level precedence that never existed.
+
+**3. Memory is emitted QUOTED.** D1 said cpu quoted, memory unquoted. That was the
+bug: an unquoted `-` placeholder produced an unparseable `baseline.yaml` while the
+generator exited 0, and `128` / `yes` / `null` were silently re-typed. Both are
+quoted now.
+
+**4. The limit/request pair is reconciled per role.** The plan resolved the four
+quantities independently, which let a request exceed its limit — an invalid pod spec.
+Because the rows are shared while the defaults differ 4–8× between roles, a request
+sized for decode inverted prefill unconditionally. `resolve_resources` now derives an
+unstated request from the stated limit and clamps any request to its own role's
+limit, so an invalid pair cannot be expressed.
+
+**5. Prefill's request equals its limit.** The plan set every request to half its
+limit. Issue #848 mounts a 16Gi `medium: Memory` tmpfs at `/dev/shm` in `vllmCommon`,
+and tmpfs charges against pod memory, so a prefill request of 8Gi under a 16Gi
+ceiling made the pod evictable mid-run. Upstream uses request == limit there;
+so does this.
+
+Also added, none of it in the plan: a Kubernetes quantity validator (an invalid
+quantity is now a hard error rather than a pod the cluster rejects at admission),
+and the four keys registered with `warn_role_rows_outside_vllm_table` so a resource
+row stated in a non-machine-read table is reported instead of silently dropped.

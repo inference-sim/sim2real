@@ -447,7 +447,13 @@ def warn_role_rows_outside_vllm_table(
 
     Returns the warning lines emitted, for testability.
     """
-    role_fields = {"prefill_replicas", "prefill_hardware", "decode_hardware", "replicas"}
+    role_fields = {
+        "prefill_replicas", "prefill_hardware", "decode_hardware", "replicas",
+        # The #850 CPU/memory rows belong here for the same reason: stated in a
+        # table this parser does not read, they are dropped and the defaults
+        # warning then asserts the operator stated nothing.
+        "cpu_limit", "memory_limit", "cpu_request", "memory_request",
+    }
     satisfied = already_extracted or set()
     emitted = []
     for table in tables:
@@ -929,9 +935,9 @@ def build_scenario(
     # --- Pod CPU/memory (issue #850) ---
     # Bootstrap emitted nothing here, so bundles inherited 4 CPU / 40Gi for a pod
     # that may hold four GPUs -- which starves vLLM and shows up as ITL noise rather
-    # than a failure. `provenance` does not exist yet, so sources are collected here
-    # and merged into it below.
-    resource_provenance: dict[str, str] = {}
+    # than a failure. Per-quantity sources are stashed on the role for the emitter,
+    # which is the only reader -- they are deliberately NOT merged into `provenance`
+    # as well, since two records of the same fact let one of them rot.
     for role_name in ("decode", "prefill"):
         if role_name not in scenario:
             continue
@@ -939,8 +945,10 @@ def build_scenario(
         for key in pres.KEYS:
             field_obj = fields.get(key)
             stated[key] = None if field_obj is None else str(field_obj.value)
-        values, res_prov = pres.resolve_resources(role_name, stated)
+        values, res_prov, notices = pres.resolve_resources(role_name, stated)
         scenario[role_name]["resources"] = values
+        for notice in notices:
+            print(f"  WARNING: {notice}", file=sys.stderr)
         warn = bool(pres.defaulted_keys(res_prov))
         if warn:
             print(pres.starvation_warning(role_name, values, res_prov),
@@ -960,8 +968,6 @@ def build_scenario(
         # Read by the emitter to decide whether to print the defaults preamble.
         scenario[role_name]["_resources_warn"] = warn
         scenario[role_name]["_resources_provenance"] = res_prov
-        for key, src in res_prov.items():
-            resource_provenance[f"{role_name}.resources.{key}"] = src
 
     # --- Pod plumbing (issue #848) ---
     # #846 turns kvTransfer on with a prefill pool. On its own that crashloops the
@@ -1001,7 +1007,6 @@ def build_scenario(
 
     # --- Build provenance map ---
     provenance = {
-        **resource_provenance,
         "model.name": fields["model"].source,
         "model.shortName": meta_source + ".shortName" if meta else "derived from model name",
         "model.path": meta_source + ".path" if meta else "derived from model name",

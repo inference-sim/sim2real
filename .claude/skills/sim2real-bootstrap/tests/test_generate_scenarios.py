@@ -526,7 +526,8 @@ def test_all_four_stated_suppresses_warning_json_path(tmp_path, capsys):
 
 
 def test_any_default_warns_on_stderr_json_path(capsys):
-    """The JSON path's stderr had no coverage at all, which is how a config.md
+    """The JSON path had no coverage of the RESOURCES stderr specifically (other
+    warnings in this file were covered), which is how a config.md
     remediation message on a JSON input went unnoticed."""
     gs.build_scenario(entry(), "cand")
     err = capsys.readouterr().err
@@ -582,7 +583,7 @@ def test_both_generators_emit_identical_resources_text(tmp_path):
     json_text = res_emit(tmp_path, prefill_instances=1)
 
     for role in ("decode", "prefill"):
-        values, prov = pres.resolve_resources(role, dict.fromkeys(pres.KEYS))
+        values, prov, _ = pres.resolve_resources(role, dict.fromkeys(pres.KEYS))
         block = "\n".join(pres.resource_lines(values, prov, warn=True))
         assert block in from_config_text, f"config.md path drifted for {role}"
         assert block in json_text, f"json path drifted for {role}"
