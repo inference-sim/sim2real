@@ -416,3 +416,81 @@ class TestIndexFlags:
     def test_empty_path_renders_as_root_in_errors(self):
         with pytest.raises(ValueError, match="<root>"):
             _index_flags(["nope"], (), "base")
+
+
+# ── Key-path threading (#851) ─────────────────────────────────────────────────
+
+def _spy_merge_lists(monkeypatch):
+    """Patch `_merge_lists` with a recording pass-through; return the path log."""
+    import pipeline.lib.values as values_mod
+
+    seen: list[tuple] = []
+    real = values_mod._merge_lists
+
+    def spy(base_list, overlay_list, *, path=(), sink=None):
+        seen.append(path)
+        return real(base_list, overlay_list, path=path, sink=sink)
+
+    monkeypatch.setattr(values_mod, "_merge_lists", spy)
+    return seen
+
+
+class TestPathThreading:
+    def test_path_reaches_nested_list(self, monkeypatch):
+        import pipeline.lib.values as values_mod
+
+        seen = _spy_merge_lists(monkeypatch)
+        base = {
+            "scenario": [
+                {"name": "s", "decode": {"vllm": {"additionalFlags": ["--a"]}}}
+            ]
+        }
+        overlay = {
+            "scenario": [
+                {"name": "s", "decode": {"vllm": {"additionalFlags": ["--b"]}}}
+            ]
+        }
+        values_mod.deep_merge(base, overlay)
+        # The list index is elided: the scenario entry's children keep the
+        # ("scenario",) prefix rather than gaining ("scenario", 0).
+        assert ("scenario",) in seen
+        assert ("scenario", "decode", "vllm", "additionalFlags") in seen
+
+    def test_default_path_is_empty_tuple(self, monkeypatch):
+        import pipeline.lib.values as values_mod
+
+        seen = _spy_merge_lists(monkeypatch)
+        values_mod.deep_merge({"a": [1]}, {"a": [2]})
+        assert seen == [("a",)]
+
+    def test_non_string_keys_stringified_in_path(self, monkeypatch):
+        import pipeline.lib.values as values_mod
+
+        seen = _spy_merge_lists(monkeypatch)
+        values_mod.deep_merge({7: [1]}, {7: [2]})
+        assert seen == [("7",)]
+
+    def test_positional_two_arg_calls_still_work(self):
+        """The pre-existing tests call these positionally; guard that contract."""
+        assert deep_merge({"a": 1}, {"b": 2}) == {"a": 1, "b": 2}
+        assert _merge_lists(["a"], ["b"]) == ["b"]
+
+    def test_path_threads_through_k8s_identity_tier(self, monkeypatch):
+        import pipeline.lib.values as values_mod
+
+        seen = _spy_merge_lists(monkeypatch)
+        obj = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "m"}}
+        base = {"extraObjects": [dict(obj, data={"keys": ["a"]})]}
+        overlay = {"extraObjects": [dict(obj, data={"keys": ["b"]})]}
+        values_mod.deep_merge(base, overlay)
+        assert ("extraObjects",) in seen
+        assert ("extraObjects", "data", "keys") in seen
+
+    def test_path_threads_through_positional_tier(self, monkeypatch):
+        import pipeline.lib.values as values_mod
+
+        seen = _spy_merge_lists(monkeypatch)
+        base = {"items": [{"a": {"deep": ["x"]}}]}
+        overlay = {"items": [{"a": {"deep": ["y"]}}]}
+        values_mod.deep_merge(base, overlay)
+        assert ("items", "a", "deep") in seen

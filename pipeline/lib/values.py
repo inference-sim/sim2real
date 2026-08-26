@@ -111,11 +111,22 @@ def _k8s_identity(item):
     return (item["apiVersion"], item["kind"], meta["name"])
 
 
-def _merge_by_keyfn(base_list: list, overlay_list: list, keyfn) -> list:
+def _merge_by_keyfn(
+    base_list: list,
+    overlay_list: list,
+    keyfn,
+    *,
+    path: tuple[str, ...] = (),
+    sink: list | None = None,
+) -> list:
     """Merge two all-dict lists by a key extractor.
 
     Base entries are emitted first (deep-merged with the same-keyed overlay entry
     when present); overlay-only entries are appended in order.
+
+    ``path`` is passed through to the recursive merge UNCHANGED — the list index
+    is deliberately elided, so a key path is the same whether a list sits between
+    two dicts or not. See ``_FLAG_LIST_PATH_SUFFIXES``.
     """
     overlay_by_key = {keyfn(item): item for item in overlay_list}
     result = []
@@ -124,7 +135,9 @@ def _merge_by_keyfn(base_list: list, overlay_list: list, keyfn) -> list:
         k = keyfn(bitem)
         seen_keys.add(k)
         if k in overlay_by_key:
-            result.append(deep_merge(bitem, overlay_by_key[k]))
+            result.append(
+                deep_merge(bitem, overlay_by_key[k], path=path, sink=sink)
+            )
         else:
             result.append(copy.deepcopy(bitem))
     for oitem in overlay_list:
@@ -159,7 +172,13 @@ def _k8s_markers_conflict(a: dict, b: dict) -> bool:
     return a_markers != b_markers
 
 
-def _merge_k8s_objects(base_list: list, overlay_list: list) -> list:
+def _merge_k8s_objects(
+    base_list: list,
+    overlay_list: list,
+    *,
+    path: tuple[str, ...] = (),
+    sink: list | None = None,
+) -> list:
     """Merge two lists of Kubernetes manifests without ever folding dissimilar objects.
 
     Manifests carrying a full identity (apiVersion, kind, metadata.name) merge by that
@@ -193,7 +212,9 @@ def _merge_k8s_objects(base_list: list, overlay_list: list) -> list:
             raise ValueError(f"duplicate Kubernetes object identity in base list: {k}")
         seen_keys.add(k)
         if k in overlay_by_key:
-            result.append(deep_merge(bitem, overlay_by_key[k]))
+            result.append(
+                deep_merge(bitem, overlay_by_key[k], path=path, sink=sink)
+            )
         else:
             result.append(copy.deepcopy(bitem))
     for oitem in overlay_list:
@@ -203,7 +224,13 @@ def _merge_k8s_objects(base_list: list, overlay_list: list) -> list:
     return result
 
 
-def _merge_lists(base_list: list, overlay_list: list) -> list:
+def _merge_lists(
+    base_list: list,
+    overlay_list: list,
+    *,
+    path: tuple[str, ...] = (),
+    sink: list | None = None,
+) -> list:
     """Merge two lists using a tiered strategy.
 
     Tier 1:  either list contains non-dict items → overlay replaces base.
@@ -230,12 +257,14 @@ def _merge_lists(base_list: list, overlay_list: list) -> list:
 
     # Tier 2a: Kubernetes manifest lists — merge by identity, never positionally fold
     if all(_is_k8s_manifest(x) for x in base_list + overlay_list):
-        return _merge_k8s_objects(base_list, overlay_list)
+        return _merge_k8s_objects(base_list, overlay_list, path=path, sink=sink)
 
     # Tier 2b: named-key merge
     key_field = _detect_list_key(base_list, overlay_list)
     if key_field is not None:
-        return _merge_by_keyfn(base_list, overlay_list, lambda d: d[key_field])
+        return _merge_by_keyfn(
+            base_list, overlay_list, lambda d: d[key_field], path=path, sink=sink
+        )
 
     # Tier 3: positional merge — surplus from either side preserved
     result = []
@@ -249,7 +278,9 @@ def _merge_lists(base_list: list, overlay_list: list) -> list:
                     f"{(overlay_list[i].get('apiVersion'), overlay_list[i].get('kind'))} "
                     "— an entry is likely missing apiVersion or kind"
                 )
-            result.append(deep_merge(base_list[i], overlay_list[i]))
+            result.append(
+                deep_merge(base_list[i], overlay_list[i], path=path, sink=sink)
+            )
         elif i < len(base_list):
             result.append(copy.deepcopy(base_list[i]))
         else:
@@ -257,19 +288,33 @@ def _merge_lists(base_list: list, overlay_list: list) -> list:
     return result
 
 
-def deep_merge(base: dict, overlay: dict) -> dict:
+def deep_merge(
+    base: dict,
+    overlay: dict,
+    *,
+    path: tuple[str, ...] = (),
+    sink: list | None = None,
+) -> dict:
     """Deep-merge overlay onto base. Dict keys merged recursively.
 
     Lists of dicts are merged by Kubernetes identity, named key, or positional index
-    (see _merge_lists). Lists of scalars are replaced entirely. Returns a new dict
-    (deep copy).
+    (see _merge_lists). Lists of scalars are replaced entirely, EXCEPT at paths
+    registered in ``_FLAG_LIST_PATH_SUFFIXES``, which merge by flag name. Returns a
+    new dict (deep copy).
+
+    ``path`` is the key path of ``base`` within the document being merged, as a
+    tuple of segments with list indices elided. It exists so ``_merge_lists`` can
+    scope a merge strategy to a key path; callers merging a whole document leave it
+    at its default. ``sink``, when a list, collects operator-facing warnings about
+    scalar lists replaced wholesale — see ``_record_scalar_list_replace``.
     """
     result = copy.deepcopy(base)
     for key, oval in overlay.items():
+        child = path + (str(key),)
         if key in result and isinstance(result[key], dict) and isinstance(oval, dict):
-            result[key] = deep_merge(result[key], oval)
+            result[key] = deep_merge(result[key], oval, path=child, sink=sink)
         elif key in result and isinstance(result[key], list) and isinstance(oval, list):
-            result[key] = _merge_lists(result[key], oval)
+            result[key] = _merge_lists(result[key], oval, path=child, sink=sink)
         else:
             result[key] = copy.deepcopy(oval)
     return result
