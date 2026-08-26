@@ -94,6 +94,29 @@ def _index_flags(entries: list, path: tuple[str, ...], side: str) -> dict:
     return indexed
 
 
+def _merge_flag_lists(
+    base_list: list, overlay_list: list, path: tuple[str, ...]
+) -> list:
+    """Merge two CLI-flag lists by flag name.
+
+    Base entries are emitted first in base order — an overlay entry sharing a key
+    substitutes its own literal spelling, so ``--no-X`` can override ``--X`` — and
+    overlay-only entries are appended in overlay order. This is the same
+    base-first-then-append convention Tier 2b already uses for keyed dict lists.
+
+    Removal: a later layer drops an inherited boolean flag by stating its
+    ``--no-`` form; the whole list is cleared by setting it to ``[]`` (handled by
+    ``_merge_lists``' empty-overlay guard before this is reached). There is
+    deliberately no per-entry deletion sentinel for ``--key=value`` flags — see
+    issue #851.
+    """
+    base_idx = _index_flags(base_list, path, "base")
+    overlay_idx = _index_flags(overlay_list, path, "overlay")
+    result = [overlay_idx.get(key, entry) for key, entry in base_idx.items()]
+    result.extend(entry for key, entry in overlay_idx.items() if key not in base_idx)
+    return result
+
+
 def _k8s_identity(item):
     """Return a Kubernetes identity tuple (apiVersion, kind, metadata.name), or None.
 
@@ -233,6 +256,12 @@ def _merge_lists(
 ) -> list:
     """Merge two lists using a tiered strategy.
 
+    Tier 0:  ``path`` ends with a ``_FLAG_LIST_PATH_SUFFIXES`` entry → merge the
+             scalar entries by flag name (``--max-num-seqs=256`` keys on
+             ``--max-num-seqs``; ``--no-X`` and ``--X`` are ONE key). Only
+             reached when both lists are non-empty. Scoped by key path because
+             flag-name merging would corrupt a space-separated arg list such as
+             ``router.proxy.args``, where values are separate elements.
     Tier 1:  either list contains non-dict items → overlay replaces base.
     Tier 2a: all entries are Kubernetes manifests → merge by (apiVersion, kind,
              metadata.name) identity; manifests without metadata.name are carried
@@ -249,6 +278,14 @@ def _merge_lists(
         return []
     if not base_list:
         return copy.deepcopy(overlay_list)
+
+    # Tier 0: path-scoped CLI-flag lists → merge by flag name (#851).
+    # Deliberately placed AFTER the empty-list guards: with only one layer
+    # contributing there is nothing to merge and nothing to lose, so a
+    # single-layer bundle is never newly refused by _index_flags' entry guards.
+    # Those guards protect the merge, not the schema.
+    if _is_flag_list_path(path):
+        return _merge_flag_lists(base_list, overlay_list, path)
 
     # Tier 1: any non-dict item → replace
     if not (all(isinstance(x, dict) for x in base_list)

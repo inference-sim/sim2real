@@ -494,3 +494,141 @@ class TestPathThreading:
         overlay = {"items": [{"a": {"deep": ["y"]}}]}
         values_mod.deep_merge(base, overlay)
         assert ("items", "a", "deep") in seen
+
+
+# ── Tier 0: flag-name list merge (#851) ───────────────────────────────────────
+
+class TestFlagListMerge:
+    def test_base_flag_survives_overlay_that_omits_it(self):
+        """The #851 bug: this returned ['--enable-force-include-usage'] before."""
+        base = ["--max-num-seqs=256", "--enable-prefix-caching"]
+        overlay = ["--enable-force-include-usage"]
+        assert _merge_lists(base, overlay, path=_FP) == [
+            "--max-num-seqs=256",
+            "--enable-prefix-caching",
+            "--enable-force-include-usage",
+        ]
+
+    def test_overlay_overrides_same_flag_without_duplicating(self):
+        base = ["--max-num-seqs=256", "--enable-prefix-caching"]
+        overlay = ["--max-num-seqs=512"]
+        assert _merge_lists(base, overlay, path=_FP) == [
+            "--max-num-seqs=512",
+            "--enable-prefix-caching",
+        ]
+
+    def test_negation_overrides_positive_and_emits_one_flag(self):
+        assert _merge_lists(
+            ["--enable-prefix-caching"], ["--no-enable-prefix-caching"], path=_FP
+        ) == ["--no-enable-prefix-caching"]
+
+    def test_positive_overrides_negation(self):
+        assert _merge_lists(
+            ["--no-enable-prefix-caching"], ["--enable-prefix-caching"], path=_FP
+        ) == ["--enable-prefix-caching"]
+
+    def test_base_order_preserved_overlay_only_appended(self):
+        base = ["--a=1", "--b=2", "--c"]
+        overlay = ["--z", "--b=99"]
+        assert _merge_lists(base, overlay, path=_FP) == [
+            "--a=1",
+            "--b=99",
+            "--c",
+            "--z",
+        ]
+
+    def test_prefill_path_merges_too(self):
+        p = ("scenario", "prefill", "vllm", "additionalFlags")
+        assert _merge_lists(["--a=1"], ["--b"], path=p) == ["--a=1", "--b"]
+
+    def test_scenario_entry_rooted_path_merges(self):
+        """capacity.py's merge root — no leading "scenario" segment."""
+        p = ("decode", "vllm", "additionalFlags")
+        assert _merge_lists(["--a=1"], ["--b"], path=p) == ["--a=1", "--b"]
+
+    def test_router_proxy_args_still_replaces(self):
+        """#851's constraint: space-separated arg lists must NOT flag-merge."""
+        base = ["--service-node", "envoy-sidecar", "--concurrency", "8"]
+        overlay = ["--log-level", "warn"]
+        p = ("scenario", "router", "proxy", "args")
+        assert _merge_lists(base, overlay, path=p) == ["--log-level", "warn"]
+
+    def test_capabilities_add_still_replaces(self):
+        p = (
+            "scenario",
+            "decode",
+            "extraContainerConfig",
+            "securityContext",
+            "capabilities",
+            "add",
+        )
+        assert _merge_lists(["IPC_LOCK"], ["SYS_PTRACE"], path=p) == ["SYS_PTRACE"]
+
+    def test_no_path_means_no_flag_merge(self):
+        assert _merge_lists(["--a=1"], ["--b"]) == ["--b"]
+
+    def test_empty_overlay_still_clears(self):
+        """An explicit empty list remains the whole-list removal escape hatch."""
+        assert _merge_lists(["--a=1"], [], path=_FP) == []
+
+    def test_empty_base_returns_overlay(self):
+        assert _merge_lists([], ["--a=1"], path=_FP) == ["--a=1"]
+
+    def test_single_layer_bad_entry_not_rejected(self):
+        """Guards protect the merge, so a lone contributor is never newly refused."""
+        assert _merge_lists([], ["not-a-flag"], path=_FP) == ["not-a-flag"]
+
+    def test_bad_entry_refused_when_both_layers_contribute(self):
+        with pytest.raises(ValueError, match="does not start with"):
+            _merge_lists(["--a=1"], ["oops"], path=_FP)
+
+    def test_bad_base_entry_refused_when_both_layers_contribute(self):
+        with pytest.raises(ValueError, match="base flag list entry"):
+            _merge_lists(["oops"], ["--a=1"], path=_FP)
+
+    def test_does_not_mutate_inputs(self):
+        base = ["--a=1"]
+        overlay = ["--b"]
+        _merge_lists(base, overlay, path=_FP)
+        assert base == ["--a=1"]
+        assert overlay == ["--b"]
+
+    def test_end_to_end_through_deep_merge(self):
+        """The observed real-bundle shape from the issue."""
+        base = {
+            "scenario": [
+                {
+                    "name": "s",
+                    "decode": {
+                        "vllm": {
+                            "additionalFlags": [
+                                "--max-num-seqs=256",
+                                "--enable-prefix-caching",
+                            ]
+                        }
+                    },
+                }
+            ]
+        }
+        overlay = {
+            "scenario": [
+                {
+                    "name": "s",
+                    "decode": {
+                        "vllm": {"additionalFlags": ["--enable-force-include-usage"]}
+                    },
+                }
+            ]
+        }
+        out = deep_merge(base, overlay)
+        assert out["scenario"][0]["decode"]["vllm"]["additionalFlags"] == [
+            "--max-num-seqs=256",
+            "--enable-prefix-caching",
+            "--enable-force-include-usage",
+        ]
+
+    def test_three_layer_merge_accumulates(self):
+        """defaults -> baseline -> overlay, the resolve_baseline chain."""
+        step1 = _merge_lists(["--a=1"], ["--b=2"], path=_FP)
+        step2 = _merge_lists(step1, ["--c"], path=_FP)
+        assert step2 == ["--a=1", "--b=2", "--c"]
