@@ -6,7 +6,15 @@ from pipeline.lib.values import (
     deep_merge,
     _merge_lists,
     _k8s_identity,
+    _flag_key,
+    _index_flags,
+    _is_flag_list_path,
 )
+
+
+# Path of a flag-merged list, as it appears when a whole scenario document is
+# merged (assemble_run's root). Used by the flag-merge and sink tests below.
+_FP = ("scenario", "decode", "vllm", "additionalFlags")
 
 
 # ── _merge_lists ──────────────────────────────────────────────────────────────
@@ -320,3 +328,91 @@ class TestDeepMerge:
         overlay = {"items": [{"name": "x", "v": 99}]}
         result = deep_merge(base, overlay)
         assert result["items"] == [{"name": "x", "v": 99}]
+
+
+# ── Flag-list merge helpers (#851) ────────────────────────────────────────────
+
+class TestFlagKey:
+    def test_valued_flag_keys_on_name(self):
+        assert _flag_key("--max-num-seqs=256") == "--max-num-seqs"
+
+    def test_bare_flag_is_its_own_key(self):
+        assert _flag_key("--enable-chunked-prefill") == "--enable-chunked-prefill"
+
+    def test_negation_collapses_to_positive_key(self):
+        assert _flag_key("--no-enable-prefix-caching") == "--enable-prefix-caching"
+        assert _flag_key("--enable-prefix-caching") == "--enable-prefix-caching"
+
+    def test_negation_of_disable_flag_collapses(self):
+        """Real llm-d-benchmark pair: --no-disable-X negates --disable-X."""
+        assert _flag_key("--no-disable-uvicorn-access-log") == (
+            "--disable-uvicorn-access-log"
+        )
+
+    def test_value_containing_equals_splits_on_first_only(self):
+        assert _flag_key('--kv-transfer-config={"a":"b=c"}') == "--kv-transfer-config"
+
+
+class TestIsFlagListPath:
+    def test_document_rooted_path_matches(self):
+        assert _is_flag_list_path(("scenario", "decode", "vllm", "additionalFlags"))
+
+    def test_scenario_entry_rooted_path_matches(self):
+        """capacity.py merges scenarios[0] directly, so there is no leading
+        "scenario" segment. Suffix matching covers both merge roots."""
+        assert _is_flag_list_path(("decode", "vllm", "additionalFlags"))
+
+    def test_prefill_role_matches_same_rule(self):
+        assert _is_flag_list_path(("scenario", "prefill", "vllm", "additionalFlags"))
+
+    def test_unrelated_scalar_list_does_not_match(self):
+        assert not _is_flag_list_path(("scenario", "router", "proxy", "args"))
+
+    def test_shorter_than_suffix_does_not_match(self):
+        assert not _is_flag_list_path(("additionalFlags",))
+        assert not _is_flag_list_path(())
+
+    def test_additionalflags_under_wrong_parent_does_not_match(self):
+        assert not _is_flag_list_path(("scenario", "router", "additionalFlags"))
+
+
+class TestIndexFlags:
+    def test_preserves_order_and_maps_key_to_literal(self):
+        out = _index_flags(["--a=1", "--b"], ("vllm", "additionalFlags"), "base")
+        assert list(out) == ["--a", "--b"]
+        assert out["--a"] == "--a=1"
+
+    def test_empty_list_yields_empty_index(self):
+        assert _index_flags([], ("vllm", "additionalFlags"), "base") == {}
+
+    def test_non_string_entry_refused(self):
+        with pytest.raises(ValueError, match="not a string"):
+            _index_flags([256], ("vllm", "additionalFlags"), "base")
+
+    def test_non_flag_entry_refused(self):
+        with pytest.raises(ValueError, match="does not start with"):
+            _index_flags(["envoy-sidecar"], ("vllm", "additionalFlags"), "overlay")
+
+    def test_duplicate_key_refused(self):
+        with pytest.raises(ValueError, match="twice"):
+            _index_flags(
+                ["--max-num-seqs=1", "--max-num-seqs=2"],
+                ("vllm", "additionalFlags"),
+                "base",
+            )
+
+    def test_negation_pair_in_one_list_is_a_duplicate(self):
+        with pytest.raises(ValueError, match="twice"):
+            _index_flags(
+                ["--enable-prefix-caching", "--no-enable-prefix-caching"],
+                ("vllm", "additionalFlags"),
+                "base",
+            )
+
+    def test_error_message_names_the_path_and_side(self):
+        with pytest.raises(ValueError, match=r"decode\.vllm\.additionalFlags: overlay"):
+            _index_flags(["nope"], ("decode", "vllm", "additionalFlags"), "overlay")
+
+    def test_empty_path_renders_as_root_in_errors(self):
+        with pytest.raises(ValueError, match="<root>"):
+            _index_flags(["nope"], (), "base")

@@ -18,6 +18,82 @@ def _detect_list_key(base_list: list, overlay_list: list):
     return None
 
 
+# ── Flag-list merge (path-scoped) ─────────────────────────────────────────────
+
+#: Key-path suffixes whose scalar lists merge by flag name rather than being
+#: replaced wholesale. Matched as a SUFFIX of the merge path, with list indices
+#: elided from the path, so one entry covers both the `decode` and `prefill`
+#: roles AND both merge roots in use today: `assemble_run` merges whole
+#: documents (`scenario.decode.vllm.additionalFlags`) while `capacity` merges a
+#: single scenario entry (`decode.vllm.additionalFlags`). An absolute path
+#: anchored at the document root would match the first and silently miss the
+#: second. See issue #851.
+_FLAG_LIST_PATH_SUFFIXES: tuple[tuple[str, ...], ...] = (
+    ("vllm", "additionalFlags"),
+)
+
+
+def _is_flag_list_path(path: tuple[str, ...]) -> bool:
+    """Return True when `path` ends with a registered flag-list suffix."""
+    return any(
+        len(path) >= len(suffix) and tuple(path[-len(suffix):]) == suffix
+        for suffix in _FLAG_LIST_PATH_SUFFIXES
+    )
+
+
+def _flag_key(entry: str) -> str:
+    """Return the merge key for one CLI-flag list entry.
+
+    `--max-num-seqs=256` keys on `--max-num-seqs`; a bare
+    `--enable-chunked-prefill` is its own key. A leading `--no-` is stripped so
+    a flag and its negation collapse to a single key: `--enable-prefix-caching`
+    and `--no-enable-prefix-caching` express one decision, so a later layer
+    stating either form must override the earlier rather than emit both.
+    Emitting both would leave the outcome to vLLM's argparse ordering — the
+    silent conflict issue #851 exists to avoid, and the reason it rejected
+    simple list concatenation.
+    """
+    name = entry.split("=", 1)[0]
+    if name.startswith("--no-"):
+        name = "--" + name[len("--no-"):]
+    return name
+
+
+def _index_flags(entries: list, path: tuple[str, ...], side: str) -> dict:
+    """Return ``{flag key: literal entry}`` for one flag list, preserving order.
+
+    Raises ValueError on a non-string entry, an entry that is not a ``--`` flag,
+    or two entries collapsing to the same key. Each would otherwise produce a
+    silently wrong flag set, which is the failure class this tier closes.
+    """
+    where = ".".join(path) or "<root>"
+    indexed: dict[str, str] = {}
+    for entry in entries:
+        if not isinstance(entry, str):
+            raise ValueError(
+                f"{where}: {side} flag list entry is "
+                f"{type(entry).__name__}, not a string: {entry!r} — this path "
+                "merges by flag name and cannot key a non-string entry"
+            )
+        if not entry.startswith("--"):
+            raise ValueError(
+                f"{where}: {side} flag list entry does not start with '--': "
+                f"{entry!r} — this path merges by flag name, so a bare value "
+                "(as used in space-separated arg lists like router.proxy.args) "
+                "would be mis-keyed as a flag name"
+            )
+        key = _flag_key(entry)
+        if key in indexed:
+            raise ValueError(
+                f"{where}: {side} flag list states '{key}' twice "
+                f"({indexed[key]!r} and {entry!r}) — merging by flag name would "
+                "silently drop one. State the flag once; note that '--no-X' and "
+                "'--X' are the same key."
+            )
+        indexed[key] = entry
+    return indexed
+
+
 def _k8s_identity(item):
     """Return a Kubernetes identity tuple (apiVersion, kind, metadata.name), or None.
 
