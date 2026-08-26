@@ -735,6 +735,14 @@ Assemble transfer manifest from all prior task outputs.
    attached to a wrong transcription." A range that starts correctly and stops early
    passes the linter and still misdescribes the code.
 
+   Two ways a citation goes wrong, and both need checking. It can be wrong when
+   written — the range does not bound the construct. Or it can **rot**: it was right
+   when written, then an edit above it in the cited file shifted every line below.
+   So re-verify any citation whose target file you have edited in the same change,
+   and when citing a file that is itself in flux, prefer a stable section or symbol
+   reference over a line range. Line numbers are the most precise citation and the
+   least durable one.
+
    **(b) Separate what is ruled out from what is proposed.** These carry different
    confidence and must not be written in the same voice:
 
@@ -745,8 +753,9 @@ Assemble transfer manifest from all prior task outputs.
      you have confirmed it is constructible, this is a **declared unknown**, in the
      same sense `/sim2real-specify` already uses for target-API adapters: *declared
      unknowns rather than guesses, so a wrong guess fails loudly rather than
-     mis-scoring silently* (`sim2real-specify/SKILL.md:166-167`). Write it as a
-     candidate, not as *the* extension point.
+     mis-scoring silently* (the TARGET-API ADAPTERS bullet in `/sim2real-specify`'s
+     specification-layer contract — referenced by section rather than line, since both
+     files move). Write it as a candidate, not as *the* extension point.
 
    Confirming a placement is constructible means more than "the data can flow."
    Citations showing that a value is reachable do not show that one type can carry
@@ -768,9 +777,14 @@ Assemble transfer manifest from all prior task outputs.
    Where no extension point fits at all, see #862 — a core modification is a legitimate
    outcome, not a dead end.
 
-   Do not invent a new marker convention for any of this. Bundles already carry
-   `PLACEMENT` and `DECLARED DEGRADATION (Dn)` as plain prose labels in this field;
-   reuse them.
+   Use plain prose labels, in the style bundles already use in this field — do not
+   invent a marker syntax. `PLACEMENT` and `DECLARED DEGRADATION (Dn)` are established;
+   `ELIMINATIONS` is added here for the half that was previously folded into the
+   placement paragraph and lost its separate standing. Those three are the sanctioned
+   set for this field (see the output schema below); prefer them over coining a fourth.
+   In particular do not introduce a new marker into `algorithms/*.go` — the
+   specification layer's contract in `/sim2real-specify` forbids in-source marker
+   conventions outright, and that rule is unaffected by the labels used here.
 10. `blis_observe`: obtained by invoking
     `python3 "$SKILL_DIR/generate_from_config.py" "$EXPERIMENT_ROOT/config.md" --emit-observe-yaml`
     and pasting its stdout verbatim between `workloads:` and `context:`. The
