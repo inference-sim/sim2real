@@ -177,21 +177,32 @@ COMPONENT_REF="<chosen ref>"
 **action:** shell  
 **depends:** task-1
 
+Each step is guarded, and every git call targets the submodule with `git -C` rather
+than a preceding `cd`. Without that, a failed `git submodule add` leaves the shell in
+`$EXPERIMENT_ROOT`, and the following `git checkout "$COMPONENT_REF"` then runs against
+the **experiment repo itself** — detaching its HEAD onto a component ref.
+
 ```bash
 cd "$EXPERIMENT_ROOT"
-git submodule add "$COMPONENT_URL" "$COMPONENT_NAME"
-cd "$COMPONENT_NAME"
-git fetch --tags
-git checkout "$COMPONENT_REF"
-cd ..
+git submodule add "$COMPONENT_URL" "$COMPONENT_NAME" \
+    || { echo "ERROR: git submodule add failed for $COMPONENT_URL"; exit 1; }
+git -C "$COMPONENT_NAME" fetch --tags \
+    || { echo "ERROR: fetch --tags failed in $COMPONENT_NAME"; exit 1; }
+git -C "$COMPONENT_NAME" checkout "$COMPONENT_REF" \
+    || { echo "ERROR: checkout of $COMPONENT_REF failed in $COMPONENT_NAME"; exit 1; }
 git add .gitmodules "$COMPONENT_NAME"
 ```
 
 **Verify (hard stop on failure):**
 ```bash
-test -d "$COMPONENT_NAME/.git" || { echo "ERROR: submodule $COMPONENT_NAME not populated"; exit 1; }
-(cd "$COMPONENT_NAME" && git rev-parse --verify HEAD >/dev/null) || { echo "ERROR: $COMPONENT_NAME has no checked-out commit"; exit 1; }
-(cd "$COMPONENT_NAME" && git log --oneline -1)
+# NOTE: `git submodule add` writes .git as a FILE containing a gitlink
+# ("gitdir: ../.git/modules/<name>"), NOT a directory. `test -d` is therefore false
+# even on a perfectly populated checkout — use -e, and let `git -C` resolve the
+# gitlink. Do not "simplify" this back to -d.
+test -e "$COMPONENT_NAME/.git" || { echo "ERROR: submodule $COMPONENT_NAME not populated"; exit 1; }
+git -C "$COMPONENT_NAME" rev-parse --verify HEAD >/dev/null 2>&1 \
+    || { echo "ERROR: $COMPONENT_NAME has no checked-out commit"; exit 1; }
+git -C "$COMPONENT_NAME" log --oneline -1
 ```
 
 A populated checkout is a **precondition for Task 5**, which derives
