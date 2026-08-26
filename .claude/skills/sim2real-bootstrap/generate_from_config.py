@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pd_plumbing as pdp
+import pod_resources as pres
 
 
 # ---------------------------------------------------------------------------
@@ -98,12 +99,42 @@ PARAMETER_ALIASES = {
     },
     "prefill_hardware": {"prefill gpu", "prefill hardware"},
     "decode_hardware": {"decode gpu", "decode hardware"},
+    # Pod CPU/memory (issue #850). Four keys, applied to both roles. Per-role
+    # overrides were considered and left out: nothing asked for them, and an
+    # operator who needs decode and prefill to differ edits baselines/baseline.yaml
+    # after bootstrap, as they do for everything else the generator does not model.
+    "cpu_limit": {"cpu limit", "cpu_limit", "cpu limits"},
+    "memory_limit": {"memory limit", "memory_limit", "memory limits"},
+    "cpu_request": {"cpu request", "cpu_request", "cpu requests"},
+    "memory_request": {"memory request", "memory_request", "memory requests"},
     "dtype": {"dtype", "--dtype"},
     "pipeline_parallel_size": {"pipeline_parallel_size", "--pipeline-parallel-size"},
     "data_parallel_size": {"data_parallel_size", "--data-parallel-size"},
     "swap_space": {"swap_space", "--swap-space"},
     "enforce_eager": {"enforce_eager", "--enforce-eager"},
 }
+
+# Canonical fields whose value is free-form text, never a number.
+#
+# Everything NOT listed here is handed to `parse_numeric`, which takes only the
+# FIRST whitespace-delimited token. That silently truncates any value a human
+# might reasonably space out: a Kubernetes quantity typed `16 Gi` becomes `16`
+# -- sixteen BYTES of memory rather than 16Gi -- and because the field then
+# counts as stated, no warning fires. The pod-resource fields are derived from
+# PARAMETER_ALIASES rather than listed by hand so a newly added `*_limit` /
+# `*_request` alias cannot forget to join this set.
+#
+# `prefill_hardware` / `decode_hardware` are here for the same reason. They
+# happen to survive `parse_numeric` today only because a GPU label's first token
+# is not numeric -- accident, not design.
+_STRING_VALUED_FIELDS = frozenset(
+    {"model", "hardware", "prefill_hardware", "decode_hardware", "dtype"}
+    | {
+        name
+        for name in PARAMETER_ALIASES
+        if name.endswith(("_limit", "_request"))
+    }
+)
 
 # Section heading keywords that indicate a vLLM configuration table
 VLLM_SECTION_KEYWORDS = [
@@ -416,7 +447,13 @@ def warn_role_rows_outside_vllm_table(
 
     Returns the warning lines emitted, for testability.
     """
-    role_fields = {"prefill_replicas", "prefill_hardware", "decode_hardware", "replicas"}
+    role_fields = {
+        "prefill_replicas", "prefill_hardware", "decode_hardware", "replicas",
+        # The #850 CPU/memory rows belong here for the same reason: stated in a
+        # table this parser does not read, they are dropped and the defaults
+        # warning then asserts the operator stated nothing.
+        "cpu_limit", "memory_limit", "cpu_request", "memory_request",
+    }
     satisfied = already_extracted or set()
     emitted = []
     for table in tables:
@@ -563,7 +600,7 @@ def extract_fields(table: TableSection) -> dict[str, ProvenanceValue]:
             continue
 
         # Parse value based on field type
-        if canonical in ("model", "hardware", "dtype"):
+        if canonical in _STRING_VALUED_FIELDS:
             value = normalize_cell(raw_value)
         elif canonical in ("enable_chunked_prefill", "enforce_eager"):
             value = parse_boolean(raw_value)
@@ -895,6 +932,43 @@ def build_scenario(
             file=sys.stderr,
         )
 
+    # --- Pod CPU/memory (issue #850) ---
+    # Bootstrap emitted nothing here, so bundles inherited 4 CPU / 40Gi for a pod
+    # that may hold four GPUs -- which starves vLLM and shows up as ITL noise rather
+    # than a failure. Per-quantity sources are stashed on the role for the emitter,
+    # which is the only reader -- they are deliberately NOT merged into `provenance`
+    # as well, since two records of the same fact let one of them rot.
+    for role_name in ("decode", "prefill"):
+        if role_name not in scenario:
+            continue
+        stated = {}
+        for key in pres.KEYS:
+            field_obj = fields.get(key)
+            stated[key] = None if field_obj is None else str(field_obj.value)
+        values, res_prov, notices = pres.resolve_resources(role_name, stated)
+        scenario[role_name]["resources"] = values
+        for notice in notices:
+            print(f"  WARNING: {notice}", file=sys.stderr)
+        warn = bool(pres.defaulted_keys(res_prov))
+        if warn:
+            print(pres.starvation_warning(role_name, values, res_prov),
+                  file=sys.stderr)
+        bad = pres.invalid_quantities(values)
+        if bad:
+            # Hard error, matching the unrecognized-replica-row branch above: an
+            # invalid quantity produces a pod the cluster rejects at admission, far
+            # from the row that caused it, so failing here is the cheap place.
+            print(
+                f"  ERROR: {role_name} has invalid Kubernetes quantities: "
+                f"{', '.join(bad)}. Use e.g. 32, 500m, 128Gi, 1536Mi -- no spaces, "
+                f"no trailing words, no placeholders.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        # Read by the emitter to decide whether to print the defaults preamble.
+        scenario[role_name]["_resources_warn"] = warn
+        scenario[role_name]["_resources_provenance"] = res_prov
+
     # --- Pod plumbing (issue #848) ---
     # #846 turns kvTransfer on with a prefill pool. On its own that crashloops the
     # worker during "Initializing NIXL wrapper", because nothing sets up the
@@ -1068,6 +1142,16 @@ def write_provenance_yaml(
         pdp.extra_env_var_lines(nixl=gates["kv"], multigpu=gates["multigpu"])
     )
 
+    # CPU/memory (#850), also per-role and also with no vllmCommon form.
+    if "resources" in scenario["decode"]:
+        lines.extend(
+            pres.resource_lines(
+                scenario["decode"]["resources"],
+                scenario["decode"]["_resources_provenance"],
+                warn=scenario["decode"].get("_resources_warn", True),
+            )
+        )
+
     # Prefill role, emitted only when config.md named a prefill pod count. Placed
     # after decode so the decode bytes above are untouched when it is absent.
     if "prefill" in scenario:
@@ -1106,6 +1190,15 @@ def write_provenance_yaml(
         lines.extend(
             pdp.extra_env_var_lines(nixl=gates["kv"], multigpu=gates["multigpu"])
         )
+
+        if "resources" in p_role:
+            lines.extend(
+                pres.resource_lines(
+                    p_role["resources"],
+                    p_role["_resources_provenance"],
+                    warn=p_role.get("_resources_warn", True),
+                )
+            )
 
     # Scenario-level plumbing (#848), last so every block above keeps its bytes.
     if gates["kv"]:

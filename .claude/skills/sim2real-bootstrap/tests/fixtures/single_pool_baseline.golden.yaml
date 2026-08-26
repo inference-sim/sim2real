@@ -22,4 +22,21 @@ scenario:
       - "--max-num-batched-tokens=2048"  # config.md row "max_num_batched_tokens"
       - "--enable-chunked-prefill"  # config.md row "enable_chunked_prefill"
       - "--enable-prefix-caching"  # sim2real-bootstrap default (config.md silent; deployed vLLM requires explicit ON)
+    # Some or all of these are GENEROUS DEFAULTS, NOT measured -- see
+    # the per-value sources. Defaults' limits come from llm-d's
+    # pd-disaggregation guide. Watch for 'Reducing Torch parallelism
+    # from N threads to 1' in the pod log: that is CPU starvation, and
+    # it shows up as ITL noise rather than a failure.
+    #
+    # requests never exceed limits -- Kubernetes rejects such a pod.
+    # Both halves are stated because the framework default sets both,
+    # so emitting only limits would leave requests at the inherited
+    # 40Gi/4.
+    resources:
+      limits:
+        memory: '128Gi'  # sim2real-bootstrap default (UNMEASURED)
+        cpu: '32'  # sim2real-bootstrap default (UNMEASURED)
+      requests:
+        memory: '64Gi'  # sim2real-bootstrap default (UNMEASURED)
+        cpu: '16'  # sim2real-bootstrap default (UNMEASURED)
 

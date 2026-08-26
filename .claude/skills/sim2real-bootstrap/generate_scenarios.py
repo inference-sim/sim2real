@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 import pd_plumbing as pdp
+import pod_resources as pres
 
 # See #831: `workers` is the LeaderWorkerSet group size (pods per replica), not a
 # parallelism degree, and no input field states it -- so it is a stated default.
@@ -119,6 +120,8 @@ KNOWN_FIELDS = {
             "enable_chunked_prefill", "block_size",
             "gpu_memory_utilization", "dtype", "kv_cache_dtype",
             "enable_prefix_caching", "enforce_eager", "swap_space",
+            # Pod CPU/memory (issue #850), applied to both roles.
+            "cpu_limit", "memory_limit", "cpu_request", "memory_request",
         },
         "ignored": set(),
     },
@@ -316,6 +319,32 @@ def build_scenario(entry: dict, name: str) -> dict:
             file=sys.stderr,
         )
 
+    # --- Pod CPU/memory (issue #850) ---
+    # Same four keys and the same resolver as the config.md path.
+    for role_name in ("decode", "prefill"):
+        if role_name not in scenario:
+            continue
+        stated = {key: vllm_args.get(key) for key in pres.KEYS}
+        values, res_prov, notices = pres.resolve_resources(role_name, stated)
+        scenario[role_name]["resources"] = values
+        for notice in notices:
+            print(f"  WARNING: {notice}", file=sys.stderr)
+        warn = bool(pres.defaulted_keys(res_prov))
+        if warn:
+            print(pres.starvation_warning(role_name, values, res_prov),
+                  file=sys.stderr)
+        bad = pres.invalid_quantities(values)
+        if bad:
+            print(
+                f"  ERROR: {role_name} has invalid Kubernetes quantities: "
+                f"{', '.join(bad)}. Use e.g. 32, 500m, 128Gi, 1536Mi -- no spaces, "
+                f"no trailing words, no placeholders.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        scenario[role_name]["_resources_warn"] = warn
+        scenario[role_name]["_resources_provenance"] = res_prov
+
     # --- Pod plumbing (issue #848) ---
     # Same two gates and the same fragments as generate_from_config.py -- see
     # pd_plumbing's module docstring for why both generators must agree here.
@@ -430,6 +459,16 @@ def write_commented_yaml(scenario: dict, entry: dict, out_path: str):
         pdp.extra_env_var_lines(nixl=gates["kv"], multigpu=gates["multigpu"])
     )
 
+    # CPU/memory (#850), also per-role.
+    if "resources" in scenario["decode"]:
+        lines.extend(
+            pres.resource_lines(
+                scenario["decode"]["resources"],
+                scenario["decode"]["_resources_provenance"],
+                warn=scenario["decode"].get("_resources_warn", True),
+            )
+        )
+
     # Prefill role, emitted only when the entry named a prefill pod count. Placed
     # after decode so the decode bytes above are untouched when it is absent.
     if "prefill" in scenario:
@@ -477,6 +516,15 @@ def write_commented_yaml(scenario: dict, entry: dict, out_path: str):
         lines.extend(
             pdp.extra_env_var_lines(nixl=gates["kv"], multigpu=gates["multigpu"])
         )
+
+        if "resources" in p_role:
+            lines.extend(
+                pres.resource_lines(
+                    p_role["resources"],
+                    p_role["_resources_provenance"],
+                    warn=p_role.get("_resources_warn", True),
+                )
+            )
 
     # Scenario-level plumbing (#848), last so every block above keeps its bytes.
     if gates["kv"]:
