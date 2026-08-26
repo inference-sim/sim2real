@@ -75,6 +75,10 @@ DEFAULTS = {
 STATED = "operator-stated"
 DEFAULTED = "sim2real-bootstrap default (UNMEASURED)"
 DERIVED = "half the stated limit"
+# Prefill memory is matched to its limit rather than halved -- see the /dev/shm note
+# above. It needs its own label: calling it "half the stated limit" would be the same
+# false provenance an exponent-notation limit used to produce.
+MATCHED = "matched to the stated limit (Guaranteed QoS for /dev/shm)"
 CLAMPED = "clamped to this role's limit"
 
 # Kubernetes' quantity grammar (apimachinery/pkg/api/resource): a number with an
@@ -111,13 +115,30 @@ def _magnitude(quantity: str) -> "float | None":
     return None
 
 
-def _halve(quantity: str) -> str:
-    """Half a quantity, keeping its suffix. `128Gi` -> `64Gi`, `32` -> `16`."""
+def _halve(quantity: str) -> "str | None":
+    """Half a quantity, keeping its suffix. `128Gi` -> `64Gi`, `32` -> `16`.
+
+    Returns None when the value cannot be halved without reformatting it, which the
+    caller must treat as "cannot derive" rather than silently passing the original
+    through. Two cases:
+
+    * exponent notation (`4e1`). `_magnitude` accepts it via `_EXPONENT_RE`, which
+      this does not match -- so an earlier version returned `4e1` unchanged while
+      labelling it "half the stated limit", asserting in the emitted YAML a halving
+      that never happened and reserving the full limit.
+    * a value whose half would only render in exponent form (`10000000` -> `5e+06`).
+      `%g` switches notation above six significant digits, so the emitted string
+      would look nothing like what the operator wrote. Kubernetes would accept it,
+      but "values pass through without being reformatted" is a promise this module
+      makes and should keep.
+    """
     match = _SUFFIXED_RE.match(quantity.strip())
-    if not match:  # pragma: no cover - callers validate first
-        return quantity
+    if not match:
+        return None
     halved = float(match.group("num")) / 2
     number = f"{halved:g}"
+    if "e" in number or "E" in number:
+        return None
     return f"{number}{match.group('suffix') or ''}"
 
 
@@ -140,9 +161,13 @@ def resolve_resources(role: str, stated: dict) -> "tuple[dict, dict, list[str]]"
     shared input rows apply to both roles and a value sized for decode exceeds
     prefill's smaller limits.
 
-    Absent, None and whitespace-only all count as unstated. Values pass through as
-    strings and are never reformatted -- `32`, `500m`, `1.5`, `128Gi`, `1536Mi` are
-    all valid quantities and re-serializing risks changing them.
+    Absent, None and whitespace-only all count as unstated.
+
+    A STATED or DEFAULTED value passes through byte-for-byte -- `32`, `500m`, `1.5`,
+    `128Gi`, `1536Mi` are all valid quantities and re-serializing risks changing them.
+    A DERIVED one is computed, so it is the one path that produces a string neither
+    the operator nor the default table wrote; `_halve` declines rather than emit
+    anything in exponent notation, so the result still looks like its input.
 
     Returns (values, provenance, notices); notices describe any clamping, for the
     caller to print.
@@ -164,16 +189,35 @@ def resolve_resources(role: str, stated: dict) -> "tuple[dict, dict, list[str]]"
             provenance[limit_key] = DEFAULTED
 
         request = clean(request_key)
+        derived = None
+        if not request and limit and _magnitude(values[limit_key]) is not None:
+            # Derive from the stated limit: the role default request may not fit a
+            # limit the operator changed. Only from a readable quantity -- halving an
+            # invalid one would propagate it and make the error name two keys instead
+            # of the single bad row.
+            if role == "prefill" and kind == "memory":
+                # Guaranteed QoS, for the same reason DEFAULTS['prefill'] uses it:
+                # #848 mounts a 16Gi `medium: Memory` tmpfs at /dev/shm in
+                # vllmCommon, and tmpfs charges against pod memory. Halving a stated
+                # limit here would put the request below that ceiling -- e.g. a
+                # stated 24Gi limit deriving a 12Gi request -- reintroducing exactly
+                # the mid-run eviction risk this module argues against, silently.
+                derived = values[limit_key]
+            else:
+                derived = _halve(values[limit_key])
+
         if request:
             values[request_key], provenance[request_key] = request, STATED
-        elif limit and _magnitude(values[limit_key]) is not None:
-            # Half the stated limit: the role default request may not fit a limit the
-            # operator changed. Only when that limit is a readable quantity -- halving
-            # an invalid one would propagate it and make the error name two keys
-            # instead of the single bad row.
-            values[request_key] = _halve(values[limit_key])
-            provenance[request_key] = DERIVED
+        elif derived is not None:
+            values[request_key] = derived
+            provenance[request_key] = (
+                MATCHED if derived == values[limit_key] else DERIVED
+            )
         else:
+            # Either nothing was stated, or the limit could not be halved without
+            # reformatting it (see _halve). Falling back to the role default keeps
+            # the emitted value something the operator or the table actually wrote;
+            # the clamp below then reconciles it against the stated limit.
             values[request_key] = DEFAULTS[role][request_key]
             provenance[request_key] = DEFAULTED
 

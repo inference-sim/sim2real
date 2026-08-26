@@ -361,3 +361,106 @@ def test_whitespace_padded_stated_values_are_trimmed(padded):
     assert v["cpu_limit"] == "64"
     assert prov["cpu_limit"] == pres.STATED
     assert pres.invalid_quantities(v) == []
+
+
+# --- review findings on the derivation branch (PR #857, round 3) ------------
+# The derivation added to fix the previous round's must_fix introduced two narrower
+# bugs of its own, both in the same shape: a value labelled as something it is not.
+
+@pytest.mark.parametrize("limit", ["4e1", "1e3", "1.5e2"])
+def test_exponent_limit_never_yields_a_falsely_derived_request(limit):
+    """`_magnitude` accepts exponent notation via _EXPONENT_RE, which `_halve` does
+    not match. The fallback returned the limit UNCHANGED while labelling it "half the
+    stated limit" -- the YAML asserted a halving that never happened and the request
+    reserved the full limit."""
+    v, prov, _ = pres.resolve_resources("decode", {**NONE, "cpu_limit": limit})
+    if prov["cpu_request"] == pres.DERIVED:
+        assert pres._magnitude(v["cpu_request"]) < pres._magnitude(v["cpu_limit"]), (
+            "labelled DERIVED but not actually smaller than the limit"
+        )
+    # Whatever path was taken, the pair must stay valid.
+    assert pres._magnitude(v["cpu_request"]) <= pres._magnitude(v["cpu_limit"])
+
+
+@pytest.mark.parametrize("quantity", ["4e1", "1e3", "1.5e2"])
+def test_halve_declines_exponent_notation(quantity):
+    assert pres._halve(quantity) is None
+
+
+@pytest.mark.parametrize("quantity", ["10000000", "99999999"])
+def test_halve_declines_when_the_result_would_change_notation(quantity):
+    """`%g` switches to exponent form above six significant digits, so `10000000`
+    would halve to `5e+06` -- textually unlike anything the operator wrote, breaking
+    this module's promise not to reformat values."""
+    assert pres._halve(quantity) is None
+
+
+def test_no_emitted_value_ever_uses_exponent_notation():
+    for limit in ("10000000", "4e1", "99999999", "128Gi", "32"):
+        v, _, _ = pres.resolve_resources("decode", {**NONE, "cpu_limit": limit})
+        for key in pres.KEYS:
+            if v[key] != limit:  # a stated value passes through untouched
+                assert "e" not in v[key].lower(), f"{key}={v[key]} from limit {limit}"
+
+
+# --- prefill keeps Guaranteed QoS even when its limit is stated -------------
+
+@pytest.mark.parametrize("limit", ["16Gi", "24Gi", "32Gi", "8Gi"])
+def test_stated_prefill_memory_limit_keeps_request_equal_to_it(limit):
+    """The invariant lived only in DEFAULTS['prefill'], so the DERIVED branch halved
+    a stated limit unconditionally: a stated 24Gi limit produced a 12Gi request,
+    below the 16Gi /dev/shm tmpfs #848 mounts, silently reintroducing the mid-run
+    eviction risk this module argues against."""
+    v, prov, _ = pres.resolve_resources("prefill", {**NONE, "memory_limit": limit})
+    assert v["memory_request"] == limit
+    assert prov["memory_request"] == pres.MATCHED
+
+
+def test_matched_label_is_distinct_from_derived():
+    """Reusing DERIVED here would be the same false-provenance bug one line up."""
+    assert pres.MATCHED != pres.DERIVED
+    assert "half" not in pres.MATCHED
+
+
+def test_prefill_cpu_still_halves():
+    """Only memory has the tmpfs concern; CPU keeps the ordinary derivation."""
+    v, prov, _ = pres.resolve_resources("prefill", {**NONE, "cpu_limit": "16"})
+    assert v["cpu_request"] == "8"
+    assert prov["cpu_request"] == pres.DERIVED
+
+
+def test_decode_memory_still_halves():
+    """Decode has no shm floor to protect -- its request stays half the limit."""
+    v, prov, _ = pres.resolve_resources("decode", {**NONE, "memory_limit": "32Gi"})
+    assert v["memory_request"] == "16Gi"
+    assert prov["memory_request"] == pres.DERIVED
+
+
+def test_every_provenance_label_describes_its_value():
+    """The class of bug behind both findings: a label asserting something the value
+    does not satisfy. Checks every label against the value it annotates."""
+    cases = [
+        ("decode", {"memory_limit": "32Gi"}),
+        ("decode", {"cpu_limit": "4e1"}),
+        ("decode", {"cpu_limit": "10000000"}),
+        ("prefill", {"memory_limit": "24Gi"}),
+        ("prefill", {"cpu_limit": "16"}),
+        ("prefill", {"cpu_request": "20"}),
+        ("decode", {}),
+    ]
+    for role, stated in cases:
+        v, prov, _ = pres.resolve_resources(role, {**NONE, **stated})
+        for kind in ("cpu", "memory"):
+            rk, lk = f"{kind}_request", f"{kind}_limit"
+            src, req, lim = prov[rk], v[rk], v[lk]
+            if src == pres.DERIVED:
+                assert pres._magnitude(req) < pres._magnitude(lim), (
+                    f"{role} {rk}: labelled '{src}' but {req} is not below {lim}")
+            elif src == pres.MATCHED:
+                assert req == lim, f"{role} {rk}: labelled '{src}' but {req} != {lim}"
+            elif src == pres.CLAMPED:
+                assert req == lim, f"{role} {rk}: labelled '{src}' but {req} != {lim}"
+            elif src == pres.STATED:
+                assert req == str(stated.get(rk, "")).strip()
+            else:
+                assert src == pres.DEFAULTED

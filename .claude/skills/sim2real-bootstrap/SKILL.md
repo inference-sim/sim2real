@@ -425,7 +425,9 @@ optional per-role accelerator overrides; without them both roles use the shared
   1. the **limit** is the stated value, else that role's default;
   2. the **request** is the stated value; failing that, half the limit when the limit
      was stated (the role's default request may not fit a limit you changed), else
-     that role's default request;
+     that role's default request. **Prefill memory is matched to its limit rather
+     than halved**, for the `/dev/shm` reason below — so raising prefill's memory
+     limit raises its request with it and keeps Guaranteed QoS;
   3. the request is then **clamped to the limit**, with a warning naming the role.
 
   Step 3 is why stating only some rows is safe. A `cpu request: 20` is sensible for
