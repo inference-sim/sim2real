@@ -175,7 +175,13 @@ def load_defaults_overlay(defaults_dir: Path | None, *, disable: list[str]) -> d
     for fragment in sorted(defaults_dir.glob("*.yaml")):
         if fragment.stem in disable_set:
             continue
-        merged = deep_merge(merged, _load_yaml(fragment))
+        try:
+            merged = deep_merge(merged, _load_yaml(fragment))
+        except ValueError as exc:
+            # Flag-list tier rejection (non-`--` entry, or two entries colliding
+            # on one flag key) — normalize so the CLI reports it as an error
+            # rather than a traceback, and name the fragment at fault.
+            raise AssembleError(f"defaults fragment {fragment.name}: {exc}") from exc
     return merged
 
 
@@ -330,9 +336,19 @@ def _merge_layer(base: dict, overlay: dict, *, layer: str, sink: list | None) ->
     ``local`` stays ``None`` when no sink was requested, so ``deep_merge`` keeps
     taking ``_record_scalar_list_replace``'s ``sink is None`` fast path rather
     than allocating and formatting messages nobody will read.
+
+    A ``ValueError`` from the flag-list tier (a non-``--`` entry, or two entries
+    colliding on one flag key) is normalized to ``AssembleError`` here, matching
+    how ``make_pipelinerun_scenario``'s ValueError is handled below. Without it
+    the CLI's ``except AssembleError`` in ``sim2real.py`` would miss it and the
+    operator would get a raw traceback instead of ``error: ...`` and exit 2. The
+    layer prefix is attached so the message names which two files disagreed.
     """
     local: list[str] | None = [] if sink is not None else None
-    merged = deep_merge(base, overlay, sink=local)
+    try:
+        merged = deep_merge(base, overlay, sink=local)
+    except ValueError as exc:
+        raise AssembleError(f"{layer}: {exc}") from exc
     if sink is not None and local:
         sink.extend(f"{layer}: {msg}" for msg in local)
     return merged
@@ -759,7 +775,7 @@ def _additive_grow(
     translation_ref: str,
     translation_dir: Path,
     cluster_config: dict,
-) -> None:
+) -> list[str]:
     """Grow an existing run's replica count from ``prior_replicas`` to
     ``new_replicas`` (``new_replicas > prior_replicas``).
 
@@ -769,6 +785,15 @@ def _additive_grow(
     ``run_metadata.json`` with the new replica count and a new
     ``assembled_at`` timestamp; ``params_hash`` byte-identical to prior
     (drift check already ran and passed).
+
+    Returns the scalar-list conflicts found while re-resolving. These must be
+    returned rather than dropped: the caller's drift check hashes only
+    ``slicer.assembly_slice(manifest)`` — transfer.yaml content — so the
+    translation-generated overlays this re-resolution merges may have changed
+    since the first assemble (via ``sim2real build``, ``translation
+    register``/``append``, or a regenerated ``/sim2real-translate`` overlay)
+    while the manifest hash still matches. A conflict introduced that way is
+    genuinely new and has never been reported.
     """
     # Re-run scenario resolution to obtain workloads + packages + submodule
     # discovery. Safe because drift check has already established that the
@@ -816,6 +841,8 @@ def _additive_grow(
     rm["scenario"] = manifest.get("scenario", "") or ""
     rm_path.write_text(json.dumps(rm, indent=2, sort_keys=True) + "\n")
 
+    return resolved.scalar_list_conflicts
+
 
 def assemble_run(
     *,
@@ -857,14 +884,14 @@ def assemble_run(
 
     Framework submodules (``inference-sim``, ``llm-d-benchmark``) whose
     directory is not initialized are similarly recorded on
-    Scalar lists that one layer replaced wholesale, discarding an earlier
-    layer's values, are recorded on ``assemble_run.scalar_list_conflicts`` for
-    the same wrapper to surface (issue #851).
-
     ``assemble_run.missing_submodules``. The four PipelineRun params
     (``benchmarkGit*``, ``blisGit*``) fall back to ``"unknown"`` in
     that case so the run assembles locally; the cluster-side clone
     step then fails visibly at the right point.
+
+    Scalar lists that one layer replaced wholesale, discarding an earlier
+    layer's values, are recorded on ``assemble_run.scalar_list_conflicts`` for
+    the same wrapper to surface (issue #851).
     """
     layout.set_experiment_root(experiment_root)
     # Reset side-band state each call — see docstring above.
@@ -983,7 +1010,7 @@ def assemble_run(
                             additive_grow_from = prior_replicas
 
     if additive_grow_from is not None:
-        _additive_grow(
+        grow_conflicts = _additive_grow(
             run_dir,
             manifest,
             prior_replicas=additive_grow_from,
@@ -996,12 +1023,13 @@ def assemble_run(
             cluster_config=cluster_config,
         )
         # skipped_algorithms/missing_submodules unchanged from prior assemble.
-        # scalar_list_conflicts likewise: the drift check has established the
-        # manifest slice is unchanged, so any conflict was already reported when
-        # the run was first assembled.
+        # scalar_list_conflicts is NOT: the drift check hashes only the manifest
+        # assembly slice, so the translation-generated overlays that
+        # _additive_grow re-merges may have changed since the first assemble
+        # while transfer.yaml did not. Surface whatever it found.
         assemble_run.skipped_algorithms = []  # type: ignore[attr-defined]
         assemble_run.missing_submodules = []  # type: ignore[attr-defined]
-        assemble_run.scalar_list_conflicts = []  # type: ignore[attr-defined]
+        assemble_run.scalar_list_conflicts = grow_conflicts  # type: ignore[attr-defined]
         assemble_run.status = "written"  # type: ignore[attr-defined]
         assemble_run.prior_assembled_at = ""  # type: ignore[attr-defined]
         return

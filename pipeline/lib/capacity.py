@@ -195,13 +195,22 @@ def derive_gpu_resource_type(resolved_scenario: dict, defaults: dict) -> str:
 
     Merges the first scenario entry over defaults, then reads
     accelerator.resource. Falls back to "nvidia.com/gpu".
+
+    Never raises: the flag-list merge tier (issue #851) rejects a malformed or
+    duplicated CLI-flag entry with ValueError, but this function's contract is
+    to always return a resource name, so such a merge failure falls back to the
+    default like every other missing-or-bad-data case here. GPU resource type
+    does not depend on vLLM flags, so the fallback loses nothing.
     """
     scenario_entry = {}
     scenarios = resolved_scenario.get("scenario", [])
     if scenarios:
         scenario_entry = scenarios[0]
 
-    merged = deep_merge(defaults, scenario_entry)
+    try:
+        merged = deep_merge(defaults, scenario_entry)
+    except ValueError:
+        return "nvidia.com/gpu"
     return merged.get("accelerator", {}).get("resource", "nvidia.com/gpu")
 
 
@@ -217,13 +226,22 @@ def gpu_cost_per_pair(resolved_scenario: dict, defaults: dict) -> Union[int, str
     accelerator.count propagates to roles that don't override it.
 
     Returns int on success, or error string describing the problematic field.
+    Never raises — the caller (``deploy.py:_derive_pair_gpu_costs``) degrades an
+    error string to a warning plus fallback cost, and a raise there would crash
+    the orchestrator at startup. A ValueError from the flag-list merge tier
+    (issue #851 — a non-``--`` entry, or two entries colliding on one flag key)
+    is therefore folded into the error-string return like every other malformed
+    -input case below.
     """
     scenario_entry = {}
     scenarios = resolved_scenario.get("scenario", [])
     if scenarios:
         scenario_entry = scenarios[0]
 
-    merged = deep_merge(defaults, scenario_entry)
+    try:
+        merged = deep_merge(defaults, scenario_entry)
+    except ValueError as exc:
+        return f"scenario/defaults merge failed: {exc}"
 
     top_accel = merged.get("accelerator", {})
     top_count_raw = top_accel.get("count")

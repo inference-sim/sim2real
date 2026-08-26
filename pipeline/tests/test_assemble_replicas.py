@@ -34,6 +34,11 @@ def _mtimes(paths: list[Path]) -> list[float]:
     return [p.stat().st_mtime_ns for p in paths]
 
 
+def _write_scenario_yaml(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.dump(data, sort_keys=False))
+
+
 def _assemble(fx: dict, *, replicas: int = 1, force: bool = False,
               now_iso: str = "2026-07-01T00:00:00Z") -> None:
     assemble_run.assemble_run(
@@ -143,6 +148,47 @@ class TestAssembleReplicas:
         _assemble(fx, replicas=5, now_iso="2026-07-02T00:00:00Z")
         assert assemble_run.assemble_run.status == "written"
         assert assemble_run.assemble_run.prior_assembled_at == ""
+
+    def test_additive_grow_surfaces_newly_introduced_scalar_conflict(self, tmp_path):
+        """#851: the grow path must NOT discard scalar_list_conflicts.
+
+        The drift check hashes only ``slicer.assembly_slice(manifest)``, i.e.
+        transfer.yaml. The baseline/overlay YAMLs that resolution actually merges
+        sit outside that hash, so editing one and then bumping --replicas takes
+        the additive-grow branch with a conflict that has never been reported.
+        """
+        fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
+                              algo_names_manifest=["sr"])
+        _assemble(fx, replicas=3, now_iso="2026-07-01T00:00:00Z")
+        assert assemble_run.assemble_run.scalar_list_conflicts == []
+
+        # Introduce a conflict WITHOUT touching transfer.yaml: the defaults
+        # fragment and the baseline bundle now both set router.proxy.args.
+        _write_scenario_yaml(
+            fx["exp_root"] / "baselines" / "defaults" / "envoy.yaml",
+            {"scenario": [{"name": "test-scenario",
+                           "router": {"proxy": {"args": ["--concurrency", "8"]}}}]},
+        )
+        _write_scenario_yaml(
+            fx["exp_root"] / "baselines" / "base.yaml",
+            {"scenario": [{"name": "test-scenario", "model": {"name": "M"},
+                           "router": {"proxy": {"args": ["--log-level", "warn"]}}}]},
+        )
+
+        _assemble(fx, replicas=5, now_iso="2026-07-02T00:00:00Z")
+        # Grow path was taken (not a full rebuild).
+        assert assemble_run.assemble_run.status == "written"
+        conflicts = assemble_run.assemble_run.scalar_list_conflicts
+        assert len(conflicts) >= 1
+        assert any("scenario.router.proxy.args" in c for c in conflicts)
+        assert any("framework defaults -> baseline bundle" in c for c in conflicts)
+
+    def test_additive_grow_reports_no_conflict_when_there_is_none(self, tmp_path):
+        fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
+                              algo_names_manifest=["sr"])
+        _assemble(fx, replicas=3, now_iso="2026-07-01T00:00:00Z")
+        _assemble(fx, replicas=5, now_iso="2026-07-02T00:00:00Z")
+        assert assemble_run.assemble_run.scalar_list_conflicts == []
 
     def test_force_rebuild_sets_status_written(self, tmp_path):
         """Issue #555: --force full rebuild is a write path — status='written'."""
