@@ -2559,6 +2559,13 @@ def _cmd_assemble(args) -> int:
             "in translation_output.json — skipped",
             file=sys.stderr,
         )
+    for msg in getattr(_assemble_run_lib.assemble_run, "scalar_list_conflicts", []):
+        print(
+            f"warning: {msg} — this list is replaced rather than merged, so the "
+            "earlier layer's values do not reach the cluster. State them in the "
+            "later layer, or move them to a typed key. See issue #851.",
+            file=sys.stderr,
+        )
     for name in getattr(_assemble_run_lib.assemble_run, "missing_submodules", []):
         print(
             f"warning: framework submodule '{name}' not initialized — "
