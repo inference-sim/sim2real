@@ -774,8 +774,13 @@ Assemble transfer manifest from all prior task outputs.
    elsewhere — it will spend the budget trying to make the stated shape work. Say
    explicitly that if the candidate does not hold, the eliminations still do, and the
    search continues within them. That tells the writer where NOT to spend retries.
-   Where no extension point fits at all, see #862 — a core modification is a legitimate
-   outcome, not a dead end.
+   Where no extension point fits at all, the placement is a **declared core
+   modification** — which files must change, why no extension point sufficed, and what
+   upstream change would invalidate it. That is a legitimate outcome, not a dead end;
+   `/sim2real-specify` Phase 2 defines the declaration and `/sim2real-translate`'s writer
+   is permitted to carry it out. Copy such a declaration through intact — a core
+   modification that reaches the writer as a bare file list is indistinguishable from an
+   accident.
 
    Use plain prose labels, in the style bundles already use in this field — do not
    invent a marker syntax. `PLACEMENT` and `DECLARED DEGRADATION (Dn)` are established;

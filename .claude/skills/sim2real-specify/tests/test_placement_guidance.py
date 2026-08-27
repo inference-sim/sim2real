@@ -66,9 +66,42 @@ def test_phase2_requires_registration_count():
 
 
 def test_phase2_keeps_the_core_modification_escape_hatch():
-    """Without somewhere to go, \"look elsewhere\" is not actionable."""
-    assert "#862" in _phase2(), (
-        "Phase 2 lost its pointer to #862. If no extension point fits at all, a "
-        "core modification is the legitimate outcome; without that pointer the "
-        "only documented move is to halt."
+    """Without somewhere to go, "look elsewhere" is not actionable.
+
+    This asserted a bare `#862` pointer when #859 added it, because the policy did
+    not exist yet. #862 implemented it inline, so the guard now checks the policy
+    itself -- a strictly stronger assertion than "an issue number is mentioned."
+    """
+    phase2 = _phase2()
+    assert "DECLARED CORE MODIFICATION" in phase2, (
+        "Phase 2 lost the DECLARED CORE MODIFICATION outcome. If no extension point "
+        "fits at all, modifying the component's own code is the legitimate outcome "
+        "(#862); without it the only documented move is to halt, which limits the "
+        "pipeline to algorithms the component already anticipated."
+    )
+
+
+def test_phase2_halts_only_on_silent_fallback():
+    """#862: the halt must be scoped to silent fallback, not to 'no extension point'.
+
+    The original wording halted whenever no extension point could express the shape,
+    which made a core modification unrepresentable. The halt's real purpose -- never
+    quietly accept a decomposition that scores a different decision -- survives; what
+    changed is that it no longer swallows the core-modification case.
+    """
+    phase2 = _phase2()
+    assert "silent fallback" in phase2, (
+        "Phase 2 no longer scopes its halt to silent fallback. #862 requires the "
+        "halt cover the case where the weaker natural decomposition would be used "
+        "instead, NOT every case where no extension point expresses the shape."
+    )
+
+
+def test_phase2_requires_the_rebase_cost_be_stated():
+    """A carried patch invalidates the pin as a free variable; say what breaks."""
+    phase2 = _phase2()
+    assert "rebase" in phase2, (
+        "Phase 2 no longer requires a declared core modification to state what "
+        "breaks on upstream rebase. That is the cost most easily left implicit: the "
+        "bundle now carries a patch, so the pinned ref is no longer free."
     )

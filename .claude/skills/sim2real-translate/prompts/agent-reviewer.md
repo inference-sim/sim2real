@@ -112,6 +112,13 @@ Flag any divergence from the source algorithm as `[fidelity]` NEEDS_CHANGES.
 
 ### Criterion 3: Registration (CRITICAL)
 
+**Scope:** this criterion governs the plugin the port registers. Where no extension point
+can carry the algorithm's decision, the port may instead modify the component's own code
+(issue #862) — see "Criterion 3b" below. If the port registers **no** plugin at all,
+the five-item chain here is inapplicable: check 3b instead of raising `[registration]`.
+Most ports that modify component code still register a plugin as well; in that case check
+both.
+
 Verify the complete registration chain — ALL of these must be true:
 
 1. Plugin Go file defines a `Type` constant (string must be kebab-case)
@@ -122,6 +129,31 @@ Verify the complete registration chain — ALL of these must be true:
 
 If any of these five items is missing or mismatched, raise `[registration]` NEEDS_CHANGES.
 This is the most common failure mode — check it carefully.
+
+### Criterion 3b: Declared core modification
+
+Applies only when `{ALGO_NAME}_output.json`'s `files_modified` is non-empty — i.e. the
+port changed files that already existed in the component. Do NOT treat that as a defect
+in itself: a decision shape that no extension point can reach is a legitimate reason to
+modify component code, and forcing it into an extension point that scores a different
+decision is the failure this pipeline exists to prevent.
+
+Verify instead that the modification is **declared, not silent**:
+
+1. The writer's `description` states that the port modifies component code, which files,
+   and why no extension point sufficed.
+2. It states what upstream change would invalidate the modification. The bundle now
+   carries a patch, so the pinned ref is no longer a free variable, and that cost has to
+   be written down.
+3. The change is no larger than the decision requires — an added call site or exported
+   hook rather than a restructuring that happens to include the algorithm.
+4. If `{CONTEXT_TEXT}` already declares a core modification, the files changed are the
+   ones it named. A port that modifies *different* files than the declaration is a
+   fidelity problem: raise `[fidelity]` NEEDS_CHANGES.
+
+An undeclared modification — files in `files_modified` with no reason given — is the
+silent-fallback hazard in another form: the port builds, reports numbers, and no reader
+can tell the component was altered. Raise `[fidelity]` NEEDS_CHANGES for that.
 
 ### Criterion 4: Config Correctness
 
