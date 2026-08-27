@@ -72,6 +72,10 @@ Example queries:
 You stay idle after initialization. When the writer sends you a review request:
 
 1. Read ALL plugin files listed in the writer's message (paths provided in the request) — fresh
+1b. Read every path under `Modified component files` in the request, if any — these are the
+   pre-existing component files the port changed, and Criterion 3b judges their size and
+   shape, not just their names. If that line is missing entirely (as opposed to `none`),
+   ask the writer for it rather than assuming there were none.
 2. Read `{OUTPUT_DIR}/{ALGO_NAME}_config.yaml` fresh
 3. Read `{OUTPUT_DIR}/{ALGO_NAME}_output.json` for metadata cross-reference
 4. Read the registration file mentioned in `{ALGO_NAME}_output.json` — just the relevant section
@@ -112,6 +116,13 @@ Flag any divergence from the source algorithm as `[fidelity]` NEEDS_CHANGES.
 
 ### Criterion 3: Registration (CRITICAL)
 
+**Applies to every port, without exception.** A port may additionally modify the
+component's own code where no extension point can carry the decision (issue #862) — see
+Criterion 3b — but that supplements the plugin rather than replacing it, so the chain below
+must still pass. A port that registers no plugin fails this criterion: the treatment
+overlay enables the algorithm by naming its plugin type, so an unregistered port cannot be
+switched on for the treatment scenario at all.
+
 Verify the complete registration chain — ALL of these must be true:
 
 1. Plugin Go file defines a `Type` constant (string must be kebab-case)
@@ -122,6 +133,37 @@ Verify the complete registration chain — ALL of these must be true:
 
 If any of these five items is missing or mismatched, raise `[registration]` NEEDS_CHANGES.
 This is the most common failure mode — check it carefully.
+
+### Criterion 3b: Declared core modification
+
+**This criterion is additional to Criterion 3, never a substitute for it.** Criterion 3
+applies to every port; this one applies as well whenever `{ALGO_NAME}_output.json`'s
+`files_modified` is non-empty — i.e. the port also changed files that already existed in
+the component. A passing registration chain says nothing about whether those files were
+declared, so **never stop at Criterion 3 because the registration passed.** That is the
+case to be careful about, and it is the common one.
+
+Do NOT treat a modification as a defect in itself: a decision shape that no extension
+point can reach is a legitimate reason to modify component code, and forcing it into an
+extension point that scores a different decision is the failure this pipeline exists to
+prevent.
+
+Verify instead that the modification is **declared, not silent**:
+
+1. The writer's `description` states that the port modifies component code, which files,
+   and why no extension point sufficed.
+2. It states what upstream change would invalidate the modification. The bundle now
+   carries a patch, so the pinned ref is no longer a free variable, and that cost has to
+   be written down.
+3. The change is no larger than the decision requires — an added call site or exported
+   hook rather than a restructuring that happens to include the algorithm.
+4. If `{CONTEXT_TEXT}` already declares a core modification, the files changed are the
+   ones it named. A port that modifies *different* files than the declaration is a
+   fidelity problem: raise `[fidelity]` NEEDS_CHANGES.
+
+An undeclared modification — files in `files_modified` with no reason given — is the
+silent-fallback hazard in another form: the port builds, reports numbers, and no reader
+can tell the component was altered. Raise `[fidelity]` NEEDS_CHANGES for that.
 
 ### Criterion 4: Config Correctness
 
@@ -185,7 +227,11 @@ Flag violations as `[treatment-config]` NEEDS_CHANGES.
 
 Reply in this exact format:
 
-**APPROVE** — You MUST include a complete verification summary:
+**APPROVE** — You MUST include a complete verification summary. Every line below is
+required, including `Core modification` — write `none (files_modified empty)` when the
+port changed no existing component files. Omitting the line is not the same as reporting
+nothing to declare: a summary that simply lacks it reads as a complete APPROVE in which
+Criterion 3b was never applied.
 ```
 VERDICT: APPROVE
 
@@ -193,6 +239,7 @@ Verification summary (required — one line per criterion):
 - Fidelity: [confirm formula/logic matches, signals correctly consumed]
 - Code quality: [confirm interfaces correct, tests present, patterns followed]
 - Registration: TypeConst=<exact value>, Factory=<name>, registration file=<path>
+- Core modification: none (files_modified empty) | declared: files=<list>, reason given, upstream-rebase risk stated
 - Config: overlay format valid, plugin types registered, keys consistent
 - Assembly: overlay YAML valid, scenario name matches, treatment_config_generated=true in {ALGO_NAME}_output.json
 - Treatment config: [parameter-free / parameters match algo config]

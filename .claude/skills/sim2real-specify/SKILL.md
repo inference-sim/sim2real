@@ -115,9 +115,51 @@ Compare against the target's NATURAL decomposition. Where the natural
 decomposition is weaker, quantify what would be lost, using the simulation's own
 ablation rather than an estimate.
 
-HALT if no extension point can express the required shape. The hazard is silent
-fallback to the weaker natural decomposition, which transfers a different
-algorithm while resembling success. Say so loudly instead.
+HALT on silent fallback to the weaker natural decomposition — that transfers a
+different algorithm while resembling success. That is the hazard this halt exists for,
+and it is unchanged: never quietly accept a decomposition that scores a different
+decision than the one you specified.
+
+But "no extension point can express the required shape" is a **finding, not a dead
+end.** It has a legitimate outcome: plan a modification to the component's own code.
+The target being plugin-based makes an extension point the right first choice, and you
+should exhaust that search before concluding it — but some decision shapes genuinely
+cannot be reached from outside, and halting on those means the pipeline can only
+transfer algorithms the component already anticipated.
+
+So there are three outcomes of this phase, not two:
+
+1. **An extension point expresses the shape** — proceed, subject to the
+   expressible-vs-constructible rule below.
+2. **No extension point expresses it, and you plan a core modification** — proceed,
+   with the modification declared as described next.
+3. **No extension point expresses it, and the natural decomposition would be used
+   instead** — HALT. This is the silent-fallback case, and it is the only one that
+   halts.
+
+**DECLARED CORE MODIFICATION.** A core change is a deviation with a cost that must
+travel with the bundle, so it is declared the way this skill already declares
+degradations — in the specification layer's own header, in the same voice, alongside
+them. Invent no new mechanism for it. State:
+
+- **Which files or packages must change**, and what the change is in behavioural terms.
+- **Why no extension point sufficed** — name the ones you ruled out and the mechanism
+  that ruled each out. This is the same elimination evidence Phase 2 already produces,
+  and it is what stops a reader assuming the search was shallow.
+- **What breaks on upstream rebase.** This is the real cost and the one most easily
+  left implicit: the bundle now carries a patch against the component, so the pinned
+  ref is no longer a free variable. Say which upstream changes would invalidate the
+  modification.
+
+`/sim2real-translate`'s writer is permitted to make the modification, and the pipeline
+already carries it end to end — the writer's output records `files_modified`, which
+`copy_generated.py` derives from a `git diff` of the component checkout, and
+`source_toggle` reverts those files when the baseline is restored. So the declaration
+is the part that is not automatic: the file list is generated, the reason is not.
+
+A modification that appears only in `files_modified`, with no declaration, is the
+silent-fallback hazard wearing different clothes — the port works, reports numbers,
+and no reader can tell that the component was altered or why.
 
 **Expressible is not constructible.** Finding an extension point that can express the
 shape shows that the data can reach the decision — that the candidates are all visible,
@@ -147,8 +189,17 @@ output — it stays true even when the candidate placement fails, and it tells a
 reader where the remaining search space is. Say so explicitly: if the candidate does not
 hold, the eliminations still do.
 
-Where no extension point fits at all, see #862 — modifying the component's own code is a
-legitimate outcome to plan rather than only a reason to halt.
+Where no extension point fits at all, the outcome is a DECLARED CORE MODIFICATION as
+described above — not a halt. Say so in the placement, so the candidate the writer
+receives names the component files to change rather than an extension point that cannot
+carry the decision.
+
+Note the modification **supplements** a plugin rather than replacing it: name the plugin
+that will carry the algorithm alongside the files it needs changed. The treatment overlay
+enables an algorithm by naming its plugin type, so a port with no registered plugin cannot
+be switched on for the treatment scenario at all — it would differ from baseline only by
+what is compiled into the image, which the overlay cannot express. The core edit provides
+the hook; the plugin provides the switch.
 
 ## Phase 3 — Observability
 

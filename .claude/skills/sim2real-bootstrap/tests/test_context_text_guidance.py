@@ -8,16 +8,18 @@ therefore within spec -- a citation range that stopped short of the construct it
 and a placement asserted as settled that could not be built at all (two interfaces
 declaring the same method name with different signatures cannot sit on one Go type).
 
-Two bounded-region guards here, mirroring test_build_commands_guidance.py (#858):
+Bounded-region guards over two areas, mirroring test_build_commands_guidance.py (#858):
 
-- the schema block must not regress to a bare placeholder, and must route to the
-  derivation step where the constraints live;
-- the derivation step must keep both constraints -- citation bounding, and the
-  settled-vs-declared-unknown split.
+- the schema block must not regress to a bare placeholder, must route to the derivation
+  step where the constraints live, and must offer both valid placement shapes;
+- the derivation step must keep both #859 constraints -- citation bounding, and the
+  settled-vs-declared-unknown split -- and must carry a declared core modification
+  through intact (#862), since bootstrap is the link between specify declaring one and
+  the writer acting on it.
 
 Prose beyond these regions is not asserted on (see test_byo.py's note on why NL
-frontends are not CI-tested); what is asserted is that the two constraints the issue
-states outright have not been quietly dropped.
+frontends are not CI-tested); what is asserted is that the constraints these issues
+state outright have not been quietly dropped.
 """
 
 import re
@@ -27,6 +29,23 @@ _SKILL_MD = Path(__file__).resolve().parents[1] / "SKILL.md"
 
 # The placeholder #859 retired. Its return would mean the constraints were dropped.
 _RETIRED_PLACEHOLDER = "<derived summary>"
+
+
+def _norm(text: str) -> str:
+    """Collapse all whitespace runs to single spaces.
+
+    Every phrase assertion below runs through this. These files are hard-wrapped
+    prose, so a guarded phrase can land across a line break -- `declared core\\n
+    modification` is not the substring `declared core modification` -- and a guard
+    that fails on reflow tells you nothing about whether the rule survived. Only
+    the words matter here, never the wrapping.
+
+    Markdown emphasis is stripped for the same reason: `modifies *different*
+    files` should satisfy a guard on `modifies different files`, since the
+    asterisks are formatting, not content. Only `*` is removed -- `_` has to
+    survive for identifiers like `files_modified`.
+    """
+    return " ".join(text.replace("*", "").split())
 
 
 def _task5() -> str:
@@ -57,7 +76,7 @@ def _task5_step9() -> str:
 
 def test_context_block_is_not_a_bare_placeholder():
     """#859: `<derived summary>` imposed no accuracy requirement and was retired."""
-    assert _RETIRED_PLACEHOLDER not in _task5_context_block(), (
+    assert _RETIRED_PLACEHOLDER not in _norm(_task5_context_block()), (
         f"Task 5's context: block is back to the bare {_RETIRED_PLACEHOLDER!r} "
         "placeholder. Issue #859 replaced it because it imposed no accuracy "
         "requirement on a field /sim2real-translate treats as authoritative."
@@ -66,7 +85,7 @@ def test_context_block_is_not_a_bare_placeholder():
 
 def test_context_block_points_at_the_derivation_step():
     """The block must route the agent to where the constraints are stated."""
-    assert "step 9" in _task5_context_block(), (
+    assert "step 9" in _norm(_task5_context_block()), (
         "Task 5's context: block does not point at derivation step 9, so the "
         "accuracy constraints are reachable only by luck."
     )
@@ -74,7 +93,7 @@ def test_context_block_points_at_the_derivation_step():
 
 def test_step9_requires_citations_to_bound_their_construct():
     """#859 constraint 1: a citation must cover the whole construct it names."""
-    step9 = _task5_step9()
+    step9 = _norm(_task5_step9())
     assert "bound the construct" in step9, (
         "Task 5 step 9 no longer requires citations to bound the construct they "
         "name. lint_citations.py cannot catch this -- it checks that lines fall "
@@ -82,9 +101,48 @@ def test_step9_requires_citations_to_bound_their_construct():
     )
 
 
+def test_step9_carries_a_declared_core_modification_through():
+    """#862: bootstrap is the link between specify's declaration and the writer.
+
+    specify declares the core modification, bootstrap copies it into context.text, and
+    the writer reads it as authoritative. If bootstrap drops the reason and passes only
+    the files, the writer receives a bare file list -- which is exactly the silent
+    modification Criterion 3b exists to reject. So the copy-through is load-bearing and
+    is guarded here rather than left to prose alone.
+    """
+    step9 = _norm(_task5_step9())
+
+    # NOT asserted: a bare "core modification". #859 already wrote "a core
+    # modification is a legitimate outcome" here as a forward reference to #862, so
+    # that phrase passes against the pre-#862 text and discriminates nothing. What
+    # #862 added is the declaration -- the placement shape, and copying it through.
+    assert "declared core" in step9, (
+        "Task 5 step 9 no longer names a DECLARED core modification as a valid "
+        "placement shape. #862: where no extension point fits, that is the outcome, "
+        "and bootstrap must transcribe the declaration rather than treating the case "
+        "as a dead end or reducing it to a file list."
+    )
+    assert "intact" in step9, (
+        "Task 5 step 9 no longer tells the author to copy a core-modification "
+        "declaration through intact. Dropping the reason turns it into a bare file "
+        "list, indistinguishable from an accident."
+    )
+
+
+def test_context_template_allows_the_core_modification_placement():
+    """The literal template must not describe only the extension-point shape."""
+    block = _norm(_task5_context_block())
+    assert "DECLARED CORE MODIFICATION" in block, (
+        "The context: template's PLACEMENT line describes only an extension point, so "
+        "an author filling it verbatim gets no hint that a declared core modification "
+        "is a valid placement (#862). Step 9 permitting it is not enough if the shape "
+        "the author copies does not."
+    )
+
+
 def test_step9_separates_settled_eliminations_from_declared_placement():
     """#859 constraint 2: the two claim kinds must not share one voice."""
-    step9 = _task5_step9()
+    step9 = _norm(_task5_step9())
     missing = [
         term
         for term in ("Elimination", "declared unknown", "registration")
