@@ -144,7 +144,7 @@ def test_reviewer_registration_criterion_is_scoped():
 
 
 def test_reviewer_has_no_gap_between_criterion_3_and_3b():
-    """Every port must land in exactly one of: plugin, declared modification, failure.
+    """No port may escape both registration criteria.
 
     Criterion 3 hands the plugin-less case to 3b, and 3b's substantive checks key off
     a non-empty files_modified. Their intersection -- no plugin AND no modification --
@@ -152,6 +152,14 @@ def test_reviewer_has_no_gap_between_criterion_3_and_3b():
     nothing would draw no NEEDS_CHANGES from either. Before #862 scoped Criterion 3,
     that case failed the registration chain unconditionally, so the gap is a
     regression this guard exists to prevent reopening.
+
+    Note the criteria are independent, NOT alternatives: a port that registers a
+    plugin AND modifies component files owes both. An earlier draft of this docstring
+    and of the prompt said every port lands in "exactly one of the three", which is
+    wrong and dangerous in the common both-at-once case -- an agent could classify
+    such a port under Criterion 3, stop, and never apply 3b's declaration checks.
+    That is the undeclared-modification hazard 3b exists to catch, so the guard below
+    also pins the applicability table.
     """
     m = re.search(
         r"\n### Criterion 3b:[^\n]*\n(?P<body>.*?)(?=\n### )", _reviewer(), re.S
@@ -163,12 +171,32 @@ def test_reviewer_has_no_gap_between_criterion_3_and_3b():
         "plugin and an empty files_modified now falls through both registration "
         "criteria, which is the hole #862 opened by scoping Criterion 3."
     )
+    # Guard the second operand too, so a rewording raises this message rather than a
+    # bare ValueError from .index().
+    gate_marker = "The rest of this criterion"
+    assert gate_marker in body, (
+        f"Criterion 3b no longer contains {gate_marker!r}, so the ordering check "
+        "below cannot locate the files_modified gate. Reword the assertion along "
+        "with the prompt."
+    )
     # The catch-all must come before the files_modified-gated checks, or a
     # plugin-less, modification-less port never reaches it.
-    assert body.index("no deliverable") < body.index("The rest of this criterion"), (
+    assert body.index("no deliverable") < body.index(gate_marker), (
         "The no-deliverable check must be the FIRST thing in Criterion 3b. Placed "
         "after the files_modified gate it is unreachable for exactly the case it "
         "is meant to catch."
+    )
+    # The criteria are independent, not alternatives. "exactly one of the three"
+    # invites an agent to stop at Criterion 3 for a port that also modified files.
+    assert "exactly one of the three" not in body, (
+        "Criterion 3b claims every port lands in 'exactly one of the three'. That is "
+        "false for the common case of a plugin PLUS a core modification, where both "
+        "criteria apply -- and it licenses skipping 3b's declaration checks whenever "
+        "the registration chain passes."
+    )
+    assert "not alternatives" in body, (
+        "Criterion 3b no longer states that Criteria 3 and 3b are independent rather "
+        "than alternatives, so a port owing both may be checked for only one."
     )
 
 

@@ -106,11 +106,16 @@ def test_step9_carries_a_declared_core_modification_through():
     is guarded here rather than left to prose alone.
     """
     step9 = _norm(_task5_step9())
-    assert "core modification" in step9, (
-        "Task 5 step 9 no longer mentions a declared core modification as a valid "
-        "placement. #862: where no extension point fits, that is the outcome, and "
-        "bootstrap must be willing to transcribe it rather than treating the case as "
-        "a dead end."
+
+    # NOT asserted: a bare "core modification". #859 already wrote "a core
+    # modification is a legitimate outcome" here as a forward reference to #862, so
+    # that phrase passes against the pre-#862 text and discriminates nothing. What
+    # #862 added is the declaration -- the placement shape, and copying it through.
+    assert "declared core" in step9, (
+        "Task 5 step 9 no longer names a DECLARED core modification as a valid "
+        "placement shape. #862: where no extension point fits, that is the outcome, "
+        "and bootstrap must transcribe the declaration rather than treating the case "
+        "as a dead end or reducing it to a file list."
     )
     assert "intact" in step9, (
         "Task 5 step 9 no longer tells the author to copy a core-modification "

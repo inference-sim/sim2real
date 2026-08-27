@@ -101,6 +101,20 @@ def test_phase2_halts_only_on_silent_fallback():
     changed is that it no longer swallows the core-modification case.
     """
     phase2 = _norm(_phase2())
+
+    # The discriminating assertion. "silent fallback" alone is NOT: the pre-#862
+    # paragraph read "The hazard is silent fallback to the weaker natural
+    # decomposition", so that phrase passes against the old blanket-HALT wording too
+    # -- doubly so once _norm() joins its hard-wrapped "silent\nfallback". What
+    # actually changed is that the halt no longer fires on "no extension point can
+    # express the shape", so that is what must be absent.
+    assert "halt if no extension point can express" not in phase2.lower(), (
+        "Phase 2 has reverted to the blanket HALT ('HALT if no extension point can "
+        "express the required shape'). #862 scopes the halt to silent fallback only: "
+        "a core modification is a legitimate outcome, and halting on every "
+        "unexpressible shape limits the pipeline to algorithms the component already "
+        "anticipated."
+    )
     assert "silent fallback" in phase2, (
         "Phase 2 no longer scopes its halt to silent fallback. #862 requires the "
         "halt cover the case where the weaker natural decomposition would be used "

@@ -136,9 +136,23 @@ This is the most common failure mode — check it carefully.
 is empty, it produced neither a plugin nor a core modification — there is no deliverable
 at all. Raise `[registration]` NEEDS_CHANGES. Check this before anything else in 3b:
 Criterion 3 hands the plugin-less case to 3b, so without this clause a port that delivers
-nothing would satisfy the applicability condition of neither criterion. Every port must
-land in exactly one of the three: a registered plugin (Criterion 3), a declared core
-modification (the rest of 3b), or this failure.
+nothing would satisfy the applicability condition of neither criterion.
+
+**The two criteria are not alternatives — they are independent, and a port can owe you
+both.** Apply each on its own condition:
+
+| Port | Criterion 3 | Criterion 3b |
+|---|---|---|
+| Registers a plugin, no modified files | apply | not applicable |
+| Registers a plugin AND modifies component files | **apply** | **apply** |
+| No plugin, modifies component files | inapplicable | apply |
+| No plugin, no modified files | inapplicable | no-deliverable failure |
+
+The second row is the common case and the one to be careful about: a port that registers
+a plugin is NOT thereby excused from 3b's declaration checks. Satisfying the registration
+chain says nothing about whether the component files it also touched were declared, and an
+undeclared modification is exactly what 3b exists to catch. Never stop at Criterion 3
+because the registration passed.
 
 The rest of this criterion applies when `files_modified` is non-empty — i.e. the port
 changed files that already existed in the component. Do NOT treat that as a defect in
