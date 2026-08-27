@@ -211,6 +211,81 @@ def test_reviewer_3b_supplements_rather_than_replaces_criterion_3():
     )
 
 
+def test_approve_template_records_the_core_modification_check():
+    """An APPROVE must show 3b was applied, including when there was nothing to declare.
+
+    The Response Format block is what the reviewer literally emits, and it enumerated one
+    line per criterion with no line for 3b. A reviewer following it produced a
+    complete-looking APPROVE carrying no evidence the declaration was ever checked --
+    which is the same silent-pass shape 3b was added to close. The line is required even
+    for an unmodified port, because an omitted line and "nothing to declare" are
+    indistinguishable to a later reader.
+    """
+    m = re.search(
+        r"\n\*\*APPROVE\*\*(?P<body>.*?)(?=\n\*\*NEEDS_CHANGES)", _reviewer(), re.S
+    )
+    assert m, "APPROVE response-format block not found -- did the heading change?"
+    body = _norm(m.group("body"))
+    assert "Core modification:" in body, (
+        "The APPROVE verification summary has no 'Core modification' line, so a "
+        "reviewer can emit a complete-looking APPROVE without recording that "
+        "Criterion 3b was applied."
+    )
+    assert "files_modified empty" in body, (
+        "The APPROVE template no longer shows what to write when the port modified "
+        "nothing. Without an explicit 'none' form the line gets omitted, and an "
+        "omitted line is indistinguishable from an unapplied criterion."
+    )
+
+
+def test_output_schema_description_carries_the_declaration():
+    """The schema comment must not tell the writer to compress the declaration away.
+
+    Criterion 3b reads `description` for the files, the reason and the rebase risk. The
+    Phase 4.5 schema documented that field as a "one-line summary of what was built",
+    which contradicts the four items the core-modification section requires -- and the
+    realistic failure is the writer honouring the schema and truncating the declaration
+    into the undeclared case 3b rejects.
+    """
+    m = re.search(r'"description": "(?P<v>[^"]*)"', _writer())
+    assert m, "agent-writer.md output schema has no `description` field"
+    value = _norm(m.group("v"))
+    assert "one-line summary of what was built" != value, (
+        "The `description` schema comment is back to a bare 'one-line summary of what "
+        "was built', which contradicts the core-modification section's requirement that "
+        "this same field carry the files, the reason and the upstream-rebase risk."
+    )
+    missing = [t for t in ("files_modified", "upstream") if t not in value]
+    assert not missing, (
+        f"The `description` schema comment dropped {missing}. It must tell the writer "
+        "that this field carries the core-modification declaration when files_modified "
+        "is non-empty, since that is what Criterion 3b reads."
+    )
+
+
+def test_review_request_hands_over_the_modified_files():
+    """The reviewer reads only what the request lists, so the request must list them.
+
+    Found by sweeping for contract blocks of the same class as the APPROVE template and
+    the output schema, rather than waiting for a review pass to name it. The request
+    enumerated `Plugin files: <files_created>` and `Test files:`, and files_modified is
+    derived separately from files_created -- so a modified component file appeared in no
+    line of the handover. Criterion 3b item 3 asks the reviewer to judge whether the
+    change is no larger than the decision requires, which it cannot do from a filename.
+    """
+    writer, reviewer = _norm(_writer()), _norm(_reviewer())
+    assert "Modified component files:" in writer, (
+        "The REVIEW REQUEST format has no 'Modified component files' line. The reviewer "
+        "reads only the paths the request lists, so Criterion 3b could see a filename "
+        "in files_modified but never the diff it is meant to judge."
+    )
+    assert "Modified component files" in reviewer, (
+        "agent-reviewer.md's Behavior steps no longer tell the reviewer to read the "
+        "modified component files from the request, so the handover has a sender and "
+        "no receiver."
+    )
+
+
 def test_reviewer_checks_the_declaration_not_the_modification():
     """A core modification is not a defect; an undeclared one is."""
     reviewer = _reviewer()

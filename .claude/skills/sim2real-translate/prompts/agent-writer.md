@@ -262,7 +262,7 @@ with all 9 required fields. If the file list changes in a later round, update it
   "test_commands": ["<shell commands to run tests>"],
   "config_kind": "{CONFIG_KIND}",
   "treatment_config_generated": true,
-  "description": "<one-line summary of what was built>"
+  "description": "<summary of what was built. If files_modified is non-empty, this field carries the core-modification declaration too — which component files changed, why no extension point sufficed, and what upstream change would invalidate it. Not one line in that case; see 'Modifying component code'. Criterion 3b reads this field, and a truncated declaration fails it.>"
 }
 ```
 
@@ -337,10 +337,17 @@ After each green build, send a review request to the reviewer agent:
 REVIEW REQUEST — Round <N>
 Plugin files: <absolute paths of all files_created (excluding test files), one per line>
 Test files: <absolute paths of all _test.go files created or modified, one per line>
+Modified component files: <absolute paths of every files_modified entry, one per line, or "none">
 Treatment config: {OUTPUT_DIR}/{ALGO_NAME}_config.yaml
 Build: PASSED
 Changed since last round: <brief description, or "initial" for round 1>
 ```
+
+The `Modified component files` line is required, and `none` is a real answer — the reviewer
+reads only what this request lists, so a modified file you omit is one Criterion 3b cannot
+judge for size or shape even though it can see the name in `files_modified`. Say `none`
+when you changed no existing component file, so the reviewer can tell an unmodified port
+from an incomplete request.
 
 Wait for the reviewer's reply.
 

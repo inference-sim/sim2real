@@ -1,4 +1,4 @@
-"""Guard Phase 2's placement-confidence rules against drift (issue #859).
+"""Guard Phase 2's placement rules against drift (issues #859 and #862).
 
 Phase 2 decides where the algorithm plugs into the component, and
 `/sim2real-bootstrap` copies that conclusion into `transfer.yaml:context.text`,
@@ -11,9 +11,16 @@ whether an extension point could *express* the shape, a placement naming two
 interfaces that share a method name was asserted flatly, and the writer designed
 a port around it before the collision surfaced as a build error.
 
-Nothing downstream can catch that, so these are the guards: the four rules the
-fix added to Phase 2 must not be silently dropped by a later edit. Bounded to the
-Phase 2 section, mirroring `sim2real-bootstrap/tests/test_context_text_guidance.py`.
+Nothing downstream can catch that, so these are the guards. Bounded to the Phase 2
+section, mirroring `sim2real-bootstrap/tests/test_context_text_guidance.py`.
+
+Two issues' rules live here now:
+
+- #859 -- expressible is not constructible; the placement is a candidate / declared
+  unknown until its method sets are checked; the registration count is stated.
+- #862 -- the HALT is scoped to silent fallback rather than firing on every
+  unexpressible shape; a DECLARED CORE MODIFICATION is a legitimate third outcome; its
+  upstream-rebase cost is stated.
 """
 
 import re

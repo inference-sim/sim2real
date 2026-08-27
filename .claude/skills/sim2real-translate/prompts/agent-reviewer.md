@@ -72,6 +72,10 @@ Example queries:
 You stay idle after initialization. When the writer sends you a review request:
 
 1. Read ALL plugin files listed in the writer's message (paths provided in the request) — fresh
+1b. Read every path under `Modified component files` in the request, if any — these are the
+   pre-existing component files the port changed, and Criterion 3b judges their size and
+   shape, not just their names. If that line is missing entirely (as opposed to `none`),
+   ask the writer for it rather than assuming there were none.
 2. Read `{OUTPUT_DIR}/{ALGO_NAME}_config.yaml` fresh
 3. Read `{OUTPUT_DIR}/{ALGO_NAME}_output.json` for metadata cross-reference
 4. Read the registration file mentioned in `{ALGO_NAME}_output.json` — just the relevant section
@@ -223,7 +227,11 @@ Flag violations as `[treatment-config]` NEEDS_CHANGES.
 
 Reply in this exact format:
 
-**APPROVE** — You MUST include a complete verification summary:
+**APPROVE** — You MUST include a complete verification summary. Every line below is
+required, including `Core modification` — write `none (files_modified empty)` when the
+port changed no existing component files. Omitting the line is not the same as reporting
+nothing to declare: a summary that simply lacks it reads as a complete APPROVE in which
+Criterion 3b was never applied.
 ```
 VERDICT: APPROVE
 
@@ -231,6 +239,7 @@ Verification summary (required — one line per criterion):
 - Fidelity: [confirm formula/logic matches, signals correctly consumed]
 - Code quality: [confirm interfaces correct, tests present, patterns followed]
 - Registration: TypeConst=<exact value>, Factory=<name>, registration file=<path>
+- Core modification: none (files_modified empty) | declared: files=<list>, reason given, upstream-rebase risk stated
 - Config: overlay format valid, plugin types registered, keys consistent
 - Assembly: overlay YAML valid, scenario name matches, treatment_config_generated=true in {ALGO_NAME}_output.json
 - Treatment config: [parameter-free / parameters match algo config]
