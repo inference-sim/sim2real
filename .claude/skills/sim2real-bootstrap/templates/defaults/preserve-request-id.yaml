@@ -1,8 +1,11 @@
+# DISABLED BY DEFAULT. Enable by removing `preserve-request-id` from
+# transfer.yaml's `defaults.disable`.
+#
 # Installs an Istio EnvoyFilter that makes the Gateway keep the caller's
 # request id instead of replacing it, so a request can be traced to the pod and
 # node that served it.
 #
-# Ships disabled. It selects a Kubernetes Gateway by label, and this bundle's
+# WHY OFF BY DEFAULT: it selects a Kubernetes Gateway by label, and this bundle's
 # topology -- epponly with an externally-managed Gateway -- deploys no Gateway at
 # all, so the filter matches nothing. It also needs Istio CRDs present.
 #

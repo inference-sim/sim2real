@@ -1,3 +1,6 @@
+# DISABLED BY DEFAULT. Enable by removing `pod-capabilities` from transfer.yaml's
+# `defaults.disable`.
+#
 # Gives the vLLM containers the capabilities NIXL needs to register memory for
 # RDMA transfer, and runs them as root.
 #
@@ -11,8 +14,8 @@
 #
 #   oc adm policy add-scc-to-user privileged -z <serviceaccount> -n <namespace>
 #
-# Until that is done, enabling this produces unschedulable pods. To turn it off,
-# add `pod-capabilities` to transfer.yaml's `defaults.disable`.
+# WHY OFF BY DEFAULT: until that is done, enabling this produces unschedulable
+# pods.
 #
 # The keys land on the container, not the pod, and are repeated for decode and
 # prefill because they are per-role. Careful: `capabilities.add` is a scalar list,

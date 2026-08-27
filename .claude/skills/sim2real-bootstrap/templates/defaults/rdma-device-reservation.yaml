@@ -1,3 +1,6 @@
+# DISABLED BY DEFAULT. Enable by removing `rdma-device-reservation` from
+# transfer.yaml's `defaults.disable`.
+#
 # Puts the model-server pods on the cluster's RDMA fabric, so KV-cache transfer
 # between prefill and decode moves over RoCE instead of the pod network.
 #
@@ -18,11 +21,9 @@
 # present but unused and transfers run over TCP. Take the whole fragment or none
 # of it.
 #
-# The network name and the resource name below describe one specific cluster.
-# Both have to change for another one.
-#
-# To turn this off, add `rdma-device-reservation` to transfer.yaml's
-# `defaults.disable`. Expect KV transfer over TCP when it is off.
+# WHY OFF BY DEFAULT: the network name and the resource name below describe one
+# specific cluster. Both have to change for another one. With it off, expect KV
+# transfer over TCP.
 #
 # scenario[0].name is realigned to the experiment baseline at merge time.
 

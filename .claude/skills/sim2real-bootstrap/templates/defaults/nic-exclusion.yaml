@@ -1,11 +1,13 @@
+# DISABLED BY DEFAULT.
+#
 # Hides specific InfiniBand/RoCE HCAs from NCCL, so it does not try to use cards
 # that are present but not usable for this traffic.
 #
-# Ships disabled, and has to. The list below is one cluster's device names. On any
-# other cluster it excludes the wrong cards, and NCCL then skips working HCAs and
-# falls back to a slower transport without saying so -- worse than excluding
-# nothing. Replace the list with your own `ibv_devinfo` output before enabling it
-# by removing `nic-exclusion` from transfer.yaml's `defaults.disable`.
+# WHY OFF BY DEFAULT: the list below is one cluster's device names. On any other
+# cluster it excludes the wrong cards, and NCCL then skips working HCAs and falls
+# back to a slower transport without saying so -- worse than excluding nothing.
+# Replace the list with your own `ibv_devinfo` output before enabling it by
+# removing `nic-exclusion` from transfer.yaml's `defaults.disable`.
 #
 # The list is repeated for decode and prefill because this key is per-role. Keep
 # the two copies identical.
