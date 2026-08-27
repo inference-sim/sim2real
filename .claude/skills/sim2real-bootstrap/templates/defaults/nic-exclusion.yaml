@@ -9,10 +9,9 @@
 # to a slower transport, silently. THE LIST BELOW IS AN EXAMPLE, NOT A DEFAULT:
 # replace it with your own `ibv_devinfo` output before enabling.
 #
-# `mlxl5_7` IS CARRIED VERBATIM AND IS ALMOST CERTAINLY A TYPO for mlx5_7, which
-# would mean that device is NOT actually excluded. Kept as-is because it is what
-# ran in the configuration this was lifted from; fix it deliberately, together with
-# replacing the rest of the list, rather than by assuming the correction is safe.
+# `mlxl5_7` was not a valid HCA name, so that slot excluded nothing -- eight
+# exclusions from a list of nine. Corrected to `mlx5_7` (#867). Upstream's guides
+# still carry the typo, so a template resync will reintroduce it.
 #
 # Duplicated across decode and prefill because `extraEnvVars` is a per-role key
 # with no vllmCommon equivalent. Keep the two copies in sync.
@@ -35,12 +34,12 @@ scenario:
   decode:
     extraEnvVars:
       - name: NCCL_EXCLUDE_IB_HCA
-        value: "mlx5_0,mlx5_2,mlx5_4,mlx5_8,mlxl5_7,mlx5_10,mlx5_12,mlx5_14,mlx5_16"
+        value: "mlx5_0,mlx5_2,mlx5_4,mlx5_8,mlx5_7,mlx5_10,mlx5_12,mlx5_14,mlx5_16"
       - name: UCX_MAX_RMA_RAILS
         value: "1"
   prefill:
     extraEnvVars:
       - name: NCCL_EXCLUDE_IB_HCA
-        value: "mlx5_0,mlx5_2,mlx5_4,mlx5_8,mlxl5_7,mlx5_10,mlx5_12,mlx5_14,mlx5_16"
+        value: "mlx5_0,mlx5_2,mlx5_4,mlx5_8,mlx5_7,mlx5_10,mlx5_12,mlx5_14,mlx5_16"
       - name: UCX_MAX_RMA_RAILS
         value: "1"
