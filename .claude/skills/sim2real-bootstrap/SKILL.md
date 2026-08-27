@@ -106,7 +106,11 @@ python "$SKILL_DIR/scaffold_precommit.py" --experiment-root "$EXPERIMENT_ROOT"
 ```
 
 This writes `.pre-commit-config.yaml` and `.secrets.baseline` (empty results —
-nothing pre-whitelisted) into the experiment root. It only installs the files;
+nothing pre-whitelisted) into the experiment root. The hook line-excludes
+content-hash fields by name (`translation_hash`, `*_sha256`, `hash`, a bare-sha
+`ref:`, ...) so the bundle's own SHA-256 output does not block every commit
+(issue #865), while still scanning those same files for everything else. It
+only installs the files;
 tell the operator to activate the hook (see **After Bootstrap**). The `--byo`
 flow runs this same step automatically.
 
@@ -1025,6 +1029,8 @@ Activate the committed secret scan (blocking, whole-repo detect-secrets):
 Every collaborator who clones must run `pre-commit install` once — git hooks
 are not cloneable. For a known-clean commit the scanner false-positives on,
 audit the finding into .secrets.baseline (preferred) or `git commit --no-verify`.
+The bundle's own content hashes are already excluded, so a finding is worth a
+real look before reaching for --no-verify.
 
 Retrofitting a repo that ALREADY committed secrets: rotate/scrub the live
 tokens FIRST, then regenerate the baseline over the cleaned tree

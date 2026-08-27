@@ -10,10 +10,20 @@ Covers the acceptance criteria:
     NOT trip the scan
   - the shipped baseline doesn't pre-whitelist anything (empty results)
   - create-if-missing: re-running never clobbers operator edits / baseline
+
+And for issue #865 (the bundle's own content hashes must not block commits):
+  - the scaffolded hook PASSES on a file of translation_hash / *_sha256 /
+    package_manifest_short / "hash" fields and a transfer.yaml-style `ref:` sha
+  - it still BLOCKS hf_token / aws_secret_access_key / password /
+    refresh_token / hashicorp_vault_token sitting in that same file — the
+    exclusion must not become a blanket bypass
+  - --exclude-lines is load-bearing (the hook ignores the baseline's own
+    exclude.lines) and the two copies of the regex agree
 """
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -180,14 +190,32 @@ def _git(repo: Path, *args: str) -> None:
                    capture_output=True, text=True)
 
 
-def _hook_blocks(tmp_path: Path, content: str, base64_limit: float | None = None) -> bool:
-    """Scaffold the config into a git repo, stage a file, run the real hook.
+def _shipped_hook_args(exp_root: Path) -> list[str]:
+    """The args the scaffolded .pre-commit-config.yaml passes to the hook.
 
-    Returns True if the hook blocks the commit (non-zero exit) — i.e. it found
-    a secret — mirroring exactly how pre-commit invokes detect-secrets. If
-    `base64_limit` is given, the scaffolded baseline's limit is overridden
-    first (used to prove the shipped 4.25 tuning is load-bearing vs 4.5).
+    Read from the config instead of hardcoded so every behavioral test below
+    exercises the shipped invocation. A hardcoded list would silently omit
+    --exclude-lines (#865) and test an invocation no operator ever runs.
     """
+    cfg = yaml.safe_load((exp_root / ".pre-commit-config.yaml").read_text())
+    ds = next(r for r in cfg["repos"]
+              if r["repo"] == "https://github.com/ibm/detect-secrets")
+    return list(ds["hooks"][0]["args"])
+
+
+def _run_hook(tmp_path: Path, files: dict[str, str], *,
+              base64_limit: float | None = None,
+              drop_args: tuple[str, ...] = ()) -> subprocess.CompletedProcess:
+    """Scaffold into a throwaway git repo, stage `files`, run the real hook.
+
+    `files` maps repo-relative path -> content. The hook runs with the args the
+    scaffolded config ships, mirroring exactly how pre-commit invokes it.
+    `base64_limit` overrides the scaffolded baseline's limit (to prove the
+    shipped 4.25 tuning is load-bearing vs the 4.5 default); `drop_args`
+    removes a shipped flag and its value (to prove --exclude-lines is
+    load-bearing rather than redundant with the baseline's own exclude.lines).
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)  # callers may pass a subdir
     scaffold_precommit.scaffold_precommit(_SKILL_DIR, tmp_path)
     if base64_limit is not None:
         bl_path = tmp_path / ".secrets.baseline"
@@ -196,19 +224,47 @@ def _hook_blocks(tmp_path: Path, content: str, base64_limit: float | None = None
             if p["name"] == "Base64HighEntropyString":
                 p["base64_limit"] = base64_limit
         bl_path.write_text(json.dumps(bl))
+    args = _shipped_hook_args(tmp_path)
+    for flag in drop_args:
+        i = args.index(flag)
+        del args[i:i + 2]  # the flag and its value
     _git(tmp_path, "init", "-q")
     _git(tmp_path, "config", "user.email", "t@t")
     _git(tmp_path, "config", "user.name", "t")
-    target = tmp_path / "plans" / "config.yaml"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content)
+    for rel, content in files.items():
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
     _git(tmp_path, "add", "-A")
-    proc = subprocess.run(
-        [_HOOK, "--baseline", ".secrets.baseline", "--use-all-plugins",
-         "plans/config.yaml"],
+    return subprocess.run(
+        [_HOOK, *args, *files],
         cwd=str(tmp_path), capture_output=True, text=True, timeout=60,
     )
-    return proc.returncode != 0
+
+
+def _hook_blocks(tmp_path: Path, content: str, base64_limit: float | None = None) -> bool:
+    """Single-file convenience wrapper over _run_hook().
+
+    Returns True if the hook blocks the commit (non-zero exit) — i.e. it found
+    a secret.
+    """
+    return _run_hook(tmp_path, {"plans/config.yaml": content},
+                     base64_limit=base64_limit).returncode != 0
+
+
+def _hook_report(proc: subprocess.CompletedProcess) -> str:
+    """The hook's findings report. detect-secrets-hook writes it to stderr;
+    both streams are joined so a future version moving it doesn't blind us."""
+    return f"{proc.stderr}\n{proc.stdout}"
+
+
+def _flagged_lines(proc: subprocess.CompletedProcess, relpath: str) -> set[int]:
+    """Line numbers the hook reported for `relpath`, parsed from its report."""
+    return {
+        int(m.group(1)) for m in re.finditer(
+            rf"^Location:\s+{re.escape(relpath)}:(\d+)$",
+            _hook_report(proc), re.MULTILINE)
+    }
 
 
 @pytest.mark.skipif(_HOOK is None, reason="detect-secrets-hook not installed")
@@ -246,3 +302,129 @@ def test_hook_allows_token_tuning_fields(tmp_path: Path):
         "  - --prompt-tokens=512\n"
         "  - --max-num-batched-tokens=2048\n",
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #865: the bundle's own content hashes must not block every commit.
+# SHA-256 hex has Shannon entropy ~3.9, above HexHighEntropyString's hex_limit
+# of 3, so before the field-name line exclusion every hash the pipeline wrote
+# tripped the detector — and neither printed mitigation applies (JSON has no
+# comments for `pragma: allowlist secret`, and the baseline keys on values that
+# change every translation). The exclusion must drop those lines WITHOUT
+# becoming a blanket bypass, which is what the pairing below pins down.
+# ---------------------------------------------------------------------------
+
+# Synthetic 64-hex values standing in for real content hashes — high entropy,
+# so they DO trip HexHighEntropyString when the exclusion is absent, which is
+# what makes test_exclude_lines_is_load_bearing meaningful.
+_HASH_FIELDS = {
+    "translation_hash": "9f2b7c1de4a58306bf1029384756abcdef0123456789abcdef0123456789abcd",
+    "source_sha256": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+    "package_manifest_sha256": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+    "runner_go_sha256": "beefcafe0123456789abcdef0123456789abcdef0123456789abcdef01234567",
+    # 7-char short form; below the detector's length floor even unexcluded, so
+    # it is here to pin the field name, not the entropy.
+    "package_manifest_short": "beefcaf",
+    # sim_results/ sample manifests use the bare key.
+    "hash": "cafebabe0123456789abcdef0123456789abcdef0123456789abcdef0123beef",
+}
+
+# Real secret shapes that must STILL be caught in the same file. The last two
+# are the "ending in" anchor's job: `refresh_token` and `hashicorp_vault_token`
+# merely CONTAIN ref/hash, so loosening that anchor would silently let a
+# credential through and these two would fail.
+_SECRET_FIELDS = {
+    "hf_token": PLAINTEXT_SECRET,
+    "aws_secret_access_key": BASE64_SECRET,
+    "password": "correct-horse-battery-staple-nine",
+    "refresh_token": "d34db33f0123456789abcdef0123456789abcdef0123456789abcdef01234567",
+    "hashicorp_vault_token": "f00dbabe0123456789abcdef0123456789abcdef0123456789abcdef01234567",
+}
+
+# transfer.yaml pins the component submodule to a bare git sha under `ref:`.
+# `ref_branch` is a non-sha value under a ref-ish key: it stays in scope (the
+# exclusion only fires on a bare 7-64 hex value), and is here so a future
+# loosening to any `ref:` value shows up as a diff on this fixture.
+_TRANSFER_YAML = (
+    "component:\n"
+    "  repo: https://github.com/llm-d/llm-d-router\n"
+    "  ref: 0123456789abcdef0123456789abcdef01234567\n"
+    "  ref_branch: refs/heads/main\n"
+)
+
+
+def _canary(include_secrets: bool) -> tuple[str, set[int], set[int]]:
+    """A translation_output.json-shaped canary.
+
+    Returns (text, hash_field_lines, secret_field_lines) so assertions key on
+    derived line numbers instead of hand-counted ones.
+    """
+    lines: list[str] = ["{"]
+    hash_lines: set[int] = set()
+    secret_lines: set[int] = set()
+    buckets = [(_HASH_FIELDS, hash_lines)]
+    if include_secrets:
+        buckets.append((_SECRET_FIELDS, secret_lines))
+    for fields, sink in buckets:
+        for key, value in fields.items():
+            lines.append(f'  "{key}": "{value}",')
+            sink.add(len(lines))  # 1-indexed: len() after append is the lineno
+    lines[-1] = lines[-1].rstrip(",")
+    lines.append("}")
+    return "\n".join(lines) + "\n", hash_lines, secret_lines
+
+
+@pytest.mark.skipif(_HOOK is None, reason="detect-secrets-hook not installed")
+def test_hook_allows_bundle_content_hashes(tmp_path: Path):
+    """The scaffolded hook passes on a bundle's own content hashes — the #865
+    symptom (every first real commit blocked) closed."""
+    content, _, _ = _canary(include_secrets=False)
+    proc = _run_hook(tmp_path, {
+        "workspace/translations/abc123/translation_output.json": content,
+        "transfer.yaml": _TRANSFER_YAML,
+    })
+    assert proc.returncode == 0, _hook_report(proc)
+
+
+@pytest.mark.skipif(_HOOK is None, reason="detect-secrets-hook not installed")
+def test_hook_blocks_real_secrets_beside_content_hashes(tmp_path: Path):
+    """The exclusion is not a blanket bypass: in a file whose hash lines are
+    skipped, every real secret shape is still caught — and only those."""
+    rel = "workspace/translations/abc123/translation_output.json"
+    content, hash_lines, secret_lines = _canary(include_secrets=True)
+    proc = _run_hook(tmp_path, {rel: content})
+    assert proc.returncode != 0
+    flagged = _flagged_lines(proc, rel)
+    assert flagged == secret_lines, (
+        f"flagged={sorted(flagged)} expected={sorted(secret_lines)} "
+        f"(hash lines {sorted(hash_lines)} must stay skipped)\n{_hook_report(proc)}"
+    )
+
+
+@pytest.mark.skipif(_HOOK is None, reason="detect-secrets-hook not installed")
+def test_exclude_lines_is_load_bearing(tmp_path: Path):
+    """Dropping --exclude-lines restores every false positive.
+
+    The hook does NOT honor the baseline's own `exclude.lines`, so the CLI arg
+    is what actually takes effect — this guards against a future "simplify"
+    that deletes the arg on the assumption the baseline covers it.
+    """
+    content, _, _ = _canary(include_secrets=False)
+    files = {"workspace/translations/abc123/translation_output.json": content}
+    assert _run_hook(tmp_path / "with", files).returncode == 0
+    assert _run_hook(tmp_path / "without", files,
+                     drop_args=("--exclude-lines",)).returncode != 0
+
+
+def test_exclude_lines_agrees_between_config_and_baseline(tmp_path: Path):
+    """Config arg and baseline `exclude.lines` must be byte-identical.
+
+    They drift silently otherwise: a later `detect-secrets scan --baseline
+    .secrets.baseline` regeneration would re-find exactly what the hook skips.
+    Unguarded so CI without detect-secrets still catches a removal.
+    """
+    scaffold_precommit.scaffold_precommit(_SKILL_DIR, tmp_path)
+    args = _shipped_hook_args(tmp_path)
+    assert "--exclude-lines" in args
+    baseline = json.loads((tmp_path / ".secrets.baseline").read_text())
+    assert baseline["exclude"]["lines"] == args[args.index("--exclude-lines") + 1]
