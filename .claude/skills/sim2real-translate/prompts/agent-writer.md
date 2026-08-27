@@ -112,13 +112,20 @@ Two things are required of you when you do:
 `files_modified` is generated for you; the reason is not. A modification that shows up
 only as a file list is indistinguishable from an accident.
 
-Most ports that modify component code still register a plugin, and then nothing about the
-output changes. If yours registers **none** — the algorithm lives entirely in modified
-component code — set `plugin_type` and `register_file` to empty strings rather than
-inventing values: the output check requires those keys to be present, not non-empty, and
-no pipeline stage reads `plugin_type`. Say in `description` that the port registers no
-plugin, so the reviewer applies its core-modification check instead of the registration
-chain.
+**You must still register a plugin.** A core modification supplements the plugin; it does
+not replace it. Every requirement elsewhere in this prompt still holds — define the `Type`
+constant and `Factory`, register them, and reference the type from
+`pluginsCustomConfig` — and `files_modified` records the component changes alongside them.
+
+The reason is structural, not bureaucratic: the treatment overlay turns your algorithm on
+by naming its plugin type, so a port with no registered plugin has no way to be switched
+on for the treatment scenario. It would differ from baseline only by what is compiled into
+the image, which the overlay cannot express. **The core edit provides the hook; the plugin
+provides the switch.**
+
+So if the decision seems to need no plugin at all, that is a signal to stop and ask the
+Expert, not to skip registration — the usual shape is a small exported hook added to
+component code, called by a plugin that carries the algorithm.
 
 If `{CONTEXT_TEXT}` already declares a core modification (`/sim2real-specify` records
 these in the specification layer's header), follow it — that declaration is the plan, and

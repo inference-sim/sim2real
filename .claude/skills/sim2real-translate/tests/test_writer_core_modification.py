@@ -11,15 +11,20 @@ plugin -- it will not weigh changing core code, because that is not the delivera
 was handed. So the constraint was the job description, and these guards protect the
 widened one.
 
-This file guards translate's whole core-modification contract, which has two ends that
-only work together:
+This file guards translate's whole core-modification contract, which has two ends:
 
-- the WRITER may act, and must say why;
-- the REVIEWER must not mandatorily reject it. Criterion 3 requires a five-item plugin
-  registration chain and says to raise NEEDS_CHANGES if any item is missing. A port that
-  modifies core code without registering a plugin fails that unconditionally, so
-  permitting the writer without scoping the reviewer would deadlock the review loop --
-  the writer has a finite retry budget and the rejection would be mandatory.
+- the WRITER may modify component code, and must say which files, why no extension point
+  sufficed, and what upstream change would invalidate it;
+- the REVIEWER must judge whether the modification was DECLARED rather than treating its
+  presence as a defect -- and must not stop at Criterion 3 when the registration chain
+  passes, since that says nothing about the files the port also touched.
+
+A core modification SUPPLEMENTS the plugin; it does not replace it. An earlier draft let a
+port register no plugin at all, which deadlocked review -- Criteria 4, 5, 6 and the
+APPROVE template all still require a registered plugin -- and was scope #862 never asked
+for. It is also the only shape the treatment overlay can express: the overlay enables the
+algorithm by naming its plugin type, so an unregistered port cannot be switched on for the
+treatment scenario. The core edit provides the hook; the plugin provides the switch.
 
 The upstream half lives in sim2real-specify/tests/test_placement_guidance.py, which
 guards Phase 2's DECLARED CORE MODIFICATION outcome.
@@ -40,8 +45,13 @@ def _norm(text: str) -> str:
     break -- `declared core\\n modification` is not the substring `declared core
     modification`. A guard that fails on reflow says nothing about whether the rule
     survived, so only the words are compared, never the wrapping.
+
+    Markdown emphasis is stripped for the same reason: `modifies *different*
+    files` should satisfy a guard on `modifies different files`, since the
+    asterisks are formatting, not content. Only `*` is removed -- `_` has to
+    survive for identifiers like `files_modified`.
     """
-    return " ".join(text.split())
+    return " ".join(text.replace("*", "").split())
 
 
 def _writer() -> str:
@@ -107,6 +117,30 @@ def test_writer_must_state_why_and_what_breaks():
     )
 
 
+def test_writer_must_still_register_a_plugin():
+    """A core modification supplements the plugin; it never replaces it.
+
+    An earlier draft told the writer it could register none and set plugin_type /
+    register_file to empty strings. That contradicted Phase 3 and Phase 4 of this same
+    prompt (which unconditionally require a Type constant, a Factory, registration, and
+    a pluginsCustomConfig reference) and it could not pass review, since Criteria 4, 5,
+    6 and the APPROVE template all require a registered plugin.
+    """
+    section = _core_mod_section()
+    assert "must still register a plugin" in section, (
+        "The core-modification section no longer requires the port to register a "
+        "plugin. #862 (option B): the core edit provides the hook, the plugin provides "
+        "the switch -- the treatment overlay enables the algorithm by naming its plugin "
+        "type, so an unregistered port cannot be switched on at all."
+    )
+    assert "empty string" not in section, (
+        "The core-modification section is back to telling the writer it may set "
+        "plugin_type / register_file to empty strings. That reintroduces the "
+        "plugin-less port, which Phase 3, Phase 4, Criteria 4/5/6 and the APPROVE "
+        "template all still forbid."
+    )
+
+
 def test_writer_defers_to_a_declaration_already_in_context():
     """When specify already planned it, the writer implements rather than re-derives."""
     section = _core_mod_section()
@@ -118,85 +152,62 @@ def test_writer_defers_to_a_declaration_already_in_context():
     )
 
 
-def test_reviewer_registration_criterion_is_scoped():
-    """Criterion 3 must not mandatorily reject a port that registers no plugin.
+def test_reviewer_registration_applies_to_every_port():
+    """Criterion 3 is unconditional: a core modification supplements the plugin.
 
-    Without this scoping the two prompts deadlock: the writer is permitted to modify
-    core code, and the reviewer is required to raise NEEDS_CHANGES when the five-item
-    registration chain is incomplete -- which it always is for a pure core modification.
+    An earlier draft of #862 scoped Criterion 3 so a plugin-less port was deferred to
+    3b. That created a deadlock elsewhere -- Criteria 4, 5, 6 and the APPROVE template
+    all still require a registered plugin, so such a port could never earn a conforming
+    APPROVE -- and it was scope this issue never asked for. The rule is now that a core
+    modification supplements the plugin rather than replacing it, which is also the only
+    shape the treatment overlay can express: it enables the algorithm by naming its
+    plugin type, so an unregistered port cannot be switched on at all.
     """
-    reviewer = _reviewer()
     m = re.search(
         r"\n### Criterion 3: Registration[^\n]*\n(?P<body>.*?)(?=\nVerify the complete)",
-        reviewer,
+        _reviewer(),
         re.S,
     )
-    assert m, (
-        "Criterion 3 has no scope preamble. #862: a port that registers no plugin "
-        "fails its five-item chain unconditionally, so the criterion must say it "
-        "governs the registered plugin and point at the core-modification check."
+    assert m, "Criterion 3 has no preamble -- did the heading or the chain intro change?"
+    body = _norm(m.group("body"))
+    assert "every port" in body, (
+        "Criterion 3's preamble no longer says it applies to every port. #862 (option "
+        "B): a core modification supplements the plugin, so the registration chain "
+        "always applies."
     )
-    assert "inapplicable" in _norm(m.group("body")), (
-        "Criterion 3's preamble no longer says the registration chain is inapplicable "
-        "when the port registers no plugin, so a declared core modification would be "
-        "rejected on a criterion it cannot satisfy."
+    assert "inapplicable" not in body, (
+        "Criterion 3's preamble is back to declaring itself inapplicable for a "
+        "plugin-less port. That reopens the deadlock: Criteria 4/5/6 and the APPROVE "
+        "template still require a registered plugin, so such a port cannot pass review."
     )
 
 
-def test_reviewer_has_no_gap_between_criterion_3_and_3b():
-    """No port may escape both registration criteria.
+def test_reviewer_3b_supplements_rather_than_replaces_criterion_3():
+    """A passing registration chain must not excuse the declaration checks.
 
-    Criterion 3 hands the plugin-less case to 3b, and 3b's substantive checks key off
-    a non-empty files_modified. Their intersection -- no plugin AND no modification --
-    would satisfy neither criterion's applicability condition, so a port delivering
-    nothing would draw no NEEDS_CHANGES from either. Before #862 scoped Criterion 3,
-    that case failed the registration chain unconditionally, so the gap is a
-    regression this guard exists to prevent reopening.
-
-    Note the criteria are independent, NOT alternatives: a port that registers a
-    plugin AND modifies component files owes both. An earlier draft of this docstring
-    and of the prompt said every port lands in "exactly one of the three", which is
-    wrong and dangerous in the common both-at-once case -- an agent could classify
-    such a port under Criterion 3, stop, and never apply 3b's declaration checks.
-    That is the undeclared-modification hazard 3b exists to catch, so the guard below
-    also pins the applicability table.
+    The hazard is an agent that sees Criterion 3 pass and stops, never checking whether
+    the component files the port ALSO touched were declared -- which is precisely what
+    3b exists to catch. An earlier draft said every port lands in "exactly one of the
+    three", which licensed exactly that mistake.
     """
     m = re.search(
         r"\n### Criterion 3b:[^\n]*\n(?P<body>.*?)(?=\n### )", _reviewer(), re.S
     )
     assert m, "Criterion 3b section body not found -- did the heading change?"
     body = _norm(m.group("body"))
-    assert "no deliverable" in body, (
-        "Criterion 3b lost its no-deliverable catch-all. A port with no registered "
-        "plugin and an empty files_modified now falls through both registration "
-        "criteria, which is the hole #862 opened by scoping Criterion 3."
+    assert "never a substitute" in body, (
+        "Criterion 3b no longer states it is additional to Criterion 3 rather than a "
+        "substitute for it, so a port owing both may be checked for only one."
     )
-    # Guard the second operand too, so a rewording raises this message rather than a
-    # bare ValueError from .index().
-    gate_marker = "The rest of this criterion"
-    assert gate_marker in body, (
-        f"Criterion 3b no longer contains {gate_marker!r}, so the ordering check "
-        "below cannot locate the files_modified gate. Reword the assertion along "
-        "with the prompt."
+    assert "never stop at Criterion 3" in body, (
+        "Criterion 3b lost the explicit instruction not to stop at Criterion 3 once "
+        "the registration chain passes. That is the both-at-once case, and it is the "
+        "common one."
     )
-    # The catch-all must come before the files_modified-gated checks, or a
-    # plugin-less, modification-less port never reaches it.
-    assert body.index("no deliverable") < body.index(gate_marker), (
-        "The no-deliverable check must be the FIRST thing in Criterion 3b. Placed "
-        "after the files_modified gate it is unreachable for exactly the case it "
-        "is meant to catch."
-    )
-    # The criteria are independent, not alternatives. "exactly one of the three"
-    # invites an agent to stop at Criterion 3 for a port that also modified files.
     assert "exactly one of the three" not in body, (
         "Criterion 3b claims every port lands in 'exactly one of the three'. That is "
-        "false for the common case of a plugin PLUS a core modification, where both "
-        "criteria apply -- and it licenses skipping 3b's declaration checks whenever "
-        "the registration chain passes."
-    )
-    assert "not alternatives" in body, (
-        "Criterion 3b no longer states that Criteria 3 and 3b are independent rather "
-        "than alternatives, so a port owing both may be checked for only one."
+        "false when a port registers a plugin AND modifies component files, and it "
+        "licenses skipping the declaration checks whenever registration passes."
     )
 
 
@@ -213,11 +224,24 @@ def test_reviewer_checks_the_declaration_not_the_modification():
     )
     assert m, "Criterion 3b section body not found -- did the heading change?"
     body = _norm(m.group("body"))
+    # "fidelity" alone is NOT sufficient here: the closing undeclared-modification
+    # clause also supplies that word, so deleting item 4 -- the check that the modified
+    # files match a prior {CONTEXT_TEXT} declaration -- would leave the guard green.
+    # Each phrase below is unique to the item it protects.
     missing = [
-        t for t in ("files_modified", "upstream", "not silent", "fidelity") if t not in body
+        t
+        for t in (
+            "files_modified",                      # the applicability condition
+            "upstream",                            # item 2, the rebase cost
+            "no larger than the decision requires",  # item 3, minimal surface
+            "different files than the declaration",  # item 4, matches the declaration
+            "not silent",                          # the framing
+        )
+        if t not in body
     ]
     assert not missing, (
         f"Criterion 3b dropped {missing}. It must key off files_modified, require the "
-        "upstream-rebase cost, insist the modification be declared rather than silent, "
-        "and raise a fidelity failure when it is not."
+        "upstream-rebase cost, hold the change to the decision's minimum, check the "
+        "modified files against any prior declaration, and insist the modification be "
+        "declared rather than silent."
     )

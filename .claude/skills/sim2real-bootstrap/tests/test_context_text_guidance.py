@@ -39,8 +39,13 @@ def _norm(text: str) -> str:
     modification` is not the substring `declared core modification` -- and a guard
     that fails on reflow tells you nothing about whether the rule survived. Only
     the words matter here, never the wrapping.
+
+    Markdown emphasis is stripped for the same reason: `modifies *different*
+    files` should satisfy a guard on `modifies different files`, since the
+    asterisks are formatting, not content. Only `*` is removed -- `_` has to
+    survive for identifiers like `files_modified`.
     """
-    return " ".join(text.split())
+    return " ".join(text.replace("*", "").split())
 
 
 def _task5() -> str:

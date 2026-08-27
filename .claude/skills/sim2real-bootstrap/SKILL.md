@@ -870,8 +870,10 @@ context:
           fails, so the writer knows where to search next.
       (b) a DECLARED CORE MODIFICATION, where no extension point can carry the
           decision -- which component files must change, why no extension point
-          sufficed, and what upstream change would invalidate it. Copy such a
-          declaration through intact.>
+          sufficed, and what upstream change would invalidate it, PLUS the plugin
+          that carries the algorithm (the core edit is the hook, the plugin is the
+          switch the treatment overlay names). Copy such a declaration through
+          intact.>
 
     <DECLARED DEGRADATION (Dn) -- any substitution, with the direction of bias.>
   files: <list of context files>

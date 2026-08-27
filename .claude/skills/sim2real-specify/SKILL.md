@@ -191,8 +191,15 @@ hold, the eliminations still do.
 
 Where no extension point fits at all, the outcome is a DECLARED CORE MODIFICATION as
 described above — not a halt. Say so in the placement, so the candidate the writer
-receives is "modify these files" rather than an extension point that cannot carry the
-decision.
+receives names the component files to change rather than an extension point that cannot
+carry the decision.
+
+Note the modification **supplements** a plugin rather than replacing it: name the plugin
+that will carry the algorithm alongside the files it needs changed. The treatment overlay
+enables an algorithm by naming its plugin type, so a port with no registered plugin cannot
+be switched on for the treatment scenario at all — it would differ from baseline only by
+what is compiled into the image, which the overlay cannot express. The core edit provides
+the hook; the plugin provides the switch.
 
 ## Phase 3 — Observability
 

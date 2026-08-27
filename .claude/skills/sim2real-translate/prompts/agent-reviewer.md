@@ -112,12 +112,12 @@ Flag any divergence from the source algorithm as `[fidelity]` NEEDS_CHANGES.
 
 ### Criterion 3: Registration (CRITICAL)
 
-**Scope:** this criterion governs the plugin the port registers. Where no extension point
-can carry the algorithm's decision, the port may instead modify the component's own code
-(issue #862) — see "Criterion 3b" below. If the port registers **no** plugin at all,
-the five-item chain here is inapplicable: check 3b instead of raising `[registration]`.
-Most ports that modify component code still register a plugin as well; in that case check
-both.
+**Applies to every port, without exception.** A port may additionally modify the
+component's own code where no extension point can carry the decision (issue #862) — see
+Criterion 3b — but that supplements the plugin rather than replacing it, so the chain below
+must still pass. A port that registers no plugin fails this criterion: the treatment
+overlay enables the algorithm by naming its plugin type, so an unregistered port cannot be
+switched on for the treatment scenario at all.
 
 Verify the complete registration chain — ALL of these must be true:
 
@@ -132,33 +132,17 @@ This is the most common failure mode — check it carefully.
 
 ### Criterion 3b: Declared core modification
 
-**First, the no-deliverable case.** If the port registers no plugin AND `files_modified`
-is empty, it produced neither a plugin nor a core modification — there is no deliverable
-at all. Raise `[registration]` NEEDS_CHANGES. Check this before anything else in 3b:
-Criterion 3 hands the plugin-less case to 3b, so without this clause a port that delivers
-nothing would satisfy the applicability condition of neither criterion.
+**This criterion is additional to Criterion 3, never a substitute for it.** Criterion 3
+applies to every port; this one applies as well whenever `{ALGO_NAME}_output.json`'s
+`files_modified` is non-empty — i.e. the port also changed files that already existed in
+the component. A passing registration chain says nothing about whether those files were
+declared, so **never stop at Criterion 3 because the registration passed.** That is the
+case to be careful about, and it is the common one.
 
-**The two criteria are not alternatives — they are independent, and a port can owe you
-both.** Apply each on its own condition:
-
-| Port | Criterion 3 | Criterion 3b |
-|---|---|---|
-| Registers a plugin, no modified files | apply | not applicable |
-| Registers a plugin AND modifies component files | **apply** | **apply** |
-| No plugin, modifies component files | inapplicable | apply |
-| No plugin, no modified files | inapplicable | no-deliverable failure |
-
-The second row is the common case and the one to be careful about: a port that registers
-a plugin is NOT thereby excused from 3b's declaration checks. Satisfying the registration
-chain says nothing about whether the component files it also touched were declared, and an
-undeclared modification is exactly what 3b exists to catch. Never stop at Criterion 3
-because the registration passed.
-
-The rest of this criterion applies when `files_modified` is non-empty — i.e. the port
-changed files that already existed in the component. Do NOT treat that as a defect in
-itself: a decision shape that no extension point can reach is a legitimate reason to
-modify component code, and forcing it into an extension point that scores a different
-decision is the failure this pipeline exists to prevent.
+Do NOT treat a modification as a defect in itself: a decision shape that no extension
+point can reach is a legitimate reason to modify component code, and forcing it into an
+extension point that scores a different decision is the failure this pipeline exists to
+prevent.
 
 Verify instead that the modification is **declared, not silent**:
 
