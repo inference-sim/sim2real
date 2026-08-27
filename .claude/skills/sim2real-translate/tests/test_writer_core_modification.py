@@ -33,6 +33,17 @@ _WRITER = _PROMPTS / "agent-writer.md"
 _REVIEWER = _PROMPTS / "agent-reviewer.md"
 
 
+def _norm(text: str) -> str:
+    """Collapse whitespace runs to single spaces.
+
+    These files are hard-wrapped prose, so a guarded phrase can land across a line
+    break -- `declared core\\n modification` is not the substring `declared core
+    modification`. A guard that fails on reflow says nothing about whether the rule
+    survived, so only the words are compared, never the wrapping.
+    """
+    return " ".join(text.split())
+
+
 def _writer() -> str:
     return _WRITER.read_text(encoding="utf-8")
 
@@ -53,13 +64,13 @@ def _core_mod_section() -> str:
         "to give the writer explicit licence; without it the writer falls back to "
         "treating a plugin as the only permitted deliverable."
     )
-    return m.group("body")
+    return _norm(m.group("body"))
 
 
 def test_writer_job_is_not_defined_as_plugin_only():
     """#862: the deliverable is a faithful port, not a plugin specifically."""
     # The opening job statement, before any section heading.
-    intro = _writer().split("\n## ", 1)[0]
+    intro = _norm(_writer().split("\n## ", 1)[0])
     assert "into a production Go plugin," not in intro, (
         "agent-writer.md's job statement is back to 'translate ... into a production "
         "Go plugin'. #862: an agent told to produce a plugin will not weigh modifying "
@@ -70,7 +81,7 @@ def test_writer_job_is_not_defined_as_plugin_only():
 def test_writer_may_modify_component_code():
     """The section must grant the licence, not merely mention the possibility."""
     section = _core_mod_section()
-    assert "permitted" in _writer(), (
+    assert "permitted" in _norm(_writer()), (
         "agent-writer.md no longer states that modifying component code is permitted."
     )
     assert "extension point" in section, (
@@ -125,17 +136,46 @@ def test_reviewer_registration_criterion_is_scoped():
         "fails its five-item chain unconditionally, so the criterion must say it "
         "governs the registered plugin and point at the core-modification check."
     )
-    assert "inapplicable" in m.group("body"), (
+    assert "inapplicable" in _norm(m.group("body")), (
         "Criterion 3's preamble no longer says the registration chain is inapplicable "
         "when the port registers no plugin, so a declared core modification would be "
         "rejected on a criterion it cannot satisfy."
     )
 
 
+def test_reviewer_has_no_gap_between_criterion_3_and_3b():
+    """Every port must land in exactly one of: plugin, declared modification, failure.
+
+    Criterion 3 hands the plugin-less case to 3b, and 3b's substantive checks key off
+    a non-empty files_modified. Their intersection -- no plugin AND no modification --
+    would satisfy neither criterion's applicability condition, so a port delivering
+    nothing would draw no NEEDS_CHANGES from either. Before #862 scoped Criterion 3,
+    that case failed the registration chain unconditionally, so the gap is a
+    regression this guard exists to prevent reopening.
+    """
+    m = re.search(
+        r"\n### Criterion 3b:[^\n]*\n(?P<body>.*?)(?=\n### )", _reviewer(), re.S
+    )
+    assert m, "Criterion 3b section body not found -- did the heading change?"
+    body = _norm(m.group("body"))
+    assert "no deliverable" in body, (
+        "Criterion 3b lost its no-deliverable catch-all. A port with no registered "
+        "plugin and an empty files_modified now falls through both registration "
+        "criteria, which is the hole #862 opened by scoping Criterion 3."
+    )
+    # The catch-all must come before the files_modified-gated checks, or a
+    # plugin-less, modification-less port never reaches it.
+    assert body.index("no deliverable") < body.index("The rest of this criterion"), (
+        "The no-deliverable check must be the FIRST thing in Criterion 3b. Placed "
+        "after the files_modified gate it is unreachable for exactly the case it "
+        "is meant to catch."
+    )
+
+
 def test_reviewer_checks_the_declaration_not_the_modification():
     """A core modification is not a defect; an undeclared one is."""
     reviewer = _reviewer()
-    assert "Criterion 3b" in reviewer, (
+    assert "Criterion 3b" in _norm(reviewer), (
         "agent-reviewer.md lost Criterion 3b. #862 requires the reviewer to judge "
         "whether a core modification is DECLARED, rather than treating the presence "
         "of files_modified as a defect."
@@ -144,7 +184,7 @@ def test_reviewer_checks_the_declaration_not_the_modification():
         r"\n### Criterion 3b:[^\n]*\n(?P<body>.*?)(?=\n### )", reviewer, re.S
     )
     assert m, "Criterion 3b section body not found -- did the heading change?"
-    body = m.group("body")
+    body = _norm(m.group("body"))
     missing = [
         t for t in ("files_modified", "upstream", "not silent", "fidelity") if t not in body
     ]

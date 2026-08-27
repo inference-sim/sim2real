@@ -863,10 +863,15 @@ context:
     <ELIMINATIONS -- extension points ruled out, each with citation + mechanism.
     Settled conclusions.>
 
-    <PLACEMENT -- the candidate extension point(s), how many separate plugin
-    registrations it implies, and every interface each type must implement. A
-    declared unknown until the method sets are checked. State what still holds
-    if it fails, so the writer knows where to search next.>
+    <PLACEMENT -- either shape is valid:
+      (a) the candidate extension point(s), how many separate plugin registrations
+          it implies, and every interface each type must implement. A declared
+          unknown until the method sets are checked. State what still holds if it
+          fails, so the writer knows where to search next.
+      (b) a DECLARED CORE MODIFICATION, where no extension point can carry the
+          decision -- which component files must change, why no extension point
+          sufficed, and what upstream change would invalidate it. Copy such a
+          declaration through intact.>
 
     <DECLARED DEGRADATION (Dn) -- any substitution, with the direction of bias.>
   files: <list of context files>

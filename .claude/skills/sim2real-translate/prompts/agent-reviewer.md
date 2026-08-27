@@ -132,9 +132,17 @@ This is the most common failure mode — check it carefully.
 
 ### Criterion 3b: Declared core modification
 
-Applies only when `{ALGO_NAME}_output.json`'s `files_modified` is non-empty — i.e. the
-port changed files that already existed in the component. Do NOT treat that as a defect
-in itself: a decision shape that no extension point can reach is a legitimate reason to
+**First, the no-deliverable case.** If the port registers no plugin AND `files_modified`
+is empty, it produced neither a plugin nor a core modification — there is no deliverable
+at all. Raise `[registration]` NEEDS_CHANGES. Check this before anything else in 3b:
+Criterion 3 hands the plugin-less case to 3b, so without this clause a port that delivers
+nothing would satisfy the applicability condition of neither criterion. Every port must
+land in exactly one of the three: a registered plugin (Criterion 3), a declared core
+modification (the rest of 3b), or this failure.
+
+The rest of this criterion applies when `files_modified` is non-empty — i.e. the port
+changed files that already existed in the component. Do NOT treat that as a defect in
+itself: a decision shape that no extension point can reach is a legitimate reason to
 modify component code, and forcing it into an extension point that scores a different
 decision is the failure this pipeline exists to prevent.
 

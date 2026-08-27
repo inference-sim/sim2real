@@ -23,6 +23,17 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 _SKILL_MD = SKILL_DIR / "SKILL.md"
 
 
+def _norm(text: str) -> str:
+    """Collapse whitespace runs to single spaces.
+
+    These files are hard-wrapped prose, so a guarded phrase can land across a line
+    break -- `declared core\\n modification` is not the substring `declared core
+    modification`. A guard that fails on reflow says nothing about whether the rule
+    survived, so only the words are compared, never the wrapping.
+    """
+    return " ".join(text.split())
+
+
 def _phase2() -> str:
     """Return the Phase 2 section of specify's SKILL.md."""
     text = _SKILL_MD.read_text(encoding="utf-8")
@@ -37,7 +48,7 @@ def _phase2() -> str:
 
 def test_phase2_distinguishes_expressible_from_constructible():
     """The gate must not collapse back to expressibility alone."""
-    phase2 = _phase2()
+    phase2 = _norm(_phase2())
     assert "constructible" in phase2, (
         "Phase 2 no longer distinguishes expressible from constructible. #859: "
         "citations showing a value is reachable do not show that one Go type can "
@@ -47,7 +58,7 @@ def test_phase2_distinguishes_expressible_from_constructible():
 
 def test_phase2_requires_placement_stated_as_candidate():
     """Placement is a declared unknown until its method sets are checked."""
-    phase2 = _phase2()
+    phase2 = _norm(_phase2())
     missing = [t for t in ("declared unknown", "candidate") if t not in phase2]
     assert not missing, (
         f"Phase 2 dropped {missing}. #859 requires the placement be written as a "
@@ -58,7 +69,7 @@ def test_phase2_requires_placement_stated_as_candidate():
 
 def test_phase2_requires_registration_count():
     """\"A custom X plus a custom Y\" is ambiguous about how many types."""
-    assert "registration" in _phase2(), (
+    assert "registration" in _norm(_phase2()), (
         "Phase 2 no longer requires the number of plugin registrations to be "
         "stated. #859: the ambiguity between one type implementing both and two "
         "separate registrations is what got resolved the cheap way."
@@ -72,7 +83,7 @@ def test_phase2_keeps_the_core_modification_escape_hatch():
     not exist yet. #862 implemented it inline, so the guard now checks the policy
     itself -- a strictly stronger assertion than "an issue number is mentioned."
     """
-    phase2 = _phase2()
+    phase2 = _norm(_phase2())
     assert "DECLARED CORE MODIFICATION" in phase2, (
         "Phase 2 lost the DECLARED CORE MODIFICATION outcome. If no extension point "
         "fits at all, modifying the component's own code is the legitimate outcome "
@@ -89,7 +100,7 @@ def test_phase2_halts_only_on_silent_fallback():
     quietly accept a decomposition that scores a different decision -- survives; what
     changed is that it no longer swallows the core-modification case.
     """
-    phase2 = _phase2()
+    phase2 = _norm(_phase2())
     assert "silent fallback" in phase2, (
         "Phase 2 no longer scopes its halt to silent fallback. #862 requires the "
         "halt cover the case where the weaker natural decomposition would be used "
@@ -99,7 +110,7 @@ def test_phase2_halts_only_on_silent_fallback():
 
 def test_phase2_requires_the_rebase_cost_be_stated():
     """A carried patch invalidates the pin as a free variable; say what breaks."""
-    phase2 = _phase2()
+    phase2 = _norm(_phase2())
     assert "rebase" in phase2, (
         "Phase 2 no longer requires a declared core modification to state what "
         "breaks on upstream rebase. That is the cost most easily left implicit: the "
