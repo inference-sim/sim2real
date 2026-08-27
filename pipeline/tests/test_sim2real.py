@@ -2112,6 +2112,83 @@ class TestAssembleCommand:
         assert "cc" in out.err
         assert "skipped" in out.err
 
+    def test_warns_on_scalar_list_conflict(self, tmp_path, capsys):
+        """#851 Stage 1: a scalar list two layers both set is reported, not silent."""
+        thash = self._make_minimal_registration(tmp_path)
+        cluster_id = self._bootstrap_experiment(tmp_path)
+        # A defaults fragment and the baseline bundle both state
+        # router.proxy.args, which still replaces (it is not a flag list), so
+        # the fragment's values never reach the cluster.
+        self._write_yaml(
+            tmp_path / "baselines" / "defaults" / "envoy.yaml",
+            {"scenario": [{
+                "name": "test-scenario",
+                "router": {"proxy": {"args": ["--concurrency", "8"]}},
+            }]},
+        )
+        self._write_yaml(
+            tmp_path / "baselines" / "base.yaml",
+            {"scenario": [{
+                "name": "test-scenario",
+                "model": {"name": "M"},
+                "router": {"proxy": {"args": ["--log-level", "warn"]}},
+            }]},
+        )
+        rc = sim2real.main(
+            [
+                "--experiment-root", str(tmp_path),
+                "assemble",
+                "--translation", thash,
+                "--cluster", cluster_id,
+                "--run", "trial-1",
+            ]
+        )
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "scenario.router.proxy.args" in err
+        assert "framework defaults -> baseline bundle" in err
+        assert "#851" in err
+
+    def test_no_warning_when_flag_list_merges(self, tmp_path, capsys):
+        """additionalFlags merges by flag name, so it must NOT be reported."""
+        thash = self._make_minimal_registration(tmp_path)
+        cluster_id = self._bootstrap_experiment(tmp_path)
+        self._write_yaml(
+            tmp_path / "baselines" / "defaults" / "vllm.yaml",
+            {"scenario": [{
+                "name": "test-scenario",
+                "decode": {"vllm": {"additionalFlags": ["--enable-prefix-caching"]}},
+            }]},
+        )
+        self._write_yaml(
+            tmp_path / "baselines" / "base.yaml",
+            {"scenario": [{
+                "name": "test-scenario",
+                "model": {"name": "M"},
+                "decode": {"vllm": {"additionalFlags": ["--max-num-seqs=256"]}},
+            }]},
+        )
+        rc = sim2real.main(
+            [
+                "--experiment-root", str(tmp_path),
+                "assemble",
+                "--translation", thash,
+                "--cluster", cluster_id,
+                "--run", "trial-1",
+            ]
+        )
+        assert rc == 0
+        assert "additionalFlags" not in capsys.readouterr().err
+        # Both layers' flags reach the resolved baseline.
+        resolved = yaml.safe_load(
+            (tmp_path / "workspace" / "runs" / "trial-1" / "cluster" / "baseline.yaml")
+            .read_text()
+        )
+        assert resolved["scenario"][0]["decode"]["vllm"]["additionalFlags"] == [
+            "--enable-prefix-caching",
+            "--max-num-seqs=256",
+        ]
+
 
 class TestAliasCollision:
     """Alias collision is checked per-algorithm regardless of batch size."""

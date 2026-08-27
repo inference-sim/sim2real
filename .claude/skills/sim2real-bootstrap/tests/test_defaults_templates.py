@@ -10,11 +10,18 @@ These tests are deliberately glob-driven: adding a fragment requires no test edi
 but the new fragment must satisfy the same contract as the existing ones.
 
 Issue #839 (two shipped fragments were wrong, five were missing) is what motivated
-them. The `additionalFlags` guard below is the narrow, statically-decidable slice of
+them. The scalar-list guard below is the narrow, statically-decidable slice of
 #841 — it catches keys that provably cannot survive the merge chain, rather than
 comparing resolved scenarios, which is what #841 tracks.
+
+Note on scope since #851: `**.vllm.additionalFlags` no longer replaces — it merges
+by flag name, so a value set from this layer does survive downstream layers. The
+guard therefore no longer applies to that key (and no fragment sets it today). It
+still applies to every other scalar list, which `_merge_lists` Tier 1 continues to
+replace wholesale.
 """
 import itertools
+import sys
 from pathlib import Path
 
 import pytest
@@ -25,6 +32,16 @@ _TEMPLATE_DIR = _SKILL_DIR / "templates" / "defaults"
 
 # Repo root: .claude/skills/sim2real-bootstrap -> up three.
 _REPO_ROOT = _SKILL_DIR.parents[2]
+
+# Make `pipeline` importable regardless of cwd, matching what the `deep_merge`
+# fixture below does — the import on the next line runs at collection time, so it
+# cannot rely on that fixture.
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+# Sourced from the merge implementation rather than re-listing the exempt paths
+# here, so this guard cannot drift from the rule it is guarding (#851).
+from pipeline.lib.values import _is_flag_list_path  # noqa: E402
 
 
 def _fragments():
@@ -102,6 +119,8 @@ def test_fragment_sets_something_beyond_its_name(path):
 #
 # A scalar list set from the defaults layer only survives if NO downstream layer
 # sets the same key, because `_merge_lists` Tier 1 replaces rather than appends.
+# (`**.vllm.additionalFlags` is the one exception since #851 — it merges by flag
+# name, so it needs no allowlist entry. Every key below still replaces.)
 # That makes every entry here a standing fragility, not an endorsement: an
 # experiment whose `baselines/<name>.yaml` sets the same key silently wins, and the
 # fragment's value never reaches the rendered output. Each entry must be justified
@@ -129,6 +148,30 @@ _ALLOWED_SCALAR_LISTS = {
 }
 
 
+def _scalar_list_paths(entry: dict) -> set:
+    """Dotted key paths under ``entry`` holding a list with any non-dict item.
+
+    Paths matching ``_FLAG_LIST_PATH_SUFFIXES`` are omitted: since #851 they
+    merge by flag name, so a value set from the defaults layer DOES survive
+    downstream layers and needs no allowlist entry. Every other scalar list is
+    still replaced wholesale by any downstream layer that sets the same key.
+    """
+    found: set = set()
+
+    def walk(node, trail):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                walk(value, trail + [str(key)])
+        elif isinstance(node, list) and node:
+            if any(not isinstance(item, dict) for item in node):
+                if _is_flag_list_path(tuple(trail)):
+                    return
+                found.add(".".join(trail))
+
+    walk(entry, [])
+    return found
+
+
 @pytest.mark.parametrize("path", _fragments(), ids=_fragment_ids())
 def test_fragment_sets_no_unacknowledged_scalar_list_key(path):
     """Scalar lists set from this layer are fragile, so each one must be deliberate.
@@ -137,7 +180,11 @@ def test_fragment_sets_no_unacknowledged_scalar_list_key(path):
     a non-dict item. The defaults overlay is the FIRST layer in `resolve_baseline`'s
     chain — `deep_merge(defaults, bundle)` then `deep_merge(..., overlay)` — so a
     scalar list it sets is discarded the moment any downstream layer sets the same
-    key. `vllm.additionalFlags` is the case that shipped inert for months (#839).
+    key. `vllm.additionalFlags` is the case that shipped inert for months (#839);
+    it is no longer subject to this (Tier 0 merges it by flag name since #851), but
+    every other scalar list still is. Since #851, `sim2real assemble` also warns at
+    resolve time when two layers both set a still-replacing scalar list, so a
+    fragment that slips past this static guard is caught at run time too.
 
     Rather than forbid scalar lists outright (which would rule out a fragment that
     legitimately owns a key nothing downstream touches), require that each one be
@@ -146,28 +193,20 @@ def test_fragment_sets_no_unacknowledged_scalar_list_key(path):
     experiment's baseline grows.
     """
     entry = yaml.safe_load(path.read_text())["scenario"][0]
-    found = set()
-
-    def walk(node, trail):
-        if isinstance(node, dict):
-            for key, value in node.items():
-                walk(value, trail + [str(key)])
-        elif isinstance(node, list) and node:
-            if any(not isinstance(item, dict) for item in node):
-                found.add(".".join(trail))
-
-    walk(entry, [])
+    found = _scalar_list_paths(entry)
     allowed = _ALLOWED_SCALAR_LISTS.get(path.stem, set())
 
     unacknowledged = sorted(found - allowed)
     assert not unacknowledged, (
-        f"{path.name}: sets scalar list(s) {unacknowledged} — a list of non-dicts is "
-        "REPLACED by any downstream layer (_merge_lists Tier 1), so a value set here "
-        "cannot be relied on to reach the rendered output. Prefer a typed "
-        "scalar/bool key, or a list of dicts carrying `name` (which merges by key). "
-        "If the key genuinely belongs in this layer, add it to "
-        "_ALLOWED_SCALAR_LISTS with a reason and warn about it in the fragment's "
-        "header comment."
+        f"{path.name}: sets scalar list(s) {unacknowledged} — at these key paths a "
+        "list of non-dicts is REPLACED by any downstream layer (_merge_lists "
+        "Tier 1), so a value set here cannot be relied on to reach the rendered "
+        "output. Prefer a typed scalar/bool key, or a list of dicts carrying "
+        "`name` (which merges by key). Paths matching "
+        "_FLAG_LIST_PATH_SUFFIXES (`**.vllm.additionalFlags`) never reach this "
+        "assertion — they merge by flag name since #851. If the key genuinely "
+        "belongs in this layer, add it to _ALLOWED_SCALAR_LISTS with a reason and "
+        "warn about it in the fragment's header comment."
     )
 
     stale = sorted(allowed - found)
@@ -175,6 +214,51 @@ def test_fragment_sets_no_unacknowledged_scalar_list_key(path):
         f"{path.name}: _ALLOWED_SCALAR_LISTS still lists {stale}, but the fragment no "
         "longer sets it — drop the allowlist entry."
     )
+
+
+@pytest.mark.parametrize(
+    "trail, exempt",
+    [
+        (["decode", "vllm", "additionalFlags"], True),
+        (["prefill", "vllm", "additionalFlags"], True),
+        (["router", "proxy", "args"], False),
+        (
+            ["decode", "extraContainerConfig", "securityContext",
+             "capabilities", "add"],
+            False,
+        ),
+        (["router", "additionalFlags"], False),
+    ],
+)
+def test_guard_exempts_exactly_the_flag_merged_paths(trail, exempt):
+    """The guard's message and comments promise `**.vllm.additionalFlags` is
+    exempt; this pins that the walk actually implements it, and that nothing
+    else is exempted by accident.
+
+    Without this, the guard and its own failure text could disagree — it would
+    demand an allowlist entry for a key while printing that the key needs none.
+    """
+    assert _is_flag_list_path(tuple(trail)) is exempt
+
+
+def test_flag_merged_scalar_list_needs_no_allowlist_entry():
+    """Exercises the guard's ACTUAL walk (`_scalar_list_paths`), not a copy of it.
+
+    A fragment-shaped entry setting `decode.vllm.additionalFlags` must not be
+    reported as unacknowledged, while `router.proxy.args` in the same entry must
+    be. Pinning both directions is what keeps the guard honest with its own
+    failure message.
+    """
+    entry = {
+        "name": "s",
+        "decode": {"vllm": {"additionalFlags": ["--enable-prefix-caching"]}},
+        "prefill": {"vllm": {"additionalFlags": ["--max-num-seqs=256"]}},
+        "router": {"proxy": {"args": ["--concurrency", "8"]}},
+    }
+    found = _scalar_list_paths(entry)
+    assert "decode.vllm.additionalFlags" not in found
+    assert "prefill.vllm.additionalFlags" not in found
+    assert found == {"router.proxy.args"}
 
 
 def test_scalar_list_allowlist_has_no_entries_for_missing_fragments():

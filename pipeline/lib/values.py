@@ -18,6 +18,135 @@ def _detect_list_key(base_list: list, overlay_list: list):
     return None
 
 
+# ── Flag-list merge (path-scoped) ─────────────────────────────────────────────
+
+#: Key-path suffixes whose scalar lists merge by flag name rather than being
+#: replaced wholesale. Matched as a SUFFIX of the merge path, with list indices
+#: elided from the path, so one entry covers both the `decode` and `prefill`
+#: roles AND both merge roots in use today: `assemble_run` merges whole
+#: documents (`scenario.decode.vllm.additionalFlags`) while `capacity` merges a
+#: single scenario entry (`decode.vllm.additionalFlags`). An absolute path
+#: anchored at the document root would match the first and silently miss the
+#: second. See issue #851.
+_FLAG_LIST_PATH_SUFFIXES: tuple[tuple[str, ...], ...] = (
+    ("vllm", "additionalFlags"),
+)
+
+
+def _is_flag_list_path(path: tuple[str, ...]) -> bool:
+    """Return True when `path` ends with a registered flag-list suffix."""
+    return any(
+        len(path) >= len(suffix) and tuple(path[-len(suffix):]) == suffix
+        for suffix in _FLAG_LIST_PATH_SUFFIXES
+    )
+
+
+def _flag_key(entry: str) -> str:
+    """Return the merge key for one CLI-flag list entry.
+
+    `--max-num-seqs=256` keys on `--max-num-seqs`; a bare
+    `--enable-chunked-prefill` is its own key. A leading `--no-` is stripped so
+    a flag and its negation collapse to a single key: `--enable-prefix-caching`
+    and `--no-enable-prefix-caching` express one decision, so a later layer
+    stating either form must override the earlier rather than emit both.
+    Emitting both would leave the outcome to vLLM's argparse ordering — the
+    silent conflict issue #851 exists to avoid, and the reason it rejected
+    simple list concatenation.
+    """
+    name = entry.split("=", 1)[0]
+    if name.startswith("--no-"):
+        name = "--" + name[len("--no-"):]
+    return name
+
+
+def _index_flags(entries: list, path: tuple[str, ...], side: str) -> dict:
+    """Return ``{flag key: literal entry}`` for one flag list, preserving order.
+
+    Raises ValueError on a non-string entry, an entry that is not a ``--`` flag,
+    or two entries collapsing to the same key. Each would otherwise produce a
+    silently wrong flag set, which is the failure class this tier closes.
+    """
+    where = ".".join(path) or "<root>"
+    indexed: dict[str, str] = {}
+    for entry in entries:
+        if not isinstance(entry, str):
+            raise ValueError(
+                f"{where}: {side} flag list entry is "
+                f"{type(entry).__name__}, not a string: {entry!r} — this path "
+                "merges by flag name and cannot key a non-string entry"
+            )
+        if not entry.startswith("--"):
+            raise ValueError(
+                f"{where}: {side} flag list entry does not start with '--': "
+                f"{entry!r} — this path merges by flag name, so a bare value "
+                "(as used in space-separated arg lists like router.proxy.args) "
+                "would be mis-keyed as a flag name"
+            )
+        key = _flag_key(entry)
+        if key in indexed:
+            raise ValueError(
+                f"{where}: {side} flag list states '{key}' twice "
+                f"({indexed[key]!r} and {entry!r}) — merging by flag name would "
+                "silently drop one. State the flag once; note that '--no-X' and "
+                "'--X' are the same key."
+            )
+        indexed[key] = entry
+    return indexed
+
+
+def _merge_flag_lists(
+    base_list: list, overlay_list: list, path: tuple[str, ...]
+) -> list:
+    """Merge two CLI-flag lists by flag name.
+
+    Base entries are emitted first in base order — an overlay entry sharing a key
+    substitutes its own literal spelling, so ``--no-X`` can override ``--X`` — and
+    overlay-only entries are appended in overlay order. This is the same
+    base-first-then-append convention Tier 2b already uses for keyed dict lists.
+
+    Removal: a later layer drops an inherited boolean flag by stating its
+    ``--no-`` form; the whole list is cleared by setting it to ``[]`` (handled by
+    ``_merge_lists``' empty-overlay guard before this is reached). There is
+    deliberately no per-entry deletion sentinel for ``--key=value`` flags — see
+    issue #851.
+    """
+    base_idx = _index_flags(base_list, path, "base")
+    overlay_idx = _index_flags(overlay_list, path, "overlay")
+    result = [overlay_idx.get(key, entry) for key, entry in base_idx.items()]
+    result.extend(entry for key, entry in overlay_idx.items() if key not in base_idx)
+    return result
+
+
+def _record_scalar_list_replace(
+    base_list: list,
+    overlay_list: list,
+    path: tuple[str, ...],
+    sink: list | None,
+) -> None:
+    """Record that a scalar list was replaced wholesale, discarding base values.
+
+    Stage 1 of issue #851, narrowed to the lists that STILL replace now that the
+    flag-merge tier exists — today ``router.proxy.args`` and
+    ``{decode,prefill}.extraContainerConfig.securityContext.capabilities.add``,
+    both allowlisted in the bootstrap skill's
+    ``tests/test_defaults_templates.py:_ALLOWED_SCALAR_LISTS``. Paths that merge
+    by flag name never reach here, so this stays signal rather than noise.
+
+    Identical lists record nothing: restating the same values loses no
+    information, and warning about it would train operators to ignore the
+    warning. ``sink is None`` — every consumer except the assemble resolution
+    chain — is silent, so a merge in a hot path such as ``capacity`` costs
+    nothing.
+    """
+    if sink is None or base_list == overlay_list:
+        return
+    sink.append(
+        f"{'.'.join(path) or '<root>'}: overlay replaces the whole list, "
+        f"discarding {len(base_list)} value(s) set by an earlier layer: "
+        f"{base_list!r} (kept: {overlay_list!r})"
+    )
+
+
 def _k8s_identity(item):
     """Return a Kubernetes identity tuple (apiVersion, kind, metadata.name), or None.
 
@@ -35,11 +164,22 @@ def _k8s_identity(item):
     return (item["apiVersion"], item["kind"], meta["name"])
 
 
-def _merge_by_keyfn(base_list: list, overlay_list: list, keyfn) -> list:
+def _merge_by_keyfn(
+    base_list: list,
+    overlay_list: list,
+    keyfn,
+    *,
+    path: tuple[str, ...] = (),
+    sink: list | None = None,
+) -> list:
     """Merge two all-dict lists by a key extractor.
 
     Base entries are emitted first (deep-merged with the same-keyed overlay entry
     when present); overlay-only entries are appended in order.
+
+    ``path`` is passed through to the recursive merge UNCHANGED — the list index
+    is deliberately elided, so a key path is the same whether a list sits between
+    two dicts or not. See ``_FLAG_LIST_PATH_SUFFIXES``.
     """
     overlay_by_key = {keyfn(item): item for item in overlay_list}
     result = []
@@ -48,7 +188,9 @@ def _merge_by_keyfn(base_list: list, overlay_list: list, keyfn) -> list:
         k = keyfn(bitem)
         seen_keys.add(k)
         if k in overlay_by_key:
-            result.append(deep_merge(bitem, overlay_by_key[k]))
+            result.append(
+                deep_merge(bitem, overlay_by_key[k], path=path, sink=sink)
+            )
         else:
             result.append(copy.deepcopy(bitem))
     for oitem in overlay_list:
@@ -83,7 +225,13 @@ def _k8s_markers_conflict(a: dict, b: dict) -> bool:
     return a_markers != b_markers
 
 
-def _merge_k8s_objects(base_list: list, overlay_list: list) -> list:
+def _merge_k8s_objects(
+    base_list: list,
+    overlay_list: list,
+    *,
+    path: tuple[str, ...] = (),
+    sink: list | None = None,
+) -> list:
     """Merge two lists of Kubernetes manifests without ever folding dissimilar objects.
 
     Manifests carrying a full identity (apiVersion, kind, metadata.name) merge by that
@@ -117,7 +265,9 @@ def _merge_k8s_objects(base_list: list, overlay_list: list) -> list:
             raise ValueError(f"duplicate Kubernetes object identity in base list: {k}")
         seen_keys.add(k)
         if k in overlay_by_key:
-            result.append(deep_merge(bitem, overlay_by_key[k]))
+            result.append(
+                deep_merge(bitem, overlay_by_key[k], path=path, sink=sink)
+            )
         else:
             result.append(copy.deepcopy(bitem))
     for oitem in overlay_list:
@@ -127,9 +277,21 @@ def _merge_k8s_objects(base_list: list, overlay_list: list) -> list:
     return result
 
 
-def _merge_lists(base_list: list, overlay_list: list) -> list:
+def _merge_lists(
+    base_list: list,
+    overlay_list: list,
+    *,
+    path: tuple[str, ...] = (),
+    sink: list | None = None,
+) -> list:
     """Merge two lists using a tiered strategy.
 
+    Tier 0:  ``path`` ends with a ``_FLAG_LIST_PATH_SUFFIXES`` entry → merge the
+             scalar entries by flag name (``--max-num-seqs=256`` keys on
+             ``--max-num-seqs``; ``--no-X`` and ``--X`` are ONE key). Only
+             reached when both lists are non-empty. Scoped by key path because
+             flag-name merging would corrupt a space-separated arg list such as
+             ``router.proxy.args``, where values are separate elements.
     Tier 1:  either list contains non-dict items → overlay replaces base.
     Tier 2a: all entries are Kubernetes manifests → merge by (apiVersion, kind,
              metadata.name) identity; manifests without metadata.name are carried
@@ -147,19 +309,30 @@ def _merge_lists(base_list: list, overlay_list: list) -> list:
     if not base_list:
         return copy.deepcopy(overlay_list)
 
+    # Tier 0: path-scoped CLI-flag lists → merge by flag name (#851).
+    # Deliberately placed AFTER the empty-list guards: with only one layer
+    # contributing there is nothing to merge and nothing to lose, so a
+    # single-layer bundle is never newly refused by _index_flags' entry guards.
+    # Those guards protect the merge, not the schema.
+    if _is_flag_list_path(path):
+        return _merge_flag_lists(base_list, overlay_list, path)
+
     # Tier 1: any non-dict item → replace
     if not (all(isinstance(x, dict) for x in base_list)
             and all(isinstance(x, dict) for x in overlay_list)):
+        _record_scalar_list_replace(base_list, overlay_list, path, sink)
         return copy.deepcopy(overlay_list)
 
     # Tier 2a: Kubernetes manifest lists — merge by identity, never positionally fold
     if all(_is_k8s_manifest(x) for x in base_list + overlay_list):
-        return _merge_k8s_objects(base_list, overlay_list)
+        return _merge_k8s_objects(base_list, overlay_list, path=path, sink=sink)
 
     # Tier 2b: named-key merge
     key_field = _detect_list_key(base_list, overlay_list)
     if key_field is not None:
-        return _merge_by_keyfn(base_list, overlay_list, lambda d: d[key_field])
+        return _merge_by_keyfn(
+            base_list, overlay_list, lambda d: d[key_field], path=path, sink=sink
+        )
 
     # Tier 3: positional merge — surplus from either side preserved
     result = []
@@ -173,7 +346,9 @@ def _merge_lists(base_list: list, overlay_list: list) -> list:
                     f"{(overlay_list[i].get('apiVersion'), overlay_list[i].get('kind'))} "
                     "— an entry is likely missing apiVersion or kind"
                 )
-            result.append(deep_merge(base_list[i], overlay_list[i]))
+            result.append(
+                deep_merge(base_list[i], overlay_list[i], path=path, sink=sink)
+            )
         elif i < len(base_list):
             result.append(copy.deepcopy(base_list[i]))
         else:
@@ -181,19 +356,33 @@ def _merge_lists(base_list: list, overlay_list: list) -> list:
     return result
 
 
-def deep_merge(base: dict, overlay: dict) -> dict:
+def deep_merge(
+    base: dict,
+    overlay: dict,
+    *,
+    path: tuple[str, ...] = (),
+    sink: list | None = None,
+) -> dict:
     """Deep-merge overlay onto base. Dict keys merged recursively.
 
     Lists of dicts are merged by Kubernetes identity, named key, or positional index
-    (see _merge_lists). Lists of scalars are replaced entirely. Returns a new dict
-    (deep copy).
+    (see _merge_lists). Lists of scalars are replaced entirely, EXCEPT at paths
+    registered in ``_FLAG_LIST_PATH_SUFFIXES``, which merge by flag name. Returns a
+    new dict (deep copy).
+
+    ``path`` is the key path of ``base`` within the document being merged, as a
+    tuple of segments with list indices elided. It exists so ``_merge_lists`` can
+    scope a merge strategy to a key path; callers merging a whole document leave it
+    at its default. ``sink``, when a list, collects operator-facing warnings about
+    scalar lists replaced wholesale — see ``_record_scalar_list_replace``.
     """
     result = copy.deepcopy(base)
     for key, oval in overlay.items():
+        child = path + (str(key),)
         if key in result and isinstance(result[key], dict) and isinstance(oval, dict):
-            result[key] = deep_merge(result[key], oval)
+            result[key] = deep_merge(result[key], oval, path=child, sink=sink)
         elif key in result and isinstance(result[key], list) and isinstance(oval, list):
-            result[key] = _merge_lists(result[key], oval)
+            result[key] = _merge_lists(result[key], oval, path=child, sink=sink)
         else:
             result[key] = copy.deepcopy(oval)
     return result

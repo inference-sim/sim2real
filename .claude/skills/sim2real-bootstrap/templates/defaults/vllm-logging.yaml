@@ -22,18 +22,20 @@
 #     decode: {vllm: {additionalFlags: ["--no-disable-uvicorn-access-log"],
 #                     loggingLevel: INFO}}
 # and both keys were inert:
-#   - `additionalFlags` is a list of scalars, so pipeline/lib/values.py
-#     `_merge_lists` Tier 1 has the overlay REPLACE the base. This fragment is
-#     the FIRST layer in resolve_baseline's chain, and both `baselines/<name>.yaml`
-#     and the translate-generated baseline overlay set that same list downstream
-#     -- so the fragment's entry was discarded before it could reach the command.
-#     No scalar-list key can usefully be set from this layer at all.
+#   - `additionalFlags` was decode-only, while the framework's suppression covers
+#     BOTH roles -- so prefill served its requests with no access log at all. The
+#     typed key applies to both roles from one place, which is why it is preferred
+#     here. (Historical note: this entry used to be discarded outright, because
+#     `additionalFlags` is a list of scalars and `_merge_lists` Tier 1 had each
+#     later layer REPLACE the whole list. Issue #851 fixed that -- Tier 0 now
+#     merges `**.vllm.additionalFlags` by flag name, so a flag set in one layer
+#     survives a layer that does not restate it. The per-role limitation above is
+#     the reason that still stands.)
 #   - `loggingLevel: INFO` is already the framework default twice over
 #     (defaults.yaml:51 `logging_level: &logging_level INFO`, plus a
 #     `default('INFO')` fallback at _macros.j2:230).
-# It was also decode-only, while the framework's suppression covers both roles --
-# so prefill served its requests with no access log at all. The typed
-# `vllmCommon.flags` key below is read per-role by the macro and fixes both.
+# The typed `vllmCommon.flags` key below is read per-role by the macro and so
+# fixes both roles from one place.
 #
 # WHY THIS IS A FRAGMENT AND NOT PART OF baselines/<name>.yaml. It is a
 # framework-default override for diagnosability, not part of the measured

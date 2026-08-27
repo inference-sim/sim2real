@@ -154,7 +154,7 @@ vllmCommon:
     disableUvicornAccessLog: false
 ```
 
-> **Note:** Use this typed key, not `**.vllm.additionalFlags: [--no-disable-uvicorn-access-log]`. `additionalFlags` is a list of scalars, so `pipeline/lib/values.py:_merge_lists` has each later layer *replace* it rather than append — a flag set from the defaults overlay is discarded by `baselines/<name>.yaml` and again by the registered overlay. The typed key also applies to **both** roles; `decode.vllm.loggingLevel: INFO` was additionally a no-op, since `INFO` is already the framework default (`defaults.yaml:51`).
+> **Note:** Use this typed key, not `**.vllm.additionalFlags: [--no-disable-uvicorn-access-log]` — the typed key applies to **both** roles from one place, whereas `additionalFlags` is per-role, so a decode-only entry leaves prefill with no access log at all. (`decode.vllm.loggingLevel: INFO` was additionally a no-op, since `INFO` is already the framework default, `defaults.yaml:51`.) Since issue #851, `**.vllm.additionalFlags` itself merges by flag name across layers — a flag one layer sets survives a later layer that does not restate it — so the earlier warning that it was *replaced* wholesale no longer applies. Scalar lists at other key paths, such as `router.proxy.args`, are still replaced; `sim2real assemble` now warns when two layers both set one.
 
 ## Correlate requests with pods (and hence nodes)
 

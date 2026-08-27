@@ -334,6 +334,47 @@ class TestDeriveGpuResourceType:
         scenario = {"scenario": [{"name": "test"}]}
         assert derive_gpu_resource_type(scenario, defaults) == "nvidia.com/gpu"
 
+    def test_malformed_flag_list_falls_back_instead_of_raising(self, capsys):
+        """#851's flag tier rejects malformed entries with ValueError; this
+        function's contract is to always return a resource name — but it must
+        say so, since a silent fallback would mis-probe a non-NVIDIA cluster."""
+        defaults = {
+            "accelerator": {"resource": "habana.ai/gaudi"},
+            "decode": {"vllm": {"additionalFlags": ["--max-num-seqs=256"]}},
+        }
+        scenario = {"scenario": [{
+            "name": "test",
+            "decode": {"vllm": {"additionalFlags": ["bare-value"]}},
+        }]}
+        assert derive_gpu_resource_type(scenario, defaults) == "nvidia.com/gpu"
+        out = capsys.readouterr()
+        assert "merge failed" in (out.out + out.err)
+
+    def test_non_flag_merge_error_also_warns_before_falling_back(self, capsys):
+        """deep_merge raises for more than the flag tier — duplicate k8s object
+        identity does too, and that fallback must not be silent either."""
+        obj = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "m"}}
+        defaults = {
+            "accelerator": {"resource": "habana.ai/gaudi"},
+            "extraObjects": [dict(obj), dict(obj)],
+        }
+        scenario = {"scenario": [{"name": "test", "extraObjects": [dict(obj)]}]}
+        assert derive_gpu_resource_type(scenario, defaults) == "nvidia.com/gpu"
+        out = capsys.readouterr()
+        assert "merge failed" in (out.out + out.err)
+
+    def test_valid_flag_lists_do_not_disturb_resource_derivation(self):
+        defaults = {
+            "accelerator": {"resource": "nvidia.com/gpu"},
+            "decode": {"vllm": {"additionalFlags": ["--max-num-seqs=256"]}},
+        }
+        scenario = {"scenario": [{
+            "name": "test",
+            "accelerator": {"resource": "habana.ai/gaudi"},
+            "decode": {"vllm": {"additionalFlags": ["--enable-prefix-caching"]}},
+        }]}
+        assert derive_gpu_resource_type(scenario, defaults) == "habana.ai/gaudi"
+
 
 # ── gpu_cost_per_pair tests ────────────────────────────────────────────────────
 
@@ -441,6 +482,59 @@ class TestGpuCostPerPair:
         assert isinstance(cost, str)
         assert "auto" in cost
         assert "accelerator.count" in cost
+
+    def test_malformed_flag_list_returns_error_string_not_raise(self):
+        """deploy.py:_derive_pair_gpu_costs degrades an error string to a warning
+        plus fallback cost; a raise there would crash the orchestrator."""
+        defaults = {
+            "decode": {
+                "enabled": True, "replicas": 1,
+                "parallelism": {"tensor": 1, "dataLocal": 1},
+                "vllm": {"additionalFlags": ["--max-num-seqs=256"]},
+            },
+            "prefill": {"enabled": False, "replicas": 0},
+        }
+        scenario = {"scenario": [{
+            "name": "test",
+            "decode": {"vllm": {"additionalFlags": ["bare-value"]}},
+        }]}
+        cost = gpu_cost_per_pair(scenario, defaults)
+        assert isinstance(cost, str)
+        assert "merge failed" in cost
+
+    def test_duplicate_flag_key_returns_error_string_not_raise(self):
+        defaults = {
+            "decode": {
+                "enabled": True, "replicas": 1,
+                "parallelism": {"tensor": 1, "dataLocal": 1},
+                "vllm": {"additionalFlags": ["--max-num-seqs=256"]},
+            },
+            "prefill": {"enabled": False, "replicas": 0},
+        }
+        scenario = {"scenario": [{
+            "name": "test",
+            "decode": {"vllm": {"additionalFlags": [
+                "--enable-prefix-caching", "--no-enable-prefix-caching",
+            ]}},
+        }]}
+        cost = gpu_cost_per_pair(scenario, defaults)
+        assert isinstance(cost, str)
+        assert "merge failed" in cost
+
+    def test_valid_flag_lists_do_not_disturb_cost(self):
+        defaults = {
+            "decode": {
+                "enabled": True, "replicas": 1,
+                "parallelism": {"tensor": 1, "dataLocal": 1},
+                "vllm": {"additionalFlags": ["--max-num-seqs=256"]},
+            },
+            "prefill": {"enabled": False, "replicas": 0},
+        }
+        scenario = {"scenario": [{
+            "name": "test",
+            "decode": {"vllm": {"additionalFlags": ["--enable-prefix-caching"]}},
+        }]}
+        assert gpu_cost_per_pair(scenario, defaults) == 1
 
     def test_non_numeric_role_accelerator_count_returns_error(self):
         defaults = {

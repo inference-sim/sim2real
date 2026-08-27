@@ -6,7 +6,15 @@ from pipeline.lib.values import (
     deep_merge,
     _merge_lists,
     _k8s_identity,
+    _flag_key,
+    _index_flags,
+    _is_flag_list_path,
 )
+
+
+# Path of a flag-merged list, as it appears when a whole scenario document is
+# merged (assemble_run's root). Used by the flag-merge and sink tests below.
+_FP = ("scenario", "decode", "vllm", "additionalFlags")
 
 
 # ── _merge_lists ──────────────────────────────────────────────────────────────
@@ -320,3 +328,374 @@ class TestDeepMerge:
         overlay = {"items": [{"name": "x", "v": 99}]}
         result = deep_merge(base, overlay)
         assert result["items"] == [{"name": "x", "v": 99}]
+
+
+# ── Flag-list merge helpers (#851) ────────────────────────────────────────────
+
+class TestFlagKey:
+    def test_valued_flag_keys_on_name(self):
+        assert _flag_key("--max-num-seqs=256") == "--max-num-seqs"
+
+    def test_bare_flag_is_its_own_key(self):
+        assert _flag_key("--enable-chunked-prefill") == "--enable-chunked-prefill"
+
+    def test_negation_collapses_to_positive_key(self):
+        assert _flag_key("--no-enable-prefix-caching") == "--enable-prefix-caching"
+        assert _flag_key("--enable-prefix-caching") == "--enable-prefix-caching"
+
+    def test_negation_of_disable_flag_collapses(self):
+        """Real llm-d-benchmark pair: --no-disable-X negates --disable-X."""
+        assert _flag_key("--no-disable-uvicorn-access-log") == (
+            "--disable-uvicorn-access-log"
+        )
+
+    def test_value_containing_equals_splits_on_first_only(self):
+        assert _flag_key('--kv-transfer-config={"a":"b=c"}') == "--kv-transfer-config"
+
+
+class TestIsFlagListPath:
+    def test_document_rooted_path_matches(self):
+        assert _is_flag_list_path(("scenario", "decode", "vllm", "additionalFlags"))
+
+    def test_scenario_entry_rooted_path_matches(self):
+        """capacity.py merges scenarios[0] directly, so there is no leading
+        "scenario" segment. Suffix matching covers both merge roots."""
+        assert _is_flag_list_path(("decode", "vllm", "additionalFlags"))
+
+    def test_prefill_role_matches_same_rule(self):
+        assert _is_flag_list_path(("scenario", "prefill", "vllm", "additionalFlags"))
+
+    def test_unrelated_scalar_list_does_not_match(self):
+        assert not _is_flag_list_path(("scenario", "router", "proxy", "args"))
+
+    def test_shorter_than_suffix_does_not_match(self):
+        assert not _is_flag_list_path(("additionalFlags",))
+        assert not _is_flag_list_path(())
+
+    def test_additionalflags_under_wrong_parent_does_not_match(self):
+        assert not _is_flag_list_path(("scenario", "router", "additionalFlags"))
+
+
+class TestIndexFlags:
+    def test_preserves_order_and_maps_key_to_literal(self):
+        out = _index_flags(["--a=1", "--b"], ("vllm", "additionalFlags"), "base")
+        assert list(out) == ["--a", "--b"]
+        assert out["--a"] == "--a=1"
+
+    def test_empty_list_yields_empty_index(self):
+        assert _index_flags([], ("vllm", "additionalFlags"), "base") == {}
+
+    def test_non_string_entry_refused(self):
+        with pytest.raises(ValueError, match="not a string"):
+            _index_flags([256], ("vllm", "additionalFlags"), "base")
+
+    def test_non_flag_entry_refused(self):
+        with pytest.raises(ValueError, match="does not start with"):
+            _index_flags(["envoy-sidecar"], ("vllm", "additionalFlags"), "overlay")
+
+    def test_duplicate_key_refused(self):
+        with pytest.raises(ValueError, match="twice"):
+            _index_flags(
+                ["--max-num-seqs=1", "--max-num-seqs=2"],
+                ("vllm", "additionalFlags"),
+                "base",
+            )
+
+    def test_negation_pair_in_one_list_is_a_duplicate(self):
+        with pytest.raises(ValueError, match="twice"):
+            _index_flags(
+                ["--enable-prefix-caching", "--no-enable-prefix-caching"],
+                ("vllm", "additionalFlags"),
+                "base",
+            )
+
+    def test_error_message_names_the_path_and_side(self):
+        with pytest.raises(ValueError, match=r"decode\.vllm\.additionalFlags: overlay"):
+            _index_flags(["nope"], ("decode", "vllm", "additionalFlags"), "overlay")
+
+    def test_empty_path_renders_as_root_in_errors(self):
+        with pytest.raises(ValueError, match="<root>"):
+            _index_flags(["nope"], (), "base")
+
+
+# ── Key-path threading (#851) ─────────────────────────────────────────────────
+
+def _spy_merge_lists(monkeypatch):
+    """Patch `_merge_lists` with a recording pass-through; return the path log."""
+    import pipeline.lib.values as values_mod
+
+    seen: list[tuple] = []
+    real = values_mod._merge_lists
+
+    def spy(base_list, overlay_list, *, path=(), sink=None):
+        seen.append(path)
+        return real(base_list, overlay_list, path=path, sink=sink)
+
+    monkeypatch.setattr(values_mod, "_merge_lists", spy)
+    return seen
+
+
+class TestPathThreading:
+    def test_path_reaches_nested_list(self, monkeypatch):
+        import pipeline.lib.values as values_mod
+
+        seen = _spy_merge_lists(monkeypatch)
+        base = {
+            "scenario": [
+                {"name": "s", "decode": {"vllm": {"additionalFlags": ["--a"]}}}
+            ]
+        }
+        overlay = {
+            "scenario": [
+                {"name": "s", "decode": {"vllm": {"additionalFlags": ["--b"]}}}
+            ]
+        }
+        values_mod.deep_merge(base, overlay)
+        # The list index is elided: the scenario entry's children keep the
+        # ("scenario",) prefix rather than gaining ("scenario", 0).
+        assert ("scenario",) in seen
+        assert ("scenario", "decode", "vllm", "additionalFlags") in seen
+
+    def test_default_path_is_empty_tuple(self, monkeypatch):
+        import pipeline.lib.values as values_mod
+
+        seen = _spy_merge_lists(monkeypatch)
+        values_mod.deep_merge({"a": [1]}, {"a": [2]})
+        assert seen == [("a",)]
+
+    def test_non_string_keys_stringified_in_path(self, monkeypatch):
+        import pipeline.lib.values as values_mod
+
+        seen = _spy_merge_lists(monkeypatch)
+        values_mod.deep_merge({7: [1]}, {7: [2]})
+        assert seen == [("7",)]
+
+    def test_positional_two_arg_calls_still_work(self):
+        """The pre-existing tests call these positionally; guard that contract."""
+        assert deep_merge({"a": 1}, {"b": 2}) == {"a": 1, "b": 2}
+        assert _merge_lists(["a"], ["b"]) == ["b"]
+
+    def test_path_threads_through_k8s_identity_tier(self, monkeypatch):
+        import pipeline.lib.values as values_mod
+
+        seen = _spy_merge_lists(monkeypatch)
+        obj = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "m"}}
+        base = {"extraObjects": [dict(obj, data={"keys": ["a"]})]}
+        overlay = {"extraObjects": [dict(obj, data={"keys": ["b"]})]}
+        values_mod.deep_merge(base, overlay)
+        assert ("extraObjects",) in seen
+        assert ("extraObjects", "data", "keys") in seen
+
+    def test_path_threads_through_positional_tier(self, monkeypatch):
+        import pipeline.lib.values as values_mod
+
+        seen = _spy_merge_lists(monkeypatch)
+        base = {"items": [{"a": {"deep": ["x"]}}]}
+        overlay = {"items": [{"a": {"deep": ["y"]}}]}
+        values_mod.deep_merge(base, overlay)
+        assert ("items", "a", "deep") in seen
+
+
+# ── Tier 0: flag-name list merge (#851) ───────────────────────────────────────
+
+class TestFlagListMerge:
+    def test_base_flag_survives_overlay_that_omits_it(self):
+        """The #851 bug: this returned ['--enable-force-include-usage'] before."""
+        base = ["--max-num-seqs=256", "--enable-prefix-caching"]
+        overlay = ["--enable-force-include-usage"]
+        assert _merge_lists(base, overlay, path=_FP) == [
+            "--max-num-seqs=256",
+            "--enable-prefix-caching",
+            "--enable-force-include-usage",
+        ]
+
+    def test_overlay_overrides_same_flag_without_duplicating(self):
+        base = ["--max-num-seqs=256", "--enable-prefix-caching"]
+        overlay = ["--max-num-seqs=512"]
+        assert _merge_lists(base, overlay, path=_FP) == [
+            "--max-num-seqs=512",
+            "--enable-prefix-caching",
+        ]
+
+    def test_negation_overrides_positive_and_emits_one_flag(self):
+        assert _merge_lists(
+            ["--enable-prefix-caching"], ["--no-enable-prefix-caching"], path=_FP
+        ) == ["--no-enable-prefix-caching"]
+
+    def test_positive_overrides_negation(self):
+        assert _merge_lists(
+            ["--no-enable-prefix-caching"], ["--enable-prefix-caching"], path=_FP
+        ) == ["--enable-prefix-caching"]
+
+    def test_base_order_preserved_overlay_only_appended(self):
+        base = ["--a=1", "--b=2", "--c"]
+        overlay = ["--z", "--b=99"]
+        assert _merge_lists(base, overlay, path=_FP) == [
+            "--a=1",
+            "--b=99",
+            "--c",
+            "--z",
+        ]
+
+    def test_prefill_path_merges_too(self):
+        p = ("scenario", "prefill", "vllm", "additionalFlags")
+        assert _merge_lists(["--a=1"], ["--b"], path=p) == ["--a=1", "--b"]
+
+    def test_scenario_entry_rooted_path_merges(self):
+        """capacity.py's merge root — no leading "scenario" segment."""
+        p = ("decode", "vllm", "additionalFlags")
+        assert _merge_lists(["--a=1"], ["--b"], path=p) == ["--a=1", "--b"]
+
+    def test_router_proxy_args_still_replaces(self):
+        """#851's constraint: space-separated arg lists must NOT flag-merge."""
+        base = ["--service-node", "envoy-sidecar", "--concurrency", "8"]
+        overlay = ["--log-level", "warn"]
+        p = ("scenario", "router", "proxy", "args")
+        assert _merge_lists(base, overlay, path=p) == ["--log-level", "warn"]
+
+    def test_capabilities_add_still_replaces(self):
+        p = (
+            "scenario",
+            "decode",
+            "extraContainerConfig",
+            "securityContext",
+            "capabilities",
+            "add",
+        )
+        assert _merge_lists(["IPC_LOCK"], ["SYS_PTRACE"], path=p) == ["SYS_PTRACE"]
+
+    def test_no_path_means_no_flag_merge(self):
+        assert _merge_lists(["--a=1"], ["--b"]) == ["--b"]
+
+    def test_empty_overlay_still_clears(self):
+        """An explicit empty list remains the whole-list removal escape hatch."""
+        assert _merge_lists(["--a=1"], [], path=_FP) == []
+
+    def test_empty_base_returns_overlay(self):
+        assert _merge_lists([], ["--a=1"], path=_FP) == ["--a=1"]
+
+    def test_single_layer_bad_entry_not_rejected(self):
+        """Guards protect the merge, so a lone contributor is never newly refused."""
+        assert _merge_lists([], ["not-a-flag"], path=_FP) == ["not-a-flag"]
+
+    def test_bad_entry_refused_when_both_layers_contribute(self):
+        with pytest.raises(ValueError, match="does not start with"):
+            _merge_lists(["--a=1"], ["oops"], path=_FP)
+
+    def test_bad_base_entry_refused_when_both_layers_contribute(self):
+        with pytest.raises(ValueError, match="base flag list entry"):
+            _merge_lists(["oops"], ["--a=1"], path=_FP)
+
+    def test_does_not_mutate_inputs(self):
+        base = ["--a=1"]
+        overlay = ["--b"]
+        _merge_lists(base, overlay, path=_FP)
+        assert base == ["--a=1"]
+        assert overlay == ["--b"]
+
+    def test_end_to_end_through_deep_merge(self):
+        """The observed real-bundle shape from the issue."""
+        base = {
+            "scenario": [
+                {
+                    "name": "s",
+                    "decode": {
+                        "vllm": {
+                            "additionalFlags": [
+                                "--max-num-seqs=256",
+                                "--enable-prefix-caching",
+                            ]
+                        }
+                    },
+                }
+            ]
+        }
+        overlay = {
+            "scenario": [
+                {
+                    "name": "s",
+                    "decode": {
+                        "vllm": {"additionalFlags": ["--enable-force-include-usage"]}
+                    },
+                }
+            ]
+        }
+        out = deep_merge(base, overlay)
+        assert out["scenario"][0]["decode"]["vllm"]["additionalFlags"] == [
+            "--max-num-seqs=256",
+            "--enable-prefix-caching",
+            "--enable-force-include-usage",
+        ]
+
+    def test_three_layer_merge_accumulates(self):
+        """defaults -> baseline -> overlay, the resolve_baseline chain."""
+        step1 = _merge_lists(["--a=1"], ["--b=2"], path=_FP)
+        step2 = _merge_lists(step1, ["--c"], path=_FP)
+        assert step2 == ["--a=1", "--b=2", "--c"]
+
+
+# ── Stage 1: conflict recording for lists that still replace (#851) ───────────
+
+_ARGS_P = ("scenario", "router", "proxy", "args")
+
+
+class TestScalarReplaceConflictSink:
+    def test_records_conflict_when_both_layers_set_scalar_list(self):
+        sink: list[str] = []
+        _merge_lists(
+            ["--concurrency", "8"], ["--log-level", "warn"], path=_ARGS_P, sink=sink
+        )
+        assert len(sink) == 1
+        assert "scenario.router.proxy.args" in sink[0]
+        assert "--concurrency" in sink[0]
+
+    def test_no_sink_is_silent(self):
+        """capacity.py merges without a sink; must not raise."""
+        assert _merge_lists(["--a"], ["--b"], path=_ARGS_P) == ["--b"]
+
+    def test_identical_lists_record_nothing(self):
+        sink: list[str] = []
+        _merge_lists(["--a"], ["--a"], path=_ARGS_P, sink=sink)
+        assert sink == []
+
+    def test_flag_merged_path_records_nothing(self):
+        sink: list[str] = []
+        _merge_lists(["--a=1"], ["--b"], path=_FP, sink=sink)
+        assert sink == []
+
+    def test_empty_base_records_nothing(self):
+        sink: list[str] = []
+        _merge_lists([], ["--b"], path=_ARGS_P, sink=sink)
+        assert sink == []
+
+    def test_empty_overlay_records_nothing(self):
+        sink: list[str] = []
+        _merge_lists(["--a"], [], path=_ARGS_P, sink=sink)
+        assert sink == []
+
+    def test_dict_list_records_nothing(self):
+        sink: list[str] = []
+        _merge_lists(
+            [{"name": "x"}], [{"name": "x", "v": 1}], path=("containers",), sink=sink
+        )
+        assert sink == []
+
+    def test_scalar_overlay_over_dict_base_records(self):
+        """Dict base clobbered by a scalar overlay is loss too."""
+        sink: list[str] = []
+        _merge_lists([{"name": "x"}], ["c"], path=_ARGS_P, sink=sink)
+        assert len(sink) == 1
+
+    def test_sink_propagates_through_deep_merge(self):
+        sink: list[str] = []
+        base = {"scenario": [{"name": "s", "router": {"proxy": {"args": ["--a"]}}}]}
+        overlay = {"scenario": [{"name": "s", "router": {"proxy": {"args": ["--b"]}}}]}
+        deep_merge(base, overlay, sink=sink)
+        assert len(sink) == 1
+        assert "scenario.router.proxy.args" in sink[0]
+
+    def test_message_reports_both_discarded_and_kept(self):
+        sink: list[str] = []
+        _merge_lists(["--a"], ["--b"], path=_ARGS_P, sink=sink)
+        assert "discarding 1 value" in sink[0]
+        assert "kept:" in sink[0]

@@ -102,6 +102,40 @@ class TestLoadDefaultsOverlay:
     def test_none_dir_returns_empty(self):
         assert assemble_run.load_defaults_overlay(None, disable=[]) == {}
 
+    def test_bad_flag_entry_across_fragments_names_the_fragment(self, tmp_path):
+        """Two fragments both setting additionalFlags hit the flag tier, so its
+        ValueError must be normalized here too — naming the fragment at fault."""
+        d = tmp_path / "defaults"
+        d.mkdir()
+        (d / "a-first.yaml").write_text(yaml.dump({"scenario": [{
+            "name": "s",
+            "decode": {"vllm": {"additionalFlags": ["--max-num-seqs=256"]}},
+        }]}))
+        (d / "b-second.yaml").write_text(yaml.dump({"scenario": [{
+            "name": "s",
+            "decode": {"vllm": {"additionalFlags": ["bare-value"]}},
+        }]}))
+        with pytest.raises(assemble_run.AssembleError) as exc:
+            assemble_run.load_defaults_overlay(d, disable=[])
+        assert "b-second.yaml" in str(exc.value)
+
+    def test_fragments_flag_lists_merge_by_name(self, tmp_path):
+        d = tmp_path / "defaults"
+        d.mkdir()
+        (d / "a-first.yaml").write_text(yaml.dump({"scenario": [{
+            "name": "s",
+            "decode": {"vllm": {"additionalFlags": ["--max-num-seqs=256"]}},
+        }]}))
+        (d / "b-second.yaml").write_text(yaml.dump({"scenario": [{
+            "name": "s",
+            "decode": {"vllm": {"additionalFlags": ["--enable-prefix-caching"]}},
+        }]}))
+        merged = assemble_run.load_defaults_overlay(d, disable=[])
+        assert merged["scenario"][0]["decode"]["vllm"]["additionalFlags"] == [
+            "--max-num-seqs=256",
+            "--enable-prefix-caching",
+        ]
+
 
 class TestInjectImageTag:
     def test_injects_repository_and_tag(self):
@@ -343,6 +377,226 @@ class TestResolveScenarios:
                 overlay_path=None,
                 framework_defaults={},
             )
+
+    # ── Flag-list merge across layers (#851) ──────────────────────────────────
+
+    def test_config_md_flag_survives_overlay_that_omits_it(self, tmp_path):
+        """#851 end-to-end: baseline flags reach the resolved scenario even when
+        the generated overlay contributes only its own flag."""
+        bundle_path = tmp_path / "baseline.yaml"
+        overlay_path = tmp_path / "baseline_overlay.yaml"
+        self._write(bundle_path, {"scenario": [{
+            "name": "b",
+            "decode": {"vllm": {"additionalFlags": [
+                "--max-num-seqs=256",
+                "--max-num-batched-tokens=2048",
+                "--enable-chunked-prefill",
+                "--enable-prefix-caching",
+            ]}},
+        }]})
+        self._write(overlay_path, {"scenario": [{
+            "name": "b",
+            "decode": {"vllm": {"additionalFlags": [
+                "--enable-force-include-usage",
+            ]}},
+        }]})
+        resolved = assemble_run.resolve_baseline(
+            bundle_path=bundle_path,
+            overlay_path=overlay_path,
+            framework_defaults={},
+        )
+        assert resolved["scenario"][0]["decode"]["vllm"]["additionalFlags"] == [
+            "--max-num-seqs=256",
+            "--max-num-batched-tokens=2048",
+            "--enable-chunked-prefill",
+            "--enable-prefix-caching",
+            "--enable-force-include-usage",
+        ]
+
+    def test_treatment_overlay_overrides_one_flag_keeps_rest(self, tmp_path):
+        overlay_path = tmp_path / "sr" / "sr_config.yaml"
+        self._write(overlay_path, {"scenario": [{
+            "name": "b",
+            "decode": {"vllm": {"additionalFlags": ["--max-num-seqs=512"]}},
+        }]})
+        baseline_resolved = {"scenario": [{
+            "name": "b",
+            "decode": {"vllm": {"additionalFlags": [
+                "--max-num-seqs=256", "--enable-prefix-caching",
+            ]}},
+        }]}
+        resolved = assemble_run.resolve_treatment(
+            baseline_resolved=baseline_resolved,
+            diffs_path=None,
+            overlay_path=overlay_path,
+        )
+        assert resolved["scenario"][0]["decode"]["vllm"]["additionalFlags"] == [
+            "--max-num-seqs=512",
+            "--enable-prefix-caching",
+        ]
+
+    def test_baseline_records_scalar_conflict_with_layer_names(self, tmp_path):
+        bundle_path = tmp_path / "baseline.yaml"
+        overlay_path = tmp_path / "baseline_overlay.yaml"
+        self._write(bundle_path, {"scenario": [{
+            "name": "b",
+            "router": {"proxy": {"args": ["--concurrency", "8"]}},
+        }]})
+        self._write(overlay_path, {"scenario": [{
+            "name": "b",
+            "router": {"proxy": {"args": ["--log-level", "warn"]}},
+        }]})
+        sink: list[str] = []
+        assemble_run.resolve_baseline(
+            bundle_path=bundle_path,
+            overlay_path=overlay_path,
+            framework_defaults={},
+            sink=sink,
+        )
+        assert len(sink) == 1
+        assert "baseline bundle -> registered overlay" in sink[0]
+        assert "scenario.router.proxy.args" in sink[0]
+
+    def test_baseline_records_defaults_layer_conflict(self, tmp_path):
+        bundle_path = tmp_path / "baseline.yaml"
+        self._write(bundle_path, {"scenario": [{
+            "name": "b",
+            "router": {"proxy": {"args": ["--log-level", "warn"]}},
+        }]})
+        sink: list[str] = []
+        assemble_run.resolve_baseline(
+            bundle_path=bundle_path,
+            overlay_path=None,
+            framework_defaults={"scenario": [{
+                "name": "defaults",
+                "router": {"proxy": {"args": ["--concurrency", "8"]}},
+            }]},
+            sink=sink,
+        )
+        assert len(sink) == 1
+        assert "framework defaults -> baseline bundle" in sink[0]
+
+    def test_baseline_sink_is_optional(self, tmp_path):
+        bundle_path = tmp_path / "baseline.yaml"
+        self._write(bundle_path, {"scenario": [{"name": "b", "a": 1}]})
+        resolved = assemble_run.resolve_baseline(
+            bundle_path=bundle_path,
+            overlay_path=None,
+            framework_defaults={},
+        )
+        assert resolved["scenario"][0]["name"] == "b"
+
+    def test_treatment_records_conflict_with_layer_names(self, tmp_path):
+        overlay_path = tmp_path / "sr" / "sr_config.yaml"
+        self._write(overlay_path, {"scenario": [{
+            "name": "b",
+            "router": {"proxy": {"args": ["--log-level", "warn"]}},
+        }]})
+        baseline_resolved = {"scenario": [{
+            "name": "b",
+            "router": {"proxy": {"args": ["--concurrency", "8"]}},
+        }]}
+        sink: list[str] = []
+        assemble_run.resolve_treatment(
+            baseline_resolved=baseline_resolved,
+            diffs_path=None,
+            overlay_path=overlay_path,
+            sink=sink,
+        )
+        assert len(sink) == 1
+        assert "treatment diffs -> algorithm overlay" in sink[0]
+
+    def test_treatment_records_diffs_layer_conflict(self, tmp_path):
+        diffs_path = tmp_path / "treatment.yaml"
+        self._write(diffs_path, {"scenario": [{
+            "name": "b",
+            "router": {"proxy": {"args": ["--log-level", "warn"]}},
+        }]})
+        baseline_resolved = {"scenario": [{
+            "name": "b",
+            "router": {"proxy": {"args": ["--concurrency", "8"]}},
+        }]}
+        sink: list[str] = []
+        assemble_run.resolve_treatment(
+            baseline_resolved=baseline_resolved,
+            diffs_path=diffs_path,
+            overlay_path=None,
+            sink=sink,
+        )
+        assert len(sink) == 1
+        assert "baseline -> treatment diffs" in sink[0]
+
+    def test_bad_flag_entry_surfaces_as_assemble_error(self, tmp_path):
+        """A flag-tier ValueError must reach the CLI as AssembleError, not a
+        raw traceback — sim2real.py catches only AssembleError."""
+        bundle_path = tmp_path / "baseline.yaml"
+        overlay_path = tmp_path / "baseline_overlay.yaml"
+        self._write(bundle_path, {"scenario": [{
+            "name": "b",
+            "decode": {"vllm": {"additionalFlags": ["--max-num-seqs=256"]}},
+        }]})
+        self._write(overlay_path, {"scenario": [{
+            "name": "b",
+            "decode": {"vllm": {"additionalFlags": ["not-a-flag"]}},
+        }]})
+        with pytest.raises(assemble_run.AssembleError) as exc:
+            assemble_run.resolve_baseline(
+                bundle_path=bundle_path,
+                overlay_path=overlay_path,
+                framework_defaults={},
+            )
+        # The layer prefix names which two files disagreed.
+        assert "baseline bundle -> registered overlay" in str(exc.value)
+        assert "does not start with" in str(exc.value)
+
+    def test_duplicate_flag_key_surfaces_as_assemble_error(self, tmp_path):
+        bundle_path = tmp_path / "baseline.yaml"
+        overlay_path = tmp_path / "baseline_overlay.yaml"
+        self._write(bundle_path, {"scenario": [{
+            "name": "b",
+            "decode": {"vllm": {"additionalFlags": ["--max-num-seqs=256"]}},
+        }]})
+        self._write(overlay_path, {"scenario": [{
+            "name": "b",
+            "decode": {"vllm": {"additionalFlags": [
+                "--enable-prefix-caching", "--no-enable-prefix-caching",
+            ]}},
+        }]})
+        with pytest.raises(assemble_run.AssembleError, match="twice"):
+            assemble_run.resolve_baseline(
+                bundle_path=bundle_path,
+                overlay_path=overlay_path,
+                framework_defaults={},
+            )
+
+    def test_treatment_bad_flag_entry_surfaces_as_assemble_error(self, tmp_path):
+        overlay_path = tmp_path / "sr" / "sr_config.yaml"
+        self._write(overlay_path, {"scenario": [{
+            "name": "b",
+            "decode": {"vllm": {"additionalFlags": ["oops"]}},
+        }]})
+        baseline_resolved = {"scenario": [{
+            "name": "b",
+            "decode": {"vllm": {"additionalFlags": ["--max-num-seqs=256"]}},
+        }]}
+        with pytest.raises(assemble_run.AssembleError) as exc:
+            assemble_run.resolve_treatment(
+                baseline_resolved=baseline_resolved,
+                diffs_path=None,
+                overlay_path=overlay_path,
+            )
+        assert "treatment diffs -> algorithm overlay" in str(exc.value)
+
+    def test_treatment_sink_stays_empty_without_conflict(self, tmp_path):
+        baseline_resolved = {"scenario": [{"name": "b", "a": 1}]}
+        sink: list[str] = []
+        assemble_run.resolve_treatment(
+            baseline_resolved=baseline_resolved,
+            diffs_path=None,
+            overlay_path=None,
+            sink=sink,
+        )
+        assert sink == []
 
     def test_framework_defaults_named_defaults_merge_into_baseline_entry(self, tmp_path):
         """Regression test for issue #516.
