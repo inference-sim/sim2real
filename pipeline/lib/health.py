@@ -180,28 +180,28 @@ def triage_pod(
             ),
         )
 
-    # Tier 2: Scheduling failure
-    if pod.phase == "Pending":
-        sched = next((e for e in pod_events if e.reason == "FailedScheduling"), None)
-        if sched:
-            msg_lower = sched.message.lower()
-            if "quota" in msg_lower or "exceeded" in msg_lower:
-                return TriageResult(
-                    tier=2, action="suggest", needs_logs=False,
-                    message=f"{pod.name}: Pending (resource quota exceeded)",
-                    suggestion=f"Resource quota exhausted: {sched.message}",
-                )
-            if "insufficient" in msg_lower or "nodes available" in msg_lower:
-                return TriageResult(
-                    tier=2, action="suggest", needs_logs=False,
-                    message=f"{pod.name}: Pending (no nodes match GPU affinity)",
-                    suggestion=(
-                        f"No schedulable nodes: {sched.message}\n"
-                        "Check nodeAffinity in scenario bundle → "
-                        "model.helmValues.decode.extraConfig.affinity"
-                    ),
-                )
-            # unrecognized scheduling message — falls through to None
+    # NO SCHEDULING BRANCH HERE, DELIBERATELY -- see issue #873.
+    #
+    # A pod that is merely Pending/Unschedulable is NOT a pod-health failure.
+    # The kube-scheduler keeps it queued and retries it, so it recovers on its
+    # own the moment capacity appears; nothing about the deployment is wrong.
+    # Classifying it here made it a tier-2 finding, and every tier-2 finding
+    # escalates to a PipelineRun cancellation (deploy.py:895) with no grace
+    # period -- which pre-empted the deliberate --pending-threshold wait in
+    # _handle_pending_pods (deploy.py:713) that runs earlier in the same
+    # orchestrator cycle, making that threshold unreachable.
+    #
+    # Unschedulable pods are owned solely by pipeline/lib/pod_pending.py, which
+    # is purpose-built for the condition: it distinguishes scarcity (Insufficient
+    # -> wait up to the threshold) from misconfiguration (node affinity, missing
+    # PVC, untolerated taint -> reclaim now). It also keys off the PodScheduled=
+    # False/Unschedulable pod CONDITION rather than a FailedScheduling EVENT, so
+    # it still sees a pod whose scheduling event has aged out of the event TTL.
+    #
+    # Do not reinstate a branch here, and do not add a count budget in the shape
+    # of _OOM_MAX_ATTEMPTS / _STARTUP_PROBE_MIN_EVENT_COUNT: a count encodes
+    # "eventually fatal, tolerate N", which is true of OOM but false of a full
+    # cluster. The correct budget is a DURATION, and pod_pending already has one.
 
     # Tier 2: Startup probe timeout
     if pod.phase == "Running" and not pod.ready:

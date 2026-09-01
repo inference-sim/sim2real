@@ -217,24 +217,84 @@ def test_triage_image_pull_backoff():
     assert "run_metadata.json" in result.suggestion
 
 
-def test_triage_failed_scheduling_gpu():
+def test_triage_ignores_unschedulable_pod_scarcity():
+    """Unschedulable-for-scarcity is NOT a pod-health finding (issue #873).
+
+    triage_pod used to return tier 2 here, and every tier-2 finding escalates to
+    a PipelineRun cancellation with no grace period, which pre-empted the
+    --pending-threshold wait in deploy.py's _handle_pending_pods. Ownership of
+    Pending/Unschedulable now sits solely with pipeline/lib/pod_pending.py.
+    """
     from pipeline.lib.health import triage_pod, RemediationTracker
     pod = _make_pod(phase="Pending")
     events = [_make_event(reason="FailedScheduling",
                           message="0/5 nodes available: 5 Insufficient nvidia.com/gpu")]
     result = triage_pod(pod, events, RemediationTracker())
-    assert result.tier == 2
-    assert "affinity" in result.suggestion.lower() or "nvidia" in result.suggestion.lower()
+    assert result is None
 
 
-def test_triage_quota_exceeded():
+def test_triage_ignores_unschedulable_pod_quota():
+    """Quota-exceeded scheduling messages are also no longer triaged here.
+
+    Behaviour change recorded deliberately (issue #873): pod_pending's
+    classify_pending_reason does not recognise quota messages and falls through
+    to "recoverable", so such a pod now waits --pending-threshold before the
+    slot is reclaimed instead of being cancelled on the first health check.
+    Note that standard ResourceQuota exhaustion is rejected at admission, so no
+    Pending pod exists for either classifier to inspect in that case.
+    """
     from pipeline.lib.health import triage_pod, RemediationTracker
     pod = _make_pod(phase="Pending")
     events = [_make_event(reason="FailedScheduling",
                           message="exceeded quota: requests.nvidia.com/gpu=4")]
     result = triage_pod(pod, events, RemediationTracker())
+    assert result is None
+
+
+def test_triage_still_reports_non_scheduling_pending_failures():
+    """Removing the scheduling branch must not blind triage to other Pending pods.
+
+    A Pending pod with an image-pull failure is matched by the reason-based
+    branch earlier in triage_pod, so it is unaffected by issue #873.
+    """
+    from pipeline.lib.health import triage_pod, RemediationTracker
+    pod = _make_pod(phase="Pending", reason="ImagePullBackOff")
+    result = triage_pod(pod, [], RemediationTracker())
+    assert result is not None
     assert result.tier == 2
-    assert "quota" in result.suggestion.lower()
+
+
+def test_check_pod_health_does_not_escalate_unschedulable(monkeypatch):
+    """The interaction this issue exists for: no cancellation for scarcity.
+
+    This is the coverage gap that let #873 through -- test_health.py asserted
+    triage_pod's output and test_deploy_run.py asserted _handle_pending_pods'
+    timer, but nothing asserted that an unschedulable pod does not trigger the
+    escalation that cancels the PipelineRun. _check_pod_health returning False
+    is what keeps the run alive long enough for pod_pending's threshold (whose
+    wait/reclaim behaviour is covered by test_deploy_run.py's
+    _handle_pending_pods tests) to govern the outcome.
+    """
+    import pipeline.deploy as deploy
+    from pipeline.lib import health as health_mod
+
+    pod = _make_pod(phase="Pending")
+    events = [_make_event(reason="FailedScheduling",
+                          message="0/20 nodes are available: 14 Insufficient nvidia.com/gpu")]
+
+    monkeypatch.setattr(health_mod, "get_all_pods", lambda ns: [pod])
+    monkeypatch.setattr(health_mod, "get_events", lambda ns: events)
+
+    def _fail_delete(ns, name):  # must not be reached
+        raise AssertionError(f"delete_pod called for {name}; scarcity is not remediable here")
+
+    monkeypatch.setattr(health_mod, "delete_pod", _fail_delete)
+
+    escalate = deploy._check_pod_health(
+        namespace="kalantar-0", pair_key="wl-x|baseline|i1",
+        tracker=health_mod.RemediationTracker(), skip_teardown=False,
+    )
+    assert escalate is False
 
 
 def test_triage_crash_loop_tier3():
