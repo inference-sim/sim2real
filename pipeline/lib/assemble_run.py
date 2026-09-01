@@ -536,6 +536,73 @@ def resolve_pair_scope(
     return [(wl, pkg) for wl in selected_wl for pkg in selected_pkg]
 
 
+class PairPlan(NamedTuple):
+    """What assemble will do to one ``(workload, package, iteration)`` triple.
+
+    ``regenerate`` and ``wipe_results`` are the two orthogonal axes from issue
+    #876: ``--force`` answers "this PipelineRun already exists — redo it?",
+    ``--no-wipe`` answers "results exist for a pair being regenerated — keep
+    them?". Because the second question is only ever asked about a pair that is
+    actually being redone, ``wipe_results`` is never True when ``regenerate``
+    is False.
+    """
+
+    workload: str
+    package: str
+    iteration: int
+    pipelinerun_path: Path
+    results_path: Path
+    regenerate: bool
+    wipe_results: bool
+
+    @property
+    def results_display(self) -> str:
+        """Operator-facing form of ``results_path``, relative to the run dir."""
+        return f"results/{self.package}/{self.workload}/i{self.iteration}/"
+
+
+def plan_pairs(
+    *,
+    run_dir: Path,
+    scope: list[tuple[str, str]],
+    iterations: "range | list[int]",
+    force: bool,
+    no_wipe: bool,
+) -> list[PairPlan]:
+    """Decide, per triple in ``scope`` × ``iterations``, what assemble will do.
+
+    Both predicates are plain ``Path.exists()`` checks — no new state, no
+    content hashing, no ``run_metadata.json`` schema change:
+
+    * PipelineRun: ``cluster/pipelinerun-<wl>|<pkg>|i<N>.yaml``
+    * results:     ``results/<pkg>/<wl>/i<N>/``
+
+    The two use different spellings of the workload name (``_``-substituted and
+    raw respectively) because that is what their producers write — see
+    ``pipelinerun_filename``.
+    """
+    cluster_dir_ = run_dir / "cluster"
+    results_root = run_dir / "results"
+    plans: list[PairPlan] = []
+    for workload, package in scope:
+        for iteration in iterations:
+            pr_path = cluster_dir_ / pipelinerun_filename(workload, package, iteration)
+            res_path = results_root / package / workload / f"i{iteration}"
+            regenerate = force or not pr_path.exists()
+            plans.append(
+                PairPlan(
+                    workload=workload,
+                    package=package,
+                    iteration=iteration,
+                    pipelinerun_path=pr_path,
+                    results_path=res_path,
+                    regenerate=regenerate,
+                    wipe_results=regenerate and not no_wipe and res_path.exists(),
+                )
+            )
+    return plans
+
+
 def generate_pipelineruns(
     *,
     run_dir: Path,
