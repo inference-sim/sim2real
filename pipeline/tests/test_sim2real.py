@@ -1968,43 +1968,111 @@ class TestAssembleCommand:
         out = capsys.readouterr().out
         assert "assembled run trial-1" in out
 
-    def test_noop_reassemble_prints_no_change_message(self, tmp_path, capsys):
-        """Issue #555: second assemble with identical inputs prints the
-        'No change needed' message and does not print 'assembled run …'."""
+    def test_noop_reassemble_reports_already_assembled_pairs(self, tmp_path, capsys):
+        """Issue #555: a second assemble with identical inputs does not print
+        'assembled run …'.
+
+        Issue #876: it also must not claim the inputs are unchanged. params_hash
+        covers only transfer.yaml's own fields — not the overlays or workload
+        YAMLs that resolution reads — and the translation is never compared at
+        all, so the old wording asserted more than the code checks. The
+        replacement reports the pair count and how to act on it."""
         thash = self._make_minimal_registration(tmp_path)
         cluster_id = self._bootstrap_experiment(tmp_path)
+        argv = [
+            "--experiment-root", str(tmp_path),
+            "assemble",
+            "--translation", thash,
+            "--cluster", cluster_id,
+            "--run", "trial-1",
+        ]
         # First assemble — write path.
-        rc1 = sim2real.main(
-            [
-                "--experiment-root", str(tmp_path),
-                "assemble",
-                "--translation", thash,
-                "--cluster", cluster_id,
-                "--run", "trial-1",
-            ]
-        )
-        assert rc1 == 0
-        # Capture prior assembled_at so we can assert the message includes it.
-        run_dir = tmp_path / "workspace" / "runs" / "trial-1"
-        meta = json.loads((run_dir / "run_metadata.json").read_text())
-        prior_assembled_at = meta["assembled_at"]
+        assert sim2real.main(argv) == 0
         capsys.readouterr()  # drain
-        # Second assemble — same inputs — no-op path.
-        rc2 = sim2real.main(
-            [
-                "--experiment-root", str(tmp_path),
-                "assemble",
-                "--translation", thash,
-                "--cluster", cluster_id,
-                "--run", "trial-1",
-            ]
-        )
-        assert rc2 == 0
+        # Second assemble — same inputs — nothing to regenerate.
+        assert sim2real.main(argv) == 0
         out = capsys.readouterr().out
-        assert "No change needed for run 'trial-1'" in out
-        assert prior_assembled_at in out
+        assert "already assembled" in out
+        # 1 workload x 2 packages x 1 iteration
+        assert "2 pair(s)" in out
         assert "--force" in out
+        assert "unchanged" not in out
         assert "assembled run trial-1" not in out
+
+    def test_unknown_workload_filter_exits_non_zero_with_valid_values(
+        self, tmp_path, capsys
+    ):
+        thash = self._make_minimal_registration(tmp_path)
+        cluster_id = self._bootstrap_experiment(tmp_path)
+        argv = [
+            "--experiment-root", str(tmp_path),
+            "assemble",
+            "--translation", thash,
+            "--cluster", cluster_id,
+            "--run", "trial-1",
+        ]
+        assert sim2real.main(argv) == 0
+        capsys.readouterr()
+        rc = sim2real.main(argv + ["--workload", "nope"])
+        assert rc == 2
+        errout = capsys.readouterr().err
+        assert "--workload" in errout
+        assert "nope" in errout
+
+    def test_scoped_assemble_narrows_to_one_package(self, tmp_path, capsys):
+        thash = self._make_minimal_registration(tmp_path)
+        cluster_id = self._bootstrap_experiment(tmp_path)
+        argv = [
+            "--experiment-root", str(tmp_path),
+            "assemble",
+            "--translation", thash,
+            "--cluster", cluster_id,
+            "--run", "trial-1",
+        ]
+        assert sim2real.main(argv) == 0
+        cluster_dir = tmp_path / "workspace" / "runs" / "trial-1" / "cluster"
+        other = cluster_dir / "pipelinerun-w1|sr|i1.yaml"
+        other_bytes = other.read_bytes()
+        other_mtime = other.stat().st_mtime_ns
+        target = cluster_dir / "pipelinerun-w1|baseline|i1.yaml"
+        target.unlink()
+        capsys.readouterr()
+        rc = sim2real.main(argv + ["--package", "baseline"])
+        assert rc == 0
+        assert target.exists()
+        assert other.read_bytes() == other_bytes
+        assert other.stat().st_mtime_ns == other_mtime
+
+    def test_assemble_flags_reach_the_library(self, tmp_path, monkeypatch):
+        """The four new flags and the None-default --replicas are wired
+        through to assemble_run() verbatim."""
+        thash = self._make_minimal_registration(tmp_path)
+        cluster_id = self._bootstrap_experiment(tmp_path)
+        seen = {}
+
+        def _fake(**kwargs):
+            seen.update(kwargs)
+
+        monkeypatch.setattr(sim2real._assemble_run_lib, "assemble_run", _fake)
+        rc = sim2real.main([
+            "--experiment-root", str(tmp_path),
+            "assemble",
+            "--translation", thash,
+            "--cluster", cluster_id,
+            "--run", "trial-1",
+            "--workload", "w1",
+            "--package", "baseline,sr",
+            "--no-wipe",
+            "--yes",
+        ])
+        assert rc == 0
+        assert seen["workload_filter"] == ["w1"]
+        assert seen["package_filter"] == ["baseline,sr"]
+        assert seen["no_wipe"] is True
+        assert seen["assume_yes"] is True
+        # None, not 1 — so a scoped assemble can tell "not specified" from
+        # "explicitly 1" and reuse the run's recorded count.
+        assert seen["replicas"] is None
 
     def test_force_rebuild_prints_assembled_not_no_change(self, tmp_path, capsys):
         """Issue #555: --force after an initial assemble still prints the
@@ -2287,7 +2355,7 @@ class TestAssembleResolvesAlias:
         captured = {}
         def fake_assemble(*, translation_hash, translation_ref, cluster_id,
                           run_name, experiment_root, manifest_path,
-                          force, replicas, now_iso):
+                          force, replicas, now_iso, **_scope_kwargs):
             captured["hash"] = translation_hash
             captured["ref"] = translation_ref
 
@@ -2572,13 +2640,18 @@ class TestPositiveInt:
 
 
 class TestAssembleReplicasArg:
-    def test_replicas_defaults_to_one(self):
+    def test_replicas_defaults_to_none_meaning_unspecified(self):
+        """Issue #876: the parser default is None, not 1, so a scoped assemble
+        can distinguish 'not specified' (reuse the run's recorded count) from
+        'explicitly 1' (which it rejects). assemble_run() resolves None to 1
+        for an unscoped call — see test_assemble_scope.py::
+        TestReplicasDefaulting::test_unscoped_replicas_omitted_means_one."""
         from pipeline.sim2real import _build_parser
         parser = _build_parser()
         args = parser.parse_args([
             "assemble", "--translation", "h", "--cluster", "c", "--run", "r",
         ])
-        assert args.replicas == 1
+        assert args.replicas is None
 
     def test_replicas_accepts_positive_int(self):
         from pipeline.sim2real import _build_parser
@@ -3339,7 +3412,7 @@ class TestCmdTranslationAppend:
         captured = {}
         def fake_assemble(*, translation_hash, translation_ref, cluster_id,
                           run_name, experiment_root, manifest_path,
-                          force, replicas, now_iso):
+                          force, replicas, now_iso, **_scope_kwargs):
             captured["hash"] = translation_hash
             captured["ref"] = translation_ref
 

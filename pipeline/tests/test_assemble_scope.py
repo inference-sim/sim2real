@@ -96,6 +96,74 @@ class TestResolvePairScope:
             _scope(package_filter=["zzz*"])
 
 
+class TestConfirmResultsWipe:
+    """The prompt is the only guard standing between an un-flagged
+    re-assemble and unrecoverable measured data, so test it directly rather
+    than only through the monkeypatched seam."""
+
+    def test_y_accepts(self, monkeypatch, capsys):
+        monkeypatch.setattr("builtins.input", lambda _p: "y")
+        assert assemble_run._confirm_results_wipe(["results/baseline/w/i1/"]) is True
+        # The targets are enumerated before the question is asked.
+        assert "results/baseline/w/i1/" in capsys.readouterr().out
+
+    def test_uppercase_y_accepts(self, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda _p: " Y ")
+        assert assemble_run._confirm_results_wipe(["x/"]) is True
+
+    def test_anything_else_declines(self, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda _p: "yes please")
+        assert assemble_run._confirm_results_wipe(["x/"]) is False
+
+    def test_empty_answer_declines(self, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda _p: "")
+        assert assemble_run._confirm_results_wipe(["x/"]) is False
+
+    def test_eof_declines(self, monkeypatch):
+        def _eof(_p):
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", _eof)
+        assert assemble_run._confirm_results_wipe(["x/"]) is False
+
+
+class TestPruneOrphanClusterFiles:
+    def test_absent_cluster_dir_is_a_noop(self, tmp_path):
+        assert assemble_run.prune_orphan_cluster_files(
+            tmp_path, expected_pipelineruns=set(), package_names=["baseline"]
+        ) == []
+
+    def test_keeps_expected_and_removes_the_rest(self, tmp_path):
+        cluster = tmp_path / "cluster"
+        cluster.mkdir()
+        keep_pr = cluster / "pipelinerun-w|baseline|i1.yaml"
+        drop_pr = cluster / "pipelinerun-gone|baseline|i1.yaml"
+        keep_scenario = cluster / "baseline.yaml"
+        drop_scenario = cluster / "dropped.yaml"
+        for p in (keep_pr, drop_pr, keep_scenario, drop_scenario):
+            p.write_text("x\n")
+        removed = assemble_run.prune_orphan_cluster_files(
+            tmp_path,
+            expected_pipelineruns={"pipelinerun-w|baseline|i1.yaml"},
+            package_names=["baseline"],
+        )
+        assert removed == [
+            "dropped.yaml",
+            "pipelinerun-gone|baseline|i1.yaml",
+        ]
+        assert keep_pr.exists() and keep_scenario.exists()
+        assert not drop_pr.exists() and not drop_scenario.exists()
+
+    def test_non_yaml_files_are_left_alone(self, tmp_path):
+        cluster = tmp_path / "cluster"
+        cluster.mkdir()
+        (cluster / "notes.txt").write_text("keep me")
+        assert assemble_run.prune_orphan_cluster_files(
+            tmp_path, expected_pipelineruns=set(), package_names=[]
+        ) == []
+        assert (cluster / "notes.txt").exists()
+
+
 def _seed(run_dir, *, pipelinerun=False, results=False,
           workload="wl_a", package="baseline", iteration=1):
     """Create the on-disk predicates for one pair."""
@@ -481,6 +549,13 @@ class TestScopedAssemble:
         with pytest.raises(AssembleError, match="unscoped"):
             _assemble(fx, force=True, package_filter=["baseline"])
 
+    def test_scoped_assemble_refuses_on_corrupt_metadata(self, tmp_path):
+        fx = _fx(tmp_path)
+        _assemble(fx)
+        (_run_dir(fx) / "run_metadata.json").write_text("{not json")
+        with pytest.raises(AssembleError, match="unscoped"):
+            _assemble(fx, force=True, package_filter=["baseline"])
+
     def test_scoped_assemble_refuses_on_legacy_shape(self, tmp_path):
         fx = _fx(tmp_path)
         _assemble(fx)
@@ -507,6 +582,33 @@ class TestScopedAssemble:
                   now_iso="2026-07-02T00:00:00Z")
         assert baseline.stat().st_mtime_ns != b_before
         assert sr.stat().st_mtime_ns != s_before
+
+
+class TestReplicasDefaulting:
+    """``replicas=None`` means "not specified" — 1 when unscoped (the
+    historical default), the run's recorded count when scoped."""
+
+    def test_unscoped_replicas_omitted_means_one(self, tmp_path):
+        fx = _fx(tmp_path)
+        _assemble(fx)  # no replicas= at all
+        names = sorted(
+            p.name for p in (_run_dir(fx) / "cluster").glob("pipelinerun-*.yaml")
+        )
+        assert names == [
+            "pipelinerun-wl-a|baseline|i1.yaml",
+            "pipelinerun-wl-a|sr|i1.yaml",
+        ]
+        rm = json.loads((_run_dir(fx) / "run_metadata.json").read_text())
+        assert rm["replicas"] == 1
+
+    def test_unscoped_replicas_omitted_still_trips_the_shrink_guard(self, tmp_path):
+        """Pre-existing behavior, preserved: an unscoped re-assemble that omits
+        --replicas resolves to 1, which is a shrink against a multi-replica run.
+        Only the scoped path reuses the recorded count."""
+        fx = _fx(tmp_path)
+        _assemble(fx, replicas=3)
+        with pytest.raises(AssembleError, match="#506"):
+            _assemble(fx, now_iso="2026-07-02T00:00:00Z")
 
 
 class TestAlreadyAssembledReport:
