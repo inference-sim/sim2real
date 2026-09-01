@@ -203,19 +203,25 @@ class TestAssembleReplicas:
         """Issue #532: --force must rebuild even when the manifest hash and
         --replicas match the prior assemble. Counterpart to
         test_reassemble_at_same_replica_count_is_noop — same setup, +force,
-        opposite mtime expectation."""
+        opposite mtime expectation.
+
+        Issue #876: the rebuild must NOT remove unrelated run-dir contents;
+        results/ lives there. Bytes are identical across the two calls when
+        inputs match, so mtime is the signal that the rewrite happened."""
         fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
                               algo_names_manifest=["sr"])
         _assemble(fx, replicas=3, now_iso="2026-07-01T00:00:00Z")
         run_dir = _run_dir_of(fx)
-        # Seed a sentinel to prove rmtree happened (bytes are byte-identical
-        # across the two calls when inputs match, so mtime is the only other
-        # signal we can rely on).
         (run_dir / "sentinel").write_text("leftover")
+        pr = _cluster_dir_of(fx) / "pipelinerun-wl-a|baseline|i3.yaml"
+        pr_mtime_before = pr.stat().st_mtime_ns
         time.sleep(0.01)
         _assemble(fx, replicas=3, force=True,
                   now_iso="2026-07-02T00:00:00Z")
-        assert not (run_dir / "sentinel").exists()
+        # PipelineRuns were rewritten...
+        assert pr.stat().st_mtime_ns != pr_mtime_before
+        # ...and unrelated run-dir contents survived (issue #876).
+        assert (run_dir / "sentinel").read_text() == "leftover"
         # Cluster/pipelinerun files present after rebuild.
         names = _pipelinerun_files(_cluster_dir_of(fx))
         assert "pipelinerun-wl-a|baseline|i3.yaml" in names
@@ -235,13 +241,18 @@ class TestAssembleReplicas:
                               algo_names_manifest=["sr"])
         _assemble(fx, replicas=3, now_iso="2026-07-01T00:00:00Z")
         run_dir = _run_dir_of(fx)
-        # Seed a sentinel to prove full rebuild (rmtree) rather than
-        # additive-grow (which would leave the sentinel in place).
         (run_dir / "sentinel").write_text("leftover")
+        # A full rebuild rewrites the pre-existing iterations; additive-grow
+        # leaves them byte- and mtime-identical, so i1's mtime is what
+        # distinguishes the two. Issue #876: the sentinel must survive either
+        # way — a rebuild is not a deletion of the run dir.
+        i1 = _cluster_dir_of(fx) / "pipelinerun-wl-a|baseline|i1.yaml"
+        i1_mtime_before = i1.stat().st_mtime_ns
         time.sleep(0.01)
         _assemble(fx, replicas=5, force=True,
                   now_iso="2026-07-02T00:00:00Z")
-        assert not (run_dir / "sentinel").exists()
+        assert i1.stat().st_mtime_ns != i1_mtime_before
+        assert (run_dir / "sentinel").read_text() == "leftover"
         # All five iterations present.
         names = _pipelinerun_files(_cluster_dir_of(fx))
         for i in (1, 2, 3, 4, 5):
@@ -280,7 +291,7 @@ class TestAssembleReplicas:
         names = _pipelinerun_files(_cluster_dir_of(fx))
         assert "pipelinerun-wl-a|baseline|i3.yaml" in names
 
-    def test_drift_with_force_rmtree_rebuilds(self, tmp_path):
+    def test_drift_with_force_rebuilds(self, tmp_path):
         fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
                               algo_names_manifest=["sr"])
         _assemble(fx, replicas=3)

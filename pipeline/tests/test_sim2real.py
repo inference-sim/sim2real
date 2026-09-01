@@ -2053,7 +2053,13 @@ class TestAssembleCommand:
         assert rc == 2
         assert "--force" in capsys.readouterr().err
 
-    def test_force_overwrites(self, tmp_path, capsys):
+    def test_force_rebuilds_and_keeps_unrelated_run_dir_contents(
+        self, tmp_path, capsys
+    ):
+        """Issue #876: --force repairs a run dir missing its metadata without
+        deleting the rest of it. The previous version of this test asserted the
+        sentinel was destroyed, which encoded the data-loss bug — collected
+        results/ live in the same directory."""
         thash = self._make_minimal_registration(tmp_path)
         cluster_id = self._bootstrap_experiment(tmp_path)
         existing = tmp_path / "workspace" / "runs" / "trial-1"
@@ -2070,7 +2076,9 @@ class TestAssembleCommand:
             ]
         )
         assert rc == 0
-        assert not (existing / "sentinel").exists()
+        assert (existing / "sentinel").read_text() == "leftover"
+        assert (existing / "manifest.assembly.yaml").exists()
+        assert (existing / "run_metadata.json").exists()
 
     def test_missing_translation_hash_errors(self, tmp_path, capsys):
         self._make_minimal_registration(tmp_path)

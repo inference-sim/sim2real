@@ -1347,7 +1347,14 @@ class TestAssembleRun:
             )
         assert (run_dir / "sentinel").read_text() == "leftover"
 
-    def test_force_overwrites_existing_run(self, tmp_path):
+    def test_force_rebuilds_without_destroying_unrelated_run_dir_contents(
+        self, tmp_path
+    ):
+        """Issue #876: --force regenerates PipelineRuns but no longer rmtrees
+        the run directory. The previous version of this test asserted the
+        sentinel was destroyed, which encoded the data-loss bug — collected
+        results/ live in the same directory, so the documented escape hatch for
+        'rebuild this run' also destroyed unrecoverable measured data."""
         fx = _make_experiment(
             tmp_path,
             algo_names_registered=["sr"],
@@ -1366,7 +1373,7 @@ class TestAssembleRun:
             force=True,
             now_iso="2026-07-01T14:05:00Z",
         )
-        assert not (run_dir / "sentinel").exists()
+        assert (run_dir / "sentinel").read_text() == "leftover"
         assert (run_dir / "manifest.assembly.yaml").exists()
 
     def test_missing_translation_dir_errors(self, tmp_path):

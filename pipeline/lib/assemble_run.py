@@ -536,6 +536,69 @@ def resolve_pair_scope(
     return [(wl, pkg) for wl in selected_wl for pkg in selected_pkg]
 
 
+def _confirm_results_wipe(displays: list[str]) -> bool:
+    """Ask before deleting collected results, returning True to proceed.
+
+    Reached only on row 2 of issue #876's table — a pair whose PipelineRun is
+    absent but whose results are present — where regeneration needs no flag and
+    the wipe would therefore happen without the operator having authorized any
+    data loss. Mirrors ``deploy wipe``'s pattern (enumerate the targets, ``[y/N]``,
+    EOF declines) so the two commands behave the same way.
+
+    This is the one place the module prints; tests monkeypatch it.
+    """
+    print(
+        "The following collected results will be deleted so their pairs can be "
+        "re-assembled:"
+    )
+    for d in displays:
+        print(f"    {d}")
+    try:
+        answer = input(f"Wipe {len(displays)} result director(ies)? [y/N] ")
+    except EOFError:
+        return False
+    return answer.strip().lower() == "y"
+
+
+def prune_orphan_cluster_files(
+    run_dir: Path,
+    *,
+    expected_pipelineruns: set[str],
+    package_names: list[str],
+) -> list[str]:
+    """Delete ``cluster/`` files the current manifest no longer describes.
+
+    Necessary because ``--force`` no longer ``rmtree``s the run directory
+    (issue #876). Without pruning, a ``transfer.yaml`` edit that drops a
+    workload or an algorithm would leave that pair's PipelineRun behind, and
+    ``deploy`` discovers pairs by globbing ``cluster/pipelinerun-*.yaml`` — so
+    the dropped pair would still be executed. The stale per-package scenario
+    YAMLs matter too: ``deploy`` falls back to the first non-PipelineRun YAML in
+    ``cluster/`` when ``baseline.yaml`` is absent, for GPU-config derivation.
+
+    Only ever called for an unscoped assemble — a scoped invocation has no
+    business judging pairs outside its scope. Collected ``results/`` for a
+    pruned pair are deliberately left in place: they are measured data, and not
+    destroying it is the point of this issue.
+
+    Returns the deleted filenames in sorted order.
+    """
+    cluster_dir_ = run_dir / "cluster"
+    if not cluster_dir_.is_dir():
+        return []
+    keep_scenarios = set(package_names)
+    removed: list[str] = []
+    for path in sorted(cluster_dir_.glob("*.yaml")):
+        if path.name.startswith("pipelinerun-"):
+            if path.name in expected_pipelineruns:
+                continue
+        elif path.stem in keep_scenarios:
+            continue
+        path.unlink()
+        removed.append(path.name)
+    return removed
+
+
 class PairPlan(NamedTuple):
     """What assemble will do to one ``(workload, package, iteration)`` triple.
 
@@ -616,15 +679,22 @@ def generate_pipelineruns(
     submodule_shas: dict,
     submodule_urls: dict,
     iterations: "range | list[int]" = range(1, 2),
+    triples: "set[tuple[str, str, int]] | None" = None,
 ) -> None:
     """Emit one PipelineRun YAML per (workload, package, iteration) tuple
     under ``cluster/``.
 
-    Filename shape: ``pipelinerun-<workload-safe>|<package>|i<N>.yaml``,
-    where ``<workload-safe>`` is the workload name with ``_`` replaced by
-    ``-`` and ``N`` is each element of ``iterations``. The ``|`` separators
-    make the derived pair key match the canonical grammar in
-    ``pipeline/lib/pairkey.py``.
+    Filename shape is owned by ``pipelinerun_filename``:
+    ``pipelinerun-<workload-safe>|<package>|i<N>.yaml``, where
+    ``<workload-safe>`` is the workload name with ``_`` replaced by ``-``
+    and ``N`` is each element of ``iterations``.
+
+    When *triples* is given, only ``(workload_name, package, iteration)``
+    members of that set are written; every other combination is skipped and
+    whatever is on disk for it is left byte- and mtime-identical. That is what
+    makes a scoped assemble non-destructive to out-of-scope pairs (issue #876).
+    When *triples* is ``None`` the full cross product of *packages* ×
+    *workloads* × *iterations* is emitted.
     """
     cluster_dir_ = run_dir / "cluster"
     cluster_dir_.mkdir(parents=True, exist_ok=True)
@@ -640,6 +710,10 @@ def generate_pipelineruns(
         for wl in workloads:
             wl_name = wl.get("name", wl.get("workload_name", "unknown"))
             for iteration in iterations:
+                if triples is not None and (
+                    wl_name, pkg_name, iteration
+                ) not in triples:
+                    continue
                 try:
                     pr = make_pipelinerun_scenario(
                         phase=pkg_name,
@@ -1002,26 +1076,58 @@ def assemble_run(
     experiment_root: Path,
     manifest_path: Path,
     force: bool,
-    replicas: int = 1,
+    replicas: "int | None" = None,
+    workload_filter: "list[str] | None" = None,
+    package_filter: "list[str] | None" = None,
+    no_wipe: bool = False,
+    assume_yes: bool = False,
     now_iso: str,
 ) -> None:
     """Materialize ``workspace/runs/<run_name>/`` per the design.
 
     Steps (per design §Commands → sim2real assemble):
-      1. Validate: translation dir + cluster_config exist; run_dir absent or
-         --force.
+      1. Validate: translation dir + cluster_config exist. An existing run_dir
+         is inspected, never deleted.
       2. Load manifest; filter algorithms to those in translation_output.json.
-      3. Snapshot assembly-slice → manifest.assembly.yaml; compute params_hash.
-      4. Resolve baseline (framework_defaults → bundle → baseline_overlay) and
+      3. Resolve baseline (framework_defaults → bundle → baseline_overlay) and
          each treatment (baseline_resolved → treatment diffs → per-algo overlay).
-      5. Inject image_tag into treatment scenarios; inject huggingface.secretName
+      4. Inject image_tag into treatment scenarios; inject huggingface.secretName
          into all scenarios.
-      6. Write cluster/{package}.yaml files.
-      7. Generate cluster/pipelinerun-*.yaml files.
-      8. Write run_metadata.json.
+      5. Resolve the pair scope and decide, per pair, whether to regenerate and
+         whether to wipe its collected results.
+      6. Confirm any un-flagged results wipe, then perform it.
+      7. Snapshot assembly-slice → manifest.assembly.yaml; compute params_hash
+         (unscoped only).
+      8. Write cluster/{package}.yaml for the packages in scope.
+      9. Generate cluster/pipelinerun-*.yaml for the pairs being regenerated.
+     10. Prune cluster/ files the manifest no longer describes (unscoped only).
+     11. Write run_metadata.json (unscoped only).
 
-    Raises AssembleError on any validation failure. Validation happens
-    before ``run_dir`` is (re)created — no partial writes on failure.
+    Raises AssembleError on any validation failure. Validation and the wipe
+    confirmation both happen before anything is written — declining the prompt
+    leaves the run exactly as it was.
+
+    ``force`` no longer removes the run directory (issue #876). It is a per-pair
+    predicate — "this PipelineRun already exists, redo it" — and the separate
+    ``no_wipe`` axis decides whether a redone pair's collected ``results/``
+    survive. Nothing outside the pairs in scope is deleted, except ``cluster/``
+    files the current manifest no longer describes (unscoped only, see
+    ``prune_orphan_cluster_files``). Because ``force`` is the long-documented
+    way to discard a run's results, it does not prompt; row 2 of the table
+    (PipelineRun absent, results present) regenerates without any flag and
+    therefore does, unless ``assume_yes`` or ``no_wipe`` is set.
+
+    Passing ``workload_filter`` or ``package_filter`` makes the invocation
+    *scoped*. A scoped assemble requires an existing run, rejects an explicit
+    ``replicas`` (it reuses the run's recorded count, so scoping cannot trip the
+    shrink guard), refuses on manifest drift regardless of ``force``, and writes
+    neither ``manifest.assembly.yaml`` nor ``run_metadata.json`` — so
+    ``params_hash`` keeps meaning "the last state in which the whole run was
+    consistent" and a later unscoped assemble still detects that drift.
+    ``cluster/<package>.yaml`` *is* rewritten for the packages in scope.
+
+    ``replicas`` of ``None`` means "not specified": 1 for an unscoped assemble
+    (the historical default), and the run's recorded count when scoped.
 
     ``translation_ref`` is the user-facing ref (alias/prefix/hash) as typed at
     the CLI. Used only in error messages — internal logic uses
@@ -1047,6 +1153,9 @@ def assemble_run(
     assemble_run.skipped_algorithms = []  # type: ignore[attr-defined]
     assemble_run.missing_submodules = []  # type: ignore[attr-defined]
     assemble_run.scalar_list_conflicts = []  # type: ignore[attr-defined]
+    assemble_run.already_assembled = 0  # type: ignore[attr-defined]
+    assemble_run.pruned_files = []  # type: ignore[attr-defined]
+    assemble_run.wiped_results = []  # type: ignore[attr-defined]
 
     # 1. Validation --------------------------------------------------------
     tdir = layout.translation_dir(translation_hash)
@@ -1071,99 +1180,144 @@ def assemble_run(
         raise AssembleError(f"cannot load manifest {manifest_path}: {exc}") from exc
 
     # 3. Existing-run decision tree (uses `manifest` for drift check) ------
+    #
+    # Nothing here deletes the run directory. The six `shutil.rmtree(run_dir)`
+    # calls this tree used to make were how `--force` destroyed collected
+    # results (issue #876); regeneration is now decided per pair, in step 5.
+    # What survives here is the set of conditions under which assemble must
+    # refuse outright, plus resolving how many iterations a pair has.
+    scoped = workload_filter is not None or package_filter is not None
     run_dir = layout.runs_dir() / run_name
     additive_grow_from: int | None = None
-    if run_dir.exists():
+    # A scoped assemble cannot repair run-wide state, because it does not
+    # rewrite manifest.assembly.yaml or run_metadata.json. Every structural
+    # problem below therefore sends the operator to an unscoped assemble.
+    _scoped_repair_hint = (
+        "repair it with an unscoped `sim2real assemble --force` before scoping."
+    )
+
+    if not run_dir.exists():
+        if scoped:
+            raise AssembleError(
+                "--workload/--package require an existing run: there is no "
+                f"runs/{run_name}/ to re-assemble a subset of. Assemble the "
+                "full run once first."
+            )
+        replicas_effective = 1 if replicas is None else replicas
+    else:
         prior_ma_path = run_dir / "manifest.assembly.yaml"
         prior_rm_path = run_dir / "run_metadata.json"
+        prior_ma: dict = {}
+        prior_rm: dict = {}
+        # `repairing` means the run's own metadata is unusable, so --force is
+        # rebuilding it from scratch and there is no prior replica count to
+        # honour or hash to compare against.
+        repairing = False
         if not (prior_ma_path.exists() and prior_rm_path.exists()):
+            if scoped:
+                raise AssembleError(
+                    f"run '{run_name}' is missing manifest.assembly.yaml or "
+                    f"run_metadata.json — {_scoped_repair_hint}"
+                )
             if not force:
                 raise AssembleError(
                     f"run directory '{run_name}' is missing manifest.assembly.yaml or "
                     f"run_metadata.json — pass --force to rebuild"
                 )
-            shutil.rmtree(run_dir)
+            repairing = True
         else:
             try:
                 prior_ma = yaml.safe_load(prior_ma_path.read_text()) or {}
                 prior_rm = json.loads(prior_rm_path.read_text())
             except (yaml.YAMLError, json.JSONDecodeError, OSError) as exc:
+                if scoped:
+                    raise AssembleError(
+                        f"run '{run_name}' has a corrupt manifest.assembly.yaml "
+                        f"or run_metadata.json: {exc} — {_scoped_repair_hint}"
+                    ) from exc
                 if not force:
                     raise AssembleError(
                         f"run '{run_name}' has a corrupt manifest.assembly.yaml "
                         f"or run_metadata.json: {exc} — pass --force to rebuild"
                     ) from exc
-                shutil.rmtree(run_dir)
-            else:
-                prior_replicas = (
-                    prior_ma.get("replicas") if isinstance(prior_ma, dict) else None
+                repairing = True
+
+        prior_replicas = (
+            prior_ma.get("replicas") if isinstance(prior_ma, dict) else None
+        )
+        if repairing or prior_replicas is None:
+            if not repairing:
+                # Legacy single-replica shape (pre-step-5).
+                if scoped:
+                    raise AssembleError(
+                        f"run '{run_name}' is in legacy single-replica shape "
+                        f"(pre-step-5) — {_scoped_repair_hint}"
+                    )
+                if not force:
+                    raise AssembleError(
+                        f"run '{run_name}' is in legacy single-replica shape "
+                        "(pre-step-5); create a fresh run to use --replicas, "
+                        "or pass --force to rebuild."
+                    )
+            replicas_effective = 1 if replicas is None else replicas
+        else:
+            if scoped and replicas is not None:
+                raise AssembleError(
+                    "--replicas cannot be combined with --workload/--package: "
+                    "a scoped assemble reuses the run's recorded replica count "
+                    f"({prior_replicas}). Grow the run with an unscoped "
+                    "`sim2real assemble --replicas` first."
                 )
-                if prior_replicas is None:
-                    if not force:
-                        raise AssembleError(
-                            f"run '{run_name}' is in legacy single-replica shape "
-                            "(pre-step-5); create a fresh run to use --replicas, "
-                            "or pass --force to rebuild."
-                        )
-                    shutil.rmtree(run_dir)
-                else:
-                    # Grow-only guard runs BEFORE the drift check because
-                    # --force bypasses drift but does NOT bypass grow-only.
-                    if replicas < prior_replicas:
-                        raise AssembleError(
-                            f"run '{run_name}' already has {prior_replicas} "
-                            f"replicas; refusing to shrink to {replicas}. "
-                            "Replica shrink is tracked in #506."
-                        )
-                    new_slice = slicer.assembly_slice(manifest)
-                    new_canonical = yaml.dump(
-                        new_slice, sort_keys=True, default_flow_style=False,
-                        allow_unicode=True,
-                    ).encode("utf-8")
-                    new_content_hash = hashlib.sha256(new_canonical).hexdigest()
-                    prior_params_hash = prior_rm.get("params_hash", "")
-                    if new_content_hash != prior_params_hash:
-                        if not force:
-                            raise AssembleError(
-                                f"manifest content changed since last assemble for "
-                                f"run '{run_name}'; pass --force to overwrite."
-                            )
-                        shutil.rmtree(run_dir)
-                    else:
-                        if replicas == prior_replicas:
-                            if force:
-                                # --force overrides the true-no-op path so
-                                # operators can rebuild when the assembler
-                                # code has changed even though inputs did not.
-                                shutil.rmtree(run_dir)
-                            else:
-                                # True no-op: reset side-band attrs and return.
-                                assemble_run.skipped_algorithms = []  # type: ignore[attr-defined]
-                                assemble_run.missing_submodules = []  # type: ignore[attr-defined]
-                                assemble_run.scalar_list_conflicts = []  # type: ignore[attr-defined]
-                                assemble_run.status = "noop"  # type: ignore[attr-defined]
-                                assemble_run.prior_assembled_at = (  # type: ignore[attr-defined]
-                                    str(prior_rm.get("assembled_at") or "")
-                                )
-                                return
-                        elif force:
-                            # replicas > prior_replicas with --force: full
-                            # rebuild rather than additive-grow. --force is
-                            # the "nuke and start over" escape hatch and
-                            # applies uniformly to every branch inside the
-                            # existing-run decision tree except shrink,
-                            # which is guarded above.
-                            shutil.rmtree(run_dir)
-                        else:
-                            # replicas > prior_replicas: additive grow.
-                            additive_grow_from = prior_replicas
+            # Scoped reuses the recorded count so that merely narrowing the
+            # scope cannot trip the shrink guard below.
+            replicas_effective = (
+                prior_replicas if scoped else (1 if replicas is None else replicas)
+            )
+            # Grow-only guard runs BEFORE the drift check because --force
+            # bypasses drift but does NOT bypass grow-only.
+            if replicas_effective < prior_replicas:
+                raise AssembleError(
+                    f"run '{run_name}' already has {prior_replicas} "
+                    f"replicas; refusing to shrink to {replicas_effective}. "
+                    "Replica shrink is tracked in #506."
+                )
+            new_slice = slicer.assembly_slice(manifest)
+            new_canonical = yaml.dump(
+                new_slice, sort_keys=True, default_flow_style=False,
+                allow_unicode=True,
+            ).encode("utf-8")
+            new_content_hash = hashlib.sha256(new_canonical).hexdigest()
+            prior_params_hash = prior_rm.get("params_hash", "")
+            if new_content_hash != prior_params_hash:
+                if scoped:
+                    # A scoped assemble leaves manifest.assembly.yaml and
+                    # params_hash alone, so it must not generate PipelineRuns
+                    # from a manifest the recorded snapshot no longer describes.
+                    raise AssembleError(
+                        f"transfer.yaml changed since run '{run_name}' was "
+                        "assembled; a scoped assemble does not record that. "
+                        "Re-assemble unscoped (`sim2real assemble --force`) "
+                        "first, then scope."
+                    )
+                if not force:
+                    raise AssembleError(
+                        f"manifest content changed since last assemble for "
+                        f"run '{run_name}'; pass --force to overwrite."
+                    )
+            elif replicas_effective > prior_replicas and not force:
+                # Additive grow. Unreachable when scoped: replicas_effective is
+                # pinned to prior_replicas there.
+                additive_grow_from = prior_replicas
+        assemble_run.prior_assembled_at = (  # type: ignore[attr-defined]
+            str(prior_rm.get("assembled_at") or "")
+        )
 
     if additive_grow_from is not None:
         grow_conflicts = _additive_grow(
             run_dir,
             manifest,
             prior_replicas=additive_grow_from,
-            new_replicas=replicas,
+            new_replicas=replicas_effective,
             now_iso=now_iso,
             experiment_root=experiment_root,
             translation_hash=translation_hash,
@@ -1203,17 +1357,81 @@ def assemble_run(
     assemble_run.missing_submodules = resolved.missing_submodules  # type: ignore[attr-defined]
     assemble_run.scalar_list_conflicts = resolved.scalar_list_conflicts  # type: ignore[attr-defined]
 
-    # 5. Snapshot assembly slice + params_hash ----------------------------
-    run_dir.mkdir(parents=True, exist_ok=True)
-    manifest_assembly_path = write_manifest_assembly(
-        run_dir, manifest, now_iso=now_iso, replicas=replicas
+    # 5. Resolve the pair scope and decide what to do per pair -------------
+    package_names = [name for name, _ in packages]
+    workload_names = [
+        wl.get("name", wl.get("workload_name", "unknown"))
+        for wl in resolved.workloads
+    ]
+    pair_scope = resolve_pair_scope(
+        workload_names=workload_names,
+        package_names=package_names,
+        workload_filter=workload_filter,
+        package_filter=package_filter,
     )
-    params_hash = compute_params_hash(manifest_assembly_path)
+    iterations = list(range(1, replicas_effective + 1))
+    plans = plan_pairs(
+        run_dir=run_dir,
+        scope=pair_scope,
+        iterations=iterations,
+        force=force,
+        no_wipe=no_wipe,
+    )
+    regen = [p for p in plans if p.regenerate]
+    if not regen:
+        # Every pair in scope already has its PipelineRun and --force was not
+        # given, so there is genuinely nothing to write. This replaces the old
+        # params_hash-keyed no-op, whose message claimed the inputs were
+        # unchanged — something params_hash cannot establish, since it covers
+        # only transfer.yaml's own fields and not the overlays or workload
+        # YAMLs that resolution reads.
+        assemble_run.status = "noop"  # type: ignore[attr-defined]
+        assemble_run.already_assembled = len(plans)  # type: ignore[attr-defined]
+        return
 
-    # 6. Write scenario YAMLs ---------------------------------------------
-    write_resolved_scenarios(run_dir, packages)
+    # 6. Confirm, then wipe, the results of pairs being regenerated --------
+    # Only prompt when --force was NOT what authorized the regeneration. With
+    # --force the wipe is the long-documented behavior and stays
+    # non-interactive so scripted use keeps working (--no-wipe is the opt-out).
+    # Without it, this is row 2 of the table — PipelineRun absent, results
+    # present — where measured data would die on a pair the operator never
+    # typed a flag for. The prompt precedes every write, so declining leaves
+    # the run exactly as it was.
+    to_wipe = [p for p in regen if p.wipe_results]
+    if to_wipe and not force and not assume_yes:
+        if not _confirm_results_wipe([p.results_display for p in to_wipe]):
+            raise AssembleError(
+                "aborted — pass --no-wipe to re-assemble while keeping the "
+                "collected results, or --yes to confirm the wipe"
+            )
+    for p in to_wipe:
+        shutil.rmtree(p.results_path)
+    assemble_run.wiped_results = [  # type: ignore[attr-defined]
+        p.results_display for p in to_wipe
+    ]
 
-    # 7. Generate PipelineRuns --------------------------------------------
+    # 7. Snapshot assembly slice + params_hash ----------------------------
+    # Skipped when scoped: params_hash must keep meaning "the last state in
+    # which the WHOLE run was consistent", so a later unscoped assemble still
+    # sees manifest drift rather than reporting nothing to do.
+    run_dir.mkdir(parents=True, exist_ok=True)
+    params_hash = ""
+    if not scoped:
+        manifest_assembly_path = write_manifest_assembly(
+            run_dir, manifest, now_iso=now_iso, replicas=replicas_effective
+        )
+        params_hash = compute_params_hash(manifest_assembly_path)
+
+    # 8. Write scenario YAMLs for the packages in scope --------------------
+    # These are advisory copies — the authoritative scenario is inlined into
+    # each PipelineRun — so rewriting them to the current overlay state is
+    # safe, and out-of-scope packages keep theirs untouched.
+    packages_in_scope = {pkg for _, pkg in pair_scope}
+    write_resolved_scenarios(
+        run_dir, [(name, res) for name, res in packages if name in packages_in_scope]
+    )
+
+    # 9. Generate PipelineRuns for the pairs being regenerated -------------
     generate_pipelineruns(
         run_dir=run_dir,
         packages=packages,
@@ -1225,36 +1443,58 @@ def assemble_run(
         model_name=resolved.model_name,
         submodule_shas=resolved.submodule_shas,
         submodule_urls=resolved.submodule_urls,
-        iterations=range(1, replicas + 1),
+        iterations=iterations,
+        triples={(p.workload, p.package, p.iteration) for p in regen},
     )
 
-    # 8. Write run_metadata.json ------------------------------------------
-    # image_tag is a single-image summary field for backward-compat; use the
-    # first *kept* algorithm's image_ref. Reading from kept_algos rather
-    # than tout["algorithms"][0] guards against the multi-algo case where
-    # translated_algos contains an algo that was filtered out of the run,
-    # which would otherwise leak a null image_tag past the built-algo check.
-    run_meta_image_tag = (
-        translated_algos[kept_algos[0]["name"]]["image_ref"]
-        if kept_algos else ""
-    )
-    # `scenario` is required by transfer.yaml (validated in sim2real.py before
-    # this call) and is used at deploy time to scope the progress ConfigMap
-    # per (scenario, run) so cross-experiment-root runs don't collide (#551).
-    write_run_metadata(
-        run_dir,
-        {
-            "version": 1,
-            "run_name": run_name,
-            "translation_hash": translation_hash,
-            "cluster_id": cluster_id,
-            "params_hash": params_hash,
-            "image_tag": run_meta_image_tag,
-            "replicas": replicas,
-            "assembled_at": now_iso,
-            "scenario": manifest.get("scenario", "") or "",
-        },
-    )
+    # 10. Prune cluster/ files the manifest no longer describes ------------
+    # Unscoped only. Needed because the run dir is no longer cleared: a
+    # transfer.yaml edit that drops a workload or algorithm would otherwise
+    # leave its PipelineRun on disk for deploy's glob to find.
+    if not scoped:
+        assemble_run.pruned_files = prune_orphan_cluster_files(  # type: ignore[attr-defined]
+            run_dir,
+            expected_pipelineruns={
+                pipelinerun_filename(wl, pkg, i)
+                for wl in workload_names
+                for pkg in package_names
+                for i in iterations
+            },
+            package_names=package_names,
+        )
+
+    # 11. Write run_metadata.json -----------------------------------------
+    # Skipped when scoped, for the same reason as manifest.assembly.yaml: it
+    # carries params_hash and the replica count, both of which describe the
+    # whole run.
+    if not scoped:
+        # image_tag is a single-image summary field for backward-compat; use the
+        # first *kept* algorithm's image_ref. Reading from kept_algos rather
+        # than tout["algorithms"][0] guards against the multi-algo case where
+        # translated_algos contains an algo that was filtered out of the run,
+        # which would otherwise leak a null image_tag past the built-algo check.
+        run_meta_image_tag = (
+            translated_algos[kept_algos[0]["name"]]["image_ref"]
+            if kept_algos else ""
+        )
+        # `scenario` is required by transfer.yaml (validated in sim2real.py
+        # before this call) and is used at deploy time to scope the progress
+        # ConfigMap per (scenario, run) so cross-experiment-root runs don't
+        # collide (#551).
+        write_run_metadata(
+            run_dir,
+            {
+                "version": 1,
+                "run_name": run_name,
+                "translation_hash": translation_hash,
+                "cluster_id": cluster_id,
+                "params_hash": params_hash,
+                "image_tag": run_meta_image_tag,
+                "replicas": replicas_effective,
+                "assembled_at": now_iso,
+                "scenario": manifest.get("scenario", "") or "",
+            },
+        )
     # Skipped-algorithm list exposed for the CLI wrapper to surface as warnings.
     assemble_run.skipped_algorithms = resolved.skipped_algo_names  # type: ignore[attr-defined]
     assemble_run.status = "written"  # type: ignore[attr-defined]
@@ -1267,3 +1507,6 @@ assemble_run.missing_submodules = []  # type: ignore[attr-defined]
 assemble_run.scalar_list_conflicts = []  # type: ignore[attr-defined]
 assemble_run.status = "written"  # type: ignore[attr-defined]
 assemble_run.prior_assembled_at = ""  # type: ignore[attr-defined]
+assemble_run.already_assembled = 0  # type: ignore[attr-defined]
+assemble_run.pruned_files = []  # type: ignore[attr-defined]
+assemble_run.wiped_results = []  # type: ignore[attr-defined]
