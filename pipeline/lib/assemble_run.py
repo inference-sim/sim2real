@@ -25,7 +25,7 @@ from typing import NamedTuple
 
 import yaml
 
-from pipeline.lib import cluster_ops, layout, slicer, translation_ref as _translation_ref
+from pipeline.lib import cluster_ops, layout, scope as _scope, slicer, translation_ref as _translation_ref
 # ``AssembleError`` lives in ``pipeline.lib.errors`` so low-level modules
 # (e.g. ``slicer``) can raise it without an import cycle. Re-exported below
 # to preserve the existing ``assemble_run.AssembleError`` API.
@@ -453,6 +453,89 @@ def write_resolved_scenarios(
     return cluster_dir_
 
 
+def pipelinerun_filename(workload: str, package: str, iteration: int) -> str:
+    """Filename of the PipelineRun YAML for one (workload, package, iteration).
+
+    Single source of truth for the ``_`` → ``-`` substitution applied to the
+    workload segment: the ``|`` separators make the derived pair key match the
+    canonical grammar in ``pipeline/lib/pairkey.py``, which does not admit
+    underscores.
+
+    The substitution is deliberately NOT applied to ``results/`` paths — those
+    carry the raw workload name, because that is what the cluster-side
+    collector writes. Anything comparing the two must go through
+    ``_normalize_scope_name``.
+    """
+    return f"pipelinerun-{workload.replace('_', '-')}|{package}|i{iteration}.yaml"
+
+
+def _normalize_scope_name(name: str) -> str:
+    """Comparison form for a ``--workload`` / ``--package`` filter value.
+
+    Workload names reach the operator in two spellings — raw (the workload
+    YAML, ``results/``) and ``_``-substituted (``cluster/pipelinerun-*``, and
+    therefore every pair key ``deploy`` prints). That substitution is slated
+    for deprecation; until then, normalizing both sides means the operator can
+    type either spelling instead of having to know which producer they are
+    naming.
+    """
+    return name.replace("_", "-")
+
+
+def _select_scope_names(
+    valid: list[str], raw_filter: "list[str] | None", flag: str
+) -> list[str]:
+    """Apply one scope filter to *valid*, preserving *valid*'s declared order.
+
+    Returns every name in *valid* when *raw_filter* is ``None``. Raises
+    :class:`AssembleError` naming the valid values when any filter value —
+    literal or glob — matches nothing, mirroring ``deploy``'s
+    ``_report_filter_mismatch`` habit of printing the alternatives.
+    """
+    values = _scope.parse_name_list(raw_filter)
+    if values is None:
+        return list(valid)
+    # Match on the normalized spelling but select the canonical names, so
+    # downstream path construction always uses the producer's own spelling.
+    by_norm: dict[str, str] = {}
+    for name in valid:
+        by_norm.setdefault(_normalize_scope_name(name), name)
+    expanded, unknown = _scope.expand_glob_values(
+        [_normalize_scope_name(v) for v in values], list(by_norm)
+    )
+    if unknown:
+        raise AssembleError(
+            f"{flag}: no match for {', '.join(sorted(set(unknown)))}. "
+            f"Valid {flag} values: {', '.join(valid)}"
+        )
+    selected = {by_norm[n] for n in expanded}
+    return [n for n in valid if n in selected]
+
+
+def resolve_pair_scope(
+    *,
+    workload_names: list[str],
+    package_names: list[str],
+    workload_filter: "list[str] | None",
+    package_filter: "list[str] | None",
+) -> list[tuple[str, str]]:
+    """Return the ``(workload, package)`` pairs in scope for this assemble.
+
+    Scope is the cross product of *workload_names* × *package_names*, narrowed
+    by the filters, in workload-major declared order. Both filters accept
+    comma-separated values and shell globs, matching ``deploy``'s
+    ``--workload`` / ``--package`` grammar — the parsing is literally shared,
+    see ``pipeline/lib/scope.py``.
+
+    Derived from the manifest rather than from ``deploy``'s ``_resolve_scope``,
+    which resolves pairs from the ConfigMap-backed progress store and therefore
+    needs a cluster namespace — unavailable and irrelevant at assemble time.
+    """
+    selected_wl = _select_scope_names(workload_names, workload_filter, "--workload")
+    selected_pkg = _select_scope_names(package_names, package_filter, "--package")
+    return [(wl, pkg) for wl in selected_wl for pkg in selected_pkg]
+
+
 def generate_pipelineruns(
     *,
     run_dir: Path,
@@ -489,7 +572,6 @@ def generate_pipelineruns(
         )
         for wl in workloads:
             wl_name = wl.get("name", wl.get("workload_name", "unknown"))
-            safe_wl = wl_name.replace("_", "-")
             for iteration in iterations:
                 try:
                     pr = make_pipelinerun_scenario(
@@ -510,7 +592,7 @@ def generate_pipelineruns(
                     )
                 except ValueError as exc:
                     raise AssembleError(str(exc)) from exc
-                fname = f"pipelinerun-{safe_wl}|{pkg_name}|i{iteration}.yaml"
+                fname = pipelinerun_filename(wl_name, pkg_name, iteration)
                 (cluster_dir_ / fname).write_text(
                     yaml.dump(pr, default_flow_style=False, allow_unicode=True)
                 )
