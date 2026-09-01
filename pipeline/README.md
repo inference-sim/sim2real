@@ -439,8 +439,21 @@ python pipeline/sim2real.py assemble \
     --cluster CLUSTER_ID \
     --run RUN_NAME \
     [--replicas N] \
-    [--force]
+    [--workload NAME ...] [--package NAME ...] \
+    [--force] [--no-wipe] [-y|--yes]
 ```
+
+| Flag | Required | Meaning |
+|------|----------|---------|
+| `--translation REF` | yes | Alias, hash prefix (min 4 chars), or full hash. |
+| `--cluster CLUSTER_ID` | yes | Matches `workspace/clusters/<id>/`. |
+| `--run RUN_NAME` | yes | Directory created at `workspace/runs/<run>/`. |
+| `--replicas N` | no | Iterations per (workload, package) pair. Default 1. Cannot be combined with `--workload` / `--package`. |
+| `--workload NAME ...` | no | Scope to these workloads. Comma- or space-separated; shell globs accepted. Requires an existing run. |
+| `--package NAME ...` | no | Scope to these packages (`baseline` or an algorithm name). Same grammar as `--workload`. |
+| `--force` | no | Re-generate PipelineRuns for pairs in scope that already have one, discarding their collected results unless `--no-wipe`. |
+| `--no-wipe` | no | Keep the collected results of pairs being re-generated. |
+| `-y`, `--yes` | no | Skip the confirmation prompt before deleting collected results. |
 
 `--translation` accepts an alias, a hash prefix (min 4 chars), or the full 64-char hash. Aliases are checked before prefixes, so a 4-char alias always resolves to its exact owner rather than a colliding hash prefix. Ambiguous prefixes exit 2 listing the candidates. Run `sim2real list translations` to see what's available.
 
@@ -481,16 +494,52 @@ Then each treatment scenario has `router.epp.image` set from that algorithm's ow
 
 **Additive-merge (grow-only).** Re-assembling an existing run with `--replicas` interacts with the prior state as follows (without `--force`):
 
-- `N == prior_replicas` — true no-op. No files rewritten. The CLI prints `No change needed for run '<run>': manifest, replicas, and translation are unchanged since <prior assembled_at>. To rebuild anyway (e.g. after an assembler code update), pass --force.` so operators can tell a no-op from an actual write; the past-tense `assembled run <name>` ack is reserved for paths that touched disk.
+- `N == prior_replicas` — nothing to regenerate. No files rewritten. The CLI prints `run '<run>': <n> pair(s) already assembled, nothing to do.` plus the flags that would change that. Note what this message does *not* claim: that the inputs are unchanged. `params_hash` covers only `transfer.yaml`'s own fields, and the translation is not compared at all, so assemble is in no position to assert it (issue #876). The past-tense `assembled run <name>` ack is reserved for paths that touched disk.
 - `N > prior_replicas` — additive grow. Existing PipelineRun files (`i1..i{prior}`) are preserved byte-for-byte and by mtime; new files are emitted for `i{prior+1}..iN`. `manifest.assembly.yaml` and `run_metadata.json` are rewritten with the new `replicas` count; `params_hash` is preserved (drift check passed).
 - `N < prior_replicas` — refused with `run '<name>' already has <prior> replicas; refusing to shrink to <N>. Replica shrink is tracked in #506.` This guard runs BEFORE every other check, so `--force` does NOT bypass it.
 
-**`--force` behavior.** With `--force`, the run directory is rebuilt from scratch (`shutil.rmtree` followed by a fresh assemble) in every branch of the decision tree above except shrink. Specifically, `--force` bypasses the no-op path (`N == prior_replicas`) AND the additive-grow path (`N > prior_replicas`) — both do a full rebuild. Use `--force` when the assembler code itself has changed and the on-disk yamls need to be regenerated even though `transfer.yaml` and `--replicas` are unchanged. Shrink is still refused (tracked in #506).
-
 Two invariants shape the grow-only path:
 
-- **Drift check.** The current assembly-slice content hash is compared against the run's recorded `params_hash`. Any mismatch refuses the assemble unless `--force` is passed — with `--force`, the whole run directory is rebuilt from scratch (existing `iN/` files are lost). Without `--force`, matching hashes are required to reach the additive-grow branch.
-- **Legacy-run guard.** A pre-step-5 run has no `replicas` field in its `manifest.assembly.yaml`. Any re-assemble against this shape is refused unless `--force`, whether or not `--replicas` was explicitly passed — the `--replicas` argparse default (`1`) still trips the guard. With `--force`, the run is rebuilt from scratch as a fresh replica-shaped run.
+- **Drift check.** The current assembly-slice content hash is compared against the run's recorded `params_hash`. Any mismatch refuses the assemble unless `--force` is passed. Without `--force`, matching hashes are required to reach the additive-grow branch.
+- **Legacy-run guard.** A pre-step-5 run has no `replicas` field in its `manifest.assembly.yaml`. Any re-assemble against this shape is refused unless `--force`, whether or not `--replicas` was explicitly passed. With `--force`, the run's metadata is rewritten as a fresh replica-shaped run.
+
+### Re-assembling: `--force`, `--no-wipe`, and scope
+
+`--force` does **not** delete the run directory. It used to (`shutil.rmtree` on every branch of the decision tree), and since `results/` lives inside the run directory, the documented escape hatch for "rebuild this run" also destroyed measured cluster data that cannot be recovered without re-running (issue #876).
+
+Re-assembly is now decided per `(workload, package, iteration)` triple, over the scope selected by `--workload` / `--package`, along two orthogonal axes:
+
+| axis | question | flag |
+|------|----------|------|
+| regenerate | this PipelineRun already exists — redo it? | `--force` |
+| results | results exist for a pair being regenerated — keep them? | `--no-wipe` |
+
+Giving four cases per triple. Both predicates are plain `Path.exists()` checks — on `cluster/pipelinerun-<wl>\|<pkg>\|iN.yaml` and `results/<pkg>/<wl>/iN/` respectively. No new state, no content hashing, no `run_metadata.json` schema change.
+
+| PipelineRun exists | results exist | behavior |
+|---|---|---|
+| no | no | generate |
+| no | yes | generate; wipe results unless `--no-wipe` — **prompts first** |
+| yes | no | nothing unless `--force` |
+| yes | yes | nothing unless `--force`; when `--force`, wipe results unless `--no-wipe` |
+
+The wipe axis only applies to pairs actually being regenerated: a pair left alone keeps its results regardless of flags.
+
+**Why only row 2 prompts.** Row 2 regenerates without the operator having typed any flag, so an unannounced wipe would destroy measured data nobody authorized. The prompt enumerates the target directories and reads `[y/N]`, mirroring `deploy wipe`; `--yes` skips it, EOF declines, and declining aborts with exit 2 having written nothing. `--force` stays non-interactive because discarding results is its long-documented behavior and prompting would break scripted use — `--force --no-wipe` is the way to regenerate YAML while keeping data.
+
+**Scoped assemble.** Passing `--workload` and/or `--package` narrows the pairs considered. Both accept comma- or space-separated values and shell globs, using the same grammar as `deploy` (literally the same code — `pipeline/lib/scope.py`). A value matching nothing exits 2 listing the valid values. Scope is derived from the manifest cross product, not from `deploy`'s progress store, which needs a cluster namespace that assemble does not have.
+
+A scoped assemble:
+
+- **requires an existing run** — there is no subset of a run that does not exist yet;
+- **rejects `--replicas`** and reuses the run's recorded count, so narrowing the scope cannot trip the shrink guard;
+- **refuses on `transfer.yaml` drift**, even with `--force`, and points at an unscoped assemble;
+- **refuses to repair** missing, corrupt, or legacy run metadata, and points at an unscoped `--force`;
+- **rewrites `cluster/<package>.yaml`** for the packages in scope. These are advisory copies — the authoritative scenario is inlined into each PipelineRun — read by `deploy` for GPU-config derivation and by `/sim2real-check` for config parity;
+- **leaves `manifest.assembly.yaml` and `run_metadata.json` untouched**, so `params_hash` keeps meaning "the last state in which the *whole* run was consistent" and a later unscoped assemble still detects drift rather than reporting nothing to do;
+- **prunes nothing** — every PipelineRun outside the scope stays byte- and mtime-identical.
+
+**Orphan pruning (unscoped only).** Because the run directory is no longer cleared, an unscoped assemble explicitly deletes `cluster/` files the current `transfer.yaml` no longer describes: PipelineRuns whose triple is outside the cross product, and per-package scenario YAMLs for packages that are gone. Without this, a manifest edit that drops a workload would leave its PipelineRun on disk for `deploy`'s `pipelinerun-*.yaml` glob to find and execute. Each removal prints a warning naming the file. The pruned pairs' `results/` are deliberately left in place.
 
 **PipelineRun name length.** `metadata.name` is `{phase}-{workload}-{run}-i{iteration}`. `phase` and `workload` are normalized (`_` → `-`) before assembly; `run` is used verbatim, so a run name containing underscores would produce an invalid DNS subdomain. This is a Kubernetes DNS subdomain, so the 253-char RFC 1123 limit applies. `assemble` validates each generated PipelineRun name and exits 2 with `error: PipelineRun name '<name>' is <len> chars, exceeds the 253-char DNS subdomain limit` if any pair (phase × workload × run × iteration) would overflow. The validator only checks length, not character validity — pick a kebab-case `--run` name to stay within DNS rules. Fail-fast at assemble time is preferable to Tekton admission rejection at dispatch time.
 
@@ -498,13 +547,16 @@ Two invariants shape the grow-only path:
 
 **Failure modes:**
 
-- Existing `runs/<run>/` without `--force` → exit 2 with `--force` hint. No writes.
+- Existing `runs/<run>/` whose `manifest.assembly.yaml` or `run_metadata.json` is missing or corrupt, without `--force` → exit 2 with `--force` hint. No writes.
 - Missing translation directory or `translation_output.json` → exit 2, no writes.
 - Missing `cluster_config.json` for `--cluster` → exit 2, no writes.
 - Workload file referenced in `transfer.yaml:workloads` missing → exit 2, no writes.
 - Malformed YAML anywhere in the input chain → exit 2, no writes.
+- `--workload` / `--package` value matching nothing → exit 2 listing the valid values. No writes.
+- `--workload` / `--package` against a run that does not exist, or alongside `--replicas` → exit 2. No writes.
+- Declining the results-wipe prompt → exit 2, no writes.
 
-`--force` recursively deletes `workspace/runs/<run>/` before re-materializing it.
+Validation and the wipe confirmation both run before anything is written, so every failure above leaves the run directory exactly as it was.
 
 ---
 
@@ -883,6 +935,7 @@ The same success gate applies — `trace_data.csv` under `workspace/runs/<run-na
 | `progress.py` | Progress persistence for the parallel pool orchestrator (ConfigMap store) |
 | `redact.py` | YAML redaction for collected plan files — stubs sensitive fields before writing to `results/` |
 | `resolve.py` | Powers `sim2real resolve --run` — hydrated run-view helper for the workspace |
+| `scope.py` | CLI filter-value primitives (`parse_name_list`, `is_glob`, `expand_glob_values`) shared by `deploy.py` and `sim2real assemble` so their `--workload` / `--package` grammar cannot drift |
 | `shadow.py` | Shadow GPU reservation ledger for `deploy.py` orchestrator |
 | `source_locator.py` | Source-location abstraction for `translation register --build` (PathLocation / GitLocation) |
 | `errors.py` | Shared exception types (`AssembleError`) — breaks import cycles between low-level modules (e.g. `slicer`) and high-level modules (e.g. `assemble_run`) |
@@ -1159,8 +1212,13 @@ If treatment uses the same InferenceObjectives as baseline, do NOT repeat them �
 # Assemble a run
 python pipeline/sim2real.py assemble --translation HASH --cluster CID --run trial-1
 
-# Re-assemble the same run (clobbers workspace/runs/trial-1/)
+# Re-assemble the same run (regenerates PipelineRuns; discards the results of
+# every pair it regenerates)
 python pipeline/sim2real.py assemble --translation HASH --cluster CID --run trial-1 --force
+
+# Re-assemble one package after editing its overlay, keeping collected results
+python pipeline/sim2real.py assemble --translation HASH --cluster CID --run trial-1 \
+    --package softreflective --force --no-wipe
 
 # Reset failed pairs without acting (preview the plan)
 python pipeline/deploy.py reset --dry-run

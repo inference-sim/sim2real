@@ -2103,7 +2103,7 @@ class TestAssembleCommand:
         assert rc2 == 0
         out = capsys.readouterr().out
         assert "assembled run trial-1" in out
-        assert "No change needed" not in out
+        assert "already assembled" not in out
 
     def test_refuses_existing_run_without_force(self, tmp_path, capsys):
         thash = self._make_minimal_registration(tmp_path)
