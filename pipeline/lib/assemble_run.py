@@ -497,9 +497,24 @@ def _select_scope_names(
         return list(valid)
     # Match on the normalized spelling but select the canonical names, so
     # downstream path construction always uses the producer's own spelling.
+    #
+    # Two names that normalize to the same string are refused rather than
+    # silently collapsed: keeping only the first would make the second
+    # unreachable AND make a filter value naming the second resolve to the
+    # first, so the wrong pair would be regenerated and (absent --no-wipe) the
+    # wrong pair's results deleted. Such a manifest is already broken — both
+    # names produce the same ``cluster/pipelinerun-*.yaml`` filename — but a
+    # scope filter must not be the thing that discovers it by destroying data.
     by_norm: dict[str, str] = {}
     for name in valid:
-        by_norm.setdefault(_normalize_scope_name(name), name)
+        norm = _normalize_scope_name(name)
+        if norm in by_norm and by_norm[norm] != name:
+            raise AssembleError(
+                f"{flag}: '{by_norm[norm]}' and '{name}' are indistinguishable "
+                "once '_' is normalized to '-', so no filter value can name one "
+                "without the other. Rename one in transfer.yaml."
+            )
+        by_norm[norm] = name
     expanded, unknown = _scope.expand_glob_values(
         [_normalize_scope_name(v) for v in values], list(by_norm)
     )
@@ -594,7 +609,20 @@ def prune_orphan_cluster_files(
                 continue
         elif path.stem in keep_scenarios:
             continue
-        path.unlink()
+        try:
+            path.unlink()
+        except OSError as exc:
+            # Normalized to AssembleError rather than escaping as a raw
+            # traceback: a stale PipelineRun left on disk is a correctness
+            # hazard (``deploy`` globs ``cluster/pipelinerun-*.yaml`` and would
+            # execute a pair the manifest no longer describes), so this has to
+            # fail loudly and in the CLI's own error shape.
+            raise AssembleError(
+                f"failed to remove stale cluster/{path.name}, which the current "
+                f"transfer.yaml no longer describes: {exc}. Leaving it in place "
+                "would let deploy execute that pair; remove it by hand and "
+                "re-run assemble."
+            ) from exc
         removed.append(path.name)
     return removed
 
@@ -1095,13 +1123,18 @@ def assemble_run(
          into all scenarios.
       5. Resolve the pair scope and decide, per pair, whether to regenerate and
          whether to wipe its collected results.
-      6. Confirm any un-flagged results wipe, then perform it.
-      7. Snapshot assembly-slice → manifest.assembly.yaml; compute params_hash
+      6. Confirm any un-flagged results wipe.
+      7. Prune cluster/ files the manifest no longer describes (unscoped only).
+      8. Wipe the results of the pairs being regenerated.
+      9. Snapshot assembly-slice → manifest.assembly.yaml; compute params_hash
          (unscoped only).
-      8. Write cluster/{package}.yaml for the packages in scope.
-      9. Generate cluster/pipelinerun-*.yaml for the pairs being regenerated.
-     10. Prune cluster/ files the manifest no longer describes (unscoped only).
-     11. Write run_metadata.json (unscoped only).
+     10. Write cluster/{package}.yaml for the packages in scope.
+     11. Generate cluster/pipelinerun-*.yaml for the pairs being regenerated.
+     12. Write run_metadata.json (unscoped only).
+
+    Steps 7 and 8 are both deletions and are ordered cheap-first: pruning
+    removes regenerable YAML, so a read-only filesystem or a permissions
+    problem aborts there, while the measured results are still on disk.
 
     Raises AssembleError on any validation failure. Validation and the wipe
     confirmation both happen before anything is written — declining the prompt
@@ -1186,7 +1219,16 @@ def assemble_run(
     # results (issue #876); regeneration is now decided per pair, in step 5.
     # What survives here is the set of conditions under which assemble must
     # refuse outright, plus resolving how many iterations a pair has.
-    scoped = workload_filter is not None or package_filter is not None
+    # Derive `scoped` from the SAME parse the filters actually go through.
+    # ``parse_name_list`` collapses a degenerate value (all whitespace, bare
+    # commas) to None, so testing the raw argv value here would take every
+    # scoped branch — skipping run_metadata.json, manifest.assembly.yaml and
+    # pruning — while ``resolve_pair_scope`` still returned the full cross
+    # product, leaving the run's own bookkeeping silently stale.
+    scoped = (
+        _scope.parse_name_list(workload_filter) is not None
+        or _scope.parse_name_list(package_filter) is not None
+    )
     run_dir = layout.runs_dir() / run_name
     additive_grow_from: int | None = None
     # A scoped assemble cannot repair run-wide state, because it does not
@@ -1222,7 +1264,8 @@ def assemble_run(
             if not force:
                 raise AssembleError(
                     f"run directory '{run_name}' is missing manifest.assembly.yaml or "
-                    f"run_metadata.json — pass --force to rebuild"
+                    "run_metadata.json — pass --force to rebuild (add "
+                    "--no-wipe to keep collected results)"
                 )
             repairing = True
         else:
@@ -1238,7 +1281,8 @@ def assemble_run(
                 if not force:
                     raise AssembleError(
                         f"run '{run_name}' has a corrupt manifest.assembly.yaml "
-                        f"or run_metadata.json: {exc} — pass --force to rebuild"
+                        f"or run_metadata.json: {exc} — pass --force to "
+                        "rebuild (add --no-wipe to keep collected results)"
                     ) from exc
                 repairing = True
 
@@ -1257,7 +1301,8 @@ def assemble_run(
                     raise AssembleError(
                         f"run '{run_name}' is in legacy single-replica shape "
                         "(pre-step-5); create a fresh run to use --replicas, "
-                        "or pass --force to rebuild."
+                        "or pass --force to rebuild (add --no-wipe to keep "
+                        "collected results)."
                     )
             replicas_effective = 1 if replicas is None else replicas
         else:
@@ -1389,7 +1434,7 @@ def assemble_run(
         assemble_run.already_assembled = len(plans)  # type: ignore[attr-defined]
         return
 
-    # 6. Confirm, then wipe, the results of pairs being regenerated --------
+    # 6. Confirm before destroying measured data ---------------------------
     # Only prompt when --force was NOT what authorized the regeneration. With
     # --force the wipe is the long-documented behavior and stays
     # non-interactive so scripted use keeps working (--no-wipe is the opt-out).
@@ -1404,13 +1449,47 @@ def assemble_run(
                 "aborted — pass --no-wipe to re-assemble while keeping the "
                 "collected results, or --yes to confirm the wipe"
             )
-    for p in to_wipe:
-        shutil.rmtree(p.results_path)
+    # 7. Prune cluster/ files the manifest no longer describes -------------
+    # Unscoped only. Needed because the run dir is no longer cleared: a
+    # transfer.yaml edit that drops a workload or algorithm would otherwise
+    # leave its PipelineRun on disk for deploy's glob to find.
+    #
+    # Deliberately ordered BEFORE the results wipe and before any write. Both
+    # are deletions, and this is the cheap one — regenerable YAML rather than
+    # measured data — so letting it go first means a read-only filesystem or a
+    # permissions problem aborts while the results are still on disk.
+    if not scoped:
+        assemble_run.pruned_files = prune_orphan_cluster_files(  # type: ignore[attr-defined]
+            run_dir,
+            expected_pipelineruns={
+                pipelinerun_filename(wl, pkg, i)
+                for wl in workload_names
+                for pkg in package_names
+                for i in iterations
+            },
+            package_names=package_names,
+        )
+
+    # 8. Wipe the results of pairs being regenerated -----------------------
+    for done, p in enumerate(to_wipe):
+        try:
+            shutil.rmtree(p.results_path)
+        except OSError as exc:
+            # Normalized to AssembleError so the CLI reports it in its own
+            # error shape. The count matters: the operator needs to know how
+            # much is already gone, and that nothing has been regenerated to
+            # replace it.
+            raise AssembleError(
+                f"failed to remove {p.results_display}: {exc}. "
+                f"{done} of {len(to_wipe)} result director(ies) were already "
+                "removed and no PipelineRun has been regenerated yet — re-run "
+                "to finish, or add --no-wipe to keep the rest."
+            ) from exc
     assemble_run.wiped_results = [  # type: ignore[attr-defined]
         p.results_display for p in to_wipe
     ]
 
-    # 7. Snapshot assembly slice + params_hash ----------------------------
+    # 9. Snapshot assembly slice + params_hash ----------------------------
     # Skipped when scoped: params_hash must keep meaning "the last state in
     # which the WHOLE run was consistent", so a later unscoped assemble still
     # sees manifest drift rather than reporting nothing to do.
@@ -1422,7 +1501,7 @@ def assemble_run(
         )
         params_hash = compute_params_hash(manifest_assembly_path)
 
-    # 8. Write scenario YAMLs for the packages in scope --------------------
+    # 10. Write scenario YAMLs for the packages in scope -------------------
     # These are advisory copies — the authoritative scenario is inlined into
     # each PipelineRun — so rewriting them to the current overlay state is
     # safe, and out-of-scope packages keep theirs untouched.
@@ -1431,7 +1510,7 @@ def assemble_run(
         run_dir, [(name, res) for name, res in packages if name in packages_in_scope]
     )
 
-    # 9. Generate PipelineRuns for the pairs being regenerated -------------
+    # 11. Generate PipelineRuns for the pairs being regenerated ------------
     generate_pipelineruns(
         run_dir=run_dir,
         packages=packages,
@@ -1447,23 +1526,7 @@ def assemble_run(
         triples={(p.workload, p.package, p.iteration) for p in regen},
     )
 
-    # 10. Prune cluster/ files the manifest no longer describes ------------
-    # Unscoped only. Needed because the run dir is no longer cleared: a
-    # transfer.yaml edit that drops a workload or algorithm would otherwise
-    # leave its PipelineRun on disk for deploy's glob to find.
-    if not scoped:
-        assemble_run.pruned_files = prune_orphan_cluster_files(  # type: ignore[attr-defined]
-            run_dir,
-            expected_pipelineruns={
-                pipelinerun_filename(wl, pkg, i)
-                for wl in workload_names
-                for pkg in package_names
-                for i in iterations
-            },
-            package_names=package_names,
-        )
-
-    # 11. Write run_metadata.json -----------------------------------------
+    # 12. Write run_metadata.json -----------------------------------------
     # Skipped when scoped, for the same reason as manifest.assembly.yaml: it
     # carries params_hash and the replica count, both of which describe the
     # whole run.

@@ -541,6 +541,10 @@ A scoped assemble:
 
 **Orphan pruning (unscoped only).** Because the run directory is no longer cleared, an unscoped assemble explicitly deletes `cluster/` files the current `transfer.yaml` no longer describes: PipelineRuns whose triple is outside the cross product, and per-package scenario YAMLs for packages that are gone. Without this, a manifest edit that drops a workload would leave its PipelineRun on disk for `deploy`'s `pipelinerun-*.yaml` glob to find and execute. Each removal prints a warning naming the file. The pruned pairs' `results/` are deliberately left in place.
 
+Pruning runs **before** the results wipe. Both are deletions, and this is the cheap one — regenerable YAML rather than measured data — so a read-only filesystem or a permissions problem aborts there, while the results are still on disk. Either delete failing raises `AssembleError` rather than a raw traceback; the results-wipe message names how many directories were already removed, since nothing has been regenerated to replace them.
+
+**Filter-value normalization.** `--workload` / `--package` values are compared with `_` normalized to `-`, so either spelling of a workload name matches. If two *declared* names differ only by that character they are indistinguishable to a filter, and assemble refuses rather than silently selecting one of them — such a manifest is already broken (both names produce the same `cluster/pipelinerun-*.yaml` filename), but a scope filter must not be what discovers it by deleting the wrong pair's results. The check only runs when a filter is given, so it does not retroactively reject an unscoped assemble.
+
 **PipelineRun name length.** `metadata.name` is `{phase}-{workload}-{run}-i{iteration}`. `phase` and `workload` are normalized (`_` → `-`) before assembly; `run` is used verbatim, so a run name containing underscores would produce an invalid DNS subdomain. This is a Kubernetes DNS subdomain, so the 253-char RFC 1123 limit applies. `assemble` validates each generated PipelineRun name and exits 2 with `error: PipelineRun name '<name>' is <len> chars, exceeds the 253-char DNS subdomain limit` if any pair (phase × workload × run × iteration) would overflow. The validator only checks length, not character validity — pick a kebab-case `--run` name to stay within DNS rules. Fail-fast at assemble time is preferable to Tekton admission rejection at dispatch time.
 
 **Algorithm filtering:** algorithms listed in `transfer.yaml:algorithms` but absent from `translation_output.json:algorithms` are skipped with a warning — the run still assembles for the algorithms that are registered. Algorithms that ARE in the translation but whose `image_ref` is still `null` (skill-driven translation before `sim2real build`) fail fast: `assemble` exits 2 with `translation <ref> not built for algorithms: <names> — run 'sim2real build --translation <ref>' first`.
@@ -554,7 +558,9 @@ A scoped assemble:
 - Malformed YAML anywhere in the input chain → exit 2, no writes.
 - `--workload` / `--package` value matching nothing → exit 2 listing the valid values. No writes.
 - `--workload` / `--package` against a run that does not exist, or alongside `--replicas` → exit 2. No writes.
+- `--workload` / `--package` given when two declared names normalize to the same string → exit 2 naming both. No writes.
 - Declining the results-wipe prompt → exit 2, no writes.
+- A `cluster/` file the manifest no longer describes cannot be deleted → exit 2, no writes and no results wiped.
 
 Validation and the wipe confirmation both run before anything is written, so every failure above leaves the run directory exactly as it was.
 

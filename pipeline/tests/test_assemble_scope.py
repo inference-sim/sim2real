@@ -95,6 +95,43 @@ class TestResolvePairScope:
         with pytest.raises(AssembleError, match="--package"):
             _scope(package_filter=["zzz*"])
 
+    def test_names_colliding_under_normalization_are_refused(self):
+        """Two names differing only by `_` vs `-` normalize to the same string.
+        Silently keeping the first would make the second unreachable AND make a
+        filter naming the second resolve to the first — regenerating, and
+        (absent --no-wipe) deleting the results of, the wrong pair."""
+        with pytest.raises(AssembleError) as exc:
+            _scope(
+                workload_names=["chat-workload", "chat_workload"],
+                workload_filter=["chat_workload"],
+            )
+        msg = str(exc.value)
+        assert "chat-workload" in msg and "chat_workload" in msg
+        assert "--workload" in msg
+
+    def test_package_collision_is_refused_too(self):
+        with pytest.raises(AssembleError, match="--package"):
+            _scope(package_names=["a_b", "a-b"], package_filter=["a-b"])
+
+    def test_collision_check_only_fires_when_a_filter_is_given(self):
+        """An unscoped assemble of such a manifest is left alone — the guard
+        exists to stop a filter from silently selecting the wrong pair, not to
+        retroactively reject manifests that already work (badly)."""
+        assert _scope(workload_names=["a_b", "a-b"]) == [
+            ("a_b", "baseline"), ("a_b", "sr"),
+            ("a-b", "baseline"), ("a-b", "sr"),
+        ]
+
+    def test_repeated_identical_name_is_not_a_collision(self):
+        """The guard fires on two *different* names that normalize alike, not on
+        the same name declared twice. A duplicated declaration still yields
+        duplicate pairs — pre-existing behavior, matching the unfiltered path,
+        and harmless because regenerating a pair twice is idempotent."""
+        assert _scope(workload_names=["w", "w"], workload_filter=["w"]) == [
+            ("w", "baseline"), ("w", "sr"),
+            ("w", "baseline"), ("w", "sr"),
+        ]
+
 
 class TestConfirmResultsWipe:
     """The prompt is the only guard standing between an un-flagged
@@ -582,6 +619,143 @@ class TestScopedAssemble:
                   now_iso="2026-07-02T00:00:00Z")
         assert baseline.stat().st_mtime_ns != b_before
         assert sr.stat().st_mtime_ns != s_before
+
+
+class TestDegenerateFilterValueIsNotScoped:
+    """`scoped` must be derived from the same parse the filters go through.
+
+    ``parse_name_list`` collapses an all-whitespace / bare-comma value to None.
+    Testing the raw argv value instead would take every scoped branch — skipping
+    run_metadata.json, manifest.assembly.yaml and pruning — while the filter
+    still resolved to the full cross product, leaving the run's own bookkeeping
+    silently stale."""
+
+    @pytest.mark.parametrize("degenerate", ([" "], [","], ["", " ,"]))
+    def test_degenerate_value_still_writes_run_wide_files(self, tmp_path, degenerate):
+        fx = _fx(tmp_path)
+        _assemble(fx)
+        run_dir = _run_dir(fx)
+        rm = run_dir / "run_metadata.json"
+        rm_mtime = rm.stat().st_mtime_ns
+        # Force a regeneration so the write path is actually reached.
+        (run_dir / "cluster" / "pipelinerun-wl-a|baseline|i1.yaml").unlink()
+        time.sleep(0.01)
+        _assemble(fx, workload_filter=degenerate, now_iso="2026-07-02T00:00:00Z")
+        assert rm.stat().st_mtime_ns != rm_mtime
+
+    def test_degenerate_value_does_not_bypass_the_missing_run_guard(self, tmp_path):
+        """A degenerate filter is unscoped, so it must assemble a fresh run
+        rather than hit the 'scoped needs an existing run' refusal."""
+        fx = _fx(tmp_path)
+        _assemble(fx, workload_filter=[" "])
+        assert (_run_dir(fx) / "run_metadata.json").exists()
+
+    def test_degenerate_value_still_prunes(self, tmp_path):
+        fx = _fx(tmp_path)
+        _assemble(fx)
+        orphan = _run_dir(fx) / "cluster" / "pipelinerun-wl-gone|baseline|i1.yaml"
+        orphan.write_text("stale\n")
+        _assemble(fx, force=True, assume_yes=True, workload_filter=[","],
+                  now_iso="2026-07-02T00:00:00Z")
+        assert not orphan.exists()
+
+
+class TestDeleteFailuresBecomeAssembleErrors:
+    """Both delete loops normalize OSError to AssembleError so the CLI reports
+    them in its own shape rather than as a raw traceback."""
+
+    def test_results_wipe_failure_names_the_progress(self, tmp_path, monkeypatch):
+        fx = _fx(tmp_path)
+        _assemble(fx)
+        run_dir = _run_dir(fx)
+        (run_dir / "cluster" / "pipelinerun-wl-a|baseline|i1.yaml").unlink()
+        _seed_results(run_dir, "baseline")
+
+        def _boom(_path):
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr(assemble_run.shutil, "rmtree", _boom)
+        with pytest.raises(AssembleError) as exc:
+            _assemble(fx, assume_yes=True, now_iso="2026-07-02T00:00:00Z")
+        msg = str(exc.value)
+        assert "read-only file system" in msg
+        assert "0 of 1" in msg
+        assert "--no-wipe" in msg
+
+    def test_prune_failure_explains_the_deploy_hazard(self, tmp_path, monkeypatch):
+        fx = _fx(tmp_path)
+        _assemble(fx)
+        orphan = _run_dir(fx) / "cluster" / "pipelinerun-wl-gone|baseline|i1.yaml"
+        orphan.write_text("stale\n")
+        real_unlink = assemble_run.Path.unlink
+
+        def _boom(self, *a, **kw):
+            if self.name == "pipelinerun-wl-gone|baseline|i1.yaml":
+                raise OSError("permission denied")
+            return real_unlink(self, *a, **kw)
+
+        monkeypatch.setattr(assemble_run.Path, "unlink", _boom)
+        with pytest.raises(AssembleError) as exc:
+            _assemble(fx, force=True, assume_yes=True,
+                      now_iso="2026-07-02T00:00:00Z")
+        msg = str(exc.value)
+        assert "permission denied" in msg
+        assert "pipelinerun-wl-gone|baseline|i1.yaml" in msg
+        assert "deploy" in msg
+
+    def test_prune_runs_before_the_results_wipe(self, tmp_path, monkeypatch):
+        """Ordered cheap-delete-first: a filesystem problem aborts while the
+        measured results are still on disk."""
+        fx = _fx(tmp_path)
+        _assemble(fx)
+        run_dir = _run_dir(fx)
+        (run_dir / "cluster" / "pipelinerun-wl-gone|baseline|i1.yaml").write_text("x\n")
+        results = _seed_results(run_dir, "baseline")
+        real_unlink = assemble_run.Path.unlink
+
+        def _boom(self, *a, **kw):
+            if self.name == "pipelinerun-wl-gone|baseline|i1.yaml":
+                raise OSError("permission denied")
+            return real_unlink(self, *a, **kw)
+
+        monkeypatch.setattr(assemble_run.Path, "unlink", _boom)
+        with pytest.raises(AssembleError, match="permission denied"):
+            _assemble(fx, force=True, assume_yes=True,
+                      now_iso="2026-07-02T00:00:00Z")
+        # The prune aborted first, so the results were never touched.
+        assert (results / "trace_data.csv").read_text() == "measured\n"
+
+
+class TestRepairMessagesMentionNoWipe:
+    """The repair guards tell the operator to pass --force, which then wipes
+    every pair's results non-interactively. The messages say so."""
+
+    def test_missing_metadata_message(self, tmp_path):
+        fx = _fx(tmp_path)
+        _assemble(fx)
+        (_run_dir(fx) / "run_metadata.json").unlink()
+        with pytest.raises(AssembleError) as exc:
+            _assemble(fx, now_iso="2026-07-02T00:00:00Z")
+        assert "--no-wipe" in str(exc.value)
+
+    def test_corrupt_metadata_message(self, tmp_path):
+        fx = _fx(tmp_path)
+        _assemble(fx)
+        (_run_dir(fx) / "run_metadata.json").write_text("{not json")
+        with pytest.raises(AssembleError) as exc:
+            _assemble(fx, now_iso="2026-07-02T00:00:00Z")
+        assert "--no-wipe" in str(exc.value)
+
+    def test_legacy_shape_message(self, tmp_path):
+        fx = _fx(tmp_path)
+        _assemble(fx)
+        ma_path = _run_dir(fx) / "manifest.assembly.yaml"
+        ma = yaml.safe_load(ma_path.read_text())
+        ma.pop("replicas", None)
+        ma_path.write_text(yaml.dump(ma, sort_keys=False))
+        with pytest.raises(AssembleError) as exc:
+            _assemble(fx, replicas=3, now_iso="2026-07-02T00:00:00Z")
+        assert "--no-wipe" in str(exc.value)
 
 
 class TestReplicasDefaulting:
