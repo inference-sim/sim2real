@@ -149,13 +149,16 @@ class TestAssembleReplicas:
         assert assemble_run.assemble_run.status == "written"
         assert assemble_run.assemble_run.prior_assembled_at == ""
 
-    def test_additive_grow_surfaces_newly_introduced_scalar_conflict(self, tmp_path):
-        """#851: the grow path must NOT discard scalar_list_conflicts.
+    def test_additive_grow_reports_no_conflict_because_it_merges_nothing(
+        self, tmp_path,
+    ):
+        """#851 surfaced scalar-list conflicts on the grow path because grow
+        re-merged the overlays. #877 removed that merge — grow now copies each
+        pair's own i1 — so there is nothing on this path that can conflict.
 
-        The drift check hashes only ``slicer.assembly_slice(manifest)``, i.e.
-        transfer.yaml. The baseline/overlay YAMLs that resolution actually merges
-        sit outside that hash, so editing one and then bumping --replicas takes
-        the additive-grow branch with a conflict that has never been reported.
+        The information is not lost: the same conflict is reported by the next
+        full assemble, which does merge. This test asserts both halves, so a
+        future change that silently stops reporting it anywhere still fails.
         """
         fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
                               algo_names_manifest=["sr"])
@@ -176,8 +179,14 @@ class TestAssembleReplicas:
         )
 
         _assemble(fx, replicas=5, now_iso="2026-07-02T00:00:00Z")
-        # Grow path was taken (not a full rebuild).
+        # Grow path was taken (not a full rebuild) and reported nothing.
         assert assemble_run.assemble_run.status == "written"
+        assert assemble_run.assemble_run.scalar_list_conflicts == []
+
+        # The next full assemble does resolve, and does report it.
+        # No results exist in this fixture, so --force has nothing to wipe and
+        # does not prompt.
+        _assemble(fx, replicas=5, force=True, now_iso="2026-07-03T00:00:00Z")
         conflicts = assemble_run.assemble_run.scalar_list_conflicts
         assert len(conflicts) >= 1
         assert any("scenario.router.proxy.args" in c for c in conflicts)
@@ -409,38 +418,54 @@ class TestAssembleReplicas:
         names = _pipelinerun_files(_cluster_dir_of(fx))
         assert "pipelinerun-wl-a|baseline|i2.yaml" in names
 
-    def test_additive_grow_missing_scenario_file_raises_assemble_error(
-        self, tmp_path,
-    ):
-        """Grow path must raise AssembleError (not AttributeError) if a
-        referenced scenario file has been deleted between prior assemble
-        and the grow call. Verifies scenario-resolution failures inside
-        the shared `_resolve_packages` helper stay in the AssembleError
-        contract on the grow path."""
+    def test_additive_grow_ignores_a_deleted_scenario_file(self, tmp_path):
+        """This used to refuse, as a side effect of grow re-resolving. #877
+        removed the resolution: grow copies each pair's own i1, so a scenario
+        file it never reads cannot fail it — and the grown iterations are
+        unaffected, having been derived from an i1 built while the file existed.
+
+        The counterpart guarantee still holds: the translation directory and
+        translation_output.json are validated in assemble_run's step 1, ahead of
+        the decision tree, so a deleted translation still refuses. See
+        test_grow_still_refuses_a_deleted_translation_dir.
+        """
         fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
                               algo_names_manifest=["sr"])
         _assemble(fx, replicas=3)
-        # Delete the baseline scenario file that transfer.yaml references.
         (fx["exp_root"] / "baselines" / "base.yaml").unlink()
-        with pytest.raises(assemble_run.AssembleError,
-                           match="baseline scenario not found"):
-            _assemble(fx, replicas=5)
+        _assemble(fx, replicas=5)
+        names = _pipelinerun_files(_cluster_dir_of(fx))
+        assert "pipelinerun-wl-a|baseline|i5.yaml" in names
+        assert "pipelinerun-wl-a|sr|i5.yaml" in names
 
-    def test_additive_grow_corrupt_translation_output_raises_assemble_error(
-        self, tmp_path,
-    ):
-        """Grow path must raise AssembleError (not raw ValueError /
-        JSONDecodeError) if translation_output.json has been corrupted
-        between prior assemble and the grow call. Verifies the wrapped
-        `read_translation_output` call lifted into `_resolve_packages`."""
+    def test_additive_grow_ignores_a_corrupt_translation_output(self, tmp_path):
+        """Same as above for translation_output.json: the library's grow path no
+        longer reads it. Note the CLI still does — `_cmd_assemble` reads it for
+        the unbuilt-image check before calling in — so `sim2real assemble` itself
+        continues to refuse here. This asserts the library contract only.
+        """
         fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
                               algo_names_manifest=["sr"])
         _assemble(fx, replicas=3)
         tout = (fx["exp_root"] / "workspace" / "translations"
                 / fx["translation_hash"] / "translation_output.json")
         tout.write_text("{not-json")
+        _assemble(fx, replicas=5)
+        assert "pipelinerun-wl-a|sr|i5.yaml" in _pipelinerun_files(
+            _cluster_dir_of(fx)
+        )
+
+    def test_grow_still_refuses_a_deleted_translation_dir(self, tmp_path):
+        """Step-1 validation runs ahead of the decision tree, so dropping
+        resolution from the grow path did not weaken this."""
+        fx = _make_experiment(tmp_path, algo_names_registered=["sr"],
+                              algo_names_manifest=["sr"])
+        _assemble(fx, replicas=3)
+        import shutil as _shutil
+        _shutil.rmtree(fx["exp_root"] / "workspace" / "translations"
+                       / fx["translation_hash"])
         with pytest.raises(assemble_run.AssembleError,
-                           match="not valid JSON"):
+                           match="translation directory not found"):
             _assemble(fx, replicas=5)
 
     def test_additive_grow_backfills_scenario_for_legacy_run(self, tmp_path):
