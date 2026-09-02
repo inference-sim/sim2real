@@ -892,9 +892,77 @@ def _retarget_pipelinerun_iteration(
     )
 
 
+class GrowPlan(NamedTuple):
+    """What :func:`build_grown_iterations` resolved, before anything is written.
+
+    ``built`` is the ``(filename, PipelineRun dict)`` list to write; ``ignored``
+    names the ``cluster/pipelinerun-*.yaml`` files whose names did not parse and
+    were therefore skipped, so the caller can say so rather than leaving the
+    operator to notice a pair silently never grew.
+    """
+
+    built: list[tuple[str, dict]]
+    ignored: list[str]
+
+
+def build_grown_iterations(
+    run_dir: Path, *, prior_replicas: int, new_replicas: int
+) -> GrowPlan:
+    """Build ``i{prior_replicas+1}..i{new_replicas}`` for every pair on disk by
+    copying that pair's own ``i1``. Touches no filesystem beyond reading.
+
+    Split from :func:`write_pipelineruns` for the same reason
+    :func:`build_pipelineruns` is: every refusal — an unparseable source
+    document, a name that does not end in the expected iteration, a grown name
+    over the 253-char limit, a missing ``replica`` param — has to happen before
+    the first file is written. Interleaving them would let a refusal on a later
+    pair leave earlier pairs' new iterations on disk while
+    ``run_metadata.json`` still recorded the old replica count, and ``deploy``
+    discovers iterations by globbing ``cluster/pipelinerun-*.yaml`` — so it
+    would execute iterations the metadata never claimed.
+    """
+    cluster_dir_ = run_dir / "cluster"
+    sources: dict[str, Path] = {}
+    pairs: set[str] = set()
+    ignored: list[str] = []
+    for path in sorted(cluster_dir_.glob("pipelinerun-*.yaml")):
+        parsed = _pipelinerun_pair_and_iteration(path)
+        if parsed is None:
+            ignored.append(path.name)
+            continue
+        pair, iteration = parsed
+        pairs.add(pair)
+        if iteration == _GROW_SOURCE_ITERATION:
+            sources[pair] = path
+
+    missing = sorted(pairs - set(sources))
+    if missing:
+        raise AssembleError(
+            "cannot grow replicas: "
+            + ", ".join(
+                f"'{p}' has no i{_GROW_SOURCE_ITERATION}" for p in missing
+            )
+            + f". Every pair grows from its own i{_GROW_SOURCE_ITERATION}, so it "
+            "must be present. Restore it, or re-assemble the run with --force."
+        )
+
+    built: list[tuple[str, dict]] = []
+    for pair in sorted(sources):
+        base = _load_yaml(sources[pair])
+        for iteration in range(prior_replicas + 1, new_replicas + 1):
+            grown = copy.deepcopy(base)
+            _retarget_pipelinerun_iteration(
+                grown,
+                source_iteration=_GROW_SOURCE_ITERATION,
+                iteration=iteration,
+            )
+            built.append((f"{pair}|i{iteration}.yaml", grown))
+    return GrowPlan(built=built, ignored=ignored)
+
+
 def grow_pair_iterations(
     run_dir: Path, *, prior_replicas: int, new_replicas: int
-) -> list[str]:
+) -> GrowPlan:
     """Emit ``i{prior_replicas+1}..i{new_replicas}`` for every pair on disk by
     copying that pair's own ``i1``.
 
@@ -921,48 +989,17 @@ def grow_pair_iterations(
     function exists to remove. Pre-existing divergence among ``i1..i_prior`` is
     NOT repaired — only the new iterations are made to match ``i1``.
 
-    Returns the written filenames, sorted.
+    Build-then-write: :func:`build_grown_iterations` resolves and validates every
+    grown document first, so a refusal on any pair leaves the run untouched
+    rather than half-grown.
+
+    Returns the :class:`GrowPlan`, whose ``built`` entries have all been written.
     """
-    cluster_dir_ = run_dir / "cluster"
-    sources: dict[str, Path] = {}
-    pairs: set[str] = set()
-    for path in sorted(cluster_dir_.glob("pipelinerun-*.yaml")):
-        parsed = _pipelinerun_pair_and_iteration(path)
-        if parsed is None:
-            continue
-        pair, iteration = parsed
-        pairs.add(pair)
-        if iteration == _GROW_SOURCE_ITERATION:
-            sources[pair] = path
-
-    missing = sorted(pairs - set(sources))
-    if missing:
-        raise AssembleError(
-            "cannot grow replicas: "
-            + ", ".join(
-                f"'{p}' has no i{_GROW_SOURCE_ITERATION}" for p in missing
-            )
-            + f". Every pair grows from its own i{_GROW_SOURCE_ITERATION}, so it "
-            "must be present. Restore it, or re-assemble the run with --force."
-        )
-
-    written: list[str] = []
-    for pair in sorted(sources):
-        base = _load_yaml(sources[pair])
-        for iteration in range(prior_replicas + 1, new_replicas + 1):
-            grown = copy.deepcopy(base)
-            _retarget_pipelinerun_iteration(
-                grown,
-                source_iteration=_GROW_SOURCE_ITERATION,
-                iteration=iteration,
-            )
-            fname = f"{pair}|i{iteration}.yaml"
-            _write_text_or_raise(
-                cluster_dir_ / fname,
-                yaml.dump(grown, default_flow_style=False, allow_unicode=True),
-            )
-            written.append(fname)
-    return sorted(written)
+    plan = build_grown_iterations(
+        run_dir, prior_replicas=prior_replicas, new_replicas=new_replicas
+    )
+    write_pipelineruns(run_dir, plan.built)
+    return plan
 
 
 def _validate_workload(data: dict, wl_path: Path) -> None:
@@ -1248,11 +1285,17 @@ def _additive_grow(
       ``assemble_run``'s step 1, ahead of the decision tree, and the CLI's
       unbuilt-image check reads the latter — so a deleted translation still
       refuses. A deleted *scenario* file no longer does, which is correct: the
-      grown iterations were never resolved from it.
+      grown iterations were never resolved from it. Note that
+      ``translation_output.json`` being *parseable* is likewise no longer checked
+      here: step 1 only checks that it exists, and the CLI's own unbuilt-image
+      pre-check is what refuses a corrupt one. That makes it a CLI-level
+      guarantee rather than a library-level one — a direct library caller that
+      does not replicate that pre-check can grow a run whose translation record
+      is unreadable.
 
-    Returns the filenames written.
+    Returns the :class:`GrowPlan`.
     """
-    written = grow_pair_iterations(
+    plan = grow_pair_iterations(
         run_dir, prior_replicas=prior_replicas, new_replicas=new_replicas
     )
 
@@ -1270,7 +1313,7 @@ def _additive_grow(
     rm["scenario"] = manifest.get("scenario", "") or ""
     _write_text_or_raise(rm_path, json.dumps(rm, indent=2, sort_keys=True) + "\n")
 
-    return written
+    return plan
 
 
 def assemble_run(
@@ -1377,6 +1420,7 @@ def assemble_run(
     assemble_run.already_assembled = 0  # type: ignore[attr-defined]
     assemble_run.pruned_files = []  # type: ignore[attr-defined]
     assemble_run.wiped_results = []  # type: ignore[attr-defined]
+    assemble_run.ignored_cluster_files = []  # type: ignore[attr-defined]
 
     # 1. Validation --------------------------------------------------------
     tdir = layout.translation_dir(translation_hash)
@@ -1546,13 +1590,17 @@ def assemble_run(
         )
 
     if additive_grow_from is not None:
-        _additive_grow(
+        grow_plan = _additive_grow(
             run_dir,
             manifest,
             prior_replicas=additive_grow_from,
             new_replicas=replicas_effective,
             now_iso=now_iso,
         )
+        # Files in cluster/ whose names did not parse were skipped, so their
+        # pairs did not grow. Surfaced rather than dropped: otherwise the only
+        # symptom is results missing later, with nothing saying why.
+        assemble_run.ignored_cluster_files = grow_plan.ignored  # type: ignore[attr-defined]
         # All three side-band lists are empty on this path, and are reset rather
         # than left holding a prior call's values. Grow copies each pair's own i1
         # (issue #877) and merges nothing, so it cannot discover a skipped
@@ -1764,3 +1812,4 @@ assemble_run.prior_assembled_at = ""  # type: ignore[attr-defined]
 assemble_run.already_assembled = 0  # type: ignore[attr-defined]
 assemble_run.pruned_files = []  # type: ignore[attr-defined]
 assemble_run.wiped_results = []  # type: ignore[attr-defined]
+assemble_run.ignored_cluster_files = []  # type: ignore[attr-defined]

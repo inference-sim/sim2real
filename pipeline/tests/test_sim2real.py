@@ -2116,6 +2116,26 @@ class TestAssembleCommand:
         assert (results / "trace_data.csv").read_text() == "measured\n"
         assert not pr.exists()
 
+    def test_ignored_cluster_file_warning_reaches_stderr(self, tmp_path, capsys):
+        """A cluster/ file whose name does not parse is skipped on the grow
+        path, so its pair never grows. Without this warning the only symptom is
+        results missing later (issue #877 review)."""
+        thash = self._make_minimal_registration(tmp_path)
+        cluster_id = self._bootstrap_experiment(tmp_path)
+        argv = [
+            "--experiment-root", str(tmp_path),
+            "assemble", "--translation", thash,
+            "--cluster", cluster_id, "--run", "trial-1",
+        ]
+        assert sim2real.main(argv) == 0
+        cluster_dir = tmp_path / "workspace" / "runs" / "trial-1" / "cluster"
+        (cluster_dir / "pipelinerun-w1|baseline|i1 copy.yaml").write_text("junk\n")
+        capsys.readouterr()
+        assert sim2real.main(argv + ["--replicas", "2"]) == 0
+        errout = capsys.readouterr().err
+        assert "ignored cluster/pipelinerun-w1|baseline|i1 copy.yaml" in errout
+        assert "was not grown" in errout
+
     def test_assemble_flags_reach_the_library(self, tmp_path, monkeypatch):
         """The four new flags and the None-default --replicas are wired
         through to assemble_run() verbatim."""

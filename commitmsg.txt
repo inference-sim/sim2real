@@ -1,0 +1,29 @@
+fix(assemble): build all grown iterations before writing any of them
+
+Review of #881 caught that grow_pair_iterations interleaved validation-that-can-
+raise with disk writes across pairs. Pairs sort alphabetically, so a corrupt or
+over-long 'sr' i1 aborted after 'baseline' i2..iN were already on disk, while
+_additive_grow only advances manifest.assembly.yaml and run_metadata.json after
+the whole loop. deploy discovers iterations by globbing cluster/pipelinerun-*.yaml,
+so the run was left with iterations its metadata never claimed.
+
+This is the same hazard #876 split build_pipelineruns/write_pipelineruns to
+avoid, and the split is mirrored here: build_grown_iterations() resolves,
+retargets and validates every document with no writes, and grow_pair_iterations()
+writes only once the whole batch has succeeded. Four new tests cover it,
+including the i9 -> i10 digit-count boundary reached through a real run name and
+an assertion that the recorded replica count does not advance on refusal.
+
+Two non-blocking review items also addressed:
+
+- Unparseable cluster/ filenames were skipped silently, so a pair could simply
+  never grow with nothing saying why. They are now collected on the returned
+  GrowPlan and surfaced as a per-file CLI warning. This fires in practice --
+  Finder-style '... i1 copy.yaml' duplicates exist in real workspaces.
+- The loss of library-level protection against a corrupt translation_output.json
+  was documented only in a test docstring. It is now stated in _additive_grow's
+  own docstring, as the CLI-level guarantee it has become.
+
+Refs #877
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>

@@ -351,36 +351,138 @@ class TestGrowFromI1:
 
 
 class TestGrowPairIterationsDirectly:
-    def test_returns_written_filenames_sorted(self, tmp_path):
+    def test_returns_built_filenames_sorted(self, tmp_path):
         fx = _fx(tmp_path)
         _assemble(fx)
         run_dir = _cluster(fx).parent
-        written = assemble_run.grow_pair_iterations(
+        plan = assemble_run.grow_pair_iterations(
             run_dir, prior_replicas=1, new_replicas=3
         )
-        assert written == [
+        assert [fname for fname, _ in plan.built] == [
             "pipelinerun-wl-a|baseline|i2.yaml",
             "pipelinerun-wl-a|baseline|i3.yaml",
             "pipelinerun-wl-a|sr|i2.yaml",
             "pipelinerun-wl-a|sr|i3.yaml",
         ]
+        assert plan.ignored == []
 
     def test_no_new_iterations_is_a_noop(self, tmp_path):
         fx = _fx(tmp_path)
         _assemble(fx)
         run_dir = _cluster(fx).parent
-        assert (
-            assemble_run.grow_pair_iterations(
-                run_dir, prior_replicas=1, new_replicas=1
-            )
-            == []
+        plan = assemble_run.grow_pair_iterations(
+            run_dir, prior_replicas=1, new_replicas=1
         )
+        assert plan.built == []
 
     def test_empty_cluster_dir_is_a_noop(self, tmp_path):
         (tmp_path / "cluster").mkdir()
-        assert (
-            assemble_run.grow_pair_iterations(
-                tmp_path, prior_replicas=1, new_replicas=3
-            )
-            == []
+        plan = assemble_run.grow_pair_iterations(
+            tmp_path, prior_replicas=1, new_replicas=3
         )
+        assert plan.built == []
+        assert plan.ignored == []
+
+    def test_unparseable_names_are_reported_as_ignored(self, tmp_path):
+        fx = _fx(tmp_path)
+        _assemble(fx)
+        (_cluster(fx) / "pipelinerun-wl-a|baseline|i1 copy.yaml").write_text("x\n")
+        plan = assemble_run.grow_pair_iterations(
+            _cluster(fx).parent, prior_replicas=1, new_replicas=2
+        )
+        assert plan.ignored == ["pipelinerun-wl-a|baseline|i1 copy.yaml"]
+
+
+class TestGrowBuildsBeforeWriting:
+    """A refusal on any pair must leave the run untouched rather than
+    half-grown: `run_metadata.json` is only updated after the whole batch, and
+    deploy discovers iterations by globbing cluster/pipelinerun-*.yaml, so a
+    partial write would give it iterations the metadata never claimed."""
+
+    def test_build_phase_writes_nothing(self, tmp_path):
+        fx = _fx(tmp_path)
+        _assemble(fx)
+        run_dir = _cluster(fx).parent
+        before = sorted(p.name for p in _cluster(fx).glob("*.yaml"))
+        assemble_run.build_grown_iterations(
+            run_dir, prior_replicas=1, new_replicas=3
+        )
+        assert sorted(p.name for p in _cluster(fx).glob("*.yaml")) == before
+
+    def test_refusal_on_a_later_pair_leaves_earlier_pairs_unwritten(
+        self, tmp_path, monkeypatch
+    ):
+        """'baseline' sorts before 'sr'. Corrupt sr's i1 so the batch refuses
+        only after baseline's grown iterations have been built — under the old
+        interleaved loop those were already on disk by then."""
+        fx = _fx(tmp_path)
+        _assemble(fx)
+        sr1 = _pr(fx, "sr", 1)
+        doc = yaml.safe_load(sr1.read_text())
+        del doc["metadata"]["name"]
+        sr1.write_text(yaml.dump(doc, default_flow_style=False))
+        with pytest.raises(AssembleError, match="metadata.name"):
+            _assemble(fx, replicas=2, now_iso="2026-07-02T00:00:00Z")
+        # Neither pair's i2 exists.
+        assert not _pr(fx, "baseline", 2).exists()
+        assert not _pr(fx, "sr", 2).exists()
+
+    def test_over_long_name_on_a_later_pair_leaves_nothing_written(self, tmp_path):
+        """The digit-count boundary the fix introduces: i9 -> i10 adds a
+        character. Reached via a run name long enough that only the two-digit
+        iteration overflows."""
+        fx = _fx(tmp_path)
+        # 'baseline-wl-a-<run>-i9' must fit at 253 and 'i10' must not.
+        run_name = "r" * (253 - len("baseline-wl-a--i9"))
+        assemble_run.assemble_run(
+            translation_hash=fx["translation_hash"],
+            translation_ref=fx["translation_hash"],
+            cluster_id=fx["cluster_id"],
+            run_name=run_name,
+            experiment_root=fx["exp_root"],
+            manifest_path=fx["manifest_path"],
+            force=False,
+            replicas=9,
+            now_iso="2026-07-01T00:00:00Z",
+        )
+        run_dir = fx["exp_root"] / "workspace" / "runs" / run_name
+        grown_before = sorted(p.name for p in (run_dir / "cluster").glob("*.yaml"))
+        with pytest.raises(AssembleError, match="253"):
+            assemble_run.assemble_run(
+                translation_hash=fx["translation_hash"],
+                translation_ref=fx["translation_hash"],
+                cluster_id=fx["cluster_id"],
+                run_name=run_name,
+                experiment_root=fx["exp_root"],
+                manifest_path=fx["manifest_path"],
+                force=False,
+                replicas=10,
+                now_iso="2026-07-02T00:00:00Z",
+            )
+        # No i10 for any pair, and the recorded replica count is untouched.
+        assert sorted(p.name for p in (run_dir / "cluster").glob("*.yaml")) == (
+            grown_before
+        )
+        import json
+
+        rm = json.loads((run_dir / "run_metadata.json").read_text())
+        assert rm["replicas"] == 9
+
+    def test_metadata_is_not_advanced_when_the_batch_refuses(self, tmp_path):
+        fx = _fx(tmp_path)
+        _assemble(fx, replicas=2)
+        run_dir = _cluster(fx).parent
+        sr1 = _pr(fx, "sr", 1)
+        doc = yaml.safe_load(sr1.read_text())
+        doc["spec"]["params"] = [
+            p for p in doc["spec"]["params"] if p["name"] != "replica"
+        ]
+        sr1.write_text(yaml.dump(doc, default_flow_style=False))
+        with pytest.raises(AssembleError, match="replica"):
+            _assemble(fx, replicas=4, now_iso="2026-07-02T00:00:00Z")
+        import json
+
+        rm = json.loads((run_dir / "run_metadata.json").read_text())
+        assert rm["replicas"] == 2
+        ma = yaml.safe_load((run_dir / "manifest.assembly.yaml").read_text())
+        assert ma["replicas"] == 2

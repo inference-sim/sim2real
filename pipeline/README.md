@@ -506,8 +506,10 @@ Then each treatment scenario has `router.epp.image` set from that algorithm's ow
   - A pair that has other iterations but no `i1` is **refused**, naming the pair. Falling back to resolution for that pair would reintroduce exactly the divergence this avoids.
   - Pre-existing divergence is **not repaired**. New iterations are made to match `i1`; an already-mismatched `i2` from an earlier grow stays mismatched.
   - Scalar-list conflicts (#851) are **not reported** on this path, because nothing is merged. The next full assemble, which does merge, still reports them.
-  - The input validation that came free with resolution is gone: a deleted baseline scenario file no longer fails a grow. The translation directory and `translation_output.json` are still checked ahead of the decision tree, so a deleted translation still refuses.
+  - The input validation that came free with resolution is gone: a deleted baseline scenario file no longer fails a grow. The translation directory and `translation_output.json` are still checked for *existence* ahead of the decision tree, so a deleted translation still refuses; a *corrupt* `translation_output.json` is caught by the CLI's own unbuilt-image pre-check, making that a CLI-level rather than library-level guarantee.
   - `metadata.name` is re-validated against the 253-char limit, since `i9` → `i10` adds a character and can push a name that fit over it.
+  - Every grown document is built and validated **before the first file is written**, so a refusal on any pair leaves the run untouched rather than half-grown. This matters because `run_metadata.json` is only advanced after the whole batch, and `deploy` discovers iterations by globbing `cluster/pipelinerun-*.yaml` — a partial write would hand it iterations the metadata never claimed.
+  - A `cluster/` file whose name does not parse as `pipelinerun-<workload>|<package>|i<N>.yaml` is skipped, and its pair therefore does not grow. Each is named in a warning, since the only other symptom would be results missing later.
 - `N < prior_replicas` — refused with `run '<name>' already has <prior> replicas; refusing to shrink to <N>. Replica shrink is tracked in #506.` This guard runs BEFORE every other check, so `--force` does NOT bypass it.
 
 Two invariants shape the grow-only path:
