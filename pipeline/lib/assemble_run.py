@@ -31,7 +31,11 @@ from pipeline.lib import cluster_ops, layout, scope as _scope, slicer, translati
 # to preserve the existing ``assemble_run.AssembleError`` API.
 from pipeline.lib.errors import AssembleError
 from pipeline.lib.manifest import ManifestError, load_manifest
-from pipeline.lib.tekton import is_trace_workload, make_pipelinerun_scenario
+from pipeline.lib.tekton import (
+    is_trace_workload,
+    make_pipelinerun_scenario,
+    validate_pipelinerun_name,
+)
 from pipeline.lib.values import deep_merge
 
 
@@ -806,45 +810,196 @@ def write_pipelineruns(run_dir: Path, built: list[tuple[str, dict]]) -> None:
         )
 
 
-def generate_pipelineruns(
-    *,
-    run_dir: Path,
-    packages: list[tuple[str, dict]],
-    workloads: list[dict],
-    run_name: str,
-    cluster_config: dict,
-    pipeline_name: str,
-    observe: dict,
-    model_name: str,
-    submodule_shas: dict,
-    submodule_urls: dict,
-    iterations: "range | list[int]" = range(1, 2),
-    triples: "set[tuple[str, str, int]] | None" = None,
-) -> None:
-    """Build and write PipelineRuns in one step — ``build_pipelineruns`` followed
-    by ``write_pipelineruns``.
+# Iteration that every grown replica is derived from. Fixed at 1 rather than
+# "the highest existing" so a grow always reproduces the pair's FIRST iteration:
+# that is what makes iN a replica of i1 rather than of whatever the previous
+# grow happened to emit.
+_GROW_SOURCE_ITERATION = 1
 
-    Retained for callers that delete nothing and so have no reason to separate
-    the two phases (``_additive_grow``, which only appends new iterations).
-    ``assemble_run`` calls the two halves separately: it must build (and thereby
-    validate) before it wipes.
+
+def _pipelinerun_pair_and_iteration(path: Path) -> "tuple[str, int] | None":
+    """Split a PipelineRun filename into ``(pair-prefix, iteration)``.
+
+    The pair-prefix is the filename stem up to but excluding the trailing
+    ``|i<N>`` segment — everything that identifies the (workload, package) pair.
+    Returns ``None`` for any name that does not parse, so hand-placed or
+    duplicated files (``...|i1 copy.yaml``) are ignored rather than mistaken for
+    a pair to grow.
     """
-    write_pipelineruns(
-        run_dir,
-        build_pipelineruns(
-            packages=packages,
-            workloads=workloads,
-            run_name=run_name,
-            cluster_config=cluster_config,
-            pipeline_name=pipeline_name,
-            observe=observe,
-            model_name=model_name,
-            submodule_shas=submodule_shas,
-            submodule_urls=submodule_urls,
-            iterations=iterations,
-            triples=triples,
-        ),
+    parts = path.stem.split("|")
+    if len(parts) != 3:
+        return None
+    iteration = parts[2]
+    if not iteration.startswith("i") or not iteration[1:].isdigit():
+        return None
+    n = int(iteration[1:])
+    if n < 1:
+        return None
+    return "|".join(parts[:2]), n
+
+
+def _retarget_pipelinerun_iteration(
+    pr: dict, *, source_iteration: int, iteration: int
+) -> None:
+    """Rewrite an in-memory PipelineRun from *source_iteration* to *iteration*.
+
+    Exactly two fields carry the iteration (issue #877): the ``-i<N>`` suffix on
+    ``metadata.name`` (``tekton.py``'s ``pr_name``) and the ``replica`` param.
+    ``resultsDir`` threads ``i$(params.replica)``, so it follows from the second
+    with no edit of its own.
+
+    Structural on purpose. The document also holds several unrelated
+    ``replicas:`` keys inside the inlined scenario — vLLM and deployment pod
+    counts — and the run name may itself contain ``-i<digits>``, so any textual
+    substitution would corrupt it.
+    """
+    meta = pr.get("metadata")
+    if not isinstance(meta, dict) or not isinstance(meta.get("name"), str):
+        raise AssembleError(
+            "PipelineRun has no metadata.name string; cannot retarget it to "
+            f"iteration {iteration}"
+        )
+    suffix = f"-i{source_iteration}"
+    name = meta["name"]
+    if not name.endswith(suffix):
+        raise AssembleError(
+            f"PipelineRun name '{name}' does not end in '{suffix}', so it is not "
+            f"iteration {source_iteration} as its filename claims — refusing to "
+            "derive a replica from it."
+        )
+    grown = name[: -len(suffix)] + f"-i{iteration}"
+    # A grow can push a name that previously fit over the limit: i9 -> i10 adds
+    # a character.
+    try:
+        validate_pipelinerun_name(grown)
+    except ValueError as exc:
+        raise AssembleError(str(exc)) from exc
+    meta["name"] = grown
+
+    params = (pr.get("spec") or {}).get("params")
+    if not isinstance(params, list):
+        raise AssembleError(
+            f"PipelineRun '{name}' has no spec.params list; cannot retarget it "
+            f"to iteration {iteration}"
+        )
+    for param in params:
+        if isinstance(param, dict) and param.get("name") == "replica":
+            param["value"] = str(iteration)
+            return
+    raise AssembleError(
+        f"PipelineRun '{name}' has no 'replica' param; cannot retarget it to "
+        f"iteration {iteration}"
     )
+
+
+class GrowPlan(NamedTuple):
+    """What :func:`build_grown_iterations` resolved, before anything is written.
+
+    ``built`` is the ``(filename, PipelineRun dict)`` list to write; ``ignored``
+    names the ``cluster/pipelinerun-*.yaml`` files whose names did not parse and
+    were therefore skipped, so the caller can say so rather than leaving the
+    operator to notice a pair silently never grew.
+    """
+
+    built: list[tuple[str, dict]]
+    ignored: list[str]
+
+
+def build_grown_iterations(
+    run_dir: Path, *, prior_replicas: int, new_replicas: int
+) -> GrowPlan:
+    """Build ``i{prior_replicas+1}..i{new_replicas}`` for every pair on disk by
+    copying that pair's own ``i1``. Touches no filesystem beyond reading.
+
+    Split from :func:`write_pipelineruns` for the same reason
+    :func:`build_pipelineruns` is: every refusal — an unparseable source
+    document, a name that does not end in the expected iteration, a grown name
+    over the 253-char limit, a missing ``replica`` param — has to happen before
+    the first file is written. Interleaving them would let a refusal on a later
+    pair leave earlier pairs' new iterations on disk while
+    ``run_metadata.json`` still recorded the old replica count, and ``deploy``
+    discovers iterations by globbing ``cluster/pipelinerun-*.yaml`` — so it
+    would execute iterations the metadata never claimed.
+    """
+    cluster_dir_ = run_dir / "cluster"
+    sources: dict[str, Path] = {}
+    pairs: set[str] = set()
+    ignored: list[str] = []
+    for path in sorted(cluster_dir_.glob("pipelinerun-*.yaml")):
+        parsed = _pipelinerun_pair_and_iteration(path)
+        if parsed is None:
+            ignored.append(path.name)
+            continue
+        pair, iteration = parsed
+        pairs.add(pair)
+        if iteration == _GROW_SOURCE_ITERATION:
+            sources[pair] = path
+
+    missing = sorted(pairs - set(sources))
+    if missing:
+        raise AssembleError(
+            "cannot grow replicas: "
+            + ", ".join(
+                f"'{p}' has no i{_GROW_SOURCE_ITERATION}" for p in missing
+            )
+            + f". Every pair grows from its own i{_GROW_SOURCE_ITERATION}, so it "
+            "must be present. Restore it, or re-assemble the run with --force."
+        )
+
+    built: list[tuple[str, dict]] = []
+    for pair in sorted(sources):
+        base = _load_yaml(sources[pair])
+        for iteration in range(prior_replicas + 1, new_replicas + 1):
+            grown = copy.deepcopy(base)
+            _retarget_pipelinerun_iteration(
+                grown,
+                source_iteration=_GROW_SOURCE_ITERATION,
+                iteration=iteration,
+            )
+            built.append((f"{pair}|i{iteration}.yaml", grown))
+    return GrowPlan(built=built, ignored=ignored)
+
+
+def grow_pair_iterations(
+    run_dir: Path, *, prior_replicas: int, new_replicas: int
+) -> GrowPlan:
+    """Emit ``i{prior_replicas+1}..i{new_replicas}`` for every pair on disk by
+    copying that pair's own ``i1``.
+
+    This is the whole of issue #877's fix. The previous implementation
+    re-resolved the manifest and overlays to build the new iterations, so an
+    overlay edited between two assembles left ``i1`` and ``i2`` carrying
+    different plugin configs, with nothing on disk recording why — replicas that
+    were not replicas, and therefore a variance figure that measures nothing.
+    Deriving each new iteration from the pair's own ``i1`` makes them replicas by
+    construction, so no drift detection is needed.
+
+    It also preserves legitimate per-pair differences for free: each pair grows
+    from itself, so a run whose pairs carry deliberately different configs stays
+    internally consistent.
+
+    Pairs are discovered from the ``cluster/pipelinerun-*.yaml`` filenames rather
+    than from the manifest. That is equivalent here — reaching the grow path
+    requires the drift check to have passed, so the on-disk pair set is the
+    manifest cross product — and it is what lets each pair be grown from its own
+    source.
+
+    A pair that has other iterations but no ``i1`` is refused rather than
+    resolved: falling back would silently reintroduce the divergence this
+    function exists to remove. Pre-existing divergence among ``i1..i_prior`` is
+    NOT repaired — only the new iterations are made to match ``i1``.
+
+    Build-then-write: :func:`build_grown_iterations` resolves and validates every
+    grown document first, so a refusal on any pair leaves the run untouched
+    rather than half-grown.
+
+    Returns the :class:`GrowPlan`, whose ``built`` entries have all been written.
+    """
+    plan = build_grown_iterations(
+        run_dir, prior_replicas=prior_replicas, new_replicas=new_replicas
+    )
+    write_pipelineruns(run_dir, plan.built)
+    return plan
 
 
 def _validate_workload(data: dict, wl_path: Path) -> None:
@@ -1101,61 +1256,47 @@ def _additive_grow(
     prior_replicas: int,
     new_replicas: int,
     now_iso: str,
-    experiment_root: Path,
-    translation_hash: str,
-    translation_ref: str,
-    translation_dir: Path,
-    cluster_config: dict,
 ) -> list[str]:
     """Grow an existing run's replica count from ``prior_replicas`` to
     ``new_replicas`` (``new_replicas > prior_replicas``).
 
     Preserves existing PipelineRun files (i1..i{prior_replicas}) byte-for-byte
-    and by mtime. Emits new files for i{prior_replicas+1}..i{new_replicas}.
-    Rewrites ``manifest.assembly.yaml`` with the new replica count. Rewrites
+    and by mtime. Emits new files for i{prior_replicas+1}..i{new_replicas} by
+    copying each pair's own i1 — see :func:`grow_pair_iterations`. Rewrites
+    ``manifest.assembly.yaml`` with the new replica count. Rewrites
     ``run_metadata.json`` with the new replica count and a new
     ``assembled_at`` timestamp; ``params_hash`` byte-identical to prior
     (drift check already ran and passed).
 
-    Returns the scalar-list conflicts found while re-resolving. These must be
-    returned rather than dropped: the caller's drift check hashes only
-    ``slicer.assembly_slice(manifest)`` — transfer.yaml content — so the
-    translation-generated overlays this re-resolution merges may have changed
-    since the first assemble (via ``sim2real build``, ``translation
-    register``/``append``, or a regenerated ``/sim2real-translate`` overlay)
-    while the manifest hash still matches. A conflict introduced that way is
-    genuinely new and has never been reported.
-    """
-    # Re-run scenario resolution to obtain workloads + packages + submodule
-    # discovery. Safe because drift check has already established that the
-    # manifest slice is unchanged from the prior assemble; ``_resolve_packages``
-    # still validates every referenced file and refuses cleanly (as
-    # ``AssembleError``) if a scenario file or the translation output has been
-    # deleted or corrupted since.
-    layout.set_experiment_root(experiment_root)
-    exp_root = layout.experiment_root()
-    tout_path = layout.translation_output_path(translation_hash)
-    resolved = _resolve_packages(
-        manifest,
-        exp_root=exp_root,
-        translation_dir=translation_dir,
-        tout_path=tout_path,
-        cluster_config=cluster_config,
-        translation_ref=translation_ref,
-    )
+    Reads no overlay, baseline, defaults, or workload YAML (issue #877). It used
+    to re-resolve all of them, which is precisely what let the new iterations
+    carry a different config than the preserved ones: the caller's drift check
+    hashes only ``slicer.assembly_slice(manifest)`` — transfer.yaml content — so
+    an overlay could change between two assembles while the manifest hash still
+    matched.
 
-    generate_pipelineruns(
-        run_dir=run_dir,
-        packages=resolved.packages,
-        workloads=resolved.workloads,
-        run_name=run_dir.name,
-        cluster_config=cluster_config,
-        pipeline_name=(manifest.get("pipeline") or {}).get("name", "sim2real"),
-        observe=manifest.get("blis_observe") or {},
-        model_name=resolved.model_name,
-        submodule_shas=resolved.submodule_shas,
-        submodule_urls=resolved.submodule_urls,
-        iterations=range(prior_replicas + 1, new_replicas + 1),
+    Two consequences of no longer merging anything here:
+
+    - The scalar-list conflicts that re-resolution used to surface on this path
+      (#851) are no longer detected, because nothing is merged. Such a conflict
+      is still reported by the next full assemble.
+    - The input validation that came free with ``_resolve_packages`` is gone. The
+      translation directory and ``translation_output.json`` are still checked in
+      ``assemble_run``'s step 1, ahead of the decision tree, and the CLI's
+      unbuilt-image check reads the latter — so a deleted translation still
+      refuses. A deleted *scenario* file no longer does, which is correct: the
+      grown iterations were never resolved from it. Note that
+      ``translation_output.json`` being *parseable* is likewise no longer checked
+      here: step 1 only checks that it exists, and the CLI's own unbuilt-image
+      pre-check is what refuses a corrupt one. That makes it a CLI-level
+      guarantee rather than a library-level one — a direct library caller that
+      does not replicate that pre-check can grow a run whose translation record
+      is unreadable.
+
+    Returns the :class:`GrowPlan`.
+    """
+    plan = grow_pair_iterations(
+        run_dir, prior_replicas=prior_replicas, new_replicas=new_replicas
     )
 
     # Rewrite manifest.assembly.yaml with new replicas count.
@@ -1172,7 +1313,7 @@ def _additive_grow(
     rm["scenario"] = manifest.get("scenario", "") or ""
     _write_text_or_raise(rm_path, json.dumps(rm, indent=2, sort_keys=True) + "\n")
 
-    return resolved.scalar_list_conflicts
+    return plan
 
 
 def assemble_run(
@@ -1279,6 +1420,7 @@ def assemble_run(
     assemble_run.already_assembled = 0  # type: ignore[attr-defined]
     assemble_run.pruned_files = []  # type: ignore[attr-defined]
     assemble_run.wiped_results = []  # type: ignore[attr-defined]
+    assemble_run.ignored_cluster_files = []  # type: ignore[attr-defined]
 
     # 1. Validation --------------------------------------------------------
     tdir = layout.translation_dir(translation_hash)
@@ -1448,35 +1590,35 @@ def assemble_run(
         )
 
     if additive_grow_from is not None:
-        grow_conflicts = _additive_grow(
+        grow_plan = _additive_grow(
             run_dir,
             manifest,
             prior_replicas=additive_grow_from,
             new_replicas=replicas_effective,
             now_iso=now_iso,
-            experiment_root=experiment_root,
-            translation_hash=translation_hash,
-            translation_ref=translation_ref,
-            translation_dir=layout.translation_dir(translation_hash),
-            cluster_config=cluster_config,
         )
-        # skipped_algorithms/missing_submodules unchanged from prior assemble.
-        # scalar_list_conflicts is NOT: the drift check hashes only the manifest
-        # assembly slice, so the translation-generated overlays that
-        # _additive_grow re-merges may have changed since the first assemble
-        # while transfer.yaml did not. Surface whatever it found.
+        # Files in cluster/ whose names did not parse were skipped, so their
+        # pairs did not grow. Surfaced rather than dropped: otherwise the only
+        # symptom is results missing later, with nothing saying why.
+        assemble_run.ignored_cluster_files = grow_plan.ignored  # type: ignore[attr-defined]
+        # All three side-band lists are empty on this path, and are reset rather
+        # than left holding a prior call's values. Grow copies each pair's own i1
+        # (issue #877) and merges nothing, so it cannot discover a skipped
+        # algorithm, a missing submodule, or a scalar-list conflict. The next
+        # full assemble, which does resolve, is what surfaces those.
         assemble_run.skipped_algorithms = []  # type: ignore[attr-defined]
         assemble_run.missing_submodules = []  # type: ignore[attr-defined]
-        assemble_run.scalar_list_conflicts = grow_conflicts  # type: ignore[attr-defined]
+        assemble_run.scalar_list_conflicts = []  # type: ignore[attr-defined]
         assemble_run.status = "written"  # type: ignore[attr-defined]
         assemble_run.prior_assembled_at = ""  # type: ignore[attr-defined]
         return
 
     # 4. Resolve packages (translation load, algorithm filter, baseline +
     # treatment resolution, image + HF-secret injection, workload load,
-    # model-name derivation, submodule discovery). Shared with the additive
-    # -grow path via ``_resolve_packages`` so the AssembleError guards stay
-    # in one place.
+    # model-name derivation, submodule discovery). This is now the ONLY
+    # resolution site: the additive-grow path used to share it, which is what
+    # let a grown replica carry a different config than the one it replicates
+    # (issue #877). Grow copies each pair's own i1 instead.
     exp_root = layout.experiment_root()
     resolved = _resolve_packages(
         manifest,
@@ -1670,3 +1812,4 @@ assemble_run.prior_assembled_at = ""  # type: ignore[attr-defined]
 assemble_run.already_assembled = 0  # type: ignore[attr-defined]
 assemble_run.pruned_files = []  # type: ignore[attr-defined]
 assemble_run.wiped_results = []  # type: ignore[attr-defined]
+assemble_run.ignored_cluster_files = []  # type: ignore[attr-defined]

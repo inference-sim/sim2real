@@ -2609,6 +2609,15 @@ def _cmd_assemble(args) -> int:
         )
     for display in getattr(_assemble_run_lib.assemble_run, "wiped_results", []):
         print(f"wiped collected results: {display}", file=sys.stderr)
+    for name in getattr(
+        _assemble_run_lib.assemble_run, "ignored_cluster_files", []
+    ):
+        print(
+            f"warning: ignored cluster/{name} — its name does not parse as "
+            "pipelinerun-<workload>|<package>|i<N>.yaml, so its pair was not "
+            "grown. Move it out of cluster/ if it is not a PipelineRun.",
+            file=sys.stderr,
+        )
     for name in getattr(_assemble_run_lib.assemble_run, "pruned_files", []):
         print(
             f"warning: removed cluster/{name} — the current transfer.yaml no "

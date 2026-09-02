@@ -496,6 +496,20 @@ Then each treatment scenario has `router.epp.image` set from that algorithm's ow
 
 - `N == prior_replicas` — nothing to regenerate. No files rewritten. The CLI prints `run '<run>': <n> pair(s) already assembled, nothing to do.` plus the flags that would change that. Note what this message does *not* claim: that the inputs are unchanged. `params_hash` covers only `transfer.yaml`'s own fields, and the translation is not compared at all, so assemble is in no position to assert it (issue #876). The past-tense `assembled run <name>` ack is reserved for paths that touched disk.
 - `N > prior_replicas` — additive grow. Existing PipelineRun files (`i1..i{prior}`) are preserved byte-for-byte and by mtime; new files are emitted for `i{prior+1}..iN`. `manifest.assembly.yaml` and `run_metadata.json` are rewritten with the new `replicas` count; `params_hash` is preserved (drift check passed).
+
+  **Each new iteration is a copy of that pair's own `i1`**, with exactly two fields rewritten: the `-i<N>` suffix on `metadata.name` and the `replica` param. `resultsDir` threads `i$(params.replica)`, so it follows automatically. Grow reads no overlay, baseline, defaults, or workload YAML.
+
+  This is what makes replicas actually replicate (issue #877). Grow used to re-run the whole resolution pipeline, so an overlay edited between two assembles produced `i2..iN` carrying a different plugin config than the preserved `i1` — with `params_hash` still matching, exit code 0, and no warning. Replicas exist to measure variance under a fixed condition; if the iterations differ, the variance figure measures nothing. Copying `i1` removes the hazard by construction rather than detecting it, and preserves legitimate per-pair differences for free, since each pair grows from itself.
+
+  Consequences worth knowing:
+
+  - A pair that has other iterations but no `i1` is **refused**, naming the pair. Falling back to resolution for that pair would reintroduce exactly the divergence this avoids.
+  - Pre-existing divergence is **not repaired**. New iterations are made to match `i1`; an already-mismatched `i2` from an earlier grow stays mismatched.
+  - Scalar-list conflicts (#851) are **not reported** on this path, because nothing is merged. The next full assemble, which does merge, still reports them.
+  - The input validation that came free with resolution is gone: a deleted baseline scenario file no longer fails a grow. The translation directory and `translation_output.json` are still checked for *existence* ahead of the decision tree, so a deleted translation still refuses; a *corrupt* `translation_output.json` is caught by the CLI's own unbuilt-image pre-check, making that a CLI-level rather than library-level guarantee.
+  - `metadata.name` is re-validated against the 253-char limit, since `i9` → `i10` adds a character and can push a name that fit over it.
+  - Every grown document is built and validated **before the first file is written**, so a refusal on any pair leaves the run untouched rather than half-grown. This matters because `run_metadata.json` is only advanced after the whole batch, and `deploy` discovers iterations by globbing `cluster/pipelinerun-*.yaml` — a partial write would hand it iterations the metadata never claimed.
+  - A `cluster/` file whose name does not parse as `pipelinerun-<workload>|<package>|i<N>.yaml` is skipped, and its pair therefore does not grow. Each is named in a warning, since the only other symptom would be results missing later.
 - `N < prior_replicas` — refused with `run '<name>' already has <prior> replicas; refusing to shrink to <N>. Replica shrink is tracked in #506.` This guard runs BEFORE every other check, so `--force` does NOT bypass it.
 
 Two invariants shape the grow-only path:

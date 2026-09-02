@@ -728,17 +728,19 @@ class TestGeneratePipelineruns:
             {"name": "wl_b", "num_requests": 20},
         ]
         cluster_config = {"namespaces": ["sim2real-slot-0"], "workspaces": {}}
-        assemble_run.generate_pipelineruns(
-            run_dir=run_dir,
-            packages=packages,
-            workloads=workloads,
-            run_name="trial-1",
-            cluster_config=cluster_config,
-            pipeline_name="sim2real",
-            observe={},
-            model_name="M",
-            submodule_shas={"llm-d-benchmark": "abc", "inference-sim": "def"},
-            submodule_urls={"llm-d-benchmark": "git@e/b", "inference-sim": "git@e/i"},
+        assemble_run.write_pipelineruns(
+            run_dir,
+            assemble_run.build_pipelineruns(
+                packages=packages,
+                workloads=workloads,
+                run_name="trial-1",
+                cluster_config=cluster_config,
+                pipeline_name="sim2real",
+                observe={},
+                model_name="M",
+                submodule_shas={"llm-d-benchmark": "abc", "inference-sim": "def"},
+                submodule_urls={"llm-d-benchmark": "git@e/b", "inference-sim": "git@e/i"},
+            ),
         )
         yamls = sorted(p.name for p in cluster_dir.glob("pipelinerun-*.yaml"))
         assert yamls == [
@@ -766,18 +768,20 @@ class TestGeneratePipelineruns:
         ]
         workloads = [{"name": "wl-a", "num_requests": 10}]
         cluster_config = {"namespaces": ["ns-0"], "workspaces": {}}
-        assemble_run.generate_pipelineruns(
-            run_dir=run_dir,
-            packages=packages,
-            workloads=workloads,
-            run_name="trial-1",
-            cluster_config=cluster_config,
-            pipeline_name="sim2real",
-            observe={},
-            model_name="M",
-            submodule_shas={},
-            submodule_urls={},
-            iterations=range(1, 3),
+        assemble_run.write_pipelineruns(
+            run_dir,
+            assemble_run.build_pipelineruns(
+                packages=packages,
+                workloads=workloads,
+                run_name="trial-1",
+                cluster_config=cluster_config,
+                pipeline_name="sim2real",
+                observe={},
+                model_name="M",
+                submodule_shas={},
+                submodule_urls={},
+                iterations=range(1, 3),
+            ),
         )
         yamls = sorted(p.name for p in cluster_dir.glob("pipelinerun-*.yaml"))
         assert yamls == [
@@ -799,18 +803,20 @@ class TestGeneratePipelineruns:
         ]
         workloads = [{"name": "wl-a", "num_requests": 10}]
         cluster_config = {"namespaces": ["ns-0"], "workspaces": {}}
-        assemble_run.generate_pipelineruns(
-            run_dir=run_dir,
-            packages=packages,
-            workloads=workloads,
-            run_name="trial-1",
-            cluster_config=cluster_config,
-            pipeline_name="sim2real",
-            observe={},
-            model_name="M",
-            submodule_shas={},
-            submodule_urls={},
-            iterations=range(1, 4),
+        assemble_run.write_pipelineruns(
+            run_dir,
+            assemble_run.build_pipelineruns(
+                packages=packages,
+                workloads=workloads,
+                run_name="trial-1",
+                cluster_config=cluster_config,
+                pipeline_name="sim2real",
+                observe={},
+                model_name="M",
+                submodule_shas={},
+                submodule_urls={},
+                iterations=range(1, 4),
+            ),
         )
         for n in (1, 2, 3):
             pr = yaml.safe_load(
@@ -823,9 +829,13 @@ class TestGeneratePipelineruns:
 
     def test_oversized_pipelinerun_name_raises_assemble_error(self, tmp_path):
         """A run_name that pushes PR name over 253 chars must raise
-        AssembleError from generate_pipelineruns, not a raw ValueError.
+        AssembleError from build_pipelineruns, not a raw ValueError.
         The assemble CLI boundary catches AssembleError only, so any
-        ValueError leaking through would surface as a raw Python traceback."""
+        ValueError leaking through would surface as a raw Python traceback.
+
+        Asserted against the build phase specifically: since #876 the refusal has
+        to happen there, before assemble deletes anything, and since #877 nothing
+        else validates the grown names."""
         run_dir = tmp_path / "runs" / "long"
         cluster_dir = run_dir / "cluster"
         cluster_dir.mkdir(parents=True)
@@ -837,8 +847,7 @@ class TestGeneratePipelineruns:
         cluster_config = {"namespaces": ["ns-0"], "workspaces": {}}
         long_run_name = "r" * 245
         with pytest.raises(assemble_run.AssembleError, match="253"):
-            assemble_run.generate_pipelineruns(
-                run_dir=run_dir,
+            assemble_run.build_pipelineruns(
                 packages=packages,
                 workloads=workloads,
                 run_name=long_run_name,
@@ -849,6 +858,8 @@ class TestGeneratePipelineruns:
                 submodule_shas={},
                 submodule_urls={},
             )
+        # Nothing was written — the refusal precedes the write phase.
+        assert list(cluster_dir.glob("pipelinerun-*.yaml")) == []
 
 
 def _write_yaml(path: Path, data) -> None:
@@ -1420,6 +1431,56 @@ class TestAssembleRun:
         )
         (fx["exp_root"] / "workloads" / "w1.yaml").unlink()
         with pytest.raises(assemble_run.AssembleError, match="workload"):
+            assemble_run.assemble_run(
+                translation_hash=fx["translation_hash"],
+                translation_ref=fx["translation_hash"],
+                cluster_id=fx["cluster_id"],
+                run_name="trial-1",
+                experiment_root=fx["exp_root"],
+                manifest_path=fx["manifest_path"],
+                force=False,
+                now_iso="2026-07-01T14:05:00Z",
+            )
+
+    def test_corrupt_translation_output_errors(self, tmp_path):
+        """Resolution wraps a JSONDecodeError as AssembleError so the CLI
+        boundary reports it rather than emitting a raw traceback.
+
+        Previously covered only via the additive-grow path; #877 removed
+        resolution from that path, so the guarantee is asserted here, on the
+        resolution path where it still applies.
+        """
+        fx = _make_experiment(
+            tmp_path,
+            algo_names_registered=["sr"],
+            algo_names_manifest=["sr"],
+        )
+        (
+            fx["exp_root"] / "workspace" / "translations"
+            / fx["translation_hash"] / "translation_output.json"
+        ).write_text("{not-json")
+        with pytest.raises(assemble_run.AssembleError, match="not valid JSON"):
+            assemble_run.assemble_run(
+                translation_hash=fx["translation_hash"],
+                translation_ref=fx["translation_hash"],
+                cluster_id=fx["cluster_id"],
+                run_name="trial-1",
+                experiment_root=fx["exp_root"],
+                manifest_path=fx["manifest_path"],
+                force=False,
+                now_iso="2026-07-01T14:05:00Z",
+            )
+
+    def test_missing_baseline_scenario_file_errors(self, tmp_path):
+        """Same relocation as above: a deleted baseline scenario is a resolution
+        failure, and resolution now happens only on the full-assemble path."""
+        fx = _make_experiment(
+            tmp_path,
+            algo_names_registered=["sr"],
+            algo_names_manifest=["sr"],
+        )
+        (fx["exp_root"] / "baselines" / "base.yaml").unlink()
+        with pytest.raises(assemble_run.AssembleError, match="baseline"):
             assemble_run.assemble_run(
                 translation_hash=fx["translation_hash"],
                 translation_ref=fx["translation_hash"],
