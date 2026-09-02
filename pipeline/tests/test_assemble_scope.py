@@ -483,6 +483,61 @@ class TestRowTwoPrompt:
         _assemble(fx, now_iso="2026-07-02T00:00:00Z")
 
 
+class TestScopedForcePreservesOutOfScopeResults:
+    """The invariant the whole change exists to establish, asserted end-to-end
+    rather than by composing separately-tested behaviors: a scoped `--force`
+    re-assemble must not touch the collected results of a pair outside its
+    scope. Issue #876 lists this first under Tests."""
+
+    def test_out_of_scope_results_survive_scoped_force(self, tmp_path):
+        fx = _fx(tmp_path)
+        _assemble(fx)
+        run_dir = _run_dir(fx)
+        in_scope = _seed_results(run_dir, "baseline")
+        out_of_scope = _seed_results(run_dir, "sr")
+        _assemble(fx, force=True, package_filter=["baseline"],
+                  now_iso="2026-07-02T00:00:00Z")
+        # The out-of-scope pair keeps its measured data...
+        assert (out_of_scope / "trace_data.csv").read_text() == "measured\n"
+        # ...while the in-scope pair was regenerated and wiped, as --force asks.
+        assert not in_scope.exists()
+        assert assemble_run.assemble_run.wiped_results == [
+            "results/baseline/wl_a/i1/"
+        ]
+
+    def test_out_of_scope_results_survive_scoped_force_with_no_wipe(self, tmp_path):
+        """The combination the README example shows:
+        `--package <pkg> --force --no-wipe`. Nothing is wiped at all."""
+        fx = _fx(tmp_path)
+        _assemble(fx)
+        run_dir = _run_dir(fx)
+        in_scope = _seed_results(run_dir, "baseline")
+        out_of_scope = _seed_results(run_dir, "sr")
+        target = run_dir / "cluster" / "pipelinerun-wl-a|baseline|i1.yaml"
+        before = target.stat().st_mtime_ns
+        time.sleep(0.01)
+        _assemble(fx, force=True, no_wipe=True, package_filter=["baseline"],
+                  now_iso="2026-07-02T00:00:00Z")
+        assert (in_scope / "trace_data.csv").read_text() == "measured\n"
+        assert (out_of_scope / "trace_data.csv").read_text() == "measured\n"
+        assert assemble_run.assemble_run.wiped_results == []
+        # ...and the in-scope PipelineRun was still regenerated.
+        assert target.stat().st_mtime_ns != before
+
+    def test_out_of_scope_results_survive_a_scoped_workload_force(self, tmp_path):
+        """Same invariant via --workload rather than --package. Only wl_a exists
+        in this fixture, so the out-of-scope results are seeded under a workload
+        that is not in the manifest at all — which is exactly the pair a
+        previous run could have left behind."""
+        fx = _fx(tmp_path)
+        _assemble(fx)
+        run_dir = _run_dir(fx)
+        stale = _seed_results(run_dir, "baseline", workload="wl_retired")
+        _assemble(fx, force=True, assume_yes=True, workload_filter=["wl_a"],
+                  now_iso="2026-07-02T00:00:00Z")
+        assert (stale / "trace_data.csv").read_text() == "measured\n"
+
+
 class TestScopedAssemble:
     def test_scoped_force_leaves_out_of_scope_pipelineruns_untouched(self, tmp_path):
         fx = _fx(tmp_path)
@@ -702,6 +757,91 @@ class TestDeleteFailuresBecomeAssembleErrors:
         assert "permission denied" in msg
         assert "pipelinerun-wl-gone|baseline|i1.yaml" in msg
         assert "deploy" in msg
+
+    def test_write_text_or_raise_normalizes_oserror(self, tmp_path):
+        target = tmp_path / "nonexistent-dir" / "f.yaml"
+        with pytest.raises(AssembleError) as exc:
+            assemble_run._write_text_or_raise(target, "body")
+        msg = str(exc.value)
+        assert "failed to write" in msg
+        assert str(target) in msg
+
+    def test_write_failure_after_the_wipe_is_an_assemble_error(self, tmp_path,
+                                                               monkeypatch):
+        """A disk-full or permissions failure in the writes that follow the wipe
+        must reach the operator as an AssembleError naming the file, not a raw
+        traceback — that is the only signal telling them what state the run is
+        in after results were deleted."""
+        fx = _fx(tmp_path)
+        _assemble(fx)
+        _seed_results(_run_dir(fx), "baseline")
+        real_write_text = assemble_run.Path.write_text
+
+        def _boom(self, *a, **kw):
+            if self.name == "manifest.assembly.yaml":
+                raise OSError("no space left on device")
+            return real_write_text(self, *a, **kw)
+
+        monkeypatch.setattr(assemble_run.Path, "write_text", _boom)
+        with pytest.raises(AssembleError) as exc:
+            _assemble(fx, force=True, assume_yes=True,
+                      now_iso="2026-07-02T00:00:00Z")
+        msg = str(exc.value)
+        assert "no space left on device" in msg
+        assert "manifest.assembly.yaml" in msg
+
+    def test_a_build_refusal_deletes_nothing(self, tmp_path, monkeypatch):
+        """PipelineRuns are built before anything is deleted, so a refusal
+        during the build (the 253-char name limit is enforced there) leaves the
+        results and the existing PipelineRuns alone. Building after the wipe
+        would strand the pair with neither results nor a manifest."""
+        fx = _fx(tmp_path)
+        _assemble(fx)
+        run_dir = _run_dir(fx)
+        results = _seed_results(run_dir, "baseline")
+        pr = run_dir / "cluster" / "pipelinerun-wl-a|baseline|i1.yaml"
+        pr_before = pr.stat().st_mtime_ns
+        (run_dir / "cluster" / "pipelinerun-wl-gone|baseline|i1.yaml").write_text("x\n")
+
+        def _refuse(**_kw):
+            raise ValueError(
+                "PipelineRun name 'x' is 999 chars, exceeds the 253-char "
+                "DNS subdomain limit"
+            )
+
+        monkeypatch.setattr(assemble_run, "make_pipelinerun_scenario", _refuse)
+        with pytest.raises(AssembleError, match="253"):
+            _assemble(fx, force=True, assume_yes=True,
+                      now_iso="2026-07-02T00:00:00Z")
+        # Results intact, existing PipelineRun untouched, and the orphan not
+        # even pruned — the refusal preceded every deletion.
+        assert (results / "trace_data.csv").read_text() == "measured\n"
+        assert pr.stat().st_mtime_ns == pr_before
+        assert (run_dir / "cluster" / "pipelinerun-wl-gone|baseline|i1.yaml").exists()
+
+    def test_over_long_pipelinerun_name_refuses_without_creating_the_run(
+        self, tmp_path
+    ):
+        """The real length check, at a run name the filesystem still accepts.
+        `baseline-wl-a-<run>-i1` is 17 chars plus the run name, so 240 pushes it
+        past 253 while staying under the 255-byte filename limit."""
+        fx = _fx(tmp_path)
+        long_run = "r" * 240
+        with pytest.raises(AssembleError, match="253"):
+            assemble_run.assemble_run(
+                translation_hash=fx["translation_hash"],
+                translation_ref=fx["translation_hash"],
+                cluster_id=fx["cluster_id"],
+                run_name=long_run,
+                experiment_root=fx["exp_root"],
+                manifest_path=fx["manifest_path"],
+                force=True,
+                assume_yes=True,
+                now_iso="2026-07-02T00:00:00Z",
+            )
+        # Nothing was written: the run directory is created in step 10, well
+        # after the step-6 build that refused.
+        assert not (fx["exp_root"] / "workspace" / "runs" / long_run).exists()
 
     def test_prune_runs_before_the_results_wipe(self, tmp_path, monkeypatch):
         """Ordered cheap-delete-first: a filesystem problem aborts while the

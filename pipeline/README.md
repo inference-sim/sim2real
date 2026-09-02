@@ -541,7 +541,15 @@ A scoped assemble:
 
 **Orphan pruning (unscoped only).** Because the run directory is no longer cleared, an unscoped assemble explicitly deletes `cluster/` files the current `transfer.yaml` no longer describes: PipelineRuns whose triple is outside the cross product, and per-package scenario YAMLs for packages that are gone. Without this, a manifest edit that drops a workload would leave its PipelineRun on disk for `deploy`'s `pipelinerun-*.yaml` glob to find and execute. Each removal prints a warning naming the file. The pruned pairs' `results/` are deliberately left in place.
 
-Pruning runs **before** the results wipe. Both are deletions, and this is the cheap one — regenerable YAML rather than measured data — so a read-only filesystem or a permissions problem aborts there, while the results are still on disk. Either delete failing raises `AssembleError` rather than a raw traceback; the results-wipe message names how many directories were already removed, since nothing has been regenerated to replace them.
+### Ordering, and why the destructive steps are safe
+
+Everything that can refuse happens before anything is deleted:
+
+1. **PipelineRuns are built in memory first.** This is where the 253-char name limit is enforced, so an over-long name aborts while the results are still on disk. Building after the wipe would strand the pair with neither results nor a manifest.
+2. **Pruning precedes the results wipe.** Both are deletions, and pruning is the cheap one — regenerable YAML rather than measured data — so a read-only filesystem or permissions problem aborts there, results intact.
+3. **Every write goes through one helper** that turns `OSError` into `AssembleError` naming the file. A disk-full failure after the wipe is then a legible error rather than a raw traceback, which is the only thing telling the operator what state the run is in.
+
+The results-wipe failure message also names how many directories were already removed, since nothing has been regenerated to replace them.
 
 **Filter-value normalization.** `--workload` / `--package` values are compared with `_` normalized to `-`, so either spelling of a workload name matches. If two *declared* names differ only by that character they are indistinguishable to a filter, and assemble refuses rather than silently selecting one of them — such a manifest is already broken (both names produce the same `cluster/pipelinerun-*.yaml` filename), but a scope filter must not be what discovers it by deleting the wrong pair's results. The check only runs when a filter is given, so it does not retroactively reject an unscoped assemble.
 
