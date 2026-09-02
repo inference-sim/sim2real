@@ -1188,14 +1188,43 @@ def build_parser() -> argparse.ArgumentParser:
     asm.add_argument(
         "--force",
         action="store_true",
-        help="overwrite an existing runs/<run>/ directory",
+        help="re-generate PipelineRuns for pairs in scope that already have "
+             "one, discarding their collected results unless --no-wipe",
     )
     asm.add_argument(
         "--replicas",
         type=_positive_int,
-        default=1,
+        default=None,
         metavar="N",
-        help="number of replica iterations per (workload, package) pair (default: 1)",
+        help="number of replica iterations per (workload, package) pair "
+             "(default: 1; cannot be combined with --workload/--package, which "
+             "reuse the run's recorded count)",
+    )
+    asm.add_argument(
+        "--workload",
+        nargs="+",
+        metavar="NAME",
+        help="scope to these workloads (comma or space-separated, globs OK); "
+             "requires an existing run",
+    )
+    asm.add_argument(
+        "--package",
+        nargs="+",
+        metavar="NAME",
+        help="scope to these packages (comma or space-separated, globs OK); "
+             "requires an existing run",
+    )
+    asm.add_argument(
+        "--no-wipe",
+        action="store_true",
+        dest="no_wipe",
+        help="keep the collected results of pairs being re-generated",
+    )
+    asm.add_argument(
+        "-y", "--yes",
+        action="store_true",
+        dest="assume_yes",
+        help="skip the confirmation prompt before deleting collected results",
     )
 
     use = sub.add_parser("use", help="Set the active run in setup_config.json")
@@ -2547,6 +2576,10 @@ def _cmd_assemble(args) -> int:
             manifest_path=manifest_path,
             force=args.force,
             replicas=args.replicas,
+            workload_filter=args.workload,
+            package_filter=args.package,
+            no_wipe=args.no_wipe,
+            assume_yes=args.assume_yes,
             now_iso=now_iso,
         )
     except _assemble_run_lib.AssembleError as exc:
@@ -2574,16 +2607,26 @@ def _cmd_assemble(args) -> int:
             "in the sim2real repo to fix.",
             file=sys.stderr,
         )
+    for display in getattr(_assemble_run_lib.assemble_run, "wiped_results", []):
+        print(f"wiped collected results: {display}", file=sys.stderr)
+    for name in getattr(_assemble_run_lib.assemble_run, "pruned_files", []):
+        print(
+            f"warning: removed cluster/{name} — the current transfer.yaml no "
+            "longer describes it; any collected results for that pair were "
+            "left in place",
+            file=sys.stderr,
+        )
     status = getattr(_assemble_run_lib.assemble_run, "status", "written")
     if status == "noop":
-        prior_assembled_at = getattr(
-            _assemble_run_lib.assemble_run, "prior_assembled_at", ""
-        ) or "unknown"
+        # Deliberately says nothing about whether the inputs changed: the only
+        # thing checked here is whether each pair in scope already has a
+        # PipelineRun on disk (issue #876).
+        n = getattr(_assemble_run_lib.assemble_run, "already_assembled", 0)
         print(
-            f"No change needed for run '{args.run}': manifest, replicas, and "
-            f"translation are unchanged since {prior_assembled_at}.\n"
-            "To rebuild anyway (e.g. after an assembler code update), "
-            "pass --force."
+            f"run '{args.run}': {n} pair(s) already assembled, nothing to do.\n"
+            "To re-assemble them, pass --force (add --no-wipe to keep their "
+            "collected results); to re-assemble only some, scope with "
+            "--workload / --package."
         )
     else:
         print(f"assembled run {args.run}")
