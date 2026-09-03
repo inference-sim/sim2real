@@ -63,6 +63,13 @@ if [ -n "$RUN" ]; then
         echo "ERROR: '.results.results_dir' missing from resolve output — schema drift?"
         exit 1
     }
+    # RUN_DIR is where this skill writes its report (see Operating Constraints).
+    # Taken from the resolve output rather than rebuilt from EXPERIMENT_ROOT/RUN
+    # so it cannot drift from layout.runs_dir(), which is what produced it.
+    RUN_DIR=$(jq -re '.run_dir' "$RESOLVED_JSON") || {
+        echo "ERROR: '.run_dir' missing from resolve output — schema drift?"
+        exit 1
+    }
     PHASES=$(jq -re '.results.phases_with_data | join(" ")' "$RESOLVED_JSON") || {
         echo "ERROR: '.results.phases_with_data' missing from resolve output — schema drift?"
         exit 1
@@ -113,9 +120,15 @@ elif [ -n "$REAL" ]; then
     # skill accepts arbitrarily named phase dirs (e.g., baseline/, treatment/
     # or quartic/, control/). Anything under RESULTS_DIR that's a directory
     # AND not one of the well-known non-phase names is a candidate phase.
+    #
+    # `check` is on this list because that is where this skill writes its own
+    # report (see Operating Constraints). It matters only in the flat-legacy
+    # case above, where RESULTS_DIR falls back to $REAL and the scan therefore
+    # covers the report directory's own level — without the entry, a bundle
+    # that has already been checked once grows a bogus `check` phase.
     PHASES=$(ls "$RESULTS_DIR" | while read d; do
         case "$d" in
-            generated|workloads|results_charts|snapshots|review|cluster|plans) ;;
+            generated|workloads|results_charts|snapshots|review|check|cluster|plans) ;;
             *) [ -d "$RESULTS_DIR/$d" ] && echo "$d" ;;
         esac
     done | tr '\n' ' ')
@@ -344,7 +357,66 @@ Perform a comprehensive parity check between a BLIS simulation bundle and its re
 
 ## Operating Constraints
 
-**STRICTLY READ-ONLY**: Do **not** modify any files. Output a structured report.
+**READ-ONLY except the report.** Do not modify any bundle input, config,
+translation output, or result artifact. The one permitted write is the report
+itself, into a fresh timestamped directory:
+
+```
+$REPORT_DIR = $RUN_DIR/check/<UTC timestamp>/      # --run mode
+$REPORT_DIR = $REAL/check/<UTC timestamp>/         # --real (legacy) mode
+```
+
+`$RUN_DIR` comes from the resolve output in Step 0 — do not rebuild it from
+`$EXPERIMENT_ROOT`/`$RUN`, which would duplicate `layout.runs_dir()`. The
+timestamp is `date -u +%Y%m%dT%H%M%SZ`. Never write under `results/`, and never
+modify a file the check reads as evidence.
+
+Create the directory fail-loud, matching Step 0's pattern:
+
+```bash
+mkdir -p "$REPORT_DIR" || {
+    echo "ERROR: could not create report directory $REPORT_DIR"
+    exit 1
+}
+```
+
+There is **no fallback location.** If the directory cannot be created — a
+read-only mount, or a stale non-directory file at that path — abort. Writing
+to `/tmp` instead would produce a check that looks like it finished while
+leaving nothing durable behind, which is the failure this write target exists
+to remove.
+
+Each invocation gets its own timestamped directory, so re-checking a run never
+overwrites an earlier verdict. Why persist at all: a section report for a
+9-cell run is far too large to review in scrollback, it does not survive the
+session, and two runs' verdicts cannot be compared unless both are on disk —
+that comparison is the operator diffing two reports, which is also why the
+directory is committable.
+
+**No check consumes this report.** Do not wire one to it. §5h aggregates across
+`(phase, workload)` cells within a single run ("independent of any single run",
+§5h). §5c.6's five gating criteria are entirely within-run; it does carry a
+secondary, non-gating `delta vs prior run` trend diagnostic, but that compares
+raw log counts between two pipeline runs — not a previous parity report.
+
+`check/` is a **sibling** of `results/`, never inside it: in a flat legacy
+bundle (no `$REAL/results/`) `RESULTS_DIR` falls back to `$REAL` itself, so
+anything written there is scanned by phase discovery. `check` is on that
+denylist (see Step 0) for exactly this reason — do not rename the directory
+without adding the new name there.
+
+**Subagents must write their section with a Bash heredoc, not the `Write`
+tool** — a harness guard rejects `Write` for subagent report files
+("Subagents should return findings as text, not write report files"). Write
+the first chunk with `cat > "$file"` and every later chunk with
+`cat >> "$file"`; starting with `>>` means a retry after a partial write
+silently appends a second copy of the section. Afterwards verify the file on
+disk: line count, first line, and a complete last line.
+
+Writing sections to files is also what keeps them intact. A section report
+for a 9-cell run exceeds the inter-agent message limit and is **silently
+truncated mid-sentence** if returned as text; a subagent should return only
+the path it wrote plus a short verdict rollup.
 
 ## Evidence Requirements
 
@@ -807,6 +879,29 @@ Exit code:  1 (FAIL and MISSING present)
 
 ## Output Format
 
+### Where the report is written
+
+Everything goes into `$REPORT_DIR` (defined in Operating Constraints:
+`$RUN_DIR/check/<UTC timestamp>/`, or `$REAL/check/<UTC timestamp>/` in legacy
+mode). One file per parallel agent, so no two agents ever write the same file:
+
+| File | Written by | Contents |
+|------|-----------|----------|
+| `section1-workload-parity.md` | Agent 1 | §1 in full |
+| `section234-config-signal-policy.md` | Agent 2 | §2, §3, §4 in full |
+| `section5-runtime-pd.md` | Agent 3 | §5 in full, including §5h |
+| `parity-report.md` | the orchestrator, after all three finish | Header, Summary table, per-iteration verdict rollup, Action Items, and links to the three section files |
+
+`parity-report.md` is the entry point: it carries the Summary table, the
+per-iteration verdict rollup, and the Action Items. It does **not** duplicate
+the section bodies — it links to them, so the assembled report stays readable
+while the evidence tables stay complete.
+
+Print the path to `parity-report.md` at the end of the run so the operator
+knows where the report landed.
+
+### Report structure
+
 Structure the report as follows. Every section must have evidence tables/snippets, not just verdicts.
 
 ```markdown
@@ -856,9 +951,22 @@ Expected 210 req/s (from workloads/w3.yaml:aggregate_rate), measured 210.4 req/s
 
 ## Parallelization
 
-Use the Agent tool to parallelize independent checks:
-- Agent 1: Workload parity (`trace_data.csv` analysis via python3)
-- Agent 2: Config + Signal parity (YAML/Go file comparison)
-- Agent 3: Runtime analysis (server log parsing, including §5h GPU thermal/power health). Within Agent 3, run §5h **before** §5b/§5e so the per-cell `thermal-FAIL` flag is available when those subsections build their tables.
+Create `$REPORT_DIR` (Operating Constraints) **before** dispatching, and pass
+the absolute path plus the agent's own filename to each agent — an agent that
+has to derive the path will pick a different timestamp.
 
-Combine results into the final report.
+Use the Agent tool to parallelize independent checks:
+- Agent 1: Workload parity (`trace_data.csv` analysis via python3) → `section1-workload-parity.md`
+- Agent 2: Config + Signal parity (YAML/Go file comparison) → `section234-config-signal-policy.md`
+- Agent 3: Runtime analysis (server log parsing, including §5h GPU thermal/power health) → `section5-runtime-pd.md`. Within Agent 3, run §5h **before** §5b/§5e so the per-cell `thermal-FAIL` flag is available when those subsections build their tables.
+
+Each agent writes its section to that file with a Bash heredoc (`cat >` for the
+first chunk, `cat >>` after), verifies it on disk, and returns **only** the path
+plus a short verdict rollup — never the section body, which is large enough to
+be silently truncated in transit.
+
+Then assemble `parity-report.md` from the three rollups: Summary table,
+per-iteration verdict rollup, Action Items, and links to the section files.
+Before assembling, confirm all three section files exist and are non-empty; if
+one is missing or was truncated, re-run that agent rather than reporting a
+partial verdict.
