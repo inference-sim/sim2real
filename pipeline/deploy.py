@@ -1018,15 +1018,7 @@ def _is_iteration_up_to_date(iN_dir: Path, remote_mtime: "float | None") -> bool
     if remote_mtime is None:
         return False
     marker = _read_collect_marker(iN_dir)
-    if marker is None:
-        return False
-    recorded = marker.get("remote_mtime")
-    if recorded is None:
-        return True
-    try:
-        return float(recorded) >= remote_mtime
-    except (TypeError, ValueError):
-        return False
+    return marker is not None and _marker_covers(marker, remote_mtime)
 
 
 def _list_pvc_iterations(
@@ -1093,14 +1085,18 @@ def _remote_file_inventory(
         if not line:
             continue
         size_str, sep, rel = line.partition("|")
-        if not sep:
-            warn(f"inventory: unparseable line: {line!r}")
-            continue
         try:
+            if not sep:
+                raise ValueError("no size/path delimiter")
             size = int(size_str)
         except ValueError:
-            warn(f"inventory: unparseable line: {line!r}")
-            continue
+            # Fail the whole inventory rather than dropping the entry. A
+            # dropped entry can never appear in ``missing``/``short``, so the
+            # iteration could be marked complete and skipped forever while that
+            # file was never fetched — the same silent data loss #885 was filed
+            # about, moved one layer down into the parser.
+            return {}, (f"failed to inventory {remote_dir}: unparseable "
+                        f"stat line: {line!r}")
         inv[rel.removeprefix("./")] = size
     return inv, None
 
@@ -1163,6 +1159,24 @@ def _read_collect_marker(iN_dir: Path) -> "dict | None":
     return data if isinstance(data, dict) else None
 
 
+def _marker_covers(marker: dict, remote_mtime: float) -> bool:
+    """True when *marker* was written against a remote at least as new.
+
+    Shared by the up-to-date gate and the copy's refetch decision so the two
+    cannot disagree about what "stale" means. A marker recording
+    ``remote_mtime: null`` was written when the mtime probe had failed; it
+    still proves the transfer completed, so it is trusted. A recorded value
+    that is not a number is a corrupted or hand-edited marker — not trusted.
+    """
+    recorded = marker.get("remote_mtime")
+    if recorded is None:
+        return True
+    try:
+        return float(recorded) >= remote_mtime
+    except (TypeError, ValueError):
+        return False
+
+
 @dataclass
 class IterationCopy:
     """Outcome of copying one ``i<N>/`` iteration (issue #885).
@@ -1182,12 +1196,25 @@ class IterationCopy:
     missing: list = field(default_factory=list)
     short: list = field(default_factory=list)     # (relpath, local, remote)
     errors: list = field(default_factory=list)
+    verified: bool = False
 
     @property
-    def trace_ok(self) -> bool:
-        """True when ``trace_data.csv`` is neither missing nor short."""
-        return ("trace_data.csv" not in self.missing
-                and all(rel != "trace_data.csv" for rel, _l, _r in self.short))
+    def trace_status(self) -> str:
+        """``"ok"``, ``"bad"``, or ``"unknown"`` for ``trace_data.csv``.
+
+        Three states, not two: ``missing`` and ``short`` are populated only by
+        the post-copy verification loop, so when that loop never ran — an
+        inventory probe that failed outright — both are empty because nothing
+        was examined, not because everything was fine. Reporting "safe" there
+        would be the same class of false reassurance #885 was filed about, one
+        step earlier in the pipeline.
+        """
+        if not self.verified:
+            return "unknown"
+        if ("trace_data.csv" in self.missing
+                or any(rel == "trace_data.csv" for rel, _l, _r in self.short)):
+            return "bad"
+        return "ok"
 
 
 def _human_bytes(n: int) -> str:
@@ -1232,12 +1259,16 @@ def _report_partial(res: IterationCopy, run_name: str, phase: str,
         print(f"       missing:    {_fmt_list(res.missing)}")
     for cause in res.errors:
         print(f"       cause:      {cause}")
-    if res.trace_ok:
+    status = res.trace_status
+    if status == "ok":
         print("       trace_data.csv is present and complete — "
               "the workload's trace is safe")
-    else:
+    elif status == "bad":
         print("       trace_data.csv is MISSING OR TRUNCATED — "
               "this workload's trace is not usable")
+    else:
+        print("       trace_data.csv state is UNKNOWN — the iteration could "
+              "not be inventoried, so nothing was checked")
     print("       ACTION: re-run to fetch only the missing files:")
     print(f"               python pipeline/deploy.py collect --run {run_name} "
           f"--package {phase} --workload {wl_name}")
@@ -1395,11 +1426,18 @@ def _copy_iteration_incremental(
         local_inv = {rel: size for rel, size in local_inv.items()
                      if rel not in set(pruned)}
 
-    # A marker that exists even though the caller chose not to skip means the
-    # remote moved on. Sizes can match while contents differ, so re-fetch
-    # everything rather than trusting the size diff.
-    stale_marker = _read_collect_marker(iN_dest) is not None
-    delta = sorted(remote_inv) if stale_marker else _delta(remote_inv, local_inv)
+    # Refetch everything only on positive evidence that the remote moved on
+    # past a marker we already hold: sizes can match while contents differ, so
+    # the size diff alone would miss an in-place rewrite. Absence of a usable
+    # remote mtime is NOT such evidence — a failed mtime probe blocks the skip
+    # in ``_is_iteration_up_to_date`` and lands every iteration here, and
+    # treating that as "remote moved on" would re-download whole complete
+    # iterations in exactly the degradation path this change makes cheap.
+    marker = _read_collect_marker(iN_dest)
+    remote_advanced = (marker is not None and remote_mtime is not None
+                       and not _marker_covers(marker, remote_mtime))
+    delta = (sorted(remote_inv) if remote_advanced
+             else _delta(remote_inv, local_inv))
 
     if delta:
         # Pass 1 (bulk): only when there is nothing local to preserve. One cp
@@ -1437,6 +1475,7 @@ def _copy_iteration_incremental(
             res.files_present += 1
             res.bytes_present += size
 
+    res.verified = True
     res.complete = not res.missing and not res.short
     if res.complete:
         _write_collect_marker(iN_dest, remote_inv, remote_mtime)

@@ -68,13 +68,33 @@ def test_remote_inventory_returns_error_on_timeout(monkeypatch):
     assert "timed out" in err.lower()
 
 
-def test_remote_inventory_warns_and_skips_unparseable_lines(monkeypatch):
-    """A malformed line is skipped; the parseable ones still land."""
-    stdout = "garbage-no-delimiter\nnotanumber|./a.log\n7|./b.log\n"
-    monkeypatch.setattr(deploy, "run", lambda *a, **k: _fake_run(stdout=stdout))
-    inv, err = deploy._remote_file_inventory("pod", "ns", "/d")
-    assert err is None
-    assert inv == {"b.log": 7}
+def test_remote_inventory_fails_the_whole_probe_on_a_malformed_line(monkeypatch):
+    """A line we cannot parse fails the inventory rather than being dropped.
+
+    A dropped entry could never appear in ``missing``/``short``, so the
+    iteration could be marked complete and skipped forever while that file was
+    never fetched — the silent data loss of #885, moved into the parser.
+    """
+    for stdout in ("garbage-no-delimiter\n7|./b.log\n",
+                   "notanumber|./a.log\n7|./b.log\n"):
+        monkeypatch.setattr(deploy, "run",
+                            lambda *a, **k: _fake_run(stdout=stdout))
+        inv, err = deploy._remote_file_inventory("pod", "ns", "/d")
+        assert inv == {}
+        assert err is not None and "unparseable" in err
+
+
+def test_a_malformed_line_prevents_the_marker(tmp_path, monkeypatch):
+    """End-to-end: the parse failure reaches the caller as an inventory error,
+    so no copy runs and no marker is written."""
+    monkeypatch.setattr(
+        deploy, "run",
+        lambda *a, **k: _fake_run(stdout="garbage-no-delimiter\n"))
+    dest = tmp_path / "i1"
+    res = deploy._copy_iteration_incremental(
+        "pod", "ns", "/data/r/p/wl/i1", dest, remote_mtime=100.0)
+    assert res.complete is False
+    assert deploy._read_collect_marker(dest) is None
 
 
 def test_remote_inventory_empty_dir_is_success_not_error(monkeypatch):
@@ -306,7 +326,7 @@ def test_incremental_copy_no_marker_when_a_file_times_out(tmp_path, monkeypatch)
     assert deploy._read_collect_marker(dest) is None
     assert res.missing == ["epp_logs/big.log"]
     assert any("timed out" in e.lower() for e in res.errors)
-    assert res.trace_ok is True          # trace_data.csv landed
+    assert res.trace_status == "ok"       # trace_data.csv landed
 
 
 def test_a_timeout_never_propagates_out_of_the_helper(tmp_path, monkeypatch):
@@ -425,6 +445,54 @@ def test_stale_marker_forces_a_full_refetch(tmp_path, monkeypatch):
     assert deploy._read_collect_marker(dest)["remote_mtime"] == 999.0
 
 
+def test_failed_mtime_probe_still_costs_only_the_delta(tmp_path, monkeypatch):
+    """``remote_mtime=None`` means the mtime probe failed. That blocks the skip
+    in ``_is_iteration_up_to_date``, so every iteration lands here — including
+    complete ones. Absence of an mtime is not evidence the remote moved on, so
+    it must NOT trigger a full refetch: that would re-download whole complete
+    iterations and re-expose the ~420 MB ceiling in exactly the degradation path
+    this change makes cheap."""
+    tree = {"trace_data.csv": 4, "epp_logs/a.log": 8}
+    dest = tmp_path / "i1"
+    (dest / "epp_logs").mkdir(parents=True)
+    (dest / "trace_data.csv").write_bytes(b"\0" * 4)
+    (dest / "epp_logs" / "a.log").write_bytes(b"\0" * 8)
+    deploy._write_collect_marker(dest, tree, 100.0)
+    fake = _FakePVC(tree)
+    monkeypatch.setattr(deploy, "run", fake)
+    res = deploy._copy_iteration_incremental(
+        "pod", "ns", "/data/r/p/wl/i1", dest, remote_mtime=None)
+    assert res.complete is True
+    assert [c for c in fake.calls if c.startswith("kubectl cp")] == []
+    assert deploy._read_collect_marker(dest)["remote_mtime"] is None
+
+
+def test_a_corrupted_marker_mtime_forces_a_full_refetch(tmp_path, monkeypatch):
+    """A marker we cannot compare is not trusted: refetch rather than assume."""
+    tree = {"trace_data.csv": 4, "epp_logs/a.log": 8}
+    dest = tmp_path / "i1"
+    (dest / "epp_logs").mkdir(parents=True)
+    (dest / "trace_data.csv").write_bytes(b"\0" * 4)
+    (dest / "epp_logs" / "a.log").write_bytes(b"\0" * 8)
+    (dest / deploy.COLLECT_MARKER).write_text('{"remote_mtime": "nonsense"}')
+    fake = _FakePVC(tree)
+    monkeypatch.setattr(deploy, "run", fake)
+    res = deploy._copy_iteration_incremental(
+        "pod", "ns", "/data/r/p/wl/i1", dest, remote_mtime=100.0)
+    assert res.complete is True
+    assert len([c for c in fake.calls if c.startswith("kubectl cp")]) == 2
+
+
+def test_marker_covers_is_the_shared_staleness_predicate():
+    """The gate and the refetch decision must agree on what 'stale' means."""
+    assert deploy._marker_covers({"remote_mtime": 500.0}, 500.0) is True
+    assert deploy._marker_covers({"remote_mtime": 501.0}, 500.0) is True
+    assert deploy._marker_covers({"remote_mtime": 499.0}, 500.0) is False
+    assert deploy._marker_covers({"remote_mtime": None}, 500.0) is True
+    assert deploy._marker_covers({}, 500.0) is True
+    assert deploy._marker_covers({"remote_mtime": "x"}, 500.0) is False
+
+
 def test_exclude_subdirs_drops_those_entries_from_the_contract(tmp_path, monkeypatch):
     """--skip-logs excludes server_logs. Excluded files must not appear in the
     inventory, must not be copied, and must not block the marker."""
@@ -540,17 +608,51 @@ def test_report_partial_names_every_thing_the_operator_needs(capsys):
 def test_report_partial_flags_a_lost_trace(capsys):
     res = deploy.IterationCopy(
         label="baseline/wl-a/i1", complete=False, files_total=2,
-        bytes_total=10, missing=["trace_data.csv"])
+        bytes_total=10, missing=["trace_data.csv"], verified=True)
     deploy._report_partial(res, "try3", "baseline", "wl-a")
     out = capsys.readouterr().out
-    assert res.trace_ok is False
+    assert res.trace_status == "bad"
     assert "MISSING OR TRUNCATED" in out
     assert "is present and complete" not in out
 
 
-def test_trace_ok_is_false_when_the_trace_is_short():
-    res = deploy.IterationCopy(short=[("trace_data.csv", 10, 20)])
-    assert res.trace_ok is False
+def test_trace_status_is_bad_when_the_trace_is_short():
+    res = deploy.IterationCopy(short=[("trace_data.csv", 10, 20)], verified=True)
+    assert res.trace_status == "bad"
+
+
+def test_trace_status_is_unknown_until_verification_runs():
+    """Empty missing/short before the verification loop means 'nothing was
+    examined', not 'everything is fine'."""
+    assert deploy.IterationCopy().trace_status == "unknown"
+    assert deploy.IterationCopy(verified=True).trace_status == "ok"
+
+
+def test_report_partial_says_unknown_when_the_inventory_probe_failed(capsys):
+    """The probe never got far enough to look at trace_data.csv, so the report
+    must not claim the trace is safe — that is the same false reassurance #885
+    was filed about, one step earlier."""
+    res = deploy.IterationCopy(
+        label="baseline/wl-a/i1", complete=False,
+        errors=["failed to inventory /data/try3/baseline/wl-a/i1: "
+                "connection refused"])
+    deploy._report_partial(res, "try3", "baseline", "wl-a")
+    out = capsys.readouterr().out
+    assert "UNKNOWN" in out
+    assert "the workload's trace is safe" not in out
+    assert "MISSING OR TRUNCATED" not in out
+    assert "connection refused" in out
+
+
+def test_inventory_error_leaves_trace_status_unknown(tmp_path, monkeypatch):
+    """The same guarantee at the level that produces the record."""
+    monkeypatch.setattr(
+        deploy, "run",
+        lambda *a, **k: _fake_run(returncode=1, stderr="connection refused"))
+    res = deploy._copy_iteration_incremental(
+        "pod", "ns", "/data/r/p/wl/i1", tmp_path / "i1", remote_mtime=100.0)
+    assert res.verified is False
+    assert res.trace_status == "unknown"
 
 
 def test_report_partial_truncates_long_file_lists(capsys):
