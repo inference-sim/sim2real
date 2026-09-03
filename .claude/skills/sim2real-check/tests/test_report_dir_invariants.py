@@ -30,11 +30,26 @@ def _skill_text() -> str:
 
 
 def _denylist_arm() -> str:
-    """Return the ``case`` arm listing well-known non-phase directory names."""
+    """Return the ``case`` arm listing well-known non-phase directory names.
+
+    Anchored to Step 0 and asserted unique. ``re.search`` alone would return
+    whichever line matched first, so a future illustrative ``case`` snippet
+    elsewhere in the skill could silently bind these tests to unrelated data —
+    a guard that reads the wrong region is worse than no guard, because it goes
+    green either way.
+    """
     text = _skill_text()
-    match = re.search(r"^\s*([a-z_|]*\|[a-z_|]*)\)\s*;;\s*$", text, re.MULTILINE)
-    assert match, "Step 0 phase-discovery denylist `case` arm not found in SKILL.md"
-    return match.group(1)
+    start = text.index("## Step 0:")
+    end = text.index("## Evidence Requirements", start)
+    matches = re.findall(
+        r"^\s*([a-z_|]*\|[a-z_|]*)\)\s*;;\s*$", text[start:end], re.MULTILINE
+    )
+    assert len(matches) == 1, (
+        f"expected exactly one `case` denylist arm in Step 0, found {len(matches)}: "
+        f"{matches}. If a second case statement was added, anchor this helper more "
+        "narrowly rather than letting it pick one arbitrarily."
+    )
+    return matches[0]
 
 
 def _operating_constraints() -> str:
@@ -104,6 +119,18 @@ class TestSubagentWriteGuidance:
 
     def test_verification_is_required(self):
         assert "verify the file on" in _operating_constraints()
+
+
+class TestReportDirCreationIsFailLoud:
+    def test_mkdir_is_guarded(self):
+        """An unguarded `mkdir -p` lets the run continue with every subsequent
+        write failing, producing a check that looks finished but left nothing
+        durable — the failure this write target exists to remove."""
+        constraints = _operating_constraints()
+        assert 'mkdir -p "$REPORT_DIR" ||' in constraints
+
+    def test_no_fallback_location_is_permitted(self):
+        assert "no fallback location" in _operating_constraints().lower()
 
 
 class TestResolveModeUsesRunDirFromResolveOutput:

@@ -368,20 +368,36 @@ $REPORT_DIR = $REAL/check/<UTC timestamp>/         # --real (legacy) mode
 
 `$RUN_DIR` comes from the resolve output in Step 0 — do not rebuild it from
 `$EXPERIMENT_ROOT`/`$RUN`, which would duplicate `layout.runs_dir()`. The
-timestamp is `date -u +%Y%m%dT%H%M%SZ`. Create the directory with `mkdir -p`.
-Never write under `results/`, and never modify a file the check reads as
-evidence.
+timestamp is `date -u +%Y%m%dT%H%M%SZ`. Never write under `results/`, and never
+modify a file the check reads as evidence.
+
+Create the directory fail-loud, matching Step 0's pattern:
+
+```bash
+mkdir -p "$REPORT_DIR" || {
+    echo "ERROR: could not create report directory $REPORT_DIR"
+    exit 1
+}
+```
+
+There is **no fallback location.** If the directory cannot be created — a
+read-only mount, or a stale non-directory file at that path — abort. Writing
+to `/tmp` instead would produce a check that looks like it finished while
+leaving nothing durable behind, which is the failure this write target exists
+to remove.
 
 Each invocation gets its own timestamped directory, so re-checking a run never
 overwrites an earlier verdict. Why persist at all: a section report for a
 9-cell run is far too large to review in scrollback, it does not survive the
 session, and two runs' verdicts cannot be compared unless both are on disk —
 that comparison is the operator diffing two reports, which is also why the
-directory is committable. Note this is **not** an input to any check:
-§5c.6 and §5h are both computed entirely from the current run's own evidence
-(§5h explicitly aggregates across `(phase, workload)` cells "independent of any
-single run"), and neither reads a previous report. Nothing here creates such a
-dependency.
+directory is committable.
+
+**No check consumes this report.** Do not wire one to it. §5h aggregates across
+`(phase, workload)` cells within a single run ("independent of any single run",
+§5h). §5c.6's five gating criteria are entirely within-run; it does carry a
+secondary, non-gating `delta vs prior run` trend diagnostic, but that compares
+raw log counts between two pipeline runs — not a previous parity report.
 
 `check/` is a **sibling** of `results/`, never inside it: in a flat legacy
 bundle (no `$REAL/results/`) `RESULTS_DIR` falls back to `$REAL` itself, so
