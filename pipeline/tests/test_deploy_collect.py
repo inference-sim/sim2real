@@ -28,6 +28,36 @@ def _mock_cm(monkeypatch, data):
         ),
     )
 
+# ── #885 remote-inventory probe support ─────────────────────────────────────
+#
+# Since #885 each iteration copy starts with an inventory exec
+# (`find . -type f -exec stat -c '%s|%n' …`) and copies only the delta. Mocks
+# below answer that probe with this canned file list so the copy set is
+# non-empty; a mock that returned nothing would issue no `kubectl cp` at all.
+# The probe is identified by its unique `%s|%n` stat format, which the
+# per-iteration mtime probe (`%Y %n`) does not use.
+
+_INVENTORY = (
+    "trace_data.csv", "trace_header.yaml",
+    "epp_stream_done", "gpu_stream_done", "metrics_stream_done",
+    "server_logs/vllm.log", "epp_logs/epp.log", "gpu_logs/gpu.log",
+    "metrics/raw/m.log", "resources/pods.yaml",
+)
+
+
+def _is_inventory_probe(cmd_str: str) -> bool:
+    """True for the #885 inventory exec, false for the mtime probe."""
+    return "%s|%n" in cmd_str
+
+
+def _inventory_stdout(relpaths=_INVENTORY, size: "int | None" = 4) -> str:
+    """Render the probe's stdout. *relpaths* may be a sequence of paths (all
+    reported at *size* bytes) or a mapping of path -> size (pass size=None)."""
+    if size is None:
+        return "".join(f"{sz}|./{rel}\n" for rel, sz in relpaths.items())
+    return "".join(f"{size}|./{rel}\n" for rel in relpaths)
+
+
 
 def test_collect_with_progress_default(tmp_path, monkeypatch):
     """Without --package, collect uses all unique packages from progress."""
@@ -48,7 +78,7 @@ def test_collect_with_progress_default(tmp_path, monkeypatch):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -72,7 +102,7 @@ def test_collect_fallback_no_progress(tmp_path, monkeypatch):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -102,7 +132,7 @@ def test_collect_single_package_from_progress(tmp_path, monkeypatch):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -131,7 +161,7 @@ def test_collect_experiment_expands_to_all_progress_phases(tmp_path, monkeypatch
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -165,7 +195,7 @@ def test_collect_package_glob_matches_family(tmp_path, monkeypatch):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -194,7 +224,7 @@ def test_collect_package_glob_does_not_match_experiment(tmp_path, monkeypatch):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -249,7 +279,7 @@ def test_collect_package_experiment_literal_still_expands(tmp_path, monkeypatch)
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -281,7 +311,7 @@ def test_collect_package_glob_scoped_path(tmp_path, monkeypatch):
 
     extract_calls = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         extract_calls.append({"phases": sorted(phases), "allowed_workloads": allowed_workloads})
         if on_workload_done and allowed_workloads:
             for phase in phases:
@@ -317,7 +347,7 @@ def test_collect_package_literal_and_glob_mix(tmp_path, monkeypatch):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -365,7 +395,7 @@ def test_collect_custom_package_in_progress(tmp_path, monkeypatch):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -394,7 +424,7 @@ def test_collect_corrupt_configmap_exits(tmp_path, monkeypatch):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -434,7 +464,7 @@ def test_collect_unreachable_configmap_exits(tmp_path, monkeypatch, capsys):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -468,7 +498,7 @@ def test_collect_only_done_phases(tmp_path, monkeypatch):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -497,7 +527,7 @@ def test_collect_missing_package_key_skipped(tmp_path, monkeypatch):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -526,7 +556,7 @@ def test_collect_with_multi_baseline_progress(tmp_path, monkeypatch):
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -553,7 +583,7 @@ def test_collect_fallback_discovers_from_pipelinerun_files(tmp_path, monkeypatch
 
     collected_phases = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         collected_phases.extend(phases)
         return {p: None for p in phases}
 
@@ -585,7 +615,7 @@ def test_collect_with_workload_scope(tmp_path, monkeypatch):
 
     extract_calls = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         extract_calls.append({"phases": sorted(phases), "allowed_workloads": allowed_workloads, "namespace": namespace})
         if on_workload_done and allowed_workloads:
             for phase in phases:
@@ -623,7 +653,7 @@ def test_collect_with_only_scope(tmp_path, monkeypatch):
 
     extract_calls = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         extract_calls.append({"phases": sorted(phases), "allowed_workloads": allowed_workloads, "namespace": namespace})
         if on_workload_done and allowed_workloads:
             for phase in phases:
@@ -659,7 +689,7 @@ def test_collect_only_without_prefix(tmp_path, monkeypatch):
 
     extract_calls = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         extract_calls.append({"phases": sorted(phases), "allowed_workloads": allowed_workloads})
         if on_workload_done and allowed_workloads:
             for phase in phases:
@@ -695,7 +725,7 @@ def test_collect_workload_with_package_filter(tmp_path, monkeypatch):
 
     extract_calls = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         extract_calls.append({"phases": sorted(phases), "allowed_workloads": allowed_workloads})
         if on_workload_done and allowed_workloads:
             for phase in phases:
@@ -752,7 +782,7 @@ def test_collect_warns_nondone_scoped_pairs(tmp_path, monkeypatch):
 
     extract_calls = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         extract_calls.append({"phases": phases, "workload": workload})
         return {p: None for p in phases}
 
@@ -785,7 +815,7 @@ def test_collect_unscoped_unchanged(tmp_path, monkeypatch):
 
     extract_calls = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         extract_calls.append({"phases": phases, "workload": workload})
         return {p: None for p in phases}
 
@@ -835,7 +865,7 @@ def test_collect_scoped_all_nondone_no_extraction(tmp_path, monkeypatch):
 
     extract_calls = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         extract_calls.append({"phases": phases, "workload": workload})
         return {p: None for p in phases}
 
@@ -864,7 +894,7 @@ def test_collect_scoped_runtime_error(tmp_path, monkeypatch):
         package = None
         skip_logs = False
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         raise RuntimeError("pod failed")
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract), \
@@ -892,7 +922,7 @@ def test_collect_scoped_per_phase_failure(tmp_path, monkeypatch):
         package = None
         skip_logs = False
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         if on_workload_done:
             on_workload_done("baseline", "smoke", namespace, None)
             on_workload_done("treatment", "smoke", namespace, RuntimeError("tar failed"))
@@ -929,7 +959,7 @@ def test_collect_only_takes_precedence_over_workload(tmp_path, monkeypatch):
 
     extract_calls = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         extract_calls.append({"phases": sorted(phases), "allowed_workloads": allowed_workloads})
         if on_workload_done and allowed_workloads:
             for phase in phases:
@@ -965,7 +995,7 @@ def test_collect_unscoped_multi_namespace_dispatch(tmp_path, monkeypatch):
 
     extract_calls = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         extract_calls.append({"namespace": namespace, "phases": sorted(phases), "workload": workload})
         return {p: None for p in phases}
 
@@ -999,7 +1029,7 @@ def test_collect_unscoped_missing_completed_namespace_warns_and_skips(tmp_path, 
 
     extract_calls = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         extract_calls.append(phases)
         return {p: None for p in phases}
 
@@ -1035,7 +1065,7 @@ def test_collect_scoped_multi_namespace_dispatch(tmp_path, monkeypatch):
 
     extract_calls = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         extract_calls.append({"namespace": namespace, "phases": sorted(phases), "allowed_workloads": allowed_workloads})
         if on_workload_done and allowed_workloads:
             for phase in phases:
@@ -1072,7 +1102,7 @@ def test_collect_scoped_missing_completed_namespace_warns_and_skips(tmp_path, mo
 
     extract_calls = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         extract_calls.append(phases)
         return {p: None for p in phases}
 
@@ -1104,7 +1134,7 @@ def test_collect_reads_from_configmap(tmp_path, monkeypatch):
 
     extract_calls = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         extract_calls.append({"phases": phases, "workload": workload})
         return {p: None for p in phases}
 
@@ -1302,7 +1332,7 @@ def test_collect_unscoped_reports_per_pair_with_namespace(tmp_path, monkeypatch,
         package = None
         skip_logs = False
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         if on_workload_done and allowed_workloads:
             for phase in phases:
                 for wl in allowed_workloads.get(phase, set()):
@@ -1344,7 +1374,7 @@ def test_collect_unscoped_failure_reports_pair_count(tmp_path, monkeypatch, caps
         package = None
         skip_logs = False
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         if on_workload_done:
             on_workload_done("baseline", "smoke", namespace, None)
             on_workload_done("treatment", "smoke", namespace, RuntimeError("disk full"))
@@ -1377,7 +1407,7 @@ def test_collect_scoped_reports_namespace_context(tmp_path, monkeypatch, capsys)
         package = None
         skip_logs = False
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         if on_workload_done and allowed_workloads:
             for phase in phases:
                 for wl in allowed_workloads.get(phase, set()):
@@ -1414,7 +1444,7 @@ def test_collect_unscoped_no_cross_product_on_slot_reuse(tmp_path, monkeypatch, 
         package = None
         skip_logs = False
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         if on_workload_done and allowed_workloads:
             for phase in phases:
                 for wl in allowed_workloads.get(phase, set()):
@@ -1460,7 +1490,7 @@ def test_collect_unscoped_parallel_multi_ns(tmp_path, monkeypatch):
 
     extract_calls = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         extract_calls.append({"namespace": namespace, "phases": sorted(phases)})
         return {p: None for p in phases}
 
@@ -1499,7 +1529,7 @@ def test_collect_unscoped_single_ns_no_threading(tmp_path, monkeypatch):
         package = None
         skip_logs = False
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         return {p: None for p in phases}
 
     executor_used = []
@@ -1535,7 +1565,7 @@ def test_collect_unscoped_parallel_one_slot_fails(tmp_path, monkeypatch, capsys)
         package = None
         skip_logs = False
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         if namespace == "ns-1":
             raise RuntimeError("pod not ready")
         if on_workload_done and allowed_workloads:
@@ -1570,7 +1600,7 @@ def test_collect_unscoped_parallel_step_header(tmp_path, monkeypatch, capsys):
         package = None
         skip_logs = False
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         return {p: None for p in phases}
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
@@ -1598,7 +1628,7 @@ def test_collect_unscoped_parallel_non_runtime_error(tmp_path, monkeypatch, caps
         package = None
         skip_logs = False
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         if namespace == "ns-1":
             raise OSError("kubectl binary not found")
         if on_workload_done and allowed_workloads:
@@ -1635,7 +1665,7 @@ def test_collect_unscoped_parallel_all_slots_fail(tmp_path, monkeypatch, capsys)
         package = None
         skip_logs = False
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         raise RuntimeError(f"pod failed in {namespace}")
 
     with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
@@ -1676,6 +1706,9 @@ def test_collect_full_copy_clears_stale_files(tmp_path, monkeypatch):
     def mock_run(cmd, **kwargs):
         mock = MagicMock(returncode=0, stdout="", stderr="")
         cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+        if _is_inventory_probe(cmd_str):
+            mock.stdout = _inventory_stdout()
+            return mock
         # Second-level ls: enumerate i<N>/ under the workload
         if "exec" in cmd_str and "ls " in cmd_str and "/wl-smoke/" in cmd_str:
             mock.stdout = "i1"
@@ -1716,6 +1749,9 @@ def test_collect_per_workload_clears_stale_files(tmp_path, monkeypatch):
     def mock_run(cmd, **kwargs):
         mock = MagicMock(returncode=0, stdout="", stderr="")
         cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+        if _is_inventory_probe(cmd_str):
+            mock.stdout = _inventory_stdout()
+            return mock
         # Second-level ls: enumerate i<N>/ under the workload
         if "exec" in cmd_str and "ls " in cmd_str and "/wl-smoke/" in cmd_str:
             mock.stdout = "i1"
@@ -1772,6 +1808,9 @@ def test_collect_skip_logs_clears_stale_log_dirs(tmp_path, monkeypatch):
     def mock_run(cmd, **kwargs):
         mock = MagicMock(returncode=0, stdout="", stderr="")
         cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+        if _is_inventory_probe(cmd_str):
+            mock.stdout = _inventory_stdout()
+            return mock
         if "exec" in cmd_str and "ls " in cmd_str and "/wl-smoke/" in cmd_str:
             # Second-level ls: list iteration subdirs under the workload
             mock.stdout = "i1"
@@ -1814,6 +1853,9 @@ def test_collect_skip_logs_invokes_gpu_logs_copy(tmp_path, monkeypatch):
         mock = MagicMock(returncode=0, stdout="", stderr="")
         cmd_list = cmd if isinstance(cmd, list) else cmd.split()
         cmd_str = " ".join(cmd_list)
+        if _is_inventory_probe(cmd_str):
+            mock.stdout = _inventory_stdout()
+            return mock
         if "exec" in cmd_str and "ls " in cmd_str and "/wl-smoke/" in cmd_str:
             mock.stdout = "i1"
         elif "exec" in cmd_str and "ls" in cmd_str:
@@ -1862,6 +1904,9 @@ def test_collect_skip_logs_invokes_metrics_copy(tmp_path, monkeypatch):
         mock = MagicMock(returncode=0, stdout="", stderr="")
         cmd_list = cmd if isinstance(cmd, list) else cmd.split()
         cmd_str = " ".join(cmd_list)
+        if _is_inventory_probe(cmd_str):
+            mock.stdout = _inventory_stdout()
+            return mock
         if "exec" in cmd_str and "ls " in cmd_str and "/wl-smoke/" in cmd_str:
             mock.stdout = "i1"
         elif "exec" in cmd_str and "ls" in cmd_str:
@@ -1885,10 +1930,14 @@ def test_collect_skip_logs_invokes_metrics_copy(tmp_path, monkeypatch):
 
 
 def test_collect_idempotent_no_stale_accumulation(tmp_path, monkeypatch):
-    """Running collect twice produces same result as once (no accumulation).
+    """Running collect twice produces the same result as once (no accumulation).
 
-    Each ``kubectl cp`` overwrites the ``i<N>`` directory contents fresh, so
-    log files from a prior collect do not pile up alongside new ones.
+    Pre-#885 this held because every ``kubectl cp`` was preceded by an
+    ``rmtree`` of the iteration. That wipe is gone — it destroyed the bytes an
+    interrupted copy had already landed, which is why a timed-out copy could
+    never converge. Idempotency now comes from the inventory: the second
+    collect's delta is empty, and a log file the PVC no longer lists is pruned
+    rather than left to pile up beside the new one.
     """
     from pipeline import deploy
     import subprocess
@@ -1901,25 +1950,40 @@ def test_collect_idempotent_no_stale_accumulation(tmp_path, monkeypatch):
     }
     _mock_cm(monkeypatch, data)
 
-    call_count = [0]
+    # What the PVC holds for this iteration, and how big each file is.
+    remote = {"trace_data.csv": 4, "server_logs/pod-current.log": 3}
+    dest_iN = run_dir / "results" / "baseline" / "wl-smoke" / "i1"
+    # A log file from an earlier collect that the PVC no longer lists.
+    (dest_iN / "server_logs").mkdir(parents=True)
+    (dest_iN / "server_logs" / "pod-from-earlier-collect.log").write_text("old")
 
     def mock_run(cmd, **kwargs):
         mock = MagicMock(returncode=0, stdout="", stderr="")
-        cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
-        # Second-level ls: enumerate i<N>/ under the workload
+        cmd_list = list(cmd) if isinstance(cmd, list) else cmd.split()
+        cmd_str = " ".join(cmd_list)
+        if _is_inventory_probe(cmd_str):
+            mock.stdout = _inventory_stdout(remote, size=None)
+            return mock
         if "exec" in cmd_str and "ls " in cmd_str and "/wl-smoke/" in cmd_str:
             mock.stdout = "i1"
         elif "exec" in cmd_str and "ls" in cmd_str:
             mock.stdout = "wl-smoke"
         elif "exec" in cmd_str and "stat" in cmd_str:
             mock.stdout = ""
-        elif "cp" in cmd_str:
-            call_count[0] += 1
-            dest = run_dir / "results" / "baseline" / "wl-smoke" / "i1"
-            dest.mkdir(parents=True, exist_ok=True)
-            (dest / "trace_data.csv").write_text(f"data-{call_count[0]}")
-            (dest / "server_logs").mkdir(exist_ok=True)
-            (dest / "server_logs" / f"pod-{call_count[0]}.log").write_text("log")
+        elif "cp" in cmd_list:
+            # Materialize exactly what was asked for, at the size the
+            # inventory advertised.
+            src = cmd_list[cmd_list.index("cp") + 1]
+            dst = Path(cmd_list[cmd_list.index("cp") + 2])
+            _, _, rel_root = src.rstrip("/").rpartition("/i1/")
+            for rel, size in remote.items():
+                if rel == rel_root:
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    dst.write_bytes(b"\0" * size)
+                elif rel.startswith(f"{rel_root}/"):
+                    out = dst / rel[len(rel_root) + 1:]
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    out.write_bytes(b"\0" * size)
         return mock
 
     monkeypatch.setattr(subprocess, "run", mock_run)
@@ -1964,7 +2028,7 @@ def test_collect_parallel_filters_workloads_per_slot(tmp_path, monkeypatch):
 
     extract_calls = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         extract_calls.append({
             "namespace": namespace,
             "phases": sorted(phases),
@@ -2020,7 +2084,7 @@ def test_collect_sequential_filters_workloads_per_slot(tmp_path, monkeypatch):
 
     extract_calls = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         extract_calls.append({
             "namespace": namespace,
             "phases": sorted(phases),
@@ -2067,6 +2131,9 @@ def test_extract_phases_filters_by_allowed_workloads(tmp_path, monkeypatch):
     def mock_run(cmd, **kwargs):
         mock = MagicMock(returncode=0, stdout="", stderr="")
         cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+        if _is_inventory_probe(cmd_str):
+            mock.stdout = _inventory_stdout()
+            return mock
         # Second-level ls: enumerate i<N>/ under the workload
         if "exec" in cmd_str and "ls " in cmd_str and any(
             f"/{w}/" in cmd_str for w in ("wl-smoke", "wl-load", "wl-heavy")
@@ -2123,6 +2190,9 @@ def test_extract_phases_filters_by_allowed_workloads_skip_logs(tmp_path, monkeyp
     def mock_run(cmd, **kwargs):
         mock = MagicMock(returncode=0, stdout="", stderr="")
         cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+        if _is_inventory_probe(cmd_str):
+            mock.stdout = _inventory_stdout()
+            return mock
         if "exec" in cmd_str and "ls " in cmd_str and any(
             f"/{w}/" in cmd_str for w in ("wl-smoke", "wl-load", "wl-heavy")
         ):
@@ -2174,6 +2244,9 @@ def test_extract_phases_per_phase_filter_prevents_cross_phase_leak(tmp_path, mon
     def mock_run(cmd, **kwargs):
         mock = MagicMock(returncode=0, stdout="", stderr="")
         cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+        if _is_inventory_probe(cmd_str):
+            mock.stdout = _inventory_stdout()
+            return mock
         # Second-level ls: enumerate i<N>/ under the workload
         if "exec" in cmd_str and "ls " in cmd_str and any(
             f"/{w}/" in cmd_str for w in ("chatbot", "balanced")
@@ -2240,7 +2313,7 @@ def test_collect_scoped_multi_slot_per_workload(tmp_path, monkeypatch):
 
     extract_calls = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         extract_calls.append({
             "namespace": namespace,
             "phases": sorted(phases),
@@ -2280,6 +2353,8 @@ def test_extract_phases_kubectl_run_failure_raises_runtime_error(tmp_path, monke
 
     def mock_run(cmd, **kwargs):
         cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+        if _is_inventory_probe(cmd_str):
+            return MagicMock(returncode=0, stdout=_inventory_stdout(), stderr="")
         if "run" in cmd and "--image=alpine:3.19" in cmd_str:
             return MagicMock(returncode=1, stdout="",
                              stderr="forbidden: namespace quota exceeded")
@@ -2328,7 +2403,7 @@ def test_collect_package_baseline_with_workload_no_spurious_warn(tmp_path, monke
     extract_calls = []
 
     def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False,
-                     workload=None, allowed_workloads=None, on_workload_done=None):
+                     workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         extract_calls.append({"phases": sorted(phases),
                               "allowed_workloads": allowed_workloads})
         if on_workload_done and allowed_workloads:
@@ -2379,7 +2454,7 @@ def test_collect_package_experiment_with_workload_still_warns_nondone(tmp_path, 
     extract_calls = []
 
     def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False,
-                     workload=None, allowed_workloads=None, on_workload_done=None):
+                     workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         extract_calls.append({"phases": sorted(phases),
                               "allowed_workloads": allowed_workloads})
         if on_workload_done and allowed_workloads:
@@ -2428,7 +2503,7 @@ def test_collect_multi_package_with_workload(tmp_path, monkeypatch):
     extract_calls = []
 
     def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False,
-                     workload=None, allowed_workloads=None, on_workload_done=None):
+                     workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         extract_calls.append({"phases": sorted(phases),
                               "allowed_workloads": allowed_workloads})
         if on_workload_done and allowed_workloads:
@@ -2580,7 +2655,7 @@ def test_collect_iteration_filter_narrows_scope(tmp_path, monkeypatch):
 
     extract_calls = []
 
-    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None):
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False, workload=None, allowed_workloads=None, on_workload_done=None, partials=None):
         extract_calls.append({"namespace": namespace, "phases": sorted(phases)})
         return {p: None for p in phases}
 
@@ -2670,6 +2745,13 @@ def test_extract_phases_preserves_iterations_across_slot_collects(tmp_path, monk
         mock = MagicMock(returncode=0, stdout="", stderr="")
         cmd_list = list(cmd) if isinstance(cmd, list) else cmd.split()
         cmd_str = " ".join(cmd_list)
+        if _is_inventory_probe(cmd_str):
+            # This slot's iterations each hold exactly one trace file, sized to
+            # match what the cp branch below writes.
+            mock.stdout = _inventory_stdout(
+                {"trace_data.csv": len(f"data from {active_slot[0]}")},
+                size=None)
+            return mock
         if "exec" in cmd_str and "find" in cmd_str:
             # mtime probe — return one line per iteration on this slot
             lines = [
@@ -2691,13 +2773,12 @@ def test_extract_phases_preserves_iterations_across_slot_collects(tmp_path, monk
             mock.stdout = "0"
             return mock
         if "cp" in cmd_list:
-            # Fake the kubectl cp — write a trace file at the destination iN
-            # so subsequent stat calls could see it if needed.
-            dst = cmd_list[cmd_list.index("cp") + 2]
-            Path(dst).mkdir(parents=True, exist_ok=True)
-            (Path(dst) / "trace_data.csv").write_text(
-                f"data from {active_slot[0]}"
-            )
+            # Fake the kubectl cp. Since #885 the source names a single
+            # top-level entry (here the trace file itself), so the destination
+            # is a file path, not the iteration directory.
+            dst = Path(cmd_list[cmd_list.index("cp") + 2])
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_text(f"data from {active_slot[0]}")
             return mock
         return mock
 

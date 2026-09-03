@@ -187,6 +187,11 @@ workspace/runs/<name>/
         metrics/processed/metrics_summary.json    # post-run percentiles over the metrics
                                                   # named in process_metrics.py:AGGREGATE_METRICS
         metrics/processed/replica_status_timeseries.json  # replica state/scale over the run
+        .collect_complete # written by `deploy.py collect` only once every file in
+                          # the remote inventory landed at the matching size
+                          # (issue #885). If it is ABSENT, this iteration was
+                          # copied partially — logs may be truncated mid-record.
+                          # Re-run `deploy.py collect` before trusting the cell.
     treatment/
       workload_<name>/
         trace_data.csv
