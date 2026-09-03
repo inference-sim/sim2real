@@ -150,6 +150,7 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). When no `-
 | `runs/<run>/results/{phase}/<workload>/i<N>/gpu_stream_done` | `deploy.py collect` (pulled from PVC) | sentinel for `stream-gpu-stats` |
 | `runs/<run>/results/{phase}/<workload>/i<N>/metrics_stream_done` | `deploy.py collect` (pulled from PVC) | sentinel for `stream-metrics` |
 | `runs/<run>/results/{phase}/plans/{flow}/*.yaml` | `deploy.py collect` (best-effort — non-fatal) | resolved llm-d-benchmark plan YAMLs pulled from PVC; workload-invariant within a phase |
+| `runs/<run>/check/<UTC timestamp>/{section1-workload-parity,section234-config-signal-policy,section5-runtime-pd,parity-report}.md` | `/sim2real-check` skill (its only permitted write — issue #882) | operator review; `parity-report.md` is the entry point. Committable (not gitignored) so two runs' verdicts can be diffed. **The `check` directory name is coupled to the phase-discovery denylist in `.claude/skills/sim2real-check/SKILL.md` Step 0** — a flat legacy bundle scans this level for phases, so renaming it requires updating that `case` arm |
 | ConfigMap `sim2real-progress-{scenario}-{run}` | `deploy.py run`, `deploy.py reset` | All `deploy.py` subcommands |
 | `runs/<run>/plans/<phase>/<workload>/` | `deploy.py run` | workload tasks |
 

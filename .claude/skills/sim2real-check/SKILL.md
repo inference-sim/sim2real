@@ -63,6 +63,13 @@ if [ -n "$RUN" ]; then
         echo "ERROR: '.results.results_dir' missing from resolve output — schema drift?"
         exit 1
     }
+    # RUN_DIR is where this skill writes its report (see Operating Constraints).
+    # Taken from the resolve output rather than rebuilt from EXPERIMENT_ROOT/RUN
+    # so it cannot drift from layout.runs_dir(), which is what produced it.
+    RUN_DIR=$(jq -re '.run_dir' "$RESOLVED_JSON") || {
+        echo "ERROR: '.run_dir' missing from resolve output — schema drift?"
+        exit 1
+    }
     PHASES=$(jq -re '.results.phases_with_data | join(" ")' "$RESOLVED_JSON") || {
         echo "ERROR: '.results.phases_with_data' missing from resolve output — schema drift?"
         exit 1
@@ -355,20 +362,26 @@ translation output, or result artifact. The one permitted write is the report
 itself, into a fresh timestamped directory:
 
 ```
-$REPORT_DIR = <run dir>/check/<UTC timestamp>/     # --run mode
+$REPORT_DIR = $RUN_DIR/check/<UTC timestamp>/      # --run mode
 $REPORT_DIR = $REAL/check/<UTC timestamp>/         # --real (legacy) mode
 ```
 
-where `<run dir>` is `<experiment-root>/workspace/runs/<RUN>/` and the timestamp
-is `date -u +%Y%m%dT%H%M%SZ`. Create it with `mkdir -p`. Never write under
-`results/`, and never modify a file the check reads as evidence.
+`$RUN_DIR` comes from the resolve output in Step 0 — do not rebuild it from
+`$EXPERIMENT_ROOT`/`$RUN`, which would duplicate `layout.runs_dir()`. The
+timestamp is `date -u +%Y%m%dT%H%M%SZ`. Create the directory with `mkdir -p`.
+Never write under `results/`, and never modify a file the check reads as
+evidence.
 
-Each invocation gets its own timestamped directory, so a re-check never
-overwrites an earlier verdict — the point of persisting the report is that
-§5c.6's "delta vs prior run" and §5h's persistent-hotspot diagnostics can
-compare against it, and clobbering defeats that. The latest report is the
-last entry in sorted order; comparing two invocations is diffing two
-directories.
+Each invocation gets its own timestamped directory, so re-checking a run never
+overwrites an earlier verdict. Why persist at all: a section report for a
+9-cell run is far too large to review in scrollback, it does not survive the
+session, and two runs' verdicts cannot be compared unless both are on disk —
+that comparison is the operator diffing two reports, which is also why the
+directory is committable. Note this is **not** an input to any check:
+§5c.6 and §5h are both computed entirely from the current run's own evidence
+(§5h explicitly aggregates across `(phase, workload)` cells "independent of any
+single run"), and neither reads a previous report. Nothing here creates such a
+dependency.
 
 `check/` is a **sibling** of `results/`, never inside it: in a flat legacy
 bundle (no `$REAL/results/`) `RESULTS_DIR` falls back to `$REAL` itself, so
@@ -853,7 +866,7 @@ Exit code:  1 (FAIL and MISSING present)
 ### Where the report is written
 
 Everything goes into `$REPORT_DIR` (defined in Operating Constraints:
-`<run dir>/check/<UTC timestamp>/`, or `$REAL/check/<UTC timestamp>/` in legacy
+`$RUN_DIR/check/<UTC timestamp>/`, or `$REAL/check/<UTC timestamp>/` in legacy
 mode). One file per parallel agent, so no two agents ever write the same file:
 
 | File | Written by | Contents |
