@@ -253,10 +253,11 @@ class _FakePVC:
     should land instead of the full size, modelling a stream cut mid-file.
     """
 
-    def __init__(self, tree, *, fail_paths=None, truncate=None):
+    def __init__(self, tree, *, fail_paths=None, truncate=None, mtime=1000.0):
         self.tree = dict(tree)              # relpath -> size
         self.fail_paths = dict(fail_paths or {})
         self.truncate = dict(truncate or {})
+        self.mtime = mtime                  # answered to the mtime probe
         self.calls = []
 
     def _match_fail(self, cmd_str):
@@ -268,10 +269,19 @@ class _FakePVC:
     def __call__(self, cmd, **kwargs):
         cmd_str = " ".join(cmd)
         self.calls.append(cmd_str)
-        if "find" in cmd_str and "stat" in cmd_str:
+        # Two probes both use find+stat and must be told apart by their stat
+        # format, or the mtime probe silently receives inventory lines, fails to
+        # parse, and yields remote_mtime=None — which disables the up-to-date
+        # gate and makes any test that depends on it pass for the wrong reason.
+        if "%s|%n" in cmd_str:
             lines = "".join(f"{sz}|./{rel}\n"
                             for rel, sz in sorted(self.tree.items()))
             return _fake_run(stdout=lines)
+        if "%Y %n" in cmd_str:
+            # _probe_remote_mtimes: `<epoch> <phase>/<workload>/iN/trace_data.csv`
+            path = cmd_str.split("find ", 1)[1].split(" ", 1)[0]
+            return _fake_run(
+                stdout=f"{self.mtime:.0f} {path}/wl-a/i1/trace_data.csv\n")
         if cmd[:2] == ["kubectl", "cp"]:
             mode = self._match_fail(cmd_str)
             if mode == "timeout":
@@ -481,6 +491,155 @@ def test_a_corrupted_marker_mtime_forces_a_full_refetch(tmp_path, monkeypatch):
         "pod", "ns", "/data/r/p/wl/i1", dest, remote_mtime=100.0)
     assert res.complete is True
     assert len([c for c in fake.calls if c.startswith("kubectl cp")]) == 2
+
+
+# ── marker scope: a --skip-logs claim must not satisfy a full collect ────────
+
+
+def test_skip_logs_marker_does_not_satisfy_a_later_full_collect(tmp_path, monkeypatch):
+    """The sequence the >1 GB prompt actively recommends: `collect --skip-logs`
+    to get traces fast, then a plain `collect` for the logs. If the skip-logs
+    marker satisfied the second call, the iteration would be skipped and
+    server_logs never fetched — #885's failure class moved off trace_data.csv
+    and onto the logs."""
+    tree = {"trace_data.csv": 4, "server_logs/vllm.log": 9}
+    wl_dest = tmp_path / "baseline" / "wl-a"
+
+    # Pass 1: --skip-logs. Completes over the filtered inventory.
+    fake1 = _LsPVC(tree)
+    monkeypatch.setattr(deploy, "run", fake1)
+    errs = deploy._copy_workload_iterations_full(
+        "pod", "run-1", "baseline", "wl-a", "ns-0", wl_dest, {"i1": 100.0},
+        exclude_subdirs=frozenset({"server_logs"}))
+    assert errs == []
+    marker = deploy._read_collect_marker(wl_dest / "i1")
+    assert marker["excluded_subdirs"] == ["server_logs"]
+    assert not (wl_dest / "i1" / "server_logs").exists()
+
+    # Pass 2: full collect. Must NOT skip, and must fetch server_logs.
+    fake2 = _LsPVC(tree)
+    monkeypatch.setattr(deploy, "run", fake2)
+    errs = deploy._copy_workload_iterations_full(
+        "pod", "run-1", "baseline", "wl-a", "ns-0", wl_dest, {"i1": 100.0})
+    assert errs == []
+    assert (wl_dest / "i1" / "server_logs" / "vllm.log").stat().st_size == 9
+    assert deploy._read_collect_marker(wl_dest / "i1")["excluded_subdirs"] == []
+
+
+def test_full_marker_does_satisfy_a_later_skip_logs_collect(tmp_path, monkeypatch):
+    """The other direction is safe: a full collect already fetched everything a
+    --skip-logs collect would want, so skipping is correct."""
+    tree = {"trace_data.csv": 4, "server_logs/vllm.log": 9}
+    wl_dest = tmp_path / "baseline" / "wl-a"
+    monkeypatch.setattr(deploy, "run", _LsPVC(tree))
+    deploy._copy_workload_iterations_full(
+        "pod", "run-1", "baseline", "wl-a", "ns-0", wl_dest, {"i1": 100.0})
+
+    fake2 = _LsPVC(tree)
+    monkeypatch.setattr(deploy, "run", fake2)
+    deploy._copy_workload_iterations_full(
+        "pod", "run-1", "baseline", "wl-a", "ns-0", wl_dest, {"i1": 100.0},
+        exclude_subdirs=frozenset({"server_logs"}))
+    assert [c for c in fake2.calls if c.startswith("kubectl cp")] == []
+
+
+def test_marker_scope_covers_rules():
+    cov = deploy._marker_scope_covers
+    assert cov({"excluded_subdirs": []}, frozenset()) is True
+    assert cov({"excluded_subdirs": []}, frozenset({"server_logs"})) is True
+    assert cov({"excluded_subdirs": ["server_logs"]}, frozenset()) is False
+    assert cov({"excluded_subdirs": ["server_logs"]},
+               frozenset({"server_logs"})) is True
+    # No field: scope unknown, so not honoured — safe and self-healing.
+    assert cov({}, frozenset()) is False
+    assert cov({"excluded_subdirs": "server_logs"}, frozenset()) is False
+
+
+def test_a_marker_without_the_scope_field_is_not_honoured(tmp_path):
+    """Written before this check existed. Re-examining costs one inventory and
+    zero transfers, and rewrites the marker with the field."""
+    iN = tmp_path / "i1"
+    iN.mkdir()
+    (iN / deploy.COLLECT_MARKER).write_text('{"remote_mtime": 100.0}')
+    assert deploy._is_iteration_up_to_date(iN, 100.0) is False
+
+
+# ── the "never raises" contract ──────────────────────────────────────────────
+
+
+def test_a_non_timeout_oserror_from_kubectl_is_contained(tmp_path, monkeypatch):
+    """`check=False` rules out CalledProcessError but not the OSError family —
+    an unresolvable kubectl raises FileNotFoundError, which would unwind past
+    every remaining iteration exactly like the TimeoutExpired this contains."""
+    def boom(*a, **k):
+        raise FileNotFoundError(2, "No such file or directory: 'kubectl'")
+    monkeypatch.setattr(deploy, "run", boom)
+    res = deploy._copy_iteration_incremental(
+        "pod", "ns", "/data/r/p/wl/i1", tmp_path / "i1", remote_mtime=100.0)
+    assert res.complete is False
+    assert res.errors and "failed to run" in res.errors[0]
+
+
+def test_a_cp_that_cannot_be_spawned_is_recorded_not_raised(tmp_path, monkeypatch):
+    def flaky(cmd, **k):
+        raise OSError("cannot allocate memory")
+
+    monkeypatch.setattr(deploy, "run", flaky)
+    errors: list = []
+    deploy._cp_one("ns/pod:/x/a.log", tmp_path / "a.log", "i1/a.log", errors)
+    assert errors and "failed to run kubectl cp" in errors[0]
+
+
+def test_a_failed_marker_write_is_reported_and_drops_the_claim(tmp_path, monkeypatch):
+    """Every file landed, so this is not a copy failure — but completeness is
+    now unprovable, so the claim must be dropped rather than the exception
+    escaping and aborting the slot."""
+    tree = {"trace_data.csv": 4}
+    monkeypatch.setattr(deploy, "run", _FakePVC(tree))
+    real_write = Path.write_text
+
+    def boom(self, *a, **k):
+        if self.name == deploy.COLLECT_MARKER:
+            raise OSError("No space left on device")
+        return real_write(self, *a, **k)
+
+    monkeypatch.setattr(Path, "write_text", boom)
+    dest = tmp_path / "i1"
+    res = deploy._copy_iteration_incremental(
+        "pod", "ns", "/data/r/p/wl/i1", dest, remote_mtime=100.0)
+    assert res.complete is False
+    assert any("could not write" in e for e in res.errors)
+    assert deploy._read_collect_marker(dest) is None
+
+
+def test_write_collect_marker_returns_an_error_string_not_a_raise(tmp_path, monkeypatch):
+    real_write = Path.write_text
+
+    def boom(self, *a, **k):
+        if self.name == deploy.COLLECT_MARKER:
+            raise OSError("read-only file system")
+        return real_write(self, *a, **k)
+
+    monkeypatch.setattr(Path, "write_text", boom)
+    err = deploy._write_collect_marker(tmp_path, {"a": 1}, 100.0)
+    assert err is not None and "read-only file system" in err
+
+
+def test_an_undeletable_destination_is_contained(tmp_path, monkeypatch):
+    """A dest dir we cannot create must not raise out of the helper."""
+    monkeypatch.setattr(deploy, "run", _FakePVC({"a.log": 4}))
+    real_mkdir = Path.mkdir
+
+    def boom(self, *a, **k):
+        if self.name == "i1":
+            raise OSError("permission denied")
+        return real_mkdir(self, *a, **k)
+
+    monkeypatch.setattr(Path, "mkdir", boom)
+    res = deploy._copy_iteration_incremental(
+        "pod", "ns", "/data/r/p/wl/i1", tmp_path / "i1", remote_mtime=100.0)
+    assert res.complete is False
+    assert any("could not create" in e for e in res.errors)
 
 
 def test_marker_covers_is_the_shared_staleness_predicate():
@@ -942,6 +1101,77 @@ def test_full_copy_does_not_redact_when_the_flag_is_off(tmp_path, monkeypatch):
         "pod", "run-1", "baseline", "wl-a", "ns-0",
         tmp_path / "baseline" / "wl-a", {"i1": 100.0})
     assert redacted == []
+
+
+def test_partials_reach_the_end_of_collect_summary_end_to_end(tmp_path, monkeypatch, capsys):
+    """`_print_partial_summary` and the `partials.append` are each unit-tested,
+    but nothing drove the wiring between them. Dropping `partials=partials`
+    from any of the `_extract_phases_from_pvc` call sites would otherwise pass
+    the whole suite while silently losing the summary."""
+    from pipeline import deploy as dep
+
+    run_dir = tmp_path / "workspace" / "runs" / "try3"
+    (run_dir / "cluster").mkdir(parents=True)
+    tree = {"trace_data.csv": 4, "epp_logs/big.log": 64}
+
+    class _Pod(_LsPVC):
+        def __call__(self, cmd, **kwargs):
+            cmd_str = " ".join(cmd)
+            if ("delete" in cmd_str or "run " in cmd_str or "wait" in cmd_str
+                    or "du" in cmd_str):
+                return _fake_run()
+            if "exec" in cmd_str and "ls " in cmd_str and "/wl-a/" not in cmd_str:
+                return _fake_run(stdout="wl-a\n")
+            if cmd[:2] == ["kubectl", "cp"] and "epp_logs" in cmd_str:
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=120)
+            return super().__call__(cmd, **kwargs)
+
+    monkeypatch.setattr(dep, "run", _Pod(tree))
+    partials: list = []
+    dep._extract_phases_from_pvc(
+        ["baseline"], "try3", "ns-0", run_dir, partials=partials)
+    assert [p.label for p in partials] == ["baseline/wl-a/i1"]
+
+    dep._print_partial_summary(partials, "try3")
+    out = capsys.readouterr().out
+    assert "Partial:" in out
+    assert "baseline/wl-a/i1" in out
+
+
+def test_skip_logs_then_full_collect_through_extract_phases(tmp_path, monkeypatch):
+    """The must-fix sequence at the level the operator actually drives:
+    `collect --skip-logs` then plain `collect`, both through
+    `_extract_phases_from_pvc`, must end with server_logs on disk."""
+    from pipeline import deploy as dep
+
+    run_dir = tmp_path / "workspace" / "runs" / "try3"
+    (run_dir / "cluster").mkdir(parents=True)
+    tree = {"trace_data.csv": 4, "server_logs/vllm.log": 9}
+
+    class _Pod(_LsPVC):
+        def __call__(self, cmd, **kwargs):
+            cmd_str = " ".join(cmd)
+            if ("delete" in cmd_str or "run " in cmd_str or "wait" in cmd_str
+                    or "du" in cmd_str):
+                return _fake_run()
+            if "exec" in cmd_str and "ls " in cmd_str and "/wl-a/" not in cmd_str:
+                return _fake_run(stdout="wl-a\n")
+            return super().__call__(cmd, **kwargs)
+
+    iN = run_dir / "results" / "baseline" / "wl-a" / "i1"
+
+    monkeypatch.setattr(dep, "run", _Pod(tree))
+    dep._extract_phases_from_pvc(
+        ["baseline"], "try3", "ns-0", run_dir, skip_logs=True)
+    assert not (iN / "server_logs").exists()
+    assert dep._read_collect_marker(iN)["excluded_subdirs"] == ["server_logs"]
+
+    monkeypatch.setattr(dep, "run", _Pod(tree))
+    dep._extract_phases_from_pvc(
+        ["baseline"], "try3", "ns-0", run_dir, skip_logs=False)
+    assert (iN / "server_logs" / "vllm.log").stat().st_size == 9, \
+        "the full collect must not have been skipped by the skip-logs marker"
+    assert dep._read_collect_marker(iN)["excluded_subdirs"] == []
 
 
 def test_full_copy_surfaces_an_ls_error(tmp_path, monkeypatch):

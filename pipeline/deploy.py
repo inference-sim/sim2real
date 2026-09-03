@@ -994,9 +994,11 @@ def _is_up_to_date(local_path: Path, remote_mtime: "float | None") -> bool:
         return False
 
 
-def _is_iteration_up_to_date(iN_dir: Path, remote_mtime: "float | None") -> bool:
+def _is_iteration_up_to_date(iN_dir: Path, remote_mtime: "float | None",
+                             exclude_subdirs: "frozenset[str]" = frozenset(),
+                             ) -> bool:
     """Return True only if *iN_dir* carries a completeness marker that is not
-    stale relative to *remote_mtime*.
+    stale relative to *remote_mtime* and whose claim covers *exclude_subdirs*.
 
     Before #885 this trusted ``iN_dir/trace_data.csv``'s mtime. That file is
     copied early in the tar stream, so it survived a timeout that truncated the
@@ -1011,6 +1013,11 @@ def _is_iteration_up_to_date(iN_dir: Path, remote_mtime: "float | None") -> bool
     ``remote_mtime`` is None was written when the probe had failed; it still
     proves completion, so it is trusted.
 
+    *exclude_subdirs* is the current request's scope. A marker only covers a
+    request that leaves out at least as much as the marker did, so a
+    ``--skip-logs`` marker never satisfies a later full collect — see
+    ``_marker_scope_covers``.
+
     Iterations collected before #885 have no marker and are therefore not
     skipped. That costs one remote inventory each and zero file transfers,
     because the delta computed against a complete local tree is empty.
@@ -1018,7 +1025,9 @@ def _is_iteration_up_to_date(iN_dir: Path, remote_mtime: "float | None") -> bool
     if remote_mtime is None:
         return False
     marker = _read_collect_marker(iN_dir)
-    return marker is not None and _marker_covers(marker, remote_mtime)
+    return (marker is not None
+            and _marker_scope_covers(marker, exclude_subdirs)
+            and _marker_covers(marker, remote_mtime))
 
 
 def _list_pvc_iterations(
@@ -1077,6 +1086,12 @@ def _remote_file_inventory(
         result = run(cmd, check=False, capture=True)
     except subprocess.TimeoutExpired as exc:
         return {}, f"inventory of {remote_dir} timed out after {exc.timeout}s"
+    except OSError as exc:
+        # `check=False` rules out CalledProcessError, but not the OSError
+        # family — an unresolvable kubectl, a fork failure, a transient
+        # resource limit. Those propagate exactly like the TimeoutExpired
+        # this change exists to contain, so they are contained too.
+        return {}, f"inventory of {remote_dir} failed to run: {exc}"
     if result.returncode != 0:
         return {}, f"failed to inventory {remote_dir}: {(result.stderr or '').strip()}"
     inv: dict[str, int] = {}
@@ -1132,13 +1147,28 @@ def _inventory_sha256(inventory: dict[str, int]) -> str:
 
 
 def _write_collect_marker(iN_dir: Path, inventory: dict[str, int],
-                          remote_mtime: "float | None") -> None:
+                          remote_mtime: "float | None",
+                          excluded_subdirs: "frozenset[str]" = frozenset(),
+                          ) -> "str | None":
     """Record that *iN_dir* holds every file in *inventory* at the right size.
 
     Written only after the local tree matches the remote inventory exactly —
     this is the sole evidence ``_is_iteration_up_to_date`` accepts (#885).
     ``remote_mtime`` is stored so a later collect can tell a complete-but-stale
     iteration from a complete-and-current one.
+
+    ``excluded_subdirs`` records what the claim does NOT cover. Without it the
+    marker asserts "this iteration is complete" when a ``--skip-logs`` collect
+    only ever established "complete apart from ``server_logs``" — and a later
+    full collect would honour that and skip the iteration, never fetching
+    ``server_logs`` at all. That is the #885 failure class exactly (a proxy
+    signal claiming completeness for data that was never transferred), moved
+    off ``trace_data.csv`` and onto the logs.
+
+    Returns an error string when the marker could not be written, else None.
+    The caller records it rather than raising: the files are already on disk,
+    so a failed marker write means "cannot prove complete", not "collect
+    failed", and must not abort the rest of the slot.
     """
     payload = {
         "completed_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
@@ -1146,8 +1176,13 @@ def _write_collect_marker(iN_dir: Path, inventory: dict[str, int],
         "byte_count": sum(inventory.values()),
         "inventory_sha256": _inventory_sha256(inventory),
         "remote_mtime": remote_mtime,
+        "excluded_subdirs": sorted(excluded_subdirs),
     }
-    (iN_dir / COLLECT_MARKER).write_text(json.dumps(payload, indent=2) + "\n")
+    try:
+        (iN_dir / COLLECT_MARKER).write_text(json.dumps(payload, indent=2) + "\n")
+    except OSError as exc:
+        return f"could not write {COLLECT_MARKER}: {exc}"
+    return None
 
 
 def _read_collect_marker(iN_dir: Path) -> "dict | None":
@@ -1157,6 +1192,28 @@ def _read_collect_marker(iN_dir: Path) -> "dict | None":
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def _marker_scope_covers(marker: dict,
+                         exclude_subdirs: "frozenset[str]") -> bool:
+    """True when *marker*'s claim is broad enough for this request.
+
+    A marker covers a request only if everything the marker left out is also
+    left out now: ``marker_excluded ⊆ requested_excluded``. So a marker written
+    by a full collect satisfies a later ``--skip-logs`` one (the data is
+    already there), but a ``--skip-logs`` marker never satisfies a later full
+    collect — that would skip the iteration and never fetch ``server_logs``,
+    which is the sequence the >1 GB prompt actively recommends.
+
+    A marker with no ``excluded_subdirs`` field predates this check, so its
+    scope is unknown and it is NOT honoured. That is safe and self-healing:
+    the iteration is re-examined once, its delta against a complete local tree
+    is empty, and the marker is rewritten with the field.
+    """
+    recorded = marker.get("excluded_subdirs")
+    if not isinstance(recorded, list):
+        return False
+    return frozenset(recorded) <= frozenset(exclude_subdirs)
 
 
 def _marker_covers(marker: dict, remote_mtime: float) -> bool:
@@ -1312,14 +1369,25 @@ def _cp_one(remote: str, dest: Path, label: str, errors: list) -> None:
     directory to extract into — create it, as the pre-#885 per-subdirectory
     copies did, rather than relying on ``kubectl cp`` to create the target.
     """
-    if remote.endswith("/"):
-        dest.mkdir(parents=True, exist_ok=True)
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if remote.endswith("/"):
+            dest.mkdir(parents=True, exist_ok=True)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        errors.append(f"{label}: could not create destination: {exc}")
+        return
     try:
         r = run(["kubectl", "cp", remote, str(dest), "--retries=3"],
                 check=False, capture=True)
     except subprocess.TimeoutExpired as exc:
         errors.append(f"{label}: timed out after {exc.timeout}s")
+        return
+    except OSError as exc:
+        # See _remote_file_inventory: `check=False` rules out
+        # CalledProcessError but not the OSError family, and an uncaught one
+        # here would unwind past every remaining iteration and workload to the
+        # slot-level handler — the very propagation this function exists to stop.
+        errors.append(f"{label}: failed to run kubectl cp: {exc}")
         return
     if r.returncode != 0:
         stderr = (r.stderr or "").strip()
@@ -1413,7 +1481,11 @@ def _copy_iteration_incremental(
     res.files_total = len(remote_inv)
     res.bytes_total = sum(remote_inv.values())
 
-    iN_dest.mkdir(parents=True, exist_ok=True)
+    try:
+        iN_dest.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        res.errors.append(f"could not create {iN_dest}: {exc}")
+        return res
     local_inv = _local_file_inventory(iN_dest)
 
     # Clear files a previous collect of this iteration left behind that the
@@ -1478,7 +1550,16 @@ def _copy_iteration_incremental(
     res.verified = True
     res.complete = not res.missing and not res.short
     if res.complete:
-        _write_collect_marker(iN_dest, remote_inv, remote_mtime)
+        # The marker records what this collect did NOT look at, so a later
+        # broader collect cannot mistake a --skip-logs claim for a full one.
+        marker_err = _write_collect_marker(
+            iN_dest, remote_inv, remote_mtime, exclude_subdirs)
+        if marker_err is not None:
+            # Every file landed, so this is not a copy failure — but without
+            # the marker completeness is unprovable, and the next collect must
+            # re-examine rather than skip. Report it and drop the claim.
+            res.errors.append(marker_err)
+            res.complete = False
     return res
 
 
@@ -1523,7 +1604,7 @@ def _copy_workload_iterations_full(
     for iN in iN_names:
         iN_dest = wl_dest / iN
         remote_mtime = wl_remote_mtimes.get(iN)
-        if _is_iteration_up_to_date(iN_dest, remote_mtime):
+        if _is_iteration_up_to_date(iN_dest, remote_mtime, exclude_subdirs):
             info(f"[{phase}/{wl_name}/{iN}] up to date — skipping")
             continue
         res = _copy_iteration_incremental(
@@ -2275,7 +2356,10 @@ def _cmd_collect(args, run_dir: Path, cluster_config: dict):
                     errors = _extract_phases_from_pvc(
                         phases_to_collect, run_name, namespace, run_dir,
                         skip_logs=skip_logs, partials=partials)
-                except RuntimeError as e:
+                # Not just RuntimeError: anything surviving the copy layer must
+                # degrade to a reported slot failure rather than crash the whole
+                # collect with no summary and no per-iteration report.
+                except Exception as e:
                     warn(f"Extractor pod failed: {e}")
                     failed.extend(phases_to_collect)
                     failed_pairs.extend(phases_to_collect)
