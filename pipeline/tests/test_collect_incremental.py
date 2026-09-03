@@ -580,6 +580,17 @@ def test_a_non_timeout_oserror_from_kubectl_is_contained(tmp_path, monkeypatch):
     assert res.errors and "failed to run" in res.errors[0]
 
 
+def test_cp_reports_an_uncreatable_destination(tmp_path, monkeypatch):
+    """The destination mkdir is the one filesystem write `_cp_one` does itself."""
+    monkeypatch.setattr(
+        Path, "mkdir",
+        lambda self, *a, **k: (_ for _ in ()).throw(OSError("read-only")))
+    errors: list = []
+    deploy._cp_one("ns/pod:/x/epp_logs/", tmp_path / "i1" / "epp_logs",
+                   "i1/epp_logs", errors)
+    assert errors and "could not create destination" in errors[0]
+
+
 def test_a_cp_that_cannot_be_spawned_is_recorded_not_raised(tmp_path, monkeypatch):
     def flaky(cmd, **k):
         raise OSError("cannot allocate memory")
@@ -1025,9 +1036,11 @@ def test_prune_warns_and_keeps_going_when_a_delete_fails(tmp_path, monkeypatch, 
     assert (dest / "stubborn.log").exists()
 
 
-def test_prune_tolerates_a_directory_it_cannot_remove(tmp_path, monkeypatch):
+def test_prune_tolerates_a_directory_it_cannot_remove(tmp_path, monkeypatch, capsys):
     """The empty-directory cleanup is best-effort; a failure there must not
-    surface as an error."""
+    surface as an error — but it must be logged, not swallowed silently, or a
+    recurring permission problem leaves no trace for an operator debugging
+    disk or inode growth."""
     dest = tmp_path / "i1"
     (dest / "epp_logs").mkdir(parents=True)
     (dest / "epp_logs" / "a.log").write_text("x")
@@ -1035,6 +1048,118 @@ def test_prune_tolerates_a_directory_it_cannot_remove(tmp_path, monkeypatch):
                         lambda self, *a, **k: (_ for _ in ()).throw(OSError("busy")))
     removed = deploy._prune_absent_locals(dest, {"epp_logs/a.log": 1}, {})
     assert removed == ["epp_logs/a.log"]
+    assert "could not remove empty dir" in capsys.readouterr().out
+
+
+def test_prune_survives_a_failing_iterdir(tmp_path, monkeypatch, capsys):
+    """`iterdir` can lose a race with another process removing the directory,
+    or hit a permission problem. Unguarded it would escape
+    `_copy_iteration_incremental` — which promises it never raises — and abort
+    every remaining iteration in the slot instead of just this one."""
+    dest = tmp_path / "i1"
+    (dest / "epp_logs").mkdir(parents=True)
+    (dest / "epp_logs" / "a.log").write_text("x")
+    monkeypatch.setattr(
+        Path, "iterdir",
+        lambda self, *a, **k: (_ for _ in ()).throw(OSError("vanished")))
+    removed = deploy._prune_absent_locals(dest, {"epp_logs/a.log": 1}, {})
+    assert removed == ["epp_logs/a.log"]
+    assert "could not remove empty dir" in capsys.readouterr().out
+
+
+def test_prune_survives_a_failing_walk(tmp_path, monkeypatch, capsys):
+    """Same for the `rglob` that produces the cleanup candidates."""
+    dest = tmp_path / "i1"
+    dest.mkdir(parents=True)
+    (dest / "a.log").write_text("x")
+    monkeypatch.setattr(
+        Path, "rglob",
+        lambda self, *a, **k: (_ for _ in ()).throw(OSError("permission denied")))
+    removed = deploy._prune_absent_locals(dest, {"a.log": 1}, {})
+    assert removed == ["a.log"], "the prune itself still completed"
+    assert "could not walk" in capsys.readouterr().out
+
+
+def test_a_filesystem_walk_failure_does_not_escape_the_copy_helper(tmp_path, monkeypatch):
+    """The contract that matters: a local-filesystem walk failure is reported,
+    never raised. ``rglob`` is reached from both ``_local_file_inventory`` and
+    the prune's directory cleanup, so failing it exercises every walk in the
+    copy path at once. The iteration then reads as incomplete — which is the
+    honest answer, since nothing could be verified — and crucially no marker is
+    written and the rest of the slot still runs."""
+    dest = tmp_path / "i1"
+    dest.mkdir(parents=True)
+    (dest / "stale.log").write_text("x")
+    monkeypatch.setattr(deploy, "run", _FakePVC({"trace_data.csv": 4}))
+    monkeypatch.setattr(
+        Path, "rglob",
+        lambda self, *a, **k: (_ for _ in ()).throw(OSError("permission denied")))
+    res = deploy._copy_iteration_incremental(
+        "pod", "ns", "/data/r/p/wl/i1", dest, remote_mtime=100.0)
+    assert res.complete is False
+    assert res.missing == ["trace_data.csv"]
+    assert deploy._read_collect_marker(dest) is None
+
+
+def test_local_inventory_survives_a_failing_is_dir(tmp_path, monkeypatch, capsys):
+    """`Path.is_dir()` re-raises anything that is not ENOENT/ENOTDIR, so a
+    permission problem on the iteration directory would escape."""
+    monkeypatch.setattr(
+        Path, "is_dir",
+        lambda self, *a, **k: (_ for _ in ()).throw(OSError("permission denied")))
+    assert deploy._local_file_inventory(tmp_path) == {}
+    assert "could not stat" in capsys.readouterr().out
+
+
+def test_full_copy_reports_an_unwritable_workload_dir(tmp_path, monkeypatch):
+    """One workload's unwritable directory must not fail every other workload
+    in the namespace — the slot-level handler is all that would catch a raise."""
+    real_mkdir = Path.mkdir
+
+    def boom(self, *a, **k):
+        if self.name == "wl-a":
+            raise OSError("read-only file system")
+        return real_mkdir(self, *a, **k)
+
+    monkeypatch.setattr(Path, "mkdir", boom)
+    monkeypatch.setattr(deploy, "run", _LsPVC({"trace_data.csv": 4}))
+    errors = deploy._copy_workload_iterations_full(
+        "pod", "run-1", "baseline", "wl-a", "ns-0",
+        tmp_path / "baseline" / "wl-a", {"i1": 100.0})
+    assert len(errors) == 1
+    assert "could not create" in errors[0]
+
+
+def test_full_copy_reports_a_redaction_failure_without_aborting(tmp_path, monkeypatch):
+    """`redact_yaml_tree` guards its own reads and writes but not its directory
+    walk. A failure there is reported against the cell, not raised."""
+    tree = {"trace_data.csv": 4, "resources/pods.yaml": 6}
+
+    def boom(path):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(deploy, "redact_yaml_tree", boom)
+    monkeypatch.setattr(deploy, "run", _LsPVC(tree))
+    wl_dest = tmp_path / "baseline" / "wl-a"
+    errors = deploy._copy_workload_iterations_full(
+        "pod", "run-1", "baseline", "wl-a", "ns-0", wl_dest, {"i1": 100.0},
+        exclude_subdirs=frozenset({"server_logs"}), redact_resources=True)
+    assert len(errors) == 1
+    assert "could not redact" in errors[0]
+    # The copy itself succeeded, so the marker still stands.
+    assert deploy._read_collect_marker(wl_dest / "i1") is not None
+
+
+def test_local_inventory_survives_a_failing_walk(tmp_path, monkeypatch, capsys):
+    """Under-reporting the local side only ever costs an extra transfer — a
+    missing entry is treated as needing a copy — so returning what we have is
+    the safe direction."""
+    (tmp_path / "a.log").write_bytes(b"xx")
+    monkeypatch.setattr(
+        Path, "rglob",
+        lambda self, *a, **k: (_ for _ in ()).throw(OSError("permission denied")))
+    assert deploy._local_file_inventory(tmp_path) == {}
+    assert "could not walk" in capsys.readouterr().out
 
 
 def test_prune_does_not_run_when_the_inventory_probe_fails(tmp_path, monkeypatch):

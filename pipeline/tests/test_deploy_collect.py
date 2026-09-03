@@ -114,6 +114,44 @@ def test_collect_fallback_no_progress(tmp_path, monkeypatch):
     mock_warn.assert_called()
 
 
+def test_collect_fallback_reports_a_non_runtime_error_instead_of_crashing(
+        tmp_path, monkeypatch, capsys):
+    """The no-progress fallback catches Exception, not just RuntimeError.
+
+    Issue #885 widened this handler: an OSError surviving the copy layer (an
+    unresolvable kubectl, a full disk) is not a RuntimeError, so it used to
+    escape and crash the whole collect with no summary and no per-iteration
+    report. The parallel and sequential branches already had coverage for their
+    non-RuntimeError path; this branch did not, so narrowing it back would have
+    kept the suite green.
+    """
+    from pipeline import deploy
+
+    run_dir = tmp_path / "workspace" / "runs" / "test-run"
+    (run_dir / "cluster").mkdir(parents=True)
+    _mock_cm(monkeypatch, {})
+
+    class Args:
+        package = None
+        skip_logs = False
+
+    def mock_extract(phases, run_name, namespace, run_dir_arg, *, skip_logs=False,
+                     workload=None, allowed_workloads=None, on_workload_done=None,
+                     partials=None):
+        raise OSError(2, "No such file or directory: 'kubectl'")
+
+    with patch.object(deploy, "_extract_phases_from_pvc", mock_extract):
+        deploy._cmd_collect(Args(), run_dir, {"namespaces": ["ns-0"]})
+
+    out = capsys.readouterr().out
+    assert "Extractor pod failed" in out
+    assert "kubectl" in out
+    # The summary still prints — that is the point of catching rather than
+    # letting it propagate.
+    assert "Collected: 0/" in out
+    assert "Failed:" in out
+
+
 def test_collect_single_package_from_progress(tmp_path, monkeypatch):
     """With --package treatment and progress containing it, collects only treatment."""
     from pipeline import deploy

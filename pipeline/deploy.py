@@ -1123,15 +1123,30 @@ def _local_file_inventory(local_dir: Path) -> dict[str, int]:
     directly against ``_remote_file_inventory`` keys.
     """
     inv: dict[str, int] = {}
-    if not local_dir.is_dir():
+    try:
+        if not local_dir.is_dir():
+            return inv
+    except OSError as exc:
+        warn(f"could not stat {local_dir}: {exc} — treating it as empty")
         return inv
-    for path in local_dir.rglob("*"):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(local_dir).as_posix()
-        if rel == COLLECT_MARKER:
-            continue
+    # The walk itself can fail (permissions, or a directory vanishing mid-walk).
+    # Report and return what we have rather than raising: this runs inside
+    # ``_copy_iteration_incremental``, which promises it never raises, and an
+    # under-reported local inventory only ever costs an extra transfer — it
+    # cannot cause a file to be skipped, since a missing entry is treated as
+    # needing a copy.
+    try:
+        paths = list(local_dir.rglob("*"))
+    except OSError as exc:
+        warn(f"could not walk {local_dir}: {exc} — treating it as empty")
+        return inv
+    for path in paths:
         try:
+            if not path.is_file():
+                continue
+            rel = path.relative_to(local_dir).as_posix()
+            if rel == COLLECT_MARKER:
+                continue
             inv[rel] = path.stat().st_size
         except OSError as exc:
             warn(f"stat failed for {path}: {exc} — treating as missing")
@@ -1426,13 +1441,28 @@ def _prune_absent_locals(iN_dest: Path, local_inv: dict[str, int],
             warn(f"could not remove stale {iN_dest / rel}: {exc}")
             continue
         removed.append(rel)
-    # Drop directories the prune emptied, deepest first.
-    for path in sorted(iN_dest.rglob("*"), key=lambda p: len(p.parts), reverse=True):
-        if path.is_dir() and not any(path.iterdir()):
-            try:
+    # Drop directories the prune emptied, deepest first. Cosmetic cleanup, so
+    # every step is best-effort — but it must not raise: an OSError here would
+    # escape ``_copy_iteration_incremental``, whose docstring promises it never
+    # does, and abort every remaining iteration and workload in the slot rather
+    # than just this one. The walk itself is guarded because ``rglob`` and
+    # ``iterdir`` can both fail on a permission problem or lose a race with
+    # another process removing a directory between the check and the call.
+    try:
+        candidates = sorted(iN_dest.rglob("*"),
+                            key=lambda p: len(p.parts), reverse=True)
+    except OSError as exc:
+        warn(f"could not walk {iN_dest} to drop emptied dirs: {exc}")
+        return removed
+    for path in candidates:
+        try:
+            if path.is_dir() and not any(path.iterdir()):
                 path.rmdir()
-            except OSError:
-                pass
+        except OSError as exc:
+            # Logged, not silent: a recurring permission problem or a pile of
+            # undeleted empty dirs otherwise leaves no trace for an operator
+            # debugging disk or inode growth.
+            warn(f"could not remove empty dir {path}: {exc}")
     return removed
 
 
@@ -1595,7 +1625,13 @@ def _copy_workload_iterations_full(
 
     Returns a list of error strings; empty on success.
     """
-    wl_dest.mkdir(parents=True, exist_ok=True)
+    try:
+        wl_dest.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # Report rather than raise: this unwinds to the slot-level handler,
+        # which would fail every remaining workload in the namespace over one
+        # workload's unwritable directory.
+        return [f"{wl_name}: could not create {wl_dest}: {exc}"]
     iN_names, ls_error = _list_pvc_iterations(
         pod_name, run_name, phase, wl_name, namespace)
     if ls_error is not None:
@@ -1612,8 +1648,16 @@ def _copy_workload_iterations_full(
             f"/data/{run_name}/{phase}/{wl_name}/{iN}", iN_dest,
             exclude_subdirs=exclude_subdirs, remote_mtime=remote_mtime,
             label=f"{phase}/{wl_name}/{iN}")
-        if redact_resources and (iN_dest / "resources").is_dir():
-            redact_yaml_tree(iN_dest / "resources")
+        if redact_resources:
+            # Best-effort, and contained: redact_yaml_tree guards its own reads
+            # and writes but not its directory walk, and a failure here must not
+            # cost the rest of the slot.
+            try:
+                if (iN_dest / "resources").is_dir():
+                    redact_yaml_tree(iN_dest / "resources")
+            except OSError as exc:
+                wl_errors.append(
+                    f"{wl_name}/{iN}: could not redact resources/: {exc}")
         if res.complete:
             continue
         _report_partial(res, run_name, phase, wl_name)
