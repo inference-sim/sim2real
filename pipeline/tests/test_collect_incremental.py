@@ -221,14 +221,46 @@ def test_not_up_to_date_when_remote_mtime_is_none(tmp_path):
     assert deploy._is_iteration_up_to_date(iN, None) is False
 
 
-def test_up_to_date_when_marker_has_no_recorded_remote_mtime(tmp_path):
+def test_not_up_to_date_when_the_marker_records_no_remote_mtime(tmp_path):
     """A marker written when the probe had failed records remote_mtime=None.
-    It still proves the transfer completed, so trust it against any remote
-    mtime rather than re-copying forever."""
+
+    That proves the transfer completed at the time, but says nothing about
+    whether the remote has moved since. Trusting it skipped the iteration on
+    every later collect no matter how new the remote became — a permanent
+    silent skip, and weaker than the pre-#885 gate, which re-copied whenever it
+    had no mtime to compare. Declining to skip costs one inventory and zero
+    transfers when nothing actually changed.
+    """
     iN = tmp_path / "i1"
     iN.mkdir()
     deploy._write_collect_marker(iN, {"trace_data.csv": 1}, None)
-    assert deploy._is_iteration_up_to_date(iN, 1_500_000_000.0) is True
+    assert deploy._is_iteration_up_to_date(iN, 1_500_000_000.0) is False
+
+
+def test_a_null_mtime_marker_does_not_permanently_skip_the_iteration(tmp_path, monkeypatch):
+    """The full regression: a first collect whose mtime probe failed writes a
+    null-mtime marker; a second collect that DOES have an mtime must re-examine
+    the iteration and pick up a remote rewrite, not report success over it."""
+    wl_dest = tmp_path / "baseline" / "wl-a"
+
+    # First collect: no mtime for i1, so a null-mtime marker is written.
+    monkeypatch.setattr(deploy, "run", _LsPVC({"trace_data.csv": 4}))
+    deploy._copy_workload_iterations_full(
+        "pod", "run-1", "baseline", "wl-a", "ns-0", wl_dest, {})
+    marker = deploy._read_collect_marker(wl_dest / "i1")
+    assert marker is not None and marker["remote_mtime"] is None
+
+    # The remote is re-run: same path, different size. Second collect has a
+    # real mtime this time and must not skip.
+    fake = _LsPVC({"trace_data.csv": 9})
+    monkeypatch.setattr(deploy, "run", fake)
+    errors = deploy._copy_workload_iterations_full(
+        "pod", "run-1", "baseline", "wl-a", "ns-0", wl_dest, {"i1": 2_000.0})
+    assert errors == []
+    assert [c for c in fake.calls if c.startswith("kubectl cp")], \
+        "the iteration must be re-examined, not skipped on a null-mtime marker"
+    assert (wl_dest / "i1" / "trace_data.csv").stat().st_size == 9
+    assert deploy._read_collect_marker(wl_dest / "i1")["remote_mtime"] == 2_000.0
 
 
 def test_not_up_to_date_when_marker_mtime_is_not_a_number(tmp_path):
@@ -653,14 +685,25 @@ def test_an_undeletable_destination_is_contained(tmp_path, monkeypatch):
     assert any("could not create" in e for e in res.errors)
 
 
-def test_marker_covers_is_the_shared_staleness_predicate():
-    """The gate and the refetch decision must agree on what 'stale' means."""
+def test_marker_covers_requires_a_comparable_recorded_mtime():
+    """Coverage needs a number to compare. Absent and corrupt both decline."""
     assert deploy._marker_covers({"remote_mtime": 500.0}, 500.0) is True
     assert deploy._marker_covers({"remote_mtime": 501.0}, 500.0) is True
     assert deploy._marker_covers({"remote_mtime": 499.0}, 500.0) is False
-    assert deploy._marker_covers({"remote_mtime": None}, 500.0) is True
-    assert deploy._marker_covers({}, 500.0) is True
+    assert deploy._marker_covers({"remote_mtime": None}, 500.0) is False
+    assert deploy._marker_covers({}, 500.0) is False
     assert deploy._marker_covers({"remote_mtime": "x"}, 500.0) is False
+
+
+def test_marker_mtime_separates_absent_from_corrupt():
+    """The two differ downstream: absent means 'no information' and falls
+    through to the size delta; corrupt means 'bad information' and forces a
+    full refetch."""
+    assert deploy._marker_mtime({"remote_mtime": 7}) == ("ok", 7.0)
+    assert deploy._marker_mtime({"remote_mtime": None}) == ("absent", None)
+    assert deploy._marker_mtime({}) == ("absent", None)
+    assert deploy._marker_mtime({"remote_mtime": "x"}) == ("corrupt", None)
+    assert deploy._marker_mtime({"remote_mtime": [1]}) == ("corrupt", None)
 
 
 def test_exclude_subdirs_drops_those_entries_from_the_contract(tmp_path, monkeypatch):
@@ -929,6 +972,51 @@ def test_full_copy_continues_to_the_next_iteration_after_a_failure(tmp_path, mon
     assert deploy._read_collect_marker(wl_dest / "i2") is not None, \
         "i2 must still be collected after i1 failed"
     assert [p.label for p in partials] == ["baseline/wl-a/i1"]
+
+
+def test_a_recovered_bulk_timeout_is_still_reported(tmp_path, monkeypatch, capsys):
+    """`complete` is decided from the final missing/short check, so a Pass-1
+    bulk copy that hit the 120 s guard and was then rebuilt file-by-file in
+    Pass 2 would otherwise leave no trace at any level. That is the one signal
+    telling the operator a single top-level subtree is now big enough to cost a
+    wasted timeout on every cold copy."""
+    tree = {"trace_data.csv": 4, "epp_logs/a.log": 8, "epp_logs/b.log": 8}
+
+    class _BulkTimesOut(_LsPVC):
+        """Fails only the directory-level copy. `_cp_one` marks a directory
+        source with a trailing slash, so that is the exact discriminator; the
+        per-file retries in Pass 2 all succeed."""
+
+        def __call__(self, cmd, **kwargs):
+            if cmd[:2] == ["kubectl", "cp"] and cmd[2].endswith("/epp_logs/"):
+                self.calls.append(" ".join(cmd))
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=120)
+            return super().__call__(cmd, **kwargs)
+
+    wl_dest = tmp_path / "baseline" / "wl-a"
+    partials: list = []
+    fake = _BulkTimesOut(tree)
+    monkeypatch.setattr(deploy, "run", fake)
+    errors = deploy._copy_workload_iterations_full(
+        "pod", "run-1", "baseline", "wl-a", "ns-0", wl_dest, {"i1": 100.0},
+        partials=partials)
+
+    # The bulk copy really was attempted and really did fail, and the per-file
+    # pass really did pick up both files — otherwise this test proves nothing.
+    cps = [c for c in fake.calls if c.startswith("kubectl cp")]
+    assert any(c.split()[2].endswith("/epp_logs/") for c in cps), cps
+    assert sum(c.split()[2].endswith("epp_logs/a.log") for c in cps) == 1, cps
+    assert sum(c.split()[2].endswith("epp_logs/b.log") for c in cps) == 1, cps
+    assert deploy._local_file_inventory(wl_dest / "i1") == tree
+
+    # The iteration did complete, so it is neither an error nor a partial.
+    assert errors == []
+    assert partials == []
+    assert deploy._read_collect_marker(wl_dest / "i1") is not None
+    # But the timeout that happened on the way is reported.
+    out = capsys.readouterr().out
+    assert "recovered after" in out
+    assert "timed out after 120s" in out
 
 
 def test_full_copy_skips_iterations_that_carry_a_current_marker(tmp_path, monkeypatch):

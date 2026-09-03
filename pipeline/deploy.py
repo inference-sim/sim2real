@@ -1231,22 +1231,43 @@ def _marker_scope_covers(marker: dict,
     return frozenset(recorded) <= frozenset(exclude_subdirs)
 
 
-def _marker_covers(marker: dict, remote_mtime: float) -> bool:
-    """True when *marker* was written against a remote at least as new.
+def _marker_mtime(marker: dict) -> "tuple[str, float | None]":
+    """Classify *marker*'s recorded remote mtime.
 
-    Shared by the up-to-date gate and the copy's refetch decision so the two
-    cannot disagree about what "stale" means. A marker recording
-    ``remote_mtime: null`` was written when the mtime probe had failed; it
-    still proves the transfer completed, so it is trusted. A recorded value
-    that is not a number is a corrupted or hand-edited marker — not trusted.
+    ``("ok", value)`` for a usable number; ``("absent", None)`` when the field
+    is missing or null, which is what gets written when the mtime probe had
+    failed and is benign; ``("corrupt", None)`` for a value that is present but
+    not a number, which means the marker itself cannot be trusted.
+
+    The three cases genuinely differ downstream — absent is "no information",
+    corrupt is "bad information" — so they are classified once here rather than
+    collapsed into a bool at each call site.
     """
-    recorded = marker.get("remote_mtime")
-    if recorded is None:
-        return True
+    if "remote_mtime" not in marker or marker["remote_mtime"] is None:
+        return "absent", None
     try:
-        return float(recorded) >= remote_mtime
+        return "ok", float(marker["remote_mtime"])
     except (TypeError, ValueError):
-        return False
+        return "corrupt", None
+
+
+def _marker_covers(marker: dict, remote_mtime: float) -> bool:
+    """True only when *marker* was written against a remote at least as new.
+
+    An absent recorded mtime does NOT count as coverage. It proves the transfer
+    completed at the time, but says nothing about whether the remote has moved
+    since — and treating it as coverage skipped the iteration on every later
+    collect no matter how new the remote became. That is a permanent silent
+    skip, and strictly weaker than the pre-#885 gate, which re-copied whenever
+    it had no mtime to compare. Declining to skip costs one inventory and zero
+    transfers when nothing has in fact changed.
+
+    A null is written whenever the phase-wide probe produced no mtime for the
+    iteration — the probe failed, or the iteration exists on the PVC without a
+    ``trace_data.csv`` for ``_probe_remote_mtimes`` to key off.
+    """
+    state, value = _marker_mtime(marker)
+    return state == "ok" and value >= remote_mtime
 
 
 @dataclass
@@ -1528,16 +1549,24 @@ def _copy_iteration_incremental(
         local_inv = {rel: size for rel, size in local_inv.items()
                      if rel not in set(pruned)}
 
-    # Refetch everything only on positive evidence that the remote moved on
-    # past a marker we already hold: sizes can match while contents differ, so
-    # the size diff alone would miss an in-place rewrite. Absence of a usable
-    # remote mtime is NOT such evidence — a failed mtime probe blocks the skip
-    # in ``_is_iteration_up_to_date`` and lands every iteration here, and
-    # treating that as "remote moved on" would re-download whole complete
-    # iterations in exactly the degradation path this change makes cheap.
+    # Refetch everything only when the size diff cannot be trusted: sizes can
+    # match while contents differ, so an in-place remote rewrite would slip
+    # past it. Two cases qualify — the marker says the remote has since moved
+    # on, or the marker is corrupt and says nothing reliable at all.
+    #
+    # A marker with no recorded mtime is neither. It is what a failed mtime
+    # probe writes, and a failed probe also blocks the skip in
+    # ``_is_iteration_up_to_date``, so it lands every iteration here. Treating
+    # that absence as "remote moved on" would re-download whole complete
+    # iterations in precisely the degradation path this change makes cheap, so
+    # it falls through to the size delta instead.
     marker = _read_collect_marker(iN_dest)
-    remote_advanced = (marker is not None and remote_mtime is not None
-                       and not _marker_covers(marker, remote_mtime))
+    mtime_state, marker_mtime = (
+        _marker_mtime(marker) if marker is not None else ("absent", None))
+    remote_advanced = (
+        marker is not None and remote_mtime is not None
+        and (mtime_state == "corrupt"
+             or (mtime_state == "ok" and marker_mtime < remote_mtime)))
     delta = (sorted(remote_inv) if remote_advanced
              else _delta(remote_inv, local_inv))
 
@@ -1659,6 +1688,19 @@ def _copy_workload_iterations_full(
                 wl_errors.append(
                     f"{wl_name}/{iN}: could not redact resources/: {exc}")
         if res.complete:
+            if res.errors:
+                # Recovered, but do not swallow it. `complete` is decided from
+                # the final missing/short check, so a bulk Pass-1 copy that hit
+                # the 120 s guard and was then rebuilt file-by-file in Pass 2
+                # would otherwise leave no trace at any level — and this is the
+                # one signal that says the guard is being hit at bulk
+                # granularity, i.e. that a single top-level subtree is now big
+                # enough to cost a wasted timeout on every cold copy.
+                warn(f"{res.label} — recovered after "
+                     f"{len(res.errors)} copy failure(s); "
+                     f"the per-file pass completed the iteration")
+                for cause in res.errors:
+                    print(f"       cause:      {cause}")
             continue
         _report_partial(res, run_name, phase, wl_name)
         if partials is not None:
