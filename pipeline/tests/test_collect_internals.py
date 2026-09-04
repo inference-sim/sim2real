@@ -7,6 +7,13 @@ that with a wipe-and-recopy of the whole workload dir — lost iterations
 whenever the two replicas of a ``(phase, workload)`` pair dispatched to
 different cluster slots. Both mechanisms now key on iterations, not
 workloads. These tests lock in that per-iteration granularity end-to-end.
+
+Issue #885 then moved the skip decision's evidence from ``trace_data.csv``'s
+mtime to the ``.collect_complete`` marker, and made the copy itself transfer
+only the inventory delta instead of wiping and re-streaming. The per-iteration
+granularity #564 established is unchanged; only what counts as proof that an
+iteration is fully collected has changed. See ``test_collect_incremental.py``
+for the marker and delta-copy mechanics themselves.
 """
 
 import os
@@ -74,6 +81,11 @@ def test_probe_remote_mtimes_no_traces_returns_empty():
 
 
 # ── _is_iteration_up_to_date ─────────────────────────────────────────────────
+#
+# Issue #885: the evidence is the .collect_complete marker, not
+# trace_data.csv's mtime. That file is copied early in the tar stream, so a
+# fresh trace_data.csv survived a truncation and made a partial iteration
+# look complete.
 
 
 def test_is_iteration_up_to_date_false_when_remote_mtime_none():
@@ -86,43 +98,84 @@ def test_is_iteration_up_to_date_false_when_iN_dir_missing(tmp_path):
     assert deploy._is_iteration_up_to_date(tmp_path / "i1", 100.0) is False
 
 
-def test_is_iteration_up_to_date_false_when_trace_csv_missing(tmp_path):
-    """Directory exists but no trace_data.csv — the iteration hasn't been
-    collected yet."""
-    iN = tmp_path / "i1"
-    iN.mkdir()
-    assert deploy._is_iteration_up_to_date(iN, 100.0) is False
-
-
-def test_is_iteration_up_to_date_true_when_local_is_fresh(tmp_path):
+def test_is_iteration_up_to_date_false_when_marker_missing(tmp_path):
+    """A fresh trace_data.csv is not proof the iteration is complete (#885)."""
     iN = tmp_path / "i1"
     iN.mkdir()
     csv = iN / "trace_data.csv"
     csv.write_text("data")
     os.utime(csv, (2000, 2000))
-    assert deploy._is_iteration_up_to_date(iN, 500.0) is True
-
-
-def test_is_iteration_up_to_date_false_when_local_is_stale(tmp_path):
-    iN = tmp_path / "i1"
-    iN.mkdir()
-    csv = iN / "trace_data.csv"
-    csv.write_text("data")
-    os.utime(csv, (100, 100))
     assert deploy._is_iteration_up_to_date(iN, 500.0) is False
 
 
-def test_is_iteration_up_to_date_true_when_local_exactly_matches_remote(tmp_path):
-    """Boundary: local mtime equal to remote counts as up-to-date."""
+def test_is_iteration_up_to_date_true_when_marker_is_current(tmp_path):
     iN = tmp_path / "i1"
     iN.mkdir()
-    csv = iN / "trace_data.csv"
-    csv.write_text("data")
-    os.utime(csv, (500, 500))
+    deploy._write_collect_marker(iN, {"trace_data.csv": 4}, 2000.0)
+    assert deploy._is_iteration_up_to_date(iN, 500.0) is True
+
+
+def test_is_iteration_up_to_date_false_when_marker_is_stale(tmp_path):
+    iN = tmp_path / "i1"
+    iN.mkdir()
+    deploy._write_collect_marker(iN, {"trace_data.csv": 4}, 100.0)
+    assert deploy._is_iteration_up_to_date(iN, 500.0) is False
+
+
+def test_is_iteration_up_to_date_true_when_marker_exactly_matches_remote(tmp_path):
+    """Boundary: a marker recorded at exactly the remote mtime counts as
+    up-to-date."""
+    iN = tmp_path / "i1"
+    iN.mkdir()
+    deploy._write_collect_marker(iN, {"trace_data.csv": 4}, 500.0)
     assert deploy._is_iteration_up_to_date(iN, 500.0) is True
 
 
 # ── Cross-slot preservation (issue #564) ─────────────────────────────────────
+
+
+def _pvc_mock(iterations: str, inventory: dict, payloads: dict,
+              cp_calls: "list | None" = None):
+    """Build a ``deploy.run`` stand-in for one slot's PVC.
+
+    *iterations* is the ``ls`` output; *inventory* maps ``iN`` to
+    ``{relpath: size}``; *payloads* maps ``(iN, relpath)`` to the text a copy
+    should materialize. Sizes in *inventory* must match those payloads, or the
+    copy is judged short and the iteration stays unmarked.
+    """
+    def mock_run(cmd, **kwargs):
+        cmd_list = list(cmd)
+        joined = " ".join(cmd_list)
+        if "exec" in cmd_list and "find" in joined and "stat" in joined:
+            iN = next((k for k in inventory if f"/{k}" in joined), None)
+            lines = "".join(f"{sz}|./{rel}\n"
+                            for rel, sz in sorted(inventory.get(iN, {}).items()))
+            return MagicMock(returncode=0, stdout=lines, stderr="")
+        if "exec" in cmd_list and "ls " in joined:
+            return MagicMock(returncode=0, stdout=iterations, stderr="")
+        if "cp" in cmd_list:
+            src = cmd_list[cmd_list.index("cp") + 1]
+            dst = Path(cmd_list[cmd_list.index("cp") + 2])
+            if cp_calls is not None:
+                cp_calls.append(src)
+            iN = next((k for k in inventory if f"/{k}/" in src), None)
+            # The source names either a single file or a directory; materialize
+            # every payload whose relpath sits under it.
+            _, _, rel_root = src.rstrip("/").rpartition(f"/{iN}/")
+            for (p_iN, rel), body in payloads.items():
+                if p_iN != iN:
+                    continue
+                if rel == rel_root:
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    dst.write_text(body)
+                elif not rel_root or rel.startswith(f"{rel_root}/"):
+                    tail = rel[len(rel_root) + 1:] if rel_root else rel
+                    out = dst / tail
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    out.write_text(body)
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return MagicMock(returncode=0, stdout="", stderr="")
+    return mock_run
 
 
 def test_copy_workload_iterations_preserves_prior_slot_iteration(tmp_path):
@@ -138,20 +191,13 @@ def test_copy_workload_iterations_preserves_prior_slot_iteration(tmp_path):
     # been fetched yet, so the up-to-date check should be neutral for i2).
     os.utime(prior, (500, 500))
 
-    def mock_run(cmd, **kwargs):
-        cmd_list = list(cmd)
-        # `kubectl exec … sh -c 'ls /data/run/phase/wl-x/'` — slot B PVC
-        # only holds i2, per the issue-report cluster-side verification.
-        if "exec" in cmd_list and any("ls " in c for c in cmd_list):
-            return MagicMock(returncode=0, stdout="i2\n", stderr="")
-        # `kubectl cp … /wl-x/i2/ tmp_path/wl-x/i2` — fake the copy by
-        # writing a trace file at the destination.
-        if "cp" in cmd_list:
-            dst = cmd_list[cmd_list.index("cp") + 2]
-            Path(dst).mkdir(parents=True, exist_ok=True)
-            (Path(dst) / "trace_data.csv").write_text("iteration-2 payload from slot B")
-            return MagicMock(returncode=0, stdout="", stderr="")
-        return MagicMock(returncode=0, stdout="", stderr="")
+    body = "iteration-2 payload from slot B"
+    # slot B's PVC only holds i2, per the issue-report cluster-side verification.
+    mock_run = _pvc_mock(
+        iterations="i2\n",
+        inventory={"i2": {"trace_data.csv": len(body)}},
+        payloads={("i2", "trace_data.csv"): body},
+    )
 
     with patch.object(deploy, "run", side_effect=mock_run):
         errors = deploy._copy_workload_iterations_full(
@@ -167,39 +213,32 @@ def test_copy_workload_iterations_preserves_prior_slot_iteration(tmp_path):
     # New iteration must land alongside it.
     i2 = wl_dest / "i2" / "trace_data.csv"
     assert i2.exists()
-    assert i2.read_text() == "iteration-2 payload from slot B"
+    assert i2.read_text() == body
 
 
 def test_copy_workload_iterations_skips_only_up_to_date_iteration(tmp_path):
-    """When both iterations are on the current slot's PVC but one is already
-    up-to-date locally, only the stale one is re-copied. The other is left
-    untouched (no wipe, no re-cp)."""
+    """When both iterations are on the current slot's PVC but one already
+    carries a current completeness marker, only the unmarked one is copied.
+    The marked one is left untouched (no wipe, no re-cp)."""
     wl_dest = tmp_path / "wl-x"
     (wl_dest / "i1").mkdir(parents=True)
     (wl_dest / "i2").mkdir(parents=True)
-    # i1 is fresh — should be skipped
+    # i1 is complete and current — should be skipped.
     fresh = wl_dest / "i1" / "trace_data.csv"
     fresh.write_text("fresh")
-    os.utime(fresh, (2000, 2000))
-    # i2 is stale — should be re-copied
-    stale = wl_dest / "i2" / "trace_data.csv"
-    stale.write_text("stale")
-    os.utime(stale, (100, 100))
+    deploy._write_collect_marker(wl_dest / "i1", {"trace_data.csv": 5}, 2000.0)
+    # i2 has content but no marker — a partial copy; must be resumed.
+    (wl_dest / "i2" / "trace_data.csv").write_text("stal")
 
     cp_calls: list[str] = []
-
-    def mock_run(cmd, **kwargs):
-        cmd_list = list(cmd)
-        if "exec" in cmd_list and any("ls " in c for c in cmd_list):
-            return MagicMock(returncode=0, stdout="i1\ni2\n", stderr="")
-        if "cp" in cmd_list:
-            src = cmd_list[cmd_list.index("cp") + 1]
-            cp_calls.append(src)
-            dst = cmd_list[cmd_list.index("cp") + 2]
-            Path(dst).mkdir(parents=True, exist_ok=True)
-            (Path(dst) / "trace_data.csv").write_text("refetched")
-            return MagicMock(returncode=0, stdout="", stderr="")
-        return MagicMock(returncode=0, stdout="", stderr="")
+    body = "refetched"
+    mock_run = _pvc_mock(
+        iterations="i1\ni2\n",
+        inventory={"i1": {"trace_data.csv": 5},
+                   "i2": {"trace_data.csv": len(body)}},
+        payloads={("i2", "trace_data.csv"): body},
+        cp_calls=cp_calls,
+    )
 
     with patch.object(deploy, "run", side_effect=mock_run):
         errors = deploy._copy_workload_iterations_full(

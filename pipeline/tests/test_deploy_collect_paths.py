@@ -12,6 +12,7 @@ Covers:
 Issue: sim2real#792
 """
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -35,6 +36,52 @@ def _mock_subprocess(monkeypatch, handler):
     monkeypatch.setattr(subprocess, "run", handler)
 
 
+# ── #885 remote-inventory probe support ─────────────────────────────────────
+#
+# Since #885 each iteration copy starts with an inventory exec
+# (`find . -type f -exec stat -c '%s|%n' …`) and copies only the delta, so a
+# mock that answered nothing would issue no `kubectl cp` at all. The probe is
+# identified by its unique `%s|%n` stat format; the per-iteration mtime probe
+# uses `%Y %n` and is unaffected.
+
+_INVENTORY = (
+    "trace_data.csv", "trace_header.yaml",
+    "epp_stream_done", "gpu_stream_done", "metrics_stream_done",
+    "server_logs/vllm.log", "epp_logs/epp.log", "gpu_logs/gpu.log",
+    "metrics/raw/m.log", "resources/pods.yaml",
+)
+
+
+def _is_inventory_probe(cmd_str):
+    """True for the #885 inventory exec, false for the mtime probe."""
+    return "%s|%n" in cmd_str
+
+
+def _inventory_stdout(relpaths=_INVENTORY, size=4):
+    return "".join(f"{size}|./{rel}\n" for rel in relpaths)
+
+
+def _materialize_cp(cmd, relpaths=_INVENTORY, size=4):
+    """Write the files a real ``kubectl cp`` of this source would deliver.
+
+    The source names one top-level entry of the iteration — a file, or a
+    directory — and every inventory path under it lands beneath the destination
+    at the size the probe advertised. Without this the post-copy verification
+    would find nothing and judge every iteration incomplete.
+    """
+    cmd_list = cmd if isinstance(cmd, list) else cmd.split()
+    src, dst = cmd_list[2], Path(cmd_list[3])
+    _, _, rel_root = src.rstrip("/").rpartition("/i1/")
+    for rel in relpaths:
+        if rel == rel_root:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(b"\0" * size)
+        elif rel.startswith(f"{rel_root}/"):
+            out = dst / rel[len(rel_root) + 1:]
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"\0" * size)
+
+
 # ── _copy_workload_iterations_full ───────────────────────────────────────────
 
 
@@ -42,7 +89,9 @@ class TestCopyWorkloadIterationsFull:
     """Unit tests for deploy._copy_workload_iterations_full."""
 
     def test_returns_errors_when_kubectl_cp_fails(self, tmp_path, monkeypatch):
-        """When kubectl cp for an iteration fails, the error is in the returned list."""
+        """When a kubectl cp inside an iteration fails, the error is in the
+        returned list. Since #885 the copy is per remote entry rather than one
+        cp of the whole iteration, so the failure is surfaced per file."""
         from pipeline import deploy
 
         wl_dest = tmp_path / "results" / "baseline" / "wl-smoke"
@@ -52,6 +101,8 @@ class TestCopyWorkloadIterationsFull:
 
         def mock_run(cmd, **kwargs):
             cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+            if _is_inventory_probe(cmd_str):
+                return _fake_run(stdout=_inventory_stdout(("trace_data.csv",)))
             call_log.append(cmd_str)
             # ls iteration dirs
             if "exec" in cmd_str and "ls " in cmd_str:
@@ -91,6 +142,8 @@ class TestExtractPhasesSkipLogsScoped:
 
         def mock_run(cmd, **kwargs):
             cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+            if _is_inventory_probe(cmd_str):
+                return _fake_run(stdout=_inventory_stdout())
             # Pod cleanup / create / wait
             if "delete" in cmd_str or "run " in cmd_str or "wait" in cmd_str:
                 return _fake_run()
@@ -103,11 +156,12 @@ class TestExtractPhasesSkipLogsScoped:
             # stat for mtime probe
             if "exec" in cmd_str and "stat" in cmd_str:
                 return _fake_run(stdout="")
-            # kubectl cp — record source
+            # kubectl cp — record source and deliver the files
             if "cp" in cmd_str:
                 cmd_list = cmd if isinstance(cmd, list) else cmd.split()
                 if len(cmd_list) >= 3:
                     cp_sources.append(cmd_list[2])
+                _materialize_cp(cmd)
                 return _fake_run()
             # size probe (du)
             if "exec" in cmd_str and "du" in cmd_str:
@@ -145,6 +199,8 @@ class TestExtractPhasesSkipLogsScoped:
 
         def mock_run(cmd, **kwargs):
             cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+            if _is_inventory_probe(cmd_str):
+                return _fake_run(stdout=_inventory_stdout())
             if "delete" in cmd_str or "run " in cmd_str or "wait" in cmd_str:
                 return _fake_run()
             if "exec" in cmd_str and "ls " in cmd_str and "/wl-smoke/" in cmd_str:
@@ -156,6 +212,7 @@ class TestExtractPhasesSkipLogsScoped:
             if "exec" in cmd_str and "du" in cmd_str:
                 return _fake_run(stdout="1000\t/data/test-run/baseline\n")
             if "cp" in cmd_str:
+                _materialize_cp(cmd)
                 return _fake_run()
             return _fake_run()
 
@@ -183,6 +240,9 @@ class TestExtractPhasesSkipLogsScoped:
 
         def mock_run(cmd, **kwargs):
             cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+            if _is_inventory_probe(cmd_str):
+                # One file is enough: the point is that a failing cp surfaces.
+                return _fake_run(stdout=_inventory_stdout(("trace_data.csv",)))
             if "delete" in cmd_str or "run " in cmd_str or "wait" in cmd_str:
                 return _fake_run()
             if "exec" in cmd_str and "ls " in cmd_str and "/wl-smoke/" in cmd_str:
@@ -225,6 +285,10 @@ class TestOnWorkloadDoneCallbacks:
 
         def mock_run(cmd, **kwargs):
             cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+            if _is_inventory_probe(cmd_str):
+                # Empty inventory — this test is not about the copy set, and an
+                # empty remote iteration copies cleanly (nothing to fetch).
+                return _fake_run(stdout="")
             if "delete" in cmd_str or "run " in cmd_str or "wait" in cmd_str:
                 return _fake_run()
             if "exec" in cmd_str and "ls " in cmd_str and "/wl-smoke/" in cmd_str:
@@ -267,6 +331,9 @@ class TestOnWorkloadDoneCallbacks:
 
         def mock_run(cmd, **kwargs):
             cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+            if _is_inventory_probe(cmd_str):
+                # One file is enough: the point is that a failing cp surfaces.
+                return _fake_run(stdout=_inventory_stdout(("trace_data.csv",)))
             if "delete" in cmd_str or "run " in cmd_str or "wait" in cmd_str:
                 return _fake_run()
             if "exec" in cmd_str and "ls " in cmd_str and "/wl-smoke/" in cmd_str:
@@ -311,6 +378,10 @@ class TestOnWorkloadDoneCallbacks:
 
         def mock_run(cmd, **kwargs):
             cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+            if _is_inventory_probe(cmd_str):
+                # Empty inventory — this test is not about the copy set, and an
+                # empty remote iteration copies cleanly (nothing to fetch).
+                return _fake_run(stdout="")
             if "delete" in cmd_str or "run " in cmd_str or "wait" in cmd_str:
                 return _fake_run()
             # First-level ls: list workloads
@@ -356,6 +427,9 @@ class TestOnWorkloadDoneCallbacks:
 
         def mock_run(cmd, **kwargs):
             cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+            if _is_inventory_probe(cmd_str):
+                # One file is enough: the point is that a failing cp surfaces.
+                return _fake_run(stdout=_inventory_stdout(("trace_data.csv",)))
             if "delete" in cmd_str or "run " in cmd_str or "wait" in cmd_str:
                 return _fake_run()
             if "exec" in cmd_str and "ls " in cmd_str and "baseline/" in cmd_str and "wl-" not in cmd_str:
@@ -406,6 +480,10 @@ class TestSkipLogsLsFailureWithAllowedWorkloads:
 
         def mock_run(cmd, **kwargs):
             cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+            if _is_inventory_probe(cmd_str):
+                # Empty inventory — this test is not about the copy set, and an
+                # empty remote iteration copies cleanly (nothing to fetch).
+                return _fake_run(stdout="")
             if "delete" in cmd_str or "run " in cmd_str or "wait" in cmd_str:
                 return _fake_run()
             if "exec" in cmd_str and "stat" in cmd_str:
@@ -451,6 +529,10 @@ class TestSkipLogsLsFailureWithAllowedWorkloads:
 
         def mock_run(cmd, **kwargs):
             cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+            if _is_inventory_probe(cmd_str):
+                # Empty inventory — this test is not about the copy set, and an
+                # empty remote iteration copies cleanly (nothing to fetch).
+                return _fake_run(stdout="")
             if "delete" in cmd_str or "run " in cmd_str or "wait" in cmd_str:
                 return _fake_run()
             if "exec" in cmd_str and "stat" in cmd_str:
@@ -502,6 +584,10 @@ class TestSkipLogsIterationLsFailure:
 
         def mock_run(cmd, **kwargs):
             cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+            if _is_inventory_probe(cmd_str):
+                # Empty inventory — this test is not about the copy set, and an
+                # empty remote iteration copies cleanly (nothing to fetch).
+                return _fake_run(stdout="")
             if "delete" in cmd_str or "run " in cmd_str or "wait" in cmd_str:
                 return _fake_run()
             if "exec" in cmd_str and "stat" in cmd_str:
@@ -566,6 +652,10 @@ class TestSizeProbeSkipLogs:
 
         def mock_run(cmd, **kwargs):
             cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+            if _is_inventory_probe(cmd_str):
+                # Empty inventory — this test is not about the copy set, and an
+                # empty remote iteration copies cleanly (nothing to fetch).
+                return _fake_run(stdout="")
             if "delete" in cmd_str or "run " in cmd_str or "wait" in cmd_str:
                 return _fake_run()
             if "exec" in cmd_str and "ls " in cmd_str and "/wl-smoke/" in cmd_str:
@@ -619,6 +709,10 @@ class TestExtractPhasePodCreateFailure:
 
         def mock_run(cmd, **kwargs):
             cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+            if _is_inventory_probe(cmd_str):
+                # Empty inventory — this test is not about the copy set, and an
+                # empty remote iteration copies cleanly (nothing to fetch).
+                return _fake_run(stdout="")
             if "delete" in cmd_str:
                 return _fake_run()
             if "run " in cmd_str:
@@ -649,6 +743,10 @@ class TestMultiPhaseCollection:
 
         def mock_run(cmd, **kwargs):
             cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+            if _is_inventory_probe(cmd_str):
+                # Empty inventory — this test is not about the copy set, and an
+                # empty remote iteration copies cleanly (nothing to fetch).
+                return _fake_run(stdout="")
             if "delete" in cmd_str or "run " in cmd_str or "wait" in cmd_str:
                 return _fake_run()
             if "exec" in cmd_str and "stat" in cmd_str:

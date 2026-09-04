@@ -13,6 +13,7 @@ Subcommands:
 
 import argparse
 import datetime as _dt
+import hashlib
 import json
 import os
 import random
@@ -23,6 +24,7 @@ import sys
 import time
 import yaml
 
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -992,23 +994,43 @@ def _is_up_to_date(local_path: Path, remote_mtime: "float | None") -> bool:
         return False
 
 
-def _is_iteration_up_to_date(iN_dir: Path, remote_mtime: "float | None") -> bool:
-    """Return True if ``iN_dir/trace_data.csv`` exists and its mtime is at
-    least as new as *remote_mtime*.
+def _is_iteration_up_to_date(iN_dir: Path, remote_mtime: "float | None",
+                             exclude_subdirs: "frozenset[str]" = frozenset(),
+                             ) -> bool:
+    """Return True only if *iN_dir* carries a completeness marker that is not
+    stale relative to *remote_mtime* and whose claim covers *exclude_subdirs*.
+
+    Before #885 this trusted ``iN_dir/trace_data.csv``'s mtime. That file is
+    copied early in the tar stream, so it survived a timeout that truncated the
+    rest of the iteration — and the next collect then printed "up to date —
+    skipping" over a partial directory, permanently retaining truncated logs.
+    Only ``COLLECT_MARKER`` proves the whole inventory landed.
 
     Keyed per iteration so that in cross-slot collect (issue #564) each
-    iteration is decided against its OWN remote mtime, not a per-workload
-    max. When ``remote_mtime`` is None the iteration is either absent from
-    the current slot's PVC or the probe failed — either way we can't skip.
+    iteration is decided against its OWN remote mtime, not a per-workload max.
+    ``remote_mtime is None`` means "cannot skip": the iteration is either absent
+    from the current slot's PVC or the probe failed. A marker whose own recorded
+    ``remote_mtime`` is None is likewise NOT trusted for skipping — it proves the
+    transfer completed at the time but says nothing about whether the remote has
+    moved since, and trusting it skipped the iteration on every later collect no
+    matter how new the remote became. See ``_marker_covers``, which owns that
+    rule; declining to skip costs one inventory and zero transfers.
+
+    *exclude_subdirs* is the current request's scope. A marker only covers a
+    request that leaves out at least as much as the marker did, so a
+    ``--skip-logs`` marker never satisfies a later full collect — see
+    ``_marker_scope_covers``.
+
+    Iterations collected before #885 have no marker and are therefore not
+    skipped. That costs one remote inventory each and zero file transfers,
+    because the delta computed against a complete local tree is empty.
     """
     if remote_mtime is None:
         return False
-    csv = iN_dir / "trace_data.csv"
-    try:
-        return csv.exists() and csv.stat().st_mtime >= remote_mtime
-    except OSError as exc:
-        warn(f"stat failed for {csv}: {exc} — will re-download")
-        return False
+    marker = _read_collect_marker(iN_dir)
+    return (marker is not None
+            and _marker_scope_covers(marker, exclude_subdirs)
+            and _marker_covers(marker, remote_mtime))
 
 
 def _list_pvc_iterations(
@@ -1036,21 +1058,612 @@ def _list_pvc_iterations(
     return iN_names, None
 
 
+# ── Incremental iteration copy (issue #885) ──────────────────────────────────
+
+COLLECT_MARKER = ".collect_complete"
+"""Per-iteration completeness marker written by collect (issue #885).
+
+Presence means every file in the remote inventory landed locally at the
+matching size. ``trace_data.csv``'s mtime is not evidence of anything beyond
+``trace_data.csv`` — it is copied early in the tar stream, so it survives a
+timeout that truncates the rest of the iteration.
+"""
+
+
+def _remote_file_inventory(
+    pod_name: str, namespace: str, remote_dir: str,
+) -> "tuple[dict[str, int], str | None]":
+    """Inventory every file under *remote_dir* on the extractor pod.
+
+    Returns ``({relpath: size_bytes}, error)``. ``error`` is None on success;
+    an empty dict with ``error=None`` means the directory exists but is empty.
+
+    One ``kubectl exec`` per iteration. BusyBox (alpine:3.19) has no GNU
+    ``find -printf``, so this shells out to ``stat -c``. The ``%s|%n`` format
+    puts the size first and the path last, so a path containing the delimiter
+    still parses via a single split from the left.
+    """
+    cmd = ["kubectl", "exec", pod_name, f"-n={namespace}", "--", "sh", "-c",
+           f"cd {remote_dir} && find . -type f -exec stat -c '%s|%n' {{}} +"]
+    try:
+        result = run(cmd, check=False, capture=True)
+    except subprocess.TimeoutExpired as exc:
+        return {}, f"inventory of {remote_dir} timed out after {exc.timeout}s"
+    except OSError as exc:
+        # `check=False` rules out CalledProcessError, but not the OSError
+        # family — an unresolvable kubectl, a fork failure, a transient
+        # resource limit. Those propagate exactly like the TimeoutExpired
+        # this change exists to contain, so they are contained too.
+        return {}, f"inventory of {remote_dir} failed to run: {exc}"
+    if result.returncode != 0:
+        return {}, f"failed to inventory {remote_dir}: {(result.stderr or '').strip()}"
+    inv: dict[str, int] = {}
+    for line in (result.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        size_str, sep, rel = line.partition("|")
+        try:
+            if not sep:
+                raise ValueError("no size/path delimiter")
+            size = int(size_str)
+        except ValueError:
+            # Fail the whole inventory rather than dropping the entry. A
+            # dropped entry can never appear in ``missing``/``short``, so the
+            # iteration could be marked complete and skipped forever while that
+            # file was never fetched — the same silent data loss #885 was filed
+            # about, moved one layer down into the parser.
+            return {}, (f"failed to inventory {remote_dir}: unparseable "
+                        f"stat line: {line!r}")
+        inv[rel.removeprefix("./")] = size
+    return inv, None
+
+
+def _local_file_inventory(local_dir: Path) -> dict[str, int]:
+    """Inventory every file under *local_dir*, excluding ``COLLECT_MARKER``.
+
+    Keys are POSIX-style paths relative to *local_dir* so they compare
+    directly against ``_remote_file_inventory`` keys.
+    """
+    inv: dict[str, int] = {}
+    try:
+        if not local_dir.is_dir():
+            return inv
+    except OSError as exc:
+        warn(f"could not stat {local_dir}: {exc} — treating it as empty")
+        return inv
+    # The walk itself can fail (permissions, or a directory vanishing mid-walk).
+    # Report and return what we have rather than raising: this runs inside
+    # ``_copy_iteration_incremental``, which promises it never raises, and an
+    # under-reported local inventory only ever costs an extra transfer — it
+    # cannot cause a file to be skipped, since a missing entry is treated as
+    # needing a copy.
+    try:
+        paths = list(local_dir.rglob("*"))
+    except OSError as exc:
+        warn(f"could not walk {local_dir}: {exc} — treating it as empty")
+        return inv
+    for path in paths:
+        try:
+            if not path.is_file():
+                continue
+            rel = path.relative_to(local_dir).as_posix()
+            if rel == COLLECT_MARKER:
+                continue
+            inv[rel] = path.stat().st_size
+        except OSError as exc:
+            warn(f"stat failed for {path}: {exc} — treating as missing")
+    return inv
+
+
+def _inventory_sha256(inventory: dict[str, int]) -> str:
+    """SHA-256 over canonically sorted ``<size> <relpath>`` lines."""
+    h = hashlib.sha256()
+    for rel in sorted(inventory):
+        h.update(f"{inventory[rel]} {rel}\n".encode())
+    return h.hexdigest()
+
+
+def _write_collect_marker(iN_dir: Path, inventory: dict[str, int],
+                          remote_mtime: "float | None",
+                          excluded_subdirs: "frozenset[str]" = frozenset(),
+                          ) -> "str | None":
+    """Record that *iN_dir* holds every file in *inventory* at the right size.
+
+    Written only after the local tree matches the remote inventory exactly —
+    this is the sole evidence ``_is_iteration_up_to_date`` accepts (#885).
+    ``remote_mtime`` is stored so a later collect can tell a complete-but-stale
+    iteration from a complete-and-current one.
+
+    ``excluded_subdirs`` records what the claim does NOT cover. Without it the
+    marker asserts "this iteration is complete" when a ``--skip-logs`` collect
+    only ever established "complete apart from ``server_logs``" — and a later
+    full collect would honour that and skip the iteration, never fetching
+    ``server_logs`` at all. That is the #885 failure class exactly (a proxy
+    signal claiming completeness for data that was never transferred), moved
+    off ``trace_data.csv`` and onto the logs.
+
+    Returns an error string when the marker could not be written, else None.
+    The caller records it rather than raising: the files are already on disk,
+    so a failed marker write means "cannot prove complete", not "collect
+    failed", and must not abort the rest of the slot.
+    """
+    payload = {
+        "completed_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        "file_count": len(inventory),
+        "byte_count": sum(inventory.values()),
+        "inventory_sha256": _inventory_sha256(inventory),
+        "remote_mtime": remote_mtime,
+        "excluded_subdirs": sorted(excluded_subdirs),
+    }
+    try:
+        (iN_dir / COLLECT_MARKER).write_text(json.dumps(payload, indent=2) + "\n")
+    except OSError as exc:
+        return f"could not write {COLLECT_MARKER}: {exc}"
+    return None
+
+
+def _read_collect_marker(iN_dir: Path) -> "dict | None":
+    """Return the parsed marker, or None when it is absent or unreadable."""
+    try:
+        data = json.loads((iN_dir / COLLECT_MARKER).read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _marker_scope_covers(marker: dict,
+                         exclude_subdirs: "frozenset[str]") -> bool:
+    """True when *marker*'s claim is broad enough for this request.
+
+    A marker covers a request only if everything the marker left out is also
+    left out now: ``marker_excluded ⊆ requested_excluded``. So a marker written
+    by a full collect satisfies a later ``--skip-logs`` one (the data is
+    already there), but a ``--skip-logs`` marker never satisfies a later full
+    collect — that would skip the iteration and never fetch ``server_logs``,
+    which is the sequence the >1 GB prompt actively recommends.
+
+    A marker with no ``excluded_subdirs`` field predates this check, so its
+    scope is unknown and it is NOT honoured. That is safe and self-healing:
+    the iteration is re-examined once, its delta against a complete local tree
+    is empty, and the marker is rewritten with the field.
+    """
+    recorded = marker.get("excluded_subdirs")
+    if not isinstance(recorded, list):
+        return False
+    return frozenset(recorded) <= frozenset(exclude_subdirs)
+
+
+def _marker_mtime(marker: dict) -> "tuple[str, float | None]":
+    """Classify *marker*'s recorded remote mtime.
+
+    ``("ok", value)`` for a usable number; ``("absent", None)`` when the field
+    is missing or null, which is what gets written when the mtime probe had
+    failed and is benign; ``("corrupt", None)`` for a value that is present but
+    not a number, which means the marker itself cannot be trusted.
+
+    The three cases genuinely differ downstream — absent is "no information",
+    corrupt is "bad information" — so they are classified once here rather than
+    collapsed into a bool at each call site.
+    """
+    if "remote_mtime" not in marker or marker["remote_mtime"] is None:
+        return "absent", None
+    try:
+        return "ok", float(marker["remote_mtime"])
+    except (TypeError, ValueError):
+        return "corrupt", None
+
+
+def _marker_covers(marker: dict, remote_mtime: float) -> bool:
+    """True only when *marker* was written against a remote at least as new.
+
+    An absent recorded mtime does NOT count as coverage. It proves the transfer
+    completed at the time, but says nothing about whether the remote has moved
+    since — and treating it as coverage skipped the iteration on every later
+    collect no matter how new the remote became. That is a permanent silent
+    skip, and strictly weaker than the pre-#885 gate, which re-copied whenever
+    it had no mtime to compare. Declining to skip costs one inventory and zero
+    transfers when nothing has in fact changed.
+
+    A null is written whenever the phase-wide probe produced no mtime for the
+    iteration — the probe failed, or the iteration exists on the PVC without a
+    ``trace_data.csv`` for ``_probe_remote_mtimes`` to key off.
+    """
+    state, value = _marker_mtime(marker)
+    return state == "ok" and value >= remote_mtime
+
+
+@dataclass
+class IterationCopy:
+    """Outcome of copying one ``i<N>/`` iteration (issue #885).
+
+    ``complete`` is the only thing the marker is written on. The remaining
+    fields exist so a partial copy can be reported in terms an operator can
+    act on: how much landed, what is missing or short, and whether the
+    workload's primary artifact survived.
+    """
+
+    label: str = ""
+    complete: bool = False
+    files_total: int = 0
+    bytes_total: int = 0
+    files_present: int = 0
+    bytes_present: int = 0
+    missing: list = field(default_factory=list)
+    short: list = field(default_factory=list)     # (relpath, local, remote)
+    errors: list = field(default_factory=list)
+    verified: bool = False
+
+    @property
+    def trace_status(self) -> str:
+        """``"ok"``, ``"bad"``, or ``"unknown"`` for ``trace_data.csv``.
+
+        Three states, not two: ``missing`` and ``short`` are populated only by
+        the post-copy verification loop, so when that loop never ran — an
+        inventory probe that failed outright — both are empty because nothing
+        was examined, not because everything was fine. Reporting "safe" there
+        would be the same class of false reassurance #885 was filed about, one
+        step earlier in the pipeline.
+        """
+        if not self.verified:
+            return "unknown"
+        if ("trace_data.csv" in self.missing
+                or any(rel == "trace_data.csv" for rel, _l, _r in self.short)):
+            return "bad"
+        return "ok"
+
+
+def _human_bytes(n: int) -> str:
+    """Format *n* bytes for an operator: ``512 B``, ``39.6 MB``, ``5.0 GB``."""
+    if n < 1024:
+        return f"{n} B"
+    val = float(n)
+    for unit in ("KB", "MB", "GB"):
+        val /= 1024.0
+        if val < 1024.0:
+            return f"{val:.1f} {unit}"
+    return f"{val / 1024.0:.1f} TB"
+
+
+def _fmt_list(items: list, limit: int = 5) -> str:
+    """Join the first *limit* items, noting how many were elided."""
+    shown = ", ".join(str(i) for i in items[:limit])
+    extra = len(items) - limit
+    return shown + (f" (+{extra} more)" if extra > 0 else "")
+
+
+def _report_partial(res: IterationCopy, run_name: str, phase: str,
+                    wl_name: str) -> None:
+    """Warn about an incomplete iteration in terms the operator can act on.
+
+    Issue #885 defect 4: the old message was the raw ``TimeoutExpired`` argv.
+    It did not say that data had partially landed, which files were short, that
+    ``trace_data.csv`` had survived, or that re-running would resume rather
+    than no-op — and all of that is known here. The three things the operator
+    needs are: this is partial and not a total loss; the primary artifact is or
+    is not safe; and re-running resumes.
+    """
+    warn(f"{res.label} — PARTIAL COPY")
+    print(f"       transferred {res.files_present} of {res.files_total} files "
+          f"({_human_bytes(res.bytes_present)} of "
+          f"{_human_bytes(res.bytes_total)})")
+    if res.short:
+        print("       incomplete: " + _fmt_list(
+            [f"{rel} (truncated at {local:,} B of {remote:,} B)"
+             for rel, local, remote in res.short]))
+    if res.missing:
+        print(f"       missing:    {_fmt_list(res.missing)}")
+    for cause in res.errors:
+        print(f"       cause:      {cause}")
+    status = res.trace_status
+    if status == "ok":
+        print("       trace_data.csv is present and complete — "
+              "the workload's trace is safe")
+    elif status == "bad":
+        print("       trace_data.csv is MISSING OR TRUNCATED — "
+              "this workload's trace is not usable")
+    else:
+        print("       trace_data.csv state is UNKNOWN — the iteration could "
+              "not be inventoried, so nothing was checked")
+    print("       ACTION: re-run to fetch only the missing files:")
+    print(f"               python pipeline/deploy.py collect --run {run_name} "
+          f"--package {phase} --workload {wl_name}")
+    print("       This iteration is NOT marked complete, so the re-run will "
+          "resume it rather than skip it.")
+
+
+def _print_partial_summary(partials: list, run_name: str) -> None:
+    """Roll up every partially-copied iteration at the end of a collect.
+
+    A failure in cell 3 of 9 is otherwise lost in the scrollback (#885).
+    """
+    if not partials:
+        return
+    print(f"\n  Partial:   {len(partials)} iteration(s) copied incompletely "
+          f"and NOT marked complete:")
+    for res in partials:
+        print(f"    - {res.label}  "
+              f"({res.files_present}/{res.files_total} files, "
+              f"{_human_bytes(res.bytes_present)} of "
+              f"{_human_bytes(res.bytes_total)})")
+    print(f"  Re-run `python pipeline/deploy.py collect --run {run_name}` "
+          f"to transfer only the missing files.")
+
+
+def _cp_one(remote: str, dest: Path, label: str, errors: list) -> None:
+    """``kubectl cp`` one remote file-or-directory to *dest*.
+
+    Contains :class:`subprocess.TimeoutExpired`, which ``check=False`` does NOT
+    suppress — ``lib/proc.run`` passes ``timeout=`` straight to
+    ``subprocess.run``, which raises regardless of ``check``. Before #885 that
+    exception unwound out of the copy loop, past every remaining iteration and
+    workload, to the slot-level handler, so one oversized file aborted an
+    entire slot's collect.
+
+    A "no such file" stderr is tolerated: the remote inventory is a snapshot,
+    and a file can disappear between inventory and copy. The caller's post-copy
+    verification catches anything that genuinely failed to land.
+
+    A *remote* ending in ``/`` is a directory copy, and *dest* is then the
+    directory to extract into — create it, as the pre-#885 per-subdirectory
+    copies did, rather than relying on ``kubectl cp`` to create the target.
+    """
+    try:
+        if remote.endswith("/"):
+            dest.mkdir(parents=True, exist_ok=True)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        errors.append(f"{label}: could not create destination: {exc}")
+        return
+    try:
+        r = run(["kubectl", "cp", remote, str(dest), "--retries=3"],
+                check=False, capture=True)
+    except subprocess.TimeoutExpired as exc:
+        errors.append(f"{label}: timed out after {exc.timeout}s")
+        return
+    except OSError as exc:
+        # See _remote_file_inventory: `check=False` rules out
+        # CalledProcessError but not the OSError family, and an uncaught one
+        # here would unwind past every remaining iteration and workload to the
+        # slot-level handler — the very propagation this function exists to stop.
+        errors.append(f"{label}: failed to run kubectl cp: {exc}")
+        return
+    if r.returncode != 0:
+        stderr = (r.stderr or "").strip()
+        if "no such file" not in stderr.lower():
+            errors.append(f"{label}: {stderr}")
+
+
+def _delta(remote_inv: dict[str, int], local_inv: dict[str, int]) -> list[str]:
+    """Relpaths present in *remote_inv* but missing or size-mismatched locally."""
+    return sorted(rel for rel, size in remote_inv.items()
+                  if local_inv.get(rel) != size)
+
+
+def _prune_absent_locals(iN_dest: Path, local_inv: dict[str, int],
+                         remote_all: dict[str, int]) -> list[str]:
+    """Delete local files the remote iteration does not have, and return them.
+
+    Before #885 each copy ``rmtree``d the destination, which cleared stale
+    files from an earlier collect of the same iteration — and destroyed the
+    bytes that had already landed, so a timed-out copy could never converge.
+    Pruning gets the first effect without the second: a file the remote still
+    holds is never touched, whether or not it has been fetched yet.
+
+    Compared against the UNFILTERED remote inventory, so ``--skip-logs`` still
+    clears a stale ``server_logs/`` the remote no longer has, while leaving one
+    the remote does have in place rather than deleting data a previous full
+    collect fetched.
+    """
+    removed: list[str] = []
+    for rel in sorted(local_inv):
+        if rel in remote_all:
+            continue
+        try:
+            (iN_dest / rel).unlink()
+        except OSError as exc:
+            warn(f"could not remove stale {iN_dest / rel}: {exc}")
+            continue
+        removed.append(rel)
+    # Drop directories the prune emptied, deepest first. Cosmetic cleanup, so
+    # every step is best-effort — but it must not raise: an OSError here would
+    # escape ``_copy_iteration_incremental``, whose docstring promises it never
+    # does, and abort every remaining iteration and workload in the slot rather
+    # than just this one. The walk itself is guarded because ``rglob`` and
+    # ``iterdir`` can both fail on a permission problem or lose a race with
+    # another process removing a directory between the check and the call.
+    try:
+        candidates = sorted(iN_dest.rglob("*"),
+                            key=lambda p: len(p.parts), reverse=True)
+    except OSError as exc:
+        warn(f"could not walk {iN_dest} to drop emptied dirs: {exc}")
+        return removed
+    for path in candidates:
+        try:
+            if path.is_dir() and not any(path.iterdir()):
+                path.rmdir()
+        except OSError as exc:
+            # Logged, not silent: a recurring permission problem or a pile of
+            # undeleted empty dirs otherwise leaves no trace for an operator
+            # debugging disk or inode growth.
+            warn(f"could not remove empty dir {path}: {exc}")
+    return removed
+
+
+def _copy_iteration_incremental(
+    pod_name: str, namespace: str, remote_iN: str, iN_dest: Path, *,
+    exclude_subdirs: "frozenset[str]" = frozenset(),
+    remote_mtime: "float | None" = None,
+    label: str = "",
+) -> IterationCopy:
+    """Copy one ``i<N>/`` iteration to *iN_dest*, transferring only the delta.
+
+    Issue #885: the previous implementation ``rmtree``d *iN_dest* and streamed
+    the whole iteration in a single ``kubectl cp`` under ``deploy.run``'s 120 s
+    control-plane guard (#694). Measured API-server throughput of ~3.5 MB/s
+    capped an iteration at ~420 MB, and because each retry started from zero
+    every attempt died at roughly the same place — the operation could not
+    converge by repetition.
+
+    This version never wipes the destination. It inventories the remote
+    iteration once, diffs by name and size, and copies only what is missing or
+    short: per remote top-level entry when nothing has landed yet (the fast
+    path), then per individual file for anything still outstanding. A retry
+    therefore costs only the delta. ``kubectl cp`` cannot resume mid-file, so a
+    truncated file is re-copied whole.
+
+    *exclude_subdirs* drops entries whose first path segment matches — used by
+    ``--skip-logs`` to leave ``server_logs`` on the PVC. *label* names the cell
+    in log lines; it defaults to the iteration directory's name, which is
+    ambiguous across a multi-cell collect, so callers should pass
+    ``<phase>/<workload>/<iN>``.
+
+    Returns an :class:`IterationCopy`. Never raises: an inventory failure or a
+    per-copy timeout is recorded in ``errors`` so the caller can keep going.
+    """
+    res = IterationCopy(label=label or iN_dest.name)
+    remote_root = remote_iN.rstrip("/")
+
+    remote_all, inv_err = _remote_file_inventory(pod_name, namespace, remote_root)
+    if inv_err is not None:
+        res.errors.append(inv_err)
+        return res
+    remote_inv = remote_all
+    if exclude_subdirs:
+        remote_inv = {rel: size for rel, size in remote_all.items()
+                      if rel.split("/", 1)[0] not in exclude_subdirs}
+    res.files_total = len(remote_inv)
+    res.bytes_total = sum(remote_inv.values())
+
+    try:
+        iN_dest.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        res.errors.append(f"could not create {iN_dest}: {exc}")
+        return res
+    local_inv = _local_file_inventory(iN_dest)
+
+    # Clear files a previous collect of this iteration left behind that the
+    # remote no longer has. Never touches a file the remote still holds, so
+    # already-landed bytes survive (that is what the old rmtree destroyed).
+    pruned = _prune_absent_locals(iN_dest, local_inv, remote_all)
+    if pruned:
+        info(f"[{res.label}] removed {len(pruned)} stale file(s) absent from "
+             f"the PVC: {_fmt_list(pruned, 3)}")
+        local_inv = {rel: size for rel, size in local_inv.items()
+                     if rel not in set(pruned)}
+
+    # Refetch everything only when the size diff cannot be trusted: sizes can
+    # match while contents differ, so an in-place remote rewrite would slip
+    # past it. Two cases qualify — the marker says the remote has since moved
+    # on, or the marker is corrupt and says nothing reliable at all.
+    #
+    # A marker with no recorded mtime is neither. It is what a failed mtime
+    # probe writes, and a failed probe also blocks the skip in
+    # ``_is_iteration_up_to_date``, so it lands every iteration here. Treating
+    # that absence as "remote moved on" would re-download whole complete
+    # iterations in precisely the degradation path this change makes cheap, so
+    # it falls through to the size delta instead.
+    marker = _read_collect_marker(iN_dest)
+    mtime_state, marker_mtime = (
+        _marker_mtime(marker) if marker is not None else ("absent", None))
+    remote_advanced = (
+        marker is not None and remote_mtime is not None
+        and (mtime_state == "corrupt"
+             or (mtime_state == "ok" and marker_mtime < remote_mtime)))
+    delta = (sorted(remote_inv) if remote_advanced
+             else _delta(remote_inv, local_inv))
+
+    if delta:
+        # Pass 1 (bulk): only when there is nothing local to preserve. One cp
+        # per remote top-level entry bounds a single transfer to one subtree
+        # instead of the whole iteration, while keeping the common case to a
+        # handful of calls. Skipped once anything has landed, so a retry never
+        # re-streams what it already has.
+        if not local_inv:
+            roots: list[str] = []
+            for rel in delta:
+                head = rel.split("/", 1)[0]
+                if head not in roots:
+                    roots.append(head)
+            for head in roots:
+                is_dir = any(rel.startswith(f"{head}/") for rel in delta)
+                _cp_one(f"{namespace}/{pod_name}:{remote_root}/{head}"
+                        + ("/" if is_dir else ""),
+                        iN_dest / head, f"{res.label}/{head}", res.errors)
+            delta = _delta(remote_inv, _local_file_inventory(iN_dest))
+
+        # Pass 2 (per file): the granularity #885 specifies. Cost is
+        # proportional to the delta, not to the tree.
+        for rel in delta:
+            _cp_one(f"{namespace}/{pod_name}:{remote_root}/{rel}",
+                    iN_dest / rel, f"{res.label}/{rel}", res.errors)
+
+    final_local = _local_file_inventory(iN_dest)
+    for rel, size in sorted(remote_inv.items()):
+        have = final_local.get(rel)
+        if have is None:
+            res.missing.append(rel)
+        elif have != size:
+            res.short.append((rel, have, size))
+        else:
+            res.files_present += 1
+            res.bytes_present += size
+
+    res.verified = True
+    res.complete = not res.missing and not res.short
+    if res.complete:
+        # The marker records what this collect did NOT look at, so a later
+        # broader collect cannot mistake a --skip-logs claim for a full one.
+        marker_err = _write_collect_marker(
+            iN_dest, remote_inv, remote_mtime, exclude_subdirs)
+        if marker_err is not None:
+            # Every file landed, so this is not a copy failure — but without
+            # the marker completeness is unprovable, and the next collect must
+            # re-examine rather than skip. Report it and drop the claim.
+            res.errors.append(marker_err)
+            res.complete = False
+    return res
+
+
 def _copy_workload_iterations_full(
     pod_name: str, run_name: str, phase: str, wl_name: str, namespace: str,
     wl_dest: Path, wl_remote_mtimes: dict[str, float],
+    partials: "list | None" = None,
+    exclude_subdirs: "frozenset[str]" = frozenset(),
+    redact_resources: bool = False,
 ) -> list[str]:
     """Enumerate ``i<N>/`` on the current slot's PVC and copy each iteration
-    individually to *wl_dest*, respecting per-iteration up-to-date skips.
+    incrementally to *wl_dest*, respecting per-iteration up-to-date skips.
 
-    The workload directory itself is NEVER wiped — only individual ``i<N>/``
-    dirs are cleaned before re-copy. This preserves iterations copied from
-    other slots (issue #564: cross-slot collect used to wipe the workload
-    dir before recopy, destroying data from the previous slot).
+    The workload directory itself is NEVER wiped — nor, since #885, is any
+    ``i<N>/`` dir. Wiping destroyed the bytes that had already landed, which is
+    why retrying a timed-out copy could not converge. Copies now transfer only
+    the inventory delta (see ``_copy_iteration_incremental``).
+
+    Preserves the issue #564 guarantee: iterations copied from other slots are
+    not present in this slot's ``i<N>`` listing and are left untouched.
+
+    *partials* — when a list is passed, one :class:`IterationCopy` per
+    incomplete iteration is appended so the caller can print an end-of-collect
+    summary. *exclude_subdirs* is forwarded to the copy helper; ``--skip-logs``
+    passes ``{"server_logs"}``.
+
+    *redact_resources* runs ``redact_yaml_tree`` over each copied iteration's
+    ``resources/``. Only the ``--skip-logs`` caller sets it, which is where the
+    call has always lived — the default full-copy path pulls ``resources/``
+    unredacted. That asymmetry predates #885 and is tracked separately; this
+    flag makes it an explicit argument rather than a difference buried in two
+    divergent copy loops.
 
     Returns a list of error strings; empty on success.
     """
-    wl_dest.mkdir(parents=True, exist_ok=True)
+    try:
+        wl_dest.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # Report rather than raise: this unwinds to the slot-level handler,
+        # which would fail every remaining workload in the namespace over one
+        # workload's unwritable directory.
+        return [f"{wl_name}: could not create {wl_dest}: {exc}"]
     iN_names, ls_error = _list_pvc_iterations(
         pod_name, run_name, phase, wl_name, namespace)
     if ls_error is not None:
@@ -1058,20 +1671,48 @@ def _copy_workload_iterations_full(
     wl_errors: list[str] = []
     for iN in iN_names:
         iN_dest = wl_dest / iN
-        if _is_iteration_up_to_date(iN_dest, wl_remote_mtimes.get(iN)):
+        remote_mtime = wl_remote_mtimes.get(iN)
+        if _is_iteration_up_to_date(iN_dest, remote_mtime, exclude_subdirs):
             info(f"[{phase}/{wl_name}/{iN}] up to date — skipping")
             continue
-        if iN_dest.exists():
-            shutil.rmtree(iN_dest)
-        iN_dest.mkdir(parents=True, exist_ok=True)
-        result = run(
-            ["kubectl", "cp",
-             f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{wl_name}/{iN}/",
-             str(iN_dest), "--retries=3"],
-            check=False, capture=True,
-        )
-        if result.returncode != 0:
-            wl_errors.append(f"{wl_name}/{iN}: {result.stderr.strip()}")
+        res = _copy_iteration_incremental(
+            pod_name, namespace,
+            f"/data/{run_name}/{phase}/{wl_name}/{iN}", iN_dest,
+            exclude_subdirs=exclude_subdirs, remote_mtime=remote_mtime,
+            label=f"{phase}/{wl_name}/{iN}")
+        if redact_resources:
+            # Best-effort, and contained: redact_yaml_tree guards its own reads
+            # and writes but not its directory walk, and a failure here must not
+            # cost the rest of the slot.
+            try:
+                if (iN_dest / "resources").is_dir():
+                    redact_yaml_tree(iN_dest / "resources")
+            except OSError as exc:
+                wl_errors.append(
+                    f"{wl_name}/{iN}: could not redact resources/: {exc}")
+        if res.complete:
+            if res.errors:
+                # Recovered, but do not swallow it. `complete` is decided from
+                # the final missing/short check, so a bulk Pass-1 copy that hit
+                # the 120 s guard and was then rebuilt file-by-file in Pass 2
+                # would otherwise leave no trace at any level — and this is the
+                # one signal that says the guard is being hit at bulk
+                # granularity, i.e. that a single top-level subtree is now big
+                # enough to cost a wasted timeout on every cold copy.
+                warn(f"{res.label} — recovered after "
+                     f"{len(res.errors)} copy failure(s); "
+                     f"the per-file pass completed the iteration")
+                for cause in res.errors:
+                    print(f"       cause:      {cause}")
+            continue
+        _report_partial(res, run_name, phase, wl_name)
+        if partials is not None:
+            partials.append(res)
+        wl_errors.extend(f"{wl_name}/{iN}: {e}" for e in res.errors)
+        if not res.errors:
+            wl_errors.append(
+                f"{wl_name}/{iN}: incomplete copy — "
+                f"{len(res.missing)} missing, {len(res.short)} short")
     return wl_errors
 
 
@@ -1080,7 +1721,9 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                               skip_logs: bool = False,
                               workload: "str | None" = None,
                               allowed_workloads: "dict[str, set[str]] | None" = None,
-                              on_workload_done=None) -> dict[str, "Exception | None"]:
+                              on_workload_done=None,
+                              partials: "list | None" = None,
+                              ) -> dict[str, "Exception | None"]:
     """Extract results for one or more phases from data-pvc using a single pod.
 
     Data layout on PVC (written by run-workload-blis-observe):
@@ -1091,10 +1734,11 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
     each phase (used by scoped ``collect --only/--workload``).
     When *workload* is None (default), workloads are discovered via ``ls`` and
     copied individually. In both cases, each workload's iterations are
-    enumerated on the current slot's PVC and copied one ``i<N>/`` at a time;
-    iterations whose local ``trace_data.csv`` is already at least as new as
-    the remote copy are skipped, and iterations belonging to other slots (not
-    present on this slot's PVC) are left untouched on local disk (issue #564).
+    enumerated on the current slot's PVC and copied one ``i<N>/`` at a time,
+    transferring only the inventory delta (issue #885). Iterations carrying a
+    current ``.collect_complete`` marker are skipped, and iterations belonging
+    to other slots (not present on this slot's PVC) are left untouched on local
+    disk (issue #564).
 
     When *allowed_workloads* is set (a dict mapping phase name to a set of
     workload names), the ``ls``-discovered list for each phase is filtered to
@@ -1109,6 +1753,10 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
 
     When *skip_logs* is True, only trace files are copied (skipping vLLM and
     EPP log files which typically account for the bulk of the data).
+
+    When *partials* is a list, one ``IterationCopy`` record per incomplete
+    iteration is appended to it so the caller can print an end-of-collect
+    summary of every cell left partial (issue #885).
 
     Returns a dict mapping phase -> None (success) or Exception (failure).
     """
@@ -1209,100 +1857,15 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                 for wl_name in wl_names:
                     wl_remote_mtimes = remote_mtimes.get(wl_name, {})
                     wl_dest = dest_dir / wl_name
-                    wl_dest.mkdir(parents=True, exist_ok=True)
-                    # Discover iteration subdirs on the PVC (post step-5 layout).
-                    iN_names, ls_error = _list_pvc_iterations(
-                        pod_name, run_name, phase, wl_name, namespace)
-                    if ls_error is not None:
-                        phase_errors.append(ls_error)
-                        if on_workload_done:
-                            on_workload_done(
-                                phase, wl_name, namespace,
-                                RuntimeError(ls_error),
-                            )
-                        continue
-                    wl_errors: list[str] = []
-                    for iN in iN_names:
-                        iN_dest = wl_dest / iN
-                        if _is_iteration_up_to_date(iN_dest, wl_remote_mtimes.get(iN)):
-                            info(f"[{phase}/{wl_name}/{iN}] up to date — skipping")
-                            continue
-                        # Wipe stale log/resource dirs for this iteration
-                        # only — iterations we skip keep their existing
-                        # contents, and iterations from other slots outside
-                        # iN_names stay untouched.
-                        for sub in ("server_logs", "epp_logs", "gpu_logs", "metrics", "resources"):
-                            p = iN_dest / sub
-                            if p.exists():
-                                shutil.rmtree(p)
-                        iN_dest.mkdir(parents=True, exist_ok=True)
-                        remote_prefix = (
-                            f"{namespace}/{pod_name}:/data/{run_name}/"
-                            f"{phase}/{wl_name}/{iN}"
-                        )
-                        # Copy trace files
-                        for fname in ("trace_data.csv", "trace_header.yaml",
-                                      "epp_stream_done", "gpu_stream_done",
-                                      "metrics_stream_done"):
-                            r = run(
-                                ["kubectl", "cp", f"{remote_prefix}/{fname}",
-                                 str(iN_dest / fname), "--retries=3"],
-                                check=False, capture=True,
-                            )
-                            if r.returncode != 0 and "no such file" not in r.stderr.lower():
-                                wl_errors.append(
-                                    f"{wl_name}/{iN}/{fname}: {r.stderr.strip()}"
-                                )
-                        # Copy epp_logs directory
-                        epp_dest = iN_dest / "epp_logs"
-                        epp_dest.mkdir(exist_ok=True)
-                        r = run(
-                            ["kubectl", "cp", f"{remote_prefix}/epp_logs/",
-                             str(epp_dest), "--retries=3"],
-                            check=False, capture=True,
-                        )
-                        if r.returncode != 0 and "no such file" not in r.stderr.lower():
-                            wl_errors.append(
-                                f"{wl_name}/{iN}/epp_logs: {r.stderr.strip()}"
-                            )
-                        # Copy gpu_logs directory
-                        gpu_dest = iN_dest / "gpu_logs"
-                        gpu_dest.mkdir(exist_ok=True)
-                        r = run(
-                            ["kubectl", "cp", f"{remote_prefix}/gpu_logs/",
-                             str(gpu_dest), "--retries=3"],
-                            check=False, capture=True,
-                        )
-                        if r.returncode != 0 and "no such file" not in r.stderr.lower():
-                            wl_errors.append(
-                                f"{wl_name}/{iN}/gpu_logs: {r.stderr.strip()}"
-                            )
-                        # Copy metrics directory
-                        metrics_dest = iN_dest / "metrics"
-                        metrics_dest.mkdir(exist_ok=True)
-                        r = run(
-                            ["kubectl", "cp", f"{remote_prefix}/metrics/",
-                             str(metrics_dest), "--retries=3"],
-                            check=False, capture=True,
-                        )
-                        if r.returncode != 0 and "no such file" not in r.stderr.lower():
-                            wl_errors.append(
-                                f"{wl_name}/{iN}/metrics: {r.stderr.strip()}"
-                            )
-                        # Copy resources directory
-                        res_dest = iN_dest / "resources"
-                        res_dest.mkdir(exist_ok=True)
-                        r = run(
-                            ["kubectl", "cp", f"{remote_prefix}/resources/",
-                             str(res_dest), "--retries=3"],
-                            check=False, capture=True,
-                        )
-                        if r.returncode != 0 and "no such file" not in r.stderr.lower():
-                            wl_errors.append(
-                                f"{wl_name}/{iN}/resources: {r.stderr.strip()}"
-                            )
-                        else:
-                            redact_yaml_tree(res_dest)
+                    # --skip-logs leaves vLLM server_logs on the PVC; they
+                    # dominate data volume. Everything else is collected.
+                    # (Issue #883 tracks the stale docstring claim that EPP
+                    # logs are skipped too — behavior here is unchanged.)
+                    wl_errors = _copy_workload_iterations_full(
+                        pod_name, run_name, phase, wl_name, namespace,
+                        wl_dest, wl_remote_mtimes, partials=partials,
+                        exclude_subdirs=frozenset({"server_logs"}),
+                        redact_resources=True)
                     if wl_errors:
                         phase_errors.extend(wl_errors)
                     if on_workload_done:
@@ -1317,7 +1880,7 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                 wl_dest = dest_dir / workload
                 wl_errors = _copy_workload_iterations_full(
                     pod_name, run_name, phase, workload, namespace,
-                    wl_dest, wl_remote_mtimes)
+                    wl_dest, wl_remote_mtimes, partials=partials)
                 wl_exc = RuntimeError("; ".join(wl_errors)) if wl_errors else None
                 errors[phase] = wl_exc
                 if on_workload_done:
@@ -1353,7 +1916,7 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                     wl_dest = dest_dir / wl_name
                     wl_errors = _copy_workload_iterations_full(
                         pod_name, run_name, phase, wl_name, namespace,
-                        wl_dest, wl_remote_mtimes)
+                        wl_dest, wl_remote_mtimes, partials=partials)
                     if wl_errors:
                         phase_errors.extend(wl_errors)
                     wl_exc = RuntimeError("; ".join(wl_errors)) if wl_errors else None
@@ -1537,6 +2100,11 @@ def _cmd_collect(args, run_dir: Path, cluster_config: dict):
     scoped = (scope_only is not None or scope_workload is not None
               or scope_iteration is not None)
 
+    # One IterationCopy per incompletely-copied iteration, accumulated across
+    # every slot so the end-of-collect summary can list them all (issue #885).
+    # Appending from the slot threads is safe — list.append is atomic.
+    partials: list = []
+
     if scoped and not progress:
         err("--only/--workload/--iteration require progress data to resolve pairs, but none was found.")
         sys.exit(1)
@@ -1668,7 +2236,8 @@ def _cmd_collect(args, run_dir: Path, cluster_config: dict):
                         sorted(ns_phases), run_name, ns, run_dir,
                         skip_logs=skip_logs,
                         allowed_workloads=allowed,
-                        on_workload_done=_on_workload_done)
+                        on_workload_done=_on_workload_done,
+                        partials=partials)
                 except Exception as e:
                     return (ns, pairs_in_ns, e)
                 return (ns, pairs_in_ns, None)
@@ -1699,7 +2268,8 @@ def _cmd_collect(args, run_dir: Path, cluster_config: dict):
                         sorted(ns_phases), run_name, ns, run_dir,
                         skip_logs=skip_logs,
                         allowed_workloads=allowed,
-                        on_workload_done=_on_workload_done)
+                        on_workload_done=_on_workload_done,
+                        partials=partials)
                 except Exception as e:
                     warn(f"Extractor pod failed in {ns}: {e}")
                     _handle_slot_failure(ns, pairs_in_ns)
@@ -1830,7 +2400,8 @@ def _cmd_collect(args, run_dir: Path, cluster_config: dict):
                                 sorted(ns_phases), run_name, ns, run_dir,
                                 skip_logs=skip_logs,
                                 allowed_workloads=allowed,
-                                on_workload_done=_on_workload_done)
+                                on_workload_done=_on_workload_done,
+                                partials=partials)
                         except Exception as e:
                             return (ns, pairs_in_ns, e)
                         return (ns, pairs_in_ns, None)
@@ -1861,7 +2432,8 @@ def _cmd_collect(args, run_dir: Path, cluster_config: dict):
                                 sorted(ns_phases), run_name, ns, run_dir,
                                 skip_logs=skip_logs,
                                 allowed_workloads=allowed,
-                                on_workload_done=_on_workload_done)
+                                on_workload_done=_on_workload_done,
+                                partials=partials)
                         except Exception as e:
                             warn(f"Extractor pod failed in {ns}: {e}")
                             _handle_slot_failure(ns, pairs_in_ns)
@@ -1872,8 +2444,11 @@ def _cmd_collect(args, run_dir: Path, cluster_config: dict):
                 try:
                     errors = _extract_phases_from_pvc(
                         phases_to_collect, run_name, namespace, run_dir,
-                        skip_logs=skip_logs)
-                except RuntimeError as e:
+                        skip_logs=skip_logs, partials=partials)
+                # Not just RuntimeError: anything surviving the copy layer must
+                # degrade to a reported slot failure rather than crash the whole
+                # collect with no summary and no per-iteration report.
+                except Exception as e:
                     warn(f"Extractor pod failed: {e}")
                     failed.extend(phases_to_collect)
                     failed_pairs.extend(phases_to_collect)
@@ -1894,6 +2469,7 @@ def _cmd_collect(args, run_dir: Path, cluster_config: dict):
     print(f"\n  Collected: {len(collected_pairs)}/{total_pairs} pairs")
     if failed_pairs:
         print(f"  Failed:    {len(failed_pairs)} pairs")
+    _print_partial_summary(partials, run_name)
     if collected_pairs:
         print(f"  Results:   {run_dir / 'results'}/")
         print("\n  Next:      /sim2real-analyze")

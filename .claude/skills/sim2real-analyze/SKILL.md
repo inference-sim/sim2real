@@ -187,6 +187,16 @@ workspace/runs/<name>/
         metrics/processed/metrics_summary.json    # post-run percentiles over the metrics
                                                   # named in process_metrics.py:AGGREGATE_METRICS
         metrics/processed/replica_status_timeseries.json  # replica state/scale over the run
+        .collect_complete # written by `deploy.py collect` only once every file in
+                          # the remote inventory landed at the matching size
+                          # (issue #885). PRESENT ⇒ the copy is known complete.
+                          # ABSENT is not by itself evidence of a problem — runs
+                          # collected before #885 never got a marker, and neither
+                          # does an iteration that was never collected. It only
+                          # means completeness is unproven: if a cell's logs look
+                          # truncated (e.g. a file ending mid-record), re-run
+                          # `deploy.py collect`, which will report any cell it
+                          # cannot complete and write the marker for the rest.
     treatment/
       workload_<name>/
         trace_data.csv
