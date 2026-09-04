@@ -1008,10 +1008,13 @@ def _is_iteration_up_to_date(iN_dir: Path, remote_mtime: "float | None",
 
     Keyed per iteration so that in cross-slot collect (issue #564) each
     iteration is decided against its OWN remote mtime, not a per-workload max.
-    ``remote_mtime is None`` still means "cannot skip": the iteration is either
-    absent from the current slot's PVC or the probe failed. A marker whose own
-    ``remote_mtime`` is None was written when the probe had failed; it still
-    proves completion, so it is trusted.
+    ``remote_mtime is None`` means "cannot skip": the iteration is either absent
+    from the current slot's PVC or the probe failed. A marker whose own recorded
+    ``remote_mtime`` is None is likewise NOT trusted for skipping — it proves the
+    transfer completed at the time but says nothing about whether the remote has
+    moved since, and trusting it skipped the iteration on every later collect no
+    matter how new the remote became. See ``_marker_covers``, which owns that
+    rule; declining to skip costs one inventory and zero transfers.
 
     *exclude_subdirs* is the current request's scope. A marker only covers a
     request that leaves out at least as much as the marker did, so a
