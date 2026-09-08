@@ -161,9 +161,13 @@ For each user request:
       - Discover arms from `workspace/runs/<name>/results/*/` — one dir per arm; `baseline` is the
         reference and every sibling is a comparison arm. Do NOT assume a `treatment/` dir.
       - Within each arm, enumerate the `<workload>/` dirs, skipping the `plans/` sibling that sits
-        beside them (it holds plan YAMLs and has no `trace_data.csv`), and resolve each trace
-        through the optional replica segment:
+        beside them (it holds plan YAMLs and has no `trace_data.csv`), and resolve traces through the
+        optional replica segment:
         `results/<arm>/<workload>/*/trace_data.csv` plus `results/<arm>/<workload>/trace_data.csv`
+      - **A cell can hold several iterations** (`i1`, `i2`, …), and they are replicas of the same
+        cell, so that glob can legitimately match more than one file. Read them **all** and
+        concatenate — taking only the first silently charts one replica and reports it as the cell.
+        If you deliberately analyse a single iteration, say which one in the output.
       - All timestamps are in **microseconds** — divide by 1000 for milliseconds
       - Filter to `status == "ok"` rows before computing any metrics
       - Save charts to `workspace/runs/<name>/results_charts/<descriptive-name>.png` or `.html`
@@ -288,10 +292,31 @@ Timestamps are microseconds, but **the columns do not share an epoch**:
   is how you tell an open-loop generator (send tracks the schedule regardless of backlog)
   from a closed-loop one.
 
-Other columns: `input_tokens`, `output_tokens`, `server_input_tokens` (post-prefix-cache,
-as the server counted it), `status`, `error_message`, `finish_reason`, `num_chunks`,
-`slo_class`, `tenant_id`, `session_id`, `prefix_group`, `prefix_length`, `streaming`,
-`model`, `request_id`, `x_request_id`.
+**The full column set** is `traceV2Columns` in BLIS (`sim/workload/tracev2.go`) — 27 always-present
+columns, in this order:
+
+```
+request_id, client_id, tenant_id, slo_class, session_id, round_index, prefix_group,
+prefix_length, streaming, input_tokens, output_tokens, text_tokens, image_tokens,
+audio_tokens, video_tokens, reason_ratio, model, deadline_us, server_input_tokens,
+arrival_time_us, send_time_us, first_chunk_time_us, last_chunk_time_us, num_chunks,
+status, error_message, finish_reason
+```
+
+Three more are inserted conditionally by `ExportTraceV2`, so **check the header before relying on
+them** rather than assuming a fixed layout:
+
+| column | present when |
+|---|---|
+| `vllm_priority` | priority was actually computed — inserted right after `slo_class` |
+| `slo_target_us` | any record has a non-zero SLO target — inserted right after `deadline_us` |
+| `x_request_id` | `trace_header.yaml`'s `mode: real` (absent for simulated traces) |
+
+Worth knowing rather than rediscovering: `server_input_tokens` is the prompt length the server
+actually counted after prefix-cache reuse, so it can exceed `input_tokens` when a shared prefix is
+prepended. `round_index` and `client_id` are the columns a multi-turn or per-client breakdown needs
+— present even in single-turn workloads, where `round_index` is constant. `text/image/audio/video_tokens`
+and `reason_ratio` carry the modality and reasoning split.
 
 - Filter to `status == "ok"` before computing any metric.
 - `warm_up_requests` from `trace_header.yaml` are already excluded from the rows, so the
@@ -427,14 +452,18 @@ base = f"workspace/runs/{run}/results"
 arms = sorted(d for d in os.listdir(base) if os.path.isdir(f"{base}/{d}"))
 arms = ["baseline"] + [a for a in arms if a != "baseline"]
 
-def trace(arm, wl):
-    """Resolve through the optional i<N>/ replica segment; legacy shape omits it."""
-    hits = sorted(glob.glob(f"{base}/{arm}/{wl}/*/trace_data.csv")) \
+def traces(arm, wl):
+    """Every trace for a cell: one per i<N>/ iteration, or one in the legacy shape.
+
+    Returns a list, not a single path — a cell can hold i1, i2, ... and they are
+    replicas of the same cell. Returning only the first would silently chart one
+    replica and label it the cell.
+    """
+    return sorted(glob.glob(f"{base}/{arm}/{wl}/*/trace_data.csv")) \
          + sorted(glob.glob(f"{base}/{arm}/{wl}/trace_data.csv"))
-    return hits[0] if hits else None
 
 # `plans/` is a sibling of the workloads, not a workload — it has no trace_data.csv.
-workloads = sorted(w for w in os.listdir(f"{base}/baseline") if trace("baseline", w))
+workloads = sorted(w for w in os.listdir(f"{base}/baseline") if traces("baseline", w))
 
 fig, axes = plt.subplots(len(workloads), 1, figsize=(10, 4 * len(workloads)))
 if len(workloads) == 1:
@@ -442,10 +471,13 @@ if len(workloads) == 1:
 
 for ax, wl in zip(axes, workloads):
     for arm in arms:
-        f = trace(arm, wl)
-        if f is None:
-            continue  # cell absent for this arm
-        df = pd.read_csv(f)
+        fs = traces(arm, wl)
+        if not fs:
+            print(f"note: no trace for {arm}/{wl} — omitted from the chart")
+            continue
+        if len(fs) > 1:
+            print(f"note: {arm}/{wl} has {len(fs)} iterations — pooling all of them")
+        df = pd.concat([pd.read_csv(f) for f in fs], ignore_index=True)
         df = df[df["status"] == "ok"]  # only compute metrics for successful requests
         ttft = (df["first_chunk_time_us"] - df["send_time_us"]) / 1000
         ax.hist(ttft, bins=50, alpha=0.6, label=arm)
