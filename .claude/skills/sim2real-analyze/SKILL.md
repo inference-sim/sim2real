@@ -64,14 +64,26 @@ Run the default catalog entry (`latency-table`):
 python .claude/skills/sim2real-analyze/analyses/latency_table.py --run <name>
 ```
 
-Print the full output to the user. If the script exits with code 1, surface the error and stop.
+Print the full output to the user.
 
-After printing the table, proactively note any interesting patterns:
+**This script only handles a two-phase run, and will exit 1 on a multi-arm one.** It resolves
+`results/baseline/` and `results/treatment/` literally (`latency_table.py:199-204`) and formats a
+strictly two-column table (`_format_row(metric, baseline, treatment)`, `latency_table.py:111`), so
+on the arm-named shape described under "Data reference" it fails with `need both results/baseline/
+and results/treatment/`. That is issue #890, not a collection problem — do NOT tell the user to
+re-run `collect`. Say the catalog does not yet support multi-arm runs, then go to Step 4 and build
+the comparison as a one-off script (Step 4 item 3), which the worked example at the end of this
+file already does for N arms. Every other `runner: script` entry shares the limitation.
+
+If the script exits 1 for any other reason, surface the error and stop.
+
+After printing the table (two-phase runs), proactively note any interesting patterns:
 - If any p99 is worse while mean/p50 is better → suggest "Would you like to see the latency distribution to understand the tail?"
-- If an arm is consistently better than `baseline` → note "<arm> shows consistent improvement."
-- If an arm is consistently worse than `baseline` → note "<arm> shows consistent regression."
-- If arms disagree by workload → say so rather than reporting a single winner; a run has as
-  many arms as the assembly declared, not just one comparison.
+- If treatment is consistently better → note "Treatment shows consistent improvement."
+- If treatment is consistently worse → note "Treatment shows consistent regression."
+
+On a multi-arm run, once you have the table from a one-off script, the same reading applies per arm
+against `baseline` — and if arms disagree by workload, say so rather than reporting a single winner.
 
 Then go to Step 4.
 
@@ -137,9 +149,11 @@ For each user request:
       ```
       The script must:
       - Import pandas, matplotlib, seaborn as needed
-      - Discover arms from `workspace/runs/<name>/results/*/` (one dir per arm; `baseline` is the
-        reference, every sibling is a comparison arm — do NOT assume a `treatment/` dir), skipping
-        the `plans/` sibling, and resolve each trace through the optional replica segment:
+      - Discover arms from `workspace/runs/<name>/results/*/` — one dir per arm; `baseline` is the
+        reference and every sibling is a comparison arm. Do NOT assume a `treatment/` dir.
+      - Within each arm, enumerate the `<workload>/` dirs, skipping the `plans/` sibling that sits
+        beside them (it holds plan YAMLs and has no `trace_data.csv`), and resolve each trace
+        through the optional replica segment:
         `results/<arm>/<workload>/*/trace_data.csv` plus `results/<arm>/<workload>/trace_data.csv`
       - All timestamps are in **microseconds** — divide by 1000 for milliseconds
       - Filter to `status == "ok"` rows before computing any metrics
@@ -226,7 +240,14 @@ workspace/runs/<name>/
                                         # Use for thermal/power confounds and node health.
           metrics/                      # see "metrics/" below (present when stream-metrics ran)
           saturation.json               # NOT LOAD-BEARING — see "saturation.json" below
-          epp_log_since                 # bookmark for incremental EPP log streaming
+          epp_log_since                 # ONE ISO8601 timestamp, written by the workload task
+                                        # (tektonc run-workload-blis-observe.yaml:45) BEFORE the
+                                        # workload starts, to bound EPP log collection to this
+                                        # workload's window. A fixed start-of-window mark, not an
+                                        # advancing bookmark, and no code reads it today. Useful
+                                        # only as "when this cell began" — note it precedes the
+                                        # first send (pod startup), so prefer trace_data.csv's
+                                        # min(send_time_us) for a workload-window bound.
           epp_stream_done               # sentinels written by collect-results when the
           gpu_stream_done               # workload finishes; each streamer polls its own
           metrics_stream_done           # sentinel and exits
