@@ -332,9 +332,16 @@ metrics/raw/<pod>_<ts>_metrics.log     one Prometheus text-exposition dump per p
                                        target exposed. Produced by stream-metrics, which
                                        wraps llm-d-benchmark's collect_metrics.sh.
 metrics/raw/collection_debug.log       collector-side errors
-metrics/processed/metrics_summary.json  post-run percentiles, but ONLY over the metrics named
-                                        in process_metrics.py:AGGREGATE_METRICS. Anything
-                                        outside that set must be read from raw/.
+metrics/processed/metrics_summary.json  post-run percentiles, but ONLY over the metrics in
+                                        process_metrics.py's AGGREGATE_METRICS — which is
+                                        RESOLVED PER RUN, not a fixed list: it is
+                                        TIME_SERIES_METRIC_SET when the run configured
+                                        monitoring.timeSeriesMetrics (env
+                                        LLMDBENCH_TIME_SERIES_METRICS), else
+                                        LEGACY_AGGREGATE_METRICS. So two runs can summarise
+                                        different metrics — check the file's own keys rather
+                                        than assuming. Anything outside the set must be read
+                                        from raw/, which always has every metric exposed.
 metrics/processed/replica_status.json            infrastructure state, per iteration
 metrics/processed/replica_status_timeseries.json replica state/scale over the run
 metrics/processed/pod_startup_times.json         pod startup timings
