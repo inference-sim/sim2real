@@ -68,8 +68,10 @@ Print the full output to the user. If the script exits with code 1, surface the 
 
 After printing the table, proactively note any interesting patterns:
 - If any p99 is worse while mean/p50 is better → suggest "Would you like to see the latency distribution to understand the tail?"
-- If treatment is consistently better → note "Treatment shows consistent improvement."
-- If treatment is consistently worse → note "Treatment shows consistent regression."
+- If an arm is consistently better than `baseline` → note "<arm> shows consistent improvement."
+- If an arm is consistently worse than `baseline` → note "<arm> shows consistent regression."
+- If arms disagree by workload → say so rather than reporting a single winner; a run has as
+  many arms as the assembly declared, not just one comparison.
 
 Then go to Step 4.
 
@@ -135,7 +137,10 @@ For each user request:
       ```
       The script must:
       - Import pandas, matplotlib, seaborn as needed
-      - Load CSVs from `workspace/runs/<name>/results/baseline/{workload}/trace_data.csv` and `results/treatment/`
+      - Discover arms from `workspace/runs/<name>/results/*/` (one dir per arm; `baseline` is the
+        reference, every sibling is a comparison arm — do NOT assume a `treatment/` dir), skipping
+        the `plans/` sibling, and resolve each trace through the optional replica segment:
+        `results/<arm>/<workload>/*/trace_data.csv` plus `results/<arm>/<workload>/trace_data.csv`
       - All timestamps are in **microseconds** — divide by 1000 for milliseconds
       - Filter to `status == "ok"` rows before computing any metrics
       - Save charts to `workspace/runs/<name>/results_charts/<descriptive-name>.png` or `.html`
@@ -171,41 +176,163 @@ Loop until the user says "done", "exit", "quit", "that's all", or similar.
 
 ## Data reference
 
+A collected cell contains 13 entries. Four of them are directories that answer
+configuration and runtime questions: `resources/`, `server_logs/`, `epp_logs/`,
+`gpu_logs/`. Read those for what actually ran — do NOT infer it from bundle
+source (`transfer.yaml`, `baselines/`), which states intent and whose
+enable/disable conventions are easy to invert.
+
 ```
 workspace/runs/<name>/
   results/
-    baseline/
-      workload_<name>/                    # legacy shape; replica shape adds an i<N>/ segment
-        trace_data.csv    # per-request; columns: send_time_us, first_chunk_time_us,
-                          #                       last_chunk_time_us, output_tokens,
-                          #                       arrival_time_us, input_tokens, status, ...
-        trace_header.yaml # model, time_unit (microseconds), workload_spec, server config
-        metrics/raw/<pod>_<ts>_metrics.log   # Prometheus text-exposition dumps, one file
-                                             # per pod per scrape (optional — present when
-                                             # stream-metrics ran). Produced by
-                                             # collect_metrics.sh which stream-metrics wraps.
-        metrics/processed/metrics_summary.json    # post-run percentiles over the metrics
-                                                  # named in process_metrics.py:AGGREGATE_METRICS
-        metrics/processed/replica_status_timeseries.json  # replica state/scale over the run
-        .collect_complete # written by `deploy.py collect` only once every file in
-                          # the remote inventory landed at the matching size
-                          # (issue #885). PRESENT ⇒ the copy is known complete.
-                          # ABSENT is not by itself evidence of a problem — runs
-                          # collected before #885 never got a marker, and neither
-                          # does an iteration that was never collected. It only
-                          # means completeness is unproven: if a cell's logs look
-                          # truncated (e.g. a file ending mid-record), re-run
-                          # `deploy.py collect`, which will report any cell it
-                          # cannot complete and write the marker for the rest.
-    treatment/
-      workload_<name>/
-        trace_data.csv
-        trace_header.yaml
-        metrics/raw/...
-        metrics/processed/...
+    <arm>/                              # ONE DIR PER ARM, named after the arm:
+                                        #   baseline/ causalsloexternality/ leastttftjoint/ ...
+                                        # NOT baseline/ + treatment/. A run has as many arms
+                                        # as the assembly declared; `baseline` is the reference
+                                        # and every sibling is a comparison arm.
+      plans/                            # resolved llm-d-benchmark plan YAMLs, per phase.
+                                        # A SIBLING OF THE WORKLOADS, NOT A WORKLOAD — skip it
+                                        # when enumerating (it has no trace_data.csv).
+      <workload>/                       # e.g. deep-research-single-turn
+        i<N>/                           # replica shape (i1, i2, ...). Legacy-shape runs omit
+                                        # this segment and put the files directly under
+                                        # <workload>/. Resolve both: glob
+                                        #   <arm>/<workload>/*/trace_data.csv
+                                        # plus <arm>/<workload>/trace_data.csv
+          trace_data.csv                # per-request; see "trace_data.csv columns" below
+          trace_header.yaml             # model, time_unit (microseconds), workload_spec,
+                                        # warm_up_requests, server config
+          resources/                    # THE APPLIED K8S OBJECTS. Authoritative for what
+                                        # actually ran: pod specs (resource requests/limits,
+                                        # env, annotations, nodeName), Deployments,
+                                        # InferencePool, Services. Answer configuration
+                                        # questions HERE, not from transfer.yaml / baselines/
+                                        # — bundle source states intent and its enable/disable
+                                        # conventions are easy to misread.
+                                        # CAVEAT: redaction runs only on the --skip-logs
+                                        # collect path, so a default full collect may leave
+                                        # sensitive fields in place (issue #886).
+          server_logs/                  # vLLM stdout, one file per model-server pod. Actual
+                                        # engine config and startup banner; UCX/NIXL transport
+                                        # selection when UCX_LOG_LEVEL/UCX_PROTO_INFO are set.
+          epp_logs/                     # EPP (router) pod logs, time-bucketed, from
+                                        # stream-epp-logs. Per-request routing decisions —
+                                        # placement, profile, and policy cost terms.
+          gpu_logs/                      # from stream-gpu-stats:
+                                        #   <node>.log       sampled nvidia-smi (temp, power,
+                                        #                    power_cap, util, mem)
+                                        #   <node>.gpus.csv  index, uuid, gpu_bus_id
+                                        #   <pod>.uuids      pod -> GPU UUID
+                                        # Use for thermal/power confounds and node health.
+          metrics/                      # see "metrics/" below (present when stream-metrics ran)
+          saturation.json               # NOT LOAD-BEARING — see "saturation.json" below
+          epp_log_since                 # bookmark for incremental EPP log streaming
+          epp_stream_done               # sentinels written by collect-results when the
+          gpu_stream_done               # workload finishes; each streamer polls its own
+          metrics_stream_done           # sentinel and exits
+          .collect_complete # written by `deploy.py collect` only once every file in
+                            # the remote inventory landed at the matching size
+                            # (issue #885). PRESENT ⇒ the copy is known complete
+                            # FOR THE SCOPE IN ITS `excluded_subdirs` field: a
+                            # --skip-logs collect records ["server_logs"], a full
+                            # collect records []. ABSENT is not by itself evidence
+                            # of a problem — runs collected before #885 never got a
+                            # marker, and neither does an iteration that was never
+                            # collected. It only means completeness is unproven: if
+                            # a cell's logs look truncated (e.g. a file ending
+                            # mid-record), re-run `deploy.py collect`, which will
+                            # report any cell it cannot complete and write the
+                            # marker for the rest.
   deploy_comparison_table.txt  # written by analyses/latency_table.py
   results_charts/              # your analysis outputs go here
 ```
+
+### trace_data.csv columns
+
+Timestamps are microseconds, but **the columns do not share an epoch**:
+
+- `send_time_us`, `first_chunk_time_us`, `last_chunk_time_us` — Unix epoch µs.
+- `arrival_time_us` — **relative to run start**, i.e. the scheduled arrival from the
+  workload's arrival process. Differencing it against `send_time_us` directly yields a
+  nonsense ~1.788e15 µs "lag"; align each series to its own origin first. The comparison
+  is how you tell an open-loop generator (send tracks the schedule regardless of backlog)
+  from a closed-loop one.
+
+Other columns: `input_tokens`, `output_tokens`, `server_input_tokens` (post-prefix-cache,
+as the server counted it), `status`, `error_message`, `finish_reason`, `num_chunks`,
+`slo_class`, `tenant_id`, `session_id`, `prefix_group`, `prefix_length`, `streaming`,
+`model`, `request_id`, `x_request_id`.
+
+- Filter to `status == "ok"` before computing any metric.
+- `warm_up_requests` from `trace_header.yaml` are already excluded from the rows, so the
+  row count is `num_requests - warm_up_requests`.
+- **`deadline_us` is present but unset** — all zeros in practice. No SLO-deadline analysis
+  is possible from the trace; τ values live in the arm's EPP config, not here.
+
+### metrics/
+
+```
+metrics/raw/<pod>_<ts>_metrics.log     one Prometheus text-exposition dump per pod per
+                                       scrape (default 15 s). UNFILTERED — every metric the
+                                       target exposed. Produced by stream-metrics, which
+                                       wraps llm-d-benchmark's collect_metrics.sh.
+metrics/raw/collection_debug.log       collector-side errors
+metrics/processed/metrics_summary.json  post-run percentiles, but ONLY over the metrics named
+                                        in process_metrics.py:AGGREGATE_METRICS. Anything
+                                        outside that set must be read from raw/.
+metrics/processed/replica_status.json            infrastructure state, per iteration
+metrics/processed/replica_status_timeseries.json replica state/scale over the run
+metrics/processed/pod_startup_times.json         pod startup timings
+metrics/metrics_collection.log          stdout+stderr of start/stop/process
+```
+
+**Metric names worth knowing, and which role populates them.** The pod's role is in its
+name (`...-prefill-...`, `...-decode-...`, `...-router-epp-...`). Reading the wrong role
+returns `0.0` rather than an error, which looks like "no data" instead of "wrong pod":
+
+| metric | populated on | use |
+|---|---|---|
+| `vllm:kv_cache_usage_perc` | prefill + decode | KV pressure (0-1) |
+| `vllm:num_preemptions_total` | decode | KV exhaustion → evict/recompute; drives TPOT |
+| `vllm:num_requests_waiting` | prefill + decode | engine queue depth |
+| `vllm:num_requests_waiting_by_reason{reason="capacity"}` | prefill + decode | distinguishes *refusing work* from *cache merely full* — a full KV with zero capacity-waiters is prefix-cache retention, not back-pressure |
+| `vllm:num_requests_running` | prefill + decode | admitted concurrency |
+| `vllm:prompt_tokens_total` | prefill + decode | prefill throughput; the split across roles shows how much prefill ran locally on decode |
+| `vllm:generation_tokens_total` | decode (prefill non-zero but negligible — it emits the first token) | decode throughput ceiling |
+| `vllm:prefix_cache_{hits,queries}_total` | prefill + decode | cache hit rate |
+| `vllm:nixl_bytes_transferred_{sum,count}` | **decode only** | KV handoff volume (decode is the puller) |
+| `vllm:nixl_xfer_time_seconds_{sum,count}` | **decode only** | handoff wire time → effective bandwidth, and channel occupancy |
+| `vllm:nixl_post_time_seconds_sum`, `vllm:nixl_num_descriptors_sum` | **decode only** | post queueing, scatter/gather fragmentation |
+| `vllm:nixl_num_{failed_transfers,kv_expired_reqs}_total` | **decode only** | handoff failures |
+| `vllm:cache_config_info{num_gpu_blocks,block_size}` | prefill + decode | KV capacity in tokens = `num_gpu_blocks × block_size` |
+
+Counters are cumulative: difference two scrapes and divide by their timestamp delta. Check
+monotonicity first — a pod restart resets them.
+
+To enumerate what a run actually exposed:
+
+```bash
+grep -ohE "^vllm:[a-zA-Z0-9_:]+" <cell>/metrics/raw/*_metrics.log | sort -u
+```
+
+### saturation.json
+
+A BLIS `observe --saturation-report` verdict: `{level, score, confidence, signals}`, where
+`score = max(rate_deficit, latency_trend)` and level is STABLE (<0.5) / BACKLOGGED
+(0.5-0.75) / OVERLOADED (≥0.75).
+
+**Do not use it as a saturation verdict.** It is computed entirely from client-side arrival
+and completion records — it has no view of KV, queue depth, or preemption — and its
+`latency_trend` signal is computed over records sorted by *completion* time, which on
+high-output-variance workloads manufactures a rising trend by construction and classifies
+unsaturated cells as OVERLOADED (upstream bug: inference-sim/inference-sim#1693). Observed:
+eight `reasoning` cells reported OVERLOADED at score 0.789-1.000 while decode KV p95 sat at
+42-44% with zero preemptions and an engine queue never deeper than 1.
+
+Derive saturation from the trace and metrics instead — queue growth
+(`num_requests_waiting_by_reason{reason="capacity"}`, or sent-minus-first-token from the
+trace), preemption counts, and offered rate against sustained token throughput.
+
 
 ## Standard analyses catalog
 
@@ -261,19 +388,37 @@ the empirical step-function CDF the catalog entry produces.
 import pandas as pd
 import matplotlib.pyplot as plt
 
+import glob, os
+
 run = "<name>"
-workloads = ["workload_fm8_short_output_highrate"]  # fill in actual workloads
+base = f"workspace/runs/{run}/results"
+
+# Arms come from the directory listing — never a hardcoded ["baseline", "treatment"].
+arms = sorted(d for d in os.listdir(base) if os.path.isdir(f"{base}/{d}"))
+arms = ["baseline"] + [a for a in arms if a != "baseline"]
+
+def trace(arm, wl):
+    """Resolve through the optional i<N>/ replica segment; legacy shape omits it."""
+    hits = sorted(glob.glob(f"{base}/{arm}/{wl}/*/trace_data.csv")) \
+         + sorted(glob.glob(f"{base}/{arm}/{wl}/trace_data.csv"))
+    return hits[0] if hits else None
+
+# `plans/` is a sibling of the workloads, not a workload — it has no trace_data.csv.
+workloads = sorted(w for w in os.listdir(f"{base}/baseline") if trace("baseline", w))
 
 fig, axes = plt.subplots(len(workloads), 1, figsize=(10, 4 * len(workloads)))
 if len(workloads) == 1:
     axes = [axes]
 
 for ax, wl in zip(axes, workloads):
-    for phase in ["baseline", "treatment"]:
-        df = pd.read_csv(f"workspace/runs/{run}/results/{phase}/{wl}/trace_data.csv")
+    for arm in arms:
+        f = trace(arm, wl)
+        if f is None:
+            continue  # cell absent for this arm
+        df = pd.read_csv(f)
         df = df[df["status"] == "ok"]  # only compute metrics for successful requests
         ttft = (df["first_chunk_time_us"] - df["send_time_us"]) / 1000
-        ax.hist(ttft, bins=50, alpha=0.6, label=phase)
+        ax.hist(ttft, bins=50, alpha=0.6, label=arm)
     wl_display = wl.replace("workload_", "").replace("_", "-")
     ax.set_title(f"TTFT distribution — {wl_display}")
     ax.set_xlabel("TTFT (ms)")
