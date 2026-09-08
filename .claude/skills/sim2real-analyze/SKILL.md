@@ -66,16 +66,25 @@ python .claude/skills/sim2real-analyze/analyses/latency_table.py --run <name>
 
 Print the full output to the user.
 
-**This script only handles a two-phase run, and will exit 1 on a multi-arm one.** It resolves
-`results/baseline/` and `results/treatment/` literally (`latency_table.py:199-204`) and formats a
-strictly two-column table (`_format_row(metric, baseline, treatment)`, `latency_table.py:111`), so
-on the arm-named shape described under "Data reference" it fails with `need both results/baseline/
-and results/treatment/`. That is issue #890, not a collection problem — do NOT tell the user to
-re-run `collect`. Say the catalog does not yet support multi-arm runs, then go to Step 4 and build
-the comparison as a one-off script (Step 4 item 3), which the worked example at the end of this
-file already does for N arms. Every other `runner: script` entry shares the limitation.
+**This script handles only a two-phase, legacy-shaped run.** It assumes `results/baseline/` +
+`results/treatment/` and a `trace_data.csv` directly under each `<workload>/`, and formats a
+strictly two-column table (`_format_row(metric, baseline, treatment)` in `latency_table.py`). Both
+assumptions are violated by shapes documented as current under "Data reference", so it exits 1 in
+**two** distinct ways — issue #890 covers both:
 
-If the script exits 1 for any other reason, surface the error and stop.
+| exit-1 message | cause | what to do |
+|---|---|---|
+| `need both results/baseline/ and results/treatment/ — run 'pipeline/deploy.py collect' first` | an arm-named run: there is no `treatment/` dir. **Also fires when the named run does not exist at all**, so check that first. | multi-arm — go to Step 4 |
+| `no workloads found in both baseline and treatment logs` | a replica-shaped run: the trace sits at `<workload>/i<N>/trace_data.csv`, and the workload scan only looks for `<workload>/trace_data.csv`, so it finds none — this fires even when `baseline/` **and** `treatment/` are both present | replica shape — go to Step 4 |
+
+In both cases the message is misleading: the first tells the user to re-run `collect` and the second
+reads as missing data, but the data is there and complete. Do NOT tell the user to re-run `collect`.
+Say the catalog does not yet support this run shape (#890), then go to Step 4 and build the
+comparison as a one-off script (Step 4 item 3) — the worked example at the end of this file already
+handles N arms and the optional `i<N>/` segment. Every other `runner: script` entry shares both
+limitations, since they come from `_common.py`'s `phase_log_dirs` and `discover_workloads`.
+
+If the script exits 1 with any other message, surface it and stop.
 
 After printing the table (two-phase runs), proactively note any interesting patterns:
 - If any p99 is worse while mean/p50 is better → suggest "Would you like to see the latency distribution to understand the tail?"
