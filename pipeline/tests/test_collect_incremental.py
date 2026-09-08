@@ -134,14 +134,23 @@ def test_local_inventory_treats_an_unstatable_file_as_missing(tmp_path, monkeypa
     it as missing and re-fetches it — the safe direction."""
     (tmp_path / "a.log").write_bytes(b"xx")
     real_stat = Path.stat
-    seen = {"a.log": 0}
 
+    # Fail every stat of a.log rather than only the second one. Which of
+    # _local_file_inventory's two stats raises is an implementation detail of
+    # pathlib, not part of the contract: on 3.11-3.13 `is_file()` reaches the
+    # public `Path.stat` and raises there, while on 3.14 it stats internally and
+    # the explicit `path.stat().st_size` raises instead. Both sit inside the same
+    # `except OSError`, so the file is omitted either way — which is what this
+    # test is actually about.
+    #
+    # The boundary is measured, not assumed: counting hits on a patched
+    # `Path.stat` through rglob -> is_file() -> stat() gives 2 on 3.11.4, 3.12.13
+    # and 3.13.7, and the CI interpreter (CPython 3.14.7, pinned by
+    # .github/workflows/test.yml) is the only one that fails. Keying on call order
+    # pinned this test to the <=3.13 internals (issue #892).
     def boom(self, *a, **k):
-        # is_file() stats first; fail only the size lookup that follows it.
         if self.name == "a.log":
-            seen["a.log"] += 1
-            if seen["a.log"] > 1:
-                raise OSError("permission denied")
+            raise OSError("permission denied")
         return real_stat(self, *a, **k)
 
     monkeypatch.setattr(Path, "stat", boom)
