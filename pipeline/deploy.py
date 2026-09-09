@@ -1630,7 +1630,6 @@ def _copy_workload_iterations_full(
     wl_dest: Path, wl_remote_mtimes: dict[str, float],
     partials: "list | None" = None,
     exclude_subdirs: "frozenset[str]" = frozenset(),
-    redact_resources: bool = False,
 ) -> list[str]:
     """Enumerate ``i<N>/`` on the current slot's PVC and copy each iteration
     incrementally to *wl_dest*, respecting per-iteration up-to-date skips.
@@ -1648,12 +1647,18 @@ def _copy_workload_iterations_full(
     summary. *exclude_subdirs* is forwarded to the copy helper; ``--skip-logs``
     passes ``{"server_logs"}``.
 
-    *redact_resources* runs ``redact_yaml_tree`` over each copied iteration's
-    ``resources/``. Only the ``--skip-logs`` caller sets it, which is where the
-    call has always lived — the default full-copy path pulls ``resources/``
-    unredacted. That asymmetry predates #885 and is tracked separately; this
-    flag makes it an explicit argument rather than a difference buried in two
-    divergent copy loops.
+    Every copied iteration's ``resources/`` is run through
+    ``redact_yaml_tree`` — unconditionally, on every path through this helper.
+    It used to be gated on a ``redact_resources`` flag that only the
+    ``--skip-logs`` caller set, so the default full-copy path — the one
+    operators actually use — pulled ``resources/`` unredacted (#886). The flag
+    is gone rather than set at each call site: all three callers want the same
+    behavior, so a parameter with one correct value is surface a fourth caller
+    could get wrong, which is exactly how the gap arose.
+
+    Redaction covers only the iterations *this call copied*. An iteration
+    skipped as already up-to-date belongs to another slot or an earlier
+    collect, is already redacted, and rewriting it is not this call's business.
 
     Returns a list of error strings; empty on success.
     """
@@ -1680,16 +1685,15 @@ def _copy_workload_iterations_full(
             f"/data/{run_name}/{phase}/{wl_name}/{iN}", iN_dest,
             exclude_subdirs=exclude_subdirs, remote_mtime=remote_mtime,
             label=f"{phase}/{wl_name}/{iN}")
-        if redact_resources:
-            # Best-effort, and contained: redact_yaml_tree guards its own reads
-            # and writes but not its directory walk, and a failure here must not
-            # cost the rest of the slot.
-            try:
-                if (iN_dest / "resources").is_dir():
-                    redact_yaml_tree(iN_dest / "resources")
-            except OSError as exc:
-                wl_errors.append(
-                    f"{wl_name}/{iN}: could not redact resources/: {exc}")
+        # Best-effort, and contained: redact_yaml_tree guards its own reads
+        # and writes but not its directory walk, and a failure here must not
+        # cost the rest of the slot.
+        try:
+            if (iN_dest / "resources").is_dir():
+                redact_yaml_tree(iN_dest / "resources")
+        except OSError as exc:
+            wl_errors.append(
+                f"{wl_name}/{iN}: could not redact resources/: {exc}")
         if res.complete:
             if res.errors:
                 # Recovered, but do not swallow it. `complete` is decided from
@@ -1864,8 +1868,7 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
                     wl_errors = _copy_workload_iterations_full(
                         pod_name, run_name, phase, wl_name, namespace,
                         wl_dest, wl_remote_mtimes, partials=partials,
-                        exclude_subdirs=frozenset({"server_logs"}),
-                        redact_resources=True)
+                        exclude_subdirs=frozenset({"server_logs"}))
                     if wl_errors:
                         phase_errors.extend(wl_errors)
                     if on_workload_done:

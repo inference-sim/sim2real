@@ -433,3 +433,262 @@ def test_yaml_with_tab_characters_is_unparseable(tmp_path: Path):
     assert result == 0
     # File should be untouched
     assert "%invalid_directive" in p.read_text()
+
+
+# ── annotation prune (issue #894) ────────────────────────────────────────────
+# `kubectl.kubernetes.io/last-applied-configuration` is a verbatim JSON copy of
+# the applied manifest. It duplicates the spec in the same document, dominates
+# the high-entropy findings in collected manifests, and — the reason it is
+# pruned rather than tolerated — is a redaction blind spot: the copy is a JSON
+# *string*, so a credential inside it is not a YAML field `_stub_sensitive_keys`
+# can reach.
+
+LAC = "kubectl.kubernetes.io/last-applied-configuration"
+
+
+def test_prunes_last_applied_configuration_leaving_other_annotations(tmp_path: Path):
+    """The multi-annotation case: the pruned key goes, its siblings stay."""
+    src = (
+        "apiVersion: v1\n"
+        "kind: Pod\n"
+        "metadata:\n"
+        "  name: vllm-decode-0\n"
+        "  annotations:\n"
+        f'    {LAC}: \'{{"apiVersion":"v1","kind":"Pod"}}\'\n'
+        "    prometheus.io/scrape: 'true'\n"
+        "spec:\n"
+        "  containers: []\n"
+    )
+    p = tmp_path / "pod.yaml"
+    p.write_text(src)
+
+    assert redact_yaml_file(p) == 1
+
+    out = p.read_text()
+    assert LAC not in out
+    doc = yaml.safe_load(out)
+    assert doc["metadata"]["annotations"] == {"prometheus.io/scrape": "true"}
+    assert doc["metadata"]["name"] == "vllm-decode-0"
+    assert doc["spec"] == {"containers": []}
+
+
+def test_sole_annotation_removes_the_annotations_mapping(tmp_path: Path):
+    """The sole-annotation case: `annotations` must not be left as `{}`.
+
+    On the run that motivated #894 this was 12 of 156 affected files — the
+    llm-d-benchmark harness Service in each cell."""
+    src = (
+        "apiVersion: v1\n"
+        "kind: Service\n"
+        "metadata:\n"
+        "  name: service-llm-d-benchmark-harness\n"
+        "  annotations:\n"
+        f'    {LAC}: \'{{"apiVersion":"v1","kind":"Service"}}\'\n'
+        "spec:\n"
+        "  ports: []\n"
+    )
+    p = tmp_path / "svc.yaml"
+    p.write_text(src)
+
+    assert redact_yaml_file(p) == 1
+
+    out = p.read_text()
+    assert LAC not in out
+    assert "annotations" not in out
+    doc = yaml.safe_load(out)
+    assert "annotations" not in doc["metadata"]
+    assert doc["metadata"]["name"] == "service-llm-d-benchmark-harness"
+
+
+def test_prune_is_counted_in_the_summary_header(tmp_path: Path):
+    """The prune deletes data rather than masking it, so it is reported."""
+    src = (
+        "apiVersion: v1\n"
+        "kind: Pod\n"
+        "metadata:\n"
+        "  name: p\n"
+        "  annotations:\n"
+        f"    {LAC}: '{{}}'\n"
+        "spec: {}\n"
+    )
+    p = tmp_path / "pod.yaml"
+    p.write_text(src)
+    redact_yaml_file(p)
+    assert p.read_text().startswith(
+        "# REDACTED by sim2real collect: 1 annotation pruned\n")
+
+
+def test_header_reports_stubs_and_prunes_together(tmp_path: Path):
+    """A file that needs both shows both, and the stub count does not absorb
+    the prune."""
+    src = (
+        "apiVersion: v1\n"
+        "kind: Secret\n"
+        "metadata:\n"
+        "  name: hf\n"
+        "  annotations:\n"
+        f"    {LAC}: '{{}}'\n"
+        "    keep: me\n"
+        "data:\n"
+        "  token: abc\n"
+    )
+    p = tmp_path / "secret.yaml"
+    p.write_text(src)
+    redact_yaml_file(p)
+    out = p.read_text()
+    assert out.startswith(
+        "# REDACTED by sim2real collect: 1 Secret stubbed, 1 annotation pruned\n")
+    assert yaml.safe_load(out)["data"]["token"] == REDACTED
+
+
+def test_prune_only_document_is_not_reported_as_stubbed(tmp_path: Path):
+    """A document changed only by the prune must not be counted as stubbed —
+    nothing in it was masked, and the header would be claiming otherwise."""
+    src = (
+        "apiVersion: v1\n"
+        "kind: Pod\n"
+        "metadata:\n"
+        "  name: p\n"
+        "  annotations:\n"
+        f"    {LAC}: '{{}}'\n"
+        "spec: {}\n"
+    )
+    p = tmp_path / "pod.yaml"
+    p.write_text(src)
+    redact_yaml_file(p)
+    assert "stubbed" not in p.read_text().splitlines()[0]
+
+
+def test_prune_plural_agreement(tmp_path: Path):
+    """Two pruned keys in one file read as 'annotations', not 'annotation'."""
+    src = (
+        "apiVersion: v1\n"
+        "kind: Pod\n"
+        "metadata:\n"
+        "  name: a\n"
+        "  annotations:\n"
+        f"    {LAC}: '{{}}'\n"
+        "---\n"
+        "apiVersion: v1\n"
+        "kind: Pod\n"
+        "metadata:\n"
+        "  name: b\n"
+        "  annotations:\n"
+        f"    {LAC}: '{{}}'\n"
+    )
+    p = tmp_path / "pods.yaml"
+    p.write_text(src)
+    assert redact_yaml_file(p) == 2
+    assert p.read_text().startswith(
+        "# REDACTED by sim2real collect: 2 annotations pruned\n")
+
+
+def test_prunes_nested_metadata_annotations(tmp_path: Path):
+    """A Deployment can carry the annotation on its pod template too, so the
+    walk is recursive rather than only checking top-level metadata."""
+    src = (
+        "apiVersion: apps/v1\n"
+        "kind: Deployment\n"
+        "metadata:\n"
+        "  name: d\n"
+        "  annotations:\n"
+        f"    {LAC}: '{{}}'\n"
+        "spec:\n"
+        "  template:\n"
+        "    metadata:\n"
+        "      annotations:\n"
+        f"        {LAC}: '{{}}'\n"
+        "        sidecar.istio.io/inject: 'false'\n"
+    )
+    p = tmp_path / "deploy.yaml"
+    p.write_text(src)
+    redact_yaml_file(p)
+    out = p.read_text()
+    assert LAC not in out
+    doc = yaml.safe_load(out)
+    assert "annotations" not in doc["metadata"]
+    assert doc["spec"]["template"]["metadata"]["annotations"] == {
+        "sidecar.istio.io/inject": "false"}
+    assert out.startswith(
+        "# REDACTED by sim2real collect: 2 annotations pruned\n")
+
+
+def test_file_without_the_annotation_is_not_rewritten(tmp_path: Path):
+    """No prune and no stub means no rewrite — an untouched file keeps its
+    bytes, including the absence of a header."""
+    src = (
+        "apiVersion: v1\n"
+        "kind: Pod\n"
+        "metadata:\n"
+        "  name: p\n"
+        "  annotations:\n"
+        "    prometheus.io/scrape: 'true'\n"
+    )
+    p = tmp_path / "pod.yaml"
+    p.write_text(src)
+    assert redact_yaml_file(p) == 0
+    assert p.read_text() == src
+
+
+def test_already_empty_annotations_mapping_is_left_alone(tmp_path: Path):
+    """The prune reports what it removed. An `annotations: {}` it did not empty
+    is not its doing, so removing it would make the count a lie — and would
+    rewrite a file that needed nothing."""
+    src = (
+        "apiVersion: v1\n"
+        "kind: Pod\n"
+        "metadata:\n"
+        "  name: p\n"
+        "  annotations: {}\n"
+    )
+    p = tmp_path / "pod.yaml"
+    p.write_text(src)
+    assert redact_yaml_file(p) == 0
+    assert p.read_text() == src
+
+
+def test_credential_inside_the_pruned_annotation_does_not_survive(tmp_path: Path):
+    """The blind spot that motivated the prune.
+
+    `_stub_sensitive_keys` descends dicts and lists; the annotation's value is
+    a JSON *string*, so a token inside it is unreachable. Before the prune the
+    live field was stubbed while its copy in the annotation stayed on disk."""
+    src = (
+        "apiVersion: v1\n"
+        "kind: Pod\n"
+        "metadata:\n"
+        "  name: p\n"
+        "  annotations:\n"
+        f'    {LAC}: \'{{"spec":{{"token":"hf_LIVESECRET123"}}}}\'\n'
+        "spec:\n"
+        "  token: hf_LIVESECRET123\n"
+    )
+    p = tmp_path / "pod.yaml"
+    p.write_text(src)
+    redact_yaml_file(p)
+    out = p.read_text()
+    assert "hf_LIVESECRET123" not in out
+    assert yaml.safe_load(out)["spec"]["token"] == REDACTED
+
+
+def test_prune_reaches_files_via_the_tree_walker(tmp_path: Path):
+    """redact_yaml_tree is what deploy.py calls on each iteration's resources/;
+    the prune must ride along rather than only working on direct calls."""
+    from pipeline.lib.redact import redact_yaml_tree
+
+    root = tmp_path / "resources"
+    (root / "nested").mkdir(parents=True)
+    body = (
+        "apiVersion: v1\n"
+        "kind: Pod\n"
+        "metadata:\n"
+        "  name: p\n"
+        "  annotations:\n"
+        f"    {LAC}: '{{}}'\n"
+    )
+    (root / "pod-a.yaml").write_text(body)
+    (root / "nested" / "pod-b.yml").write_text(body)
+
+    assert redact_yaml_tree(root) == 2
+    assert LAC not in (root / "pod-a.yaml").read_text()
+    assert LAC not in (root / "nested" / "pod-b.yml").read_text()

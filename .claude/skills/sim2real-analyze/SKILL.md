@@ -236,9 +236,12 @@ workspace/runs/<name>/
                                         # questions HERE, not from transfer.yaml / baselines/
                                         # — bundle source states intent and its enable/disable
                                         # conventions are easy to misread.
-                                        # CAVEAT: redaction runs only on the --skip-logs
-                                        # collect path, so a default full collect may leave
-                                        # sensitive fields in place (issue #886).
+                                        # Redacted on every collect path (#886): sensitive
+                                        # fields are stubbed REDACTED, and the
+                                        # last-applied-configuration annotation is pruned as
+                                        # a duplicate of the spec beside it (#894). A file
+                                        # rewritten either way carries a "# REDACTED by
+                                        # sim2real collect:" header line naming what changed.
           server_logs/                  # vLLM stdout, one file per model-server pod. Actual
                                         # engine config and startup banner; UCX/NIXL transport
                                         # selection when UCX_LOG_LEVEL/UCX_PROTO_INFO are set.
