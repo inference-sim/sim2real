@@ -19,6 +19,22 @@ And for issue #865 (the bundle's own content hashes must not block commits):
     exclusion must not become a blanket bypass
   - --exclude-lines is load-bearing (the hook ignores the baseline's own
     exclude.lines) and the two copies of the regex agree
+
+And for issue #896 (Kubernetes object names are high-entropy by construction):
+  - the four collected-telemetry trees under workspace/runs/ are excluded, and
+    the exclusion is load-bearing — enforced BOTH by pre-commit's file filter
+    and by the baseline's mirrored `exclude.files`, which the hook does honor
+  - resources/ manifests and every authored bundle file stay in scope
+  - .secrets.wordlist ships the three model-agnostic role segments, stays
+    comment-free, and suppresses pod names per-secret so a credential beside a
+    suppressed name still blocks
+  - the residual gap is pinned: excluded trees have no scan layer at all
+
+Note on guarding: the behavioral tests skip unless the hook is USABLE, meaning
+present AND able to run the shipped `--word-list` (see `_HOOK_READY`). Guarding
+on the binary alone stopped being sufficient once `--word-list` joined the
+shipped args, since a hook without pyahocorasick then fails every behavioral
+test with an exit code that reads as "the config allowed a secret".
 """
 from __future__ import annotations
 
@@ -27,6 +43,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 from collections.abc import Callable
 from pathlib import Path
@@ -217,10 +234,46 @@ def test_byo_run_scaffolds_precommit(tmp_path: Path):
 # scaffolded .secrets.baseline inside a throwaway git repo, so it exercises
 # the tuned base64_limit through the true hook path — not a plain `scan`,
 # which at the default 4.5 limit would miss the plaintext HF token.
-# Guarded on detect-secrets-hook being installed so CI without it still passes.
+# Guarded on the hook being USABLE so a machine without it still passes — see
+# `_HOOK_READY` below, which covers both the binary and the pyahocorasick that
+# the shipped `--word-list` needs.
 # ---------------------------------------------------------------------------
 
 _HOOK = shutil.which("detect-secrets-hook")
+
+
+def _hook_supports_word_list() -> bool:
+    """Can the resolved hook actually run the shipped `--word-list` arg?
+
+    detect-secrets imports pyahocorasick lazily inside `build_automaton`, so a
+    hook without it dies with ModuleNotFoundError. Since `--word-list` is in the
+    args EVERY behavioral test now passes (they read the shipped config), a
+    missing pyahocorasick would fail all of them — including ones that predate
+    it — with a nonzero exit that reads as "the config allowed a secret" (#896).
+
+    Probed by invoking the hook rather than by importing ahocorasick here:
+    `_HOOK` is a separate process and need not share this interpreter's
+    environment, so `find_spec` in the test process can answer for the wrong
+    Python. No git repo is needed — the automaton is built before any scanning.
+    """
+    if _HOOK is None:
+        return False
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "wl").write_text("-decode-\n")
+        (d / "f.yaml").write_text("a: b\n")
+        proc = subprocess.run(
+            [_HOOK, "--word-list", str(d / "wl"), str(d / "f.yaml")],
+            cwd=td, capture_output=True, text=True, timeout=60)
+    return "ahocorasick" not in (proc.stderr + proc.stdout)
+
+
+_HOOK_READY = _hook_supports_word_list()
+_HOOK_SKIP_REASON = (
+    "detect-secrets-hook not installed" if _HOOK is None else
+    "detect-secrets-hook found but pyahocorasick is missing from its "
+    "environment, which the shipped --word-list requires"
+)
 
 # Synthetic, deterministically-generated high-entropy values — NOT real
 # credentials and with no provider-recognized prefix (so they don't trip
@@ -323,21 +376,21 @@ def _flagged_lines(proc: subprocess.CompletedProcess, relpath: str) -> set[int]:
     }
 
 
-@pytest.mark.skipif(_HOOK is None, reason="detect-secrets-hook not installed")
+@pytest.mark.skipif(not _HOOK_READY, reason=_HOOK_SKIP_REASON)
 def test_hook_blocks_high_entropy_token_value(tmp_path: Path):
     """A token value below the 4.5 default but above 4.25 is blocked by the
     shipped baseline — the #819 miss (plaintext token) closed."""
     assert _hook_blocks(tmp_path, f"huggingface:\n  token: {PLAINTEXT_SECRET}\n")
 
 
-@pytest.mark.skipif(_HOOK is None, reason="detect-secrets-hook not installed")
+@pytest.mark.skipif(not _HOOK_READY, reason=_HOOK_SKIP_REASON)
 def test_hook_blocks_tokenbase64_field(tmp_path: Path):
     """The base64-encoded twin is blocked too."""
     assert _hook_blocks(
         tmp_path, f"huggingface:\n  tokenBase64: {BASE64_SECRET}\n")
 
 
-@pytest.mark.skipif(_HOOK is None, reason="detect-secrets-hook not installed")
+@pytest.mark.skipif(not _HOOK_READY, reason=_HOOK_SKIP_REASON)
 def test_tuned_limit_is_load_bearing(tmp_path: Path):
     """The same value the shipped 4.25 catches would slip at the 4.5 default —
     guards against a future baseline regeneration resetting the limit."""
@@ -346,7 +399,7 @@ def test_tuned_limit_is_load_bearing(tmp_path: Path):
     assert not _hook_blocks(tmp_path, content, base64_limit=4.5)
 
 
-@pytest.mark.skipif(_HOOK is None, reason="detect-secrets-hook not installed")
+@pytest.mark.skipif(not _HOOK_READY, reason=_HOOK_SKIP_REASON)
 def test_hook_allows_token_tuning_fields(tmp_path: Path):
     """Legitimate benchmark tuning fields — numeric values, must NOT block."""
     assert not _hook_blocks(
@@ -430,7 +483,7 @@ def _canary(include_secrets: bool) -> tuple[str, set[int], set[int]]:
     return "\n".join(lines) + "\n", hash_lines, secret_lines
 
 
-@pytest.mark.skipif(_HOOK is None, reason="detect-secrets-hook not installed")
+@pytest.mark.skipif(not _HOOK_READY, reason=_HOOK_SKIP_REASON)
 def test_hook_allows_bundle_content_hashes(tmp_path: Path):
     """The scaffolded hook passes on a bundle's own content hashes — the #865
     symptom (every first real commit blocked) closed."""
@@ -442,7 +495,7 @@ def test_hook_allows_bundle_content_hashes(tmp_path: Path):
     assert proc.returncode == 0, _hook_report(proc)
 
 
-@pytest.mark.skipif(_HOOK is None, reason="detect-secrets-hook not installed")
+@pytest.mark.skipif(not _HOOK_READY, reason=_HOOK_SKIP_REASON)
 def test_hook_blocks_real_secrets_beside_content_hashes(tmp_path: Path):
     """The exclusion is not a blanket bypass: in a file whose hash lines are
     skipped, every real secret shape is still caught — and only those."""
@@ -457,7 +510,7 @@ def test_hook_blocks_real_secrets_beside_content_hashes(tmp_path: Path):
     )
 
 
-@pytest.mark.skipif(_HOOK is None, reason="detect-secrets-hook not installed")
+@pytest.mark.skipif(not _HOOK_READY, reason=_HOOK_SKIP_REASON)
 def test_exclude_lines_is_load_bearing(tmp_path: Path):
     """Dropping --exclude-lines restores every false positive.
 
@@ -567,7 +620,7 @@ def _precommit_filter(exp_root: Path, paths: list[str]) -> list[str]:
     "workspace/runs/try8/results/baseline/wl-a/i1/epp_logs/epp.log",
     "workspace/runs/try8/results/baseline/wl-a/i1/metrics/raw/p_1_metrics.log",
 ])
-@pytest.mark.skipif(_HOOK is None, reason="detect-secrets-hook not installed")
+@pytest.mark.skipif(not _HOOK_READY, reason=_HOOK_SKIP_REASON)
 def test_telemetry_exclusion_is_load_bearing(tmp_path: Path, relpath):
     """A high-entropy telemetry value produces no finding under the shipped
     config, and a finding once the exclusion is removed.
@@ -607,7 +660,7 @@ def test_precommit_filter_drops_the_pod_name_telemetry_shapes(
     assert _precommit_filter(tmp_path, [relpath]) == []
 
 
-@pytest.mark.skipif(_HOOK is None, reason="detect-secrets-hook not installed")
+@pytest.mark.skipif(not _HOOK_READY, reason=_HOOK_SKIP_REASON)
 def test_telemetry_exclusion_leaves_no_scan_layer(tmp_path: Path):
     """Pins the residual gap the exclusion accepts, so it cannot be forgotten.
 
@@ -674,7 +727,7 @@ def test_exclude_files_agrees_between_config_and_baseline(tmp_path: Path):
     assert baseline["exclude"]["files"] == ds["hooks"][0]["exclude"]
 
 
-@pytest.mark.skipif(_HOOK is None, reason="detect-secrets-hook not installed")
+@pytest.mark.skipif(not _HOOK_READY, reason=_HOOK_SKIP_REASON)
 def test_word_list_suppresses_pod_names_in_resource_manifests(tmp_path: Path):
     """A role-named pod in `metadata.name` produces no finding with the word
     list and a finding without it (#896).
@@ -698,7 +751,7 @@ def test_word_list_suppresses_pod_names_in_resource_manifests(tmp_path: Path):
                      drop_args=("--word-list",)).returncode != 0
 
 
-@pytest.mark.skipif(_HOOK is None, reason="detect-secrets-hook not installed")
+@pytest.mark.skipif(not _HOOK_READY, reason=_HOOK_SKIP_REASON)
 def test_word_list_suppression_is_per_secret_not_per_file(tmp_path: Path):
     """is_found_with_aho_corasick drops a candidate that CONTAINS a listed
     word, so the rest of the manifest keeps being scanned. A real credential

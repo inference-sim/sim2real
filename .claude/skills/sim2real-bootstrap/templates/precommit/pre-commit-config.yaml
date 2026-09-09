@@ -177,11 +177,21 @@ repos:
         # sampled corpus", NOT "verified clean". Closing the gap properly means
         # extending the collect-time redactor to logs — a separate change.
         #
-        # NOTE ON LAYERS: this `exclude:` is a pre-commit key, applied by
-        # pre-commit to the file list BEFORE the hook runs. It is not a hook
-        # argument, and neither the hook nor the baseline's own `exclude.files`
-        # suppresses these findings when detect-secrets-hook is invoked
-        # directly on an explicit path. The baseline carries the same regex so
-        # a later `detect-secrets scan --baseline .secrets.baseline`
-        # regeneration agrees with the hook; a test asserts the two match.
+        # NOTE ON LAYERS: TWO things enforce this exclusion, and both are
+        # needed.
+        #
+        #   1. This `exclude:` is a pre-commit key, applied by pre-commit to
+        #      the file list BEFORE the hook runs. It is not a hook argument,
+        #      so it does nothing when detect-secrets-hook is invoked directly.
+        #   2. The baseline's `exclude.files` carries the SAME regex, and the
+        #      hook DOES honor it — including on an explicit path. Verified:
+        #      with everything else held constant, reverting that field to
+        #      `^\.secrets\.baseline$` turns a suppressed telemetry finding
+        #      back into a reported one.
+        #
+        # So the mirror is load-bearing for any direct or CI invocation, not
+        # merely so a later `detect-secrets scan --baseline .secrets.baseline`
+        # regeneration agrees with the hook. Do NOT drop it as a duplicate of
+        # the key above — they cover different invocation paths. A test asserts
+        # the two regexes match.
         exclude: '^(\.secrets\.baseline$|workspace/runs/.*/(epp_logs|gpu_logs|metrics|server_logs)/)'
