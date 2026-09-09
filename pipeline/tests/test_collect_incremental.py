@@ -1240,7 +1240,7 @@ def test_full_copy_reports_a_redaction_failure_without_aborting(tmp_path, monkey
     wl_dest = tmp_path / "baseline" / "wl-a"
     errors = deploy._copy_workload_iterations_full(
         "pod", "run-1", "baseline", "wl-a", "ns-0", wl_dest, {"i1": 100.0},
-        exclude_subdirs=frozenset({"server_logs"}), redact_resources=True)
+        exclude_subdirs=frozenset({"server_logs"}))
     assert len(errors) == 1
     assert "could not redact" in errors[0]
     # The copy itself succeeded, so the marker still stands.
@@ -1290,9 +1290,9 @@ def test_full_copy_forwards_exclude_subdirs(tmp_path, monkeypatch):
 
 
 def test_redact_resources_runs_only_on_iterations_this_call_copied(tmp_path, monkeypatch):
-    """--skip-logs redacts resources/ for the iterations it copies. It must not
-    reach into an iteration it skipped — that one is another slot's or an
-    earlier collect's, already redacted, and rewriting it is not this call's
+    """Redaction covers the iterations this call copies. It must not reach into
+    an iteration it skipped — that one is another slot's or an earlier
+    collect's, already redacted, and rewriting it is not this call's
     business."""
     tree = {"trace_data.csv": 4, "resources/pods.yaml": 6}
     wl_dest = tmp_path / "baseline" / "wl-a"
@@ -1307,14 +1307,20 @@ def test_redact_resources_runs_only_on_iterations_this_call_copied(tmp_path, mon
     deploy._copy_workload_iterations_full(
         "pod", "run-1", "baseline", "wl-a", "ns-0", wl_dest,
         {"i1": 100.0, "i9": 100.0},
-        exclude_subdirs=frozenset({"server_logs"}), redact_resources=True)
+        exclude_subdirs=frozenset({"server_logs"}))
 
     assert [p.parent.name for p in redacted] == ["i1"], redacted
 
 
-def test_full_copy_does_not_redact_when_the_flag_is_off(tmp_path, monkeypatch):
-    """The default full-copy path leaves resources/ unredacted — the pre-#885
-    behavior, preserved deliberately and tracked as its own defect."""
+def test_full_copy_redacts_resources_on_the_default_path(tmp_path, monkeypatch):
+    """The default full-copy path — the one operators actually use — redacts
+    resources/ (#886).
+
+    This test is the inverse of the one it replaces, which asserted the
+    unredacted behavior as deliberate. Redaction used to be gated on a
+    `redact_resources` flag that only the --skip-logs caller set, so the
+    redactor meant to stub credentials before they reach results/ did not run
+    on the common path."""
     tree = {"resources/pods.yaml": 6}
     redacted: list = []
     monkeypatch.setattr(deploy, "redact_yaml_tree", redacted.append)
@@ -1322,7 +1328,38 @@ def test_full_copy_does_not_redact_when_the_flag_is_off(tmp_path, monkeypatch):
     deploy._copy_workload_iterations_full(
         "pod", "run-1", "baseline", "wl-a", "ns-0",
         tmp_path / "baseline" / "wl-a", {"i1": 100.0})
-    assert redacted == []
+    assert [p.parent.name for p in redacted] == ["i1"], redacted
+
+
+def test_skip_logs_path_also_redacts_resources(tmp_path, monkeypatch):
+    """The other path through the same helper. Paired with the default-path
+    test above so #886's acceptance — redacted on *every* collect path — is
+    pinned from both directions rather than inferred from one."""
+    tree = {"resources/pods.yaml": 6, "server_logs/vllm.log": 99}
+    redacted: list = []
+    monkeypatch.setattr(deploy, "redact_yaml_tree", redacted.append)
+    monkeypatch.setattr(deploy, "run", _LsPVC(tree))
+    deploy._copy_workload_iterations_full(
+        "pod", "run-1", "baseline", "wl-a", "ns-0",
+        tmp_path / "baseline" / "wl-a", {"i1": 100.0},
+        exclude_subdirs=frozenset({"server_logs"}))
+    assert [p.parent.name for p in redacted] == ["i1"], redacted
+
+
+def test_resource_redaction_has_no_opt_out():
+    """Redaction must not be re-gateable behind a parameter.
+
+    #886 arose because the call was reachable only through a flag one of three
+    call sites set. Asserting the absence of any such parameter is what makes
+    this unskippable on *every* path, rather than testing the paths that happen
+    to exist today and leaving a fourth caller free to reintroduce the gap."""
+    import inspect
+
+    params = inspect.signature(deploy._copy_workload_iterations_full).parameters
+    gates = [p for p in params if "redact" in p.lower()]
+    assert gates == [], (
+        f"redaction is gated on {gates}; it must be unconditional so no call "
+        f"site can skip it (#886)")
 
 
 def test_partials_reach_the_end_of_collect_summary_end_to_end(tmp_path, monkeypatch, capsys):

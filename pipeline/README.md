@@ -985,7 +985,7 @@ The same success gate applies — `trace_data.csv` under `workspace/runs/<run-na
 | `health.py` | Pod health detection and remediation for the deploy orchestrator |
 | `log.py` | Shared logging functions for pipeline scripts |
 | `progress.py` | Progress persistence for the parallel pool orchestrator (ConfigMap store) |
-| `redact.py` | YAML redaction for collected plan files — stubs sensitive fields before writing to `results/` |
+| `redact.py` | YAML redaction for collected plan and resource files — stubs sensitive fields, and prunes annotations that are a verbatim copy of the manifest they annotate (`kubectl.kubernetes.io/last-applied-configuration`, #894), before writing to `results/`. Runs on every collect path (#886) |
 | `resolve.py` | Powers `sim2real resolve --run` — hydrated run-view helper for the workspace |
 | `scope.py` | CLI filter-value primitives (`parse_name_list`, `is_glob`, `expand_glob_values`) shared by `deploy.py` and `sim2real assemble` so their `--workload` / `--package` grammar cannot drift |
 | `shadow.py` | Shadow GPU reservation ledger for `deploy.py` orchestrator |
