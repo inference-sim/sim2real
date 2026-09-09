@@ -83,12 +83,115 @@ repos:
         # regeneration agrees with the hook instead of silently re-finding
         # what the hook skips. Keep the two in sync — a test asserts they are
         # byte-identical.
+        # --word-list suppresses Kubernetes object names (issue #896).
+        #
+        # Pod and ReplicaSet names are high-entropy BY CONSTRUCTION. The
+        # Base64HighEntropyString charset includes `-` and `_` (url-safe
+        # base64), so a name like
+        #   meta-lla-888e33f1-instruct-decode-558d9f5fd4-x97w2-rank-0
+        # is one candidate token at Shannon entropy 4.447 — ABOVE the 4.391 HF
+        # token the 4.25 limit exists to catch. No threshold separates them, so
+        # tuning the limit cannot work, in either direction.
+        #
+        # In `resources/` manifests these appear as bare `name:` scalars.
+        # detect-secrets tries _analyze_yaml_file BEFORE the plain line scan
+        # and that path inspects parsed string VALUES, so source quoting is
+        # irrelevant — unquoted names are candidates in YAML even though the
+        # same text in a .log file would not be.
+        #
+        # Why the other three mechanisms were each rejected:
+        #   - the entropy limit: see above, no threshold works.
+        #   - the baseline: names carry a ReplicaSet hash and a random 5-char
+        #     suffix that change on every deployment, so each run strands the
+        #     previous entries — the #865 failure mode exactly.
+        #   - --exclude-lines: the only keyable field is `name:`, and exempting
+        #     every `name:` line in every YAML repo-wide is far too broad a
+        #     trade for this.
+        #
+        # The word list keys on the ROLE segments llm-d-modelservice appends,
+        # NOT on the deployment-name prefix: that prefix is model.shortName
+        # truncated plus a hash, derived per bundle, so the scaffold cannot
+        # know it. The role segments are model-agnostic and identical for
+        # every bundle, so they ship as a constant.
+        #
+        # Suppression is per-SECRET, not per-line or per-file:
+        # is_found_with_aho_corasick drops a candidate when the candidate
+        # CONTAINS a listed word, so the rest of every manifest stays scanned.
+        #
+        # .secrets.wordlist must stay COMMENT-FREE. build_automaton adds every
+        # line longer than 3 characters verbatim and has no comment syntax, so
+        # a `#` line would be loaded as a suppression word. That is why this
+        # explanation lives here and not in the wordlist file.
+        #
+        # KNOWN GAP: the fragments cover modelservice role pods. The harness's
+        # own pods (download-model-*, sim2real-orchestrator-*) sit at 3.9-4.1
+        # today and so are not flagged, but a longer model prefix could push
+        # one over. Add one more fragment if that happens.
         args:
           - --baseline
           - .secrets.baseline
           - --use-all-plugins
           - --exclude-lines
           - '(?i)(?:^[\s"-]*[a-z0-9_.]*(?:sha1|sha256|sha512|hash|digest|checksum|fingerprint|manifest_short)"?\s*[:=])|(?:^\s*-?\s*"?(?:ref|commit|revision)"?\s*[:=]\s*"?[0-9a-f]{7,64}"?\s*,?\s*(?:#.*)?$)'
-        # The baseline file records hashes of audited hits; scanning it would
-        # be circular. Everything else in the repo is in scope.
-        exclude: ^\.secrets\.baseline$
+          - --word-list
+          - .secrets.wordlist
+        # --word-list needs pyahocorasick, which is NOT in the hook's default
+        # environment (ModuleNotFoundError without this). No baseline
+        # regeneration is needed to add it: pre_commit_hook.py builds the
+        # automaton and hands it to the plugins without ever comparing the
+        # baseline's recorded word_list.hash, so `word_list: {file: null,
+        # hash: null}` in the shipped baseline stays valid.
+        additional_dependencies:
+          - pyahocorasick
+        # Excluded from the scan:
+        #
+        #   .secrets.baseline — records hashes of audited hits; scanning it
+        #   would be circular.
+        #
+        #   the four collected-telemetry trees under workspace/runs/ — these
+        #   are machine-generated and carry Kubernetes pod names in bulk
+        #   (Prometheus label values in metrics/raw/*, zap JSON values in
+        #   epp_logs/*). The word list above handles the handful of names in
+        #   `resources/` manifests; it is the wrong tool for whole trees, where
+        #   the volume is the problem: 4,234 of 4,682 staged files on one run,
+        #   epp_logs/ alone 3.1 GB of 3.7 GB.
+        #
+        # The principle is SCAN WHAT A HUMAN OR A TEMPLATE AUTHORED; SKIP
+        # MACHINE-GENERATED TELEMETRY. Anchored to workspace/runs/ so a
+        # metrics/ directory elsewhere in a bundle stays in scope. Deliberately
+        # still scanned, and where the credential risk actually is:
+        # resources/ manifests (env, secretKeyRef, ConfigMaps),
+        # manifest.assembly.yaml, run_metadata.json, trace_header.yaml, the
+        # generated plugin configs, baselines/, transfer.yaml and config.md.
+        #
+        # STANDING EXEMPTION, not a one-time judgement: these trees are not
+        # redacted at collect time either — redact_yaml_tree walks resources/
+        # only — so after this exclusion they have NO secret-scanning layer at
+        # all. What was actually checked before accepting that trade, on one
+        # run: epp_logs/ across all 165 files had zero hits for authorization,
+        # bearer, x-api-key, apikey or hf_ (every "token" match was a metric
+        # field name such as KvCacheMaxTokenCapacity); server_logs/ and
+        # gpu_logs/ were checked over a ~200-file subset for token/key/AWS/
+        # private-key shapes with zero hits. metrics/ was NOT scanned for
+        # credential shapes. So this is "no evidence of credentials in the
+        # sampled corpus", NOT "verified clean". Closing the gap properly means
+        # extending the collect-time redactor to logs — a separate change.
+        #
+        # NOTE ON LAYERS: TWO things enforce this exclusion, and both are
+        # needed.
+        #
+        #   1. This `exclude:` is a pre-commit key, applied by pre-commit to
+        #      the file list BEFORE the hook runs. It is not a hook argument,
+        #      so it does nothing when detect-secrets-hook is invoked directly.
+        #   2. The baseline's `exclude.files` carries the SAME regex, and the
+        #      hook DOES honor it — including on an explicit path. Verified:
+        #      with everything else held constant, reverting that field to
+        #      `^\.secrets\.baseline$` turns a suppressed telemetry finding
+        #      back into a reported one.
+        #
+        # So the mirror is load-bearing for any direct or CI invocation, not
+        # merely so a later `detect-secrets scan --baseline .secrets.baseline`
+        # regeneration agrees with the hook. Do NOT drop it as a duplicate of
+        # the key above — they cover different invocation paths. A test asserts
+        # the two regexes match.
+        exclude: '^(\.secrets\.baseline$|workspace/runs/.*/(epp_logs|gpu_logs|metrics|server_logs)/)'

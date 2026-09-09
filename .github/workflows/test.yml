@@ -30,6 +30,13 @@ jobs:
           # under the merge gate instead of skipping. Verified to install and run
           # on the CI Python (3.14).
           pip install "detect-secrets @ git+https://github.com/ibm/detect-secrets.git@0.13.1+ibm.64.dss"
+          # detect-secrets' --word-list (#896) imports pyahocorasick lazily and
+          # raises ModuleNotFoundError without it. The scaffolded hook declares
+          # it via additional_dependencies, but that only covers pre-commit's
+          # managed env — the behavioral tests invoke detect-secrets-hook
+          # directly, so it must be installed here too or the word-list tests
+          # fail rather than skip.
+          pip install pyahocorasick
 
       - name: Lint
         run: ruff check pipeline/ .claude/skills/ --select F

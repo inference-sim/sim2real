@@ -105,12 +105,38 @@ an operator-edited config or an audited baseline.
 python "$SKILL_DIR/scaffold_precommit.py" --experiment-root "$EXPERIMENT_ROOT"
 ```
 
-This writes `.pre-commit-config.yaml` and `.secrets.baseline` (empty results —
-nothing pre-whitelisted) into the experiment root. The hook line-excludes
-content-hash fields by name (`translation_hash`, `*_sha256`, `hash`, a bare-sha
-`ref:`, ...) so the bundle's own SHA-256 output does not block every commit
-(issue #865), while still scanning those same files for everything else. It
-only installs the files;
+This writes `.pre-commit-config.yaml`, `.secrets.baseline` (empty results —
+nothing pre-whitelisted) and `.secrets.wordlist` into the experiment root.
+
+Three tuning mechanisms keep the hook usable on a repo that commits a collected
+run — each handles a shape none of the others can:
+
+- **`--exclude-lines`** drops content-hash fields by name (`translation_hash`,
+  `*_sha256`, `hash`, a bare-sha `ref:`, ...) so the bundle's own SHA-256 output
+  does not block every commit (issue #865), while still scanning those same
+  files for everything else.
+- **`exclude`** drops the four collected-telemetry trees (`epp_logs`,
+  `gpu_logs`, `metrics`, `server_logs` under `workspace/runs/`), which carry
+  Kubernetes pod names in bulk. Pod names are high-entropy by construction —
+  4.447 against the 4.391 HF token the 4.25 limit exists to catch — so no
+  entropy threshold separates them (issue #896). Mirrored into the baseline's
+  `exclude.files`, which the hook also honors.
+- **`--word-list`** (`.secrets.wordlist`, needs `pyahocorasick`) suppresses the
+  pod names left in `resources/`, keyed on the model-agnostic role segments
+  `-decode-` / `-prefill-` / `-router-epp-` rather than the per-bundle
+  deployment prefix. Suppression is per-secret, so the rest of each manifest
+  keeps being scanned.
+
+**The excluded telemetry trees have no secret-scanning layer at all** — the
+collect-time redactor walks `resources/` only. That is a standing accepted
+trade, recorded in the template with what was and was not checked before
+accepting it; `metrics/` was never scanned for credential shapes. Closing it
+means extending the redactor to logs, which is separate work.
+
+`.secrets.wordlist` must stay comment-free: `build_automaton` loads every line
+longer than 3 characters as a suppression word and has no comment syntax.
+
+It only installs the files;
 tell the operator to activate the hook (see **After Bootstrap**). The `--byo`
 flow runs this same step automatically.
 
@@ -988,6 +1014,7 @@ Exit code 0 and all fields printed = success.
   .gitignore                     <- task-0
   .pre-commit-config.yaml        <- task-0b
   .secrets.baseline              <- task-0b
+  .secrets.wordlist              <- task-0b
 ```
 
 ## After Bootstrap
@@ -1018,8 +1045,9 @@ For pre-built EPP images (no skill-driven translation), see the [`--byo` mode](#
 
 ### Activate the secret-scan hook
 
-Task 0b scaffolds `.pre-commit-config.yaml` + `.secrets.baseline` but cannot
-install git hooks for the operator. Tell the user:
+Task 0b scaffolds `.pre-commit-config.yaml` + `.secrets.baseline` +
+`.secrets.wordlist` but cannot install git hooks for the operator. Tell the
+user:
 
 ```
 Activate the committed secret scan (blocking, whole-repo detect-secrets):
@@ -1099,6 +1127,7 @@ If stdin is not a TTY OR the operator passed `--non-interactive`, do not prompt 
   workloads/*.yaml                               <- pre-existing (operator brought)
   .pre-commit-config.yaml                        <- secret-scan hook (issue #822, create-if-missing)
   .secrets.baseline                              <- detect-secrets baseline (empty results)
+  .secrets.wordlist                              <- pod-name suppression word list (issue #896)
 ```
 
 Copies are atomic (write-to-temp + rename). Destinations validated to lie inside `<experiment-root>`; symlinks that escape are rejected. YAML inputs are parse-validated (single-doc, mapping root, non-empty) before any writes. The pre-commit secret scan is scaffolded create-if-missing (same as BLIS Task 0b); activate it per the [Activate the secret-scan hook](#activate-the-secret-scan-hook) instructions.
