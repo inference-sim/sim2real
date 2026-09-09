@@ -1653,8 +1653,8 @@ def _copy_workload_iterations_full(
     ``--skip-logs`` caller set, so the default full-copy path — the one
     operators actually use — pulled ``resources/`` unredacted (#886). The flag
     is gone rather than set at each call site: all three callers want the same
-    behavior, so a parameter with one correct value is surface a fourth caller
-    could get wrong, which is exactly how the gap arose.
+    behavior, so a parameter with one correct value is just surface area a
+    fourth caller could get wrong, which is exactly how the gap arose.
 
     Redaction covers only the iterations *this call copied*. An iteration
     skipped as already up-to-date belongs to another slot or an earlier
