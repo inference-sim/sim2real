@@ -14,6 +14,13 @@ operator edits or an audited baseline.
 
   templates/precommit/pre-commit-config.yaml -> <exp-root>/.pre-commit-config.yaml
   templates/precommit/secrets.baseline       -> <exp-root>/.secrets.baseline
+  templates/precommit/secrets.wordlist       -> <exp-root>/.secrets.wordlist
+
+``.secrets.wordlist`` (issue #896) suppresses Kubernetes object names, which
+are high-entropy by construction and cannot be handled by the entropy limit,
+the baseline, or ``--exclude-lines`` — see the rationale in the config
+template. It must stay comment-free: ``build_automaton`` loads every line
+longer than 3 characters as a suppression word and has no comment syntax.
 
 Used by both bootstrap modes: BLIS mode invokes ``main()`` via SKILL.md Task
 0b (``action: shell``); ``--byo`` mode calls ``scaffold_precommit()`` from
@@ -35,6 +42,7 @@ from byo import _atomic_copy_file
 _SCAFFOLD_FILES: tuple[tuple[str, str], ...] = (
     ("pre-commit-config.yaml", ".pre-commit-config.yaml"),
     ("secrets.baseline", ".secrets.baseline"),
+    ("secrets.wordlist", ".secrets.wordlist"),
 )
 
 
