@@ -18,7 +18,8 @@ generalize to other targets.
 
 Before contributing, ensure you have:
 
-- **Python 3.10+** (CI runs 3.14)
+- **Python 3.12+** (CI runs 3.12 and 3.14) — older interpreters cannot resolve
+  `requirements.txt`; see `pyproject.toml`
 - **kubectl** — configured to reach a test cluster
 - **Tekton Pipelines** installed on the cluster
 - **Claude Code CLI** (`claude`) — for AI-assisted development (optional but recommended)

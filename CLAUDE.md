@@ -157,7 +157,9 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). When no `-
 
 ## Development
 
-- Python >= 3.10
+- Python >= 3.12 — declared in `pyproject.toml` (`requires-python`), enforced at
+  import by `pipeline/__init__.py` (CLI) and the repo-root `conftest.py` (tests).
+  The floor comes from `requirements.txt`'s numpy pin, not from the code (#906)
 - Tests: `python -m pytest pipeline/ -v`
 - Lint: `ruff check pipeline/` (if installed)
 - PyYAML required for `assemble_run.py` and `tekton.py` — install via `pip install -r requirements.txt`
