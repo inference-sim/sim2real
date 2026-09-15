@@ -99,6 +99,112 @@ def test_saturation_report_stays_injected():
     assert "--saturation-report" in g.OBSERVE_PIPELINE_INJECTED_FLAGS
 
 
+_CONFIG_BLOCK = """\
+```bash
+blis observe \\
+  --timeout 60 \\
+  --detectors composite \\
+  --api-format chat \\
+  --record-itl \\
+  --no-streaming
+```
+"""
+
+
+def test_config_md_round_trips_all_four_new_flags_into_the_emitted_yaml():
+    """The regression this file exists to prevent, end to end: config.md ->
+    parse -> render. The parse half alone passing is what let the emitter drop
+    these silently, so assert the RENDERED text, not the parsed dict."""
+    rendered = g.render_blis_observe_yaml(g.parse_observe_block(_CONFIG_BLOCK))
+    assert "timeout: 60  # source: config.md" in rendered
+    assert 'detectors: "composite"  # source: config.md' in rendered
+    assert 'apiFormat: "chat"  # source: config.md' in rendered
+    assert "recordItl: true  # source: config.md" in rendered
+    assert "streaming: false  # source: config.md" in rendered
+
+
+def test_emitted_yaml_is_loadable_and_accepted_by_the_manifest_validator():
+    """The emitted block must survive the validator that reads it. A quoted
+    bool, or a key the allowlist rejects, would fail only at assemble time —
+    after the bundle is written and committed."""
+    import pathlib
+    import sys as _sys
+
+    import yaml as _yaml
+
+    repo = pathlib.Path(__file__).resolve().parents[3]
+    _sys.path.insert(0, str(repo))
+    from pipeline.lib import observe_argv
+
+    block = _yaml.safe_load(
+        g.render_blis_observe_yaml(g.parse_observe_block(_CONFIG_BLOCK))
+    )["blis_observe"]
+    assert block["recordItl"] is True
+    assert block["streaming"] is False
+    for key, value in block.items():
+        assert observe_argv.check_observe_type(key, value) is None, (
+            f"emitted blis_observe.{key}={value!r} would be rejected by manifest"
+        )
+
+
+def test_observe_defaults_covers_every_key_the_parser_can_produce():
+    """The emitter iterates OBSERVE_DEFAULTS, so a key the parser produces but
+    this dict omits is SILENTLY DISCARDED — no warning, exit 0. That is how
+    #900's first pass regressed --api-format / --record-itl / --no-streaming,
+    which previously survived into extraArgs."""
+    producible = (set(g.OBSERVE_TUNING_FLAGS.values())
+                  | {key for key, _ in g.OBSERVE_PRESENCE_FLAGS.values()}
+                  | {"extraArgs"})
+    missing = sorted(producible - set(g.OBSERVE_DEFAULTS))
+    assert not missing, (
+        f"parse_observe_block can produce {missing}, but OBSERVE_DEFAULTS omits "
+        f"them so render_blis_observe_yaml drops them silently"
+    )
+
+
+def test_observe_defaults_matches_the_runtime_flag_table():
+    """The skill and the pipeline must agree on the key set, or a generated
+    transfer.yaml documents one thing while the pipeline runs another."""
+    import pathlib
+    import sys as _sys
+
+    repo = pathlib.Path(__file__).resolve().parents[3]
+    _sys.path.insert(0, str(repo))
+    from pipeline.lib import observe_argv
+
+    assert set(g.OBSERVE_DEFAULTS) == set(observe_argv.VALID_OBSERVE_KEYS)
+
+
+def test_observe_defaults_values_match_the_runtime_defaults():
+    """A value mismatch is subtler than a key mismatch and worse: the emitted
+    bundle would record a default the renderer does not apply."""
+    import pathlib
+    import sys as _sys
+
+    repo = pathlib.Path(__file__).resolve().parents[3]
+    _sys.path.insert(0, str(repo))
+    from pipeline.lib import observe_argv
+
+    for key, spec in observe_argv.OBSERVE_FLAGS.items():
+        got = g.OBSERVE_DEFAULTS[key]
+        # The skill stores scalars as strings (it emits YAML text); the runtime
+        # table stores native types. Compare through str() except for bools,
+        # which must stay bools so the emitter renders real YAML booleans.
+        if isinstance(spec.default, bool):
+            assert got is spec.default, f"{key}: {got!r} vs {spec.default!r}"
+        else:
+            assert str(got) == str(spec.default), f"{key}: {got!r} vs {spec.default!r}"
+
+
+def test_bool_keys_render_as_yaml_booleans():
+    """A quoted "True" is a STRING to YAML, which manifest.py's per-key type
+    check then rejects — so the bundle would fail to load, not merely mislead."""
+    out = g.render_blis_observe_yaml({"recordItl": True, "streaming": False})
+    assert "recordItl: true" in out
+    assert "streaming: false" in out
+    assert '"true"' not in out and '"True"' not in out
+
+
 def test_no_streaming_is_inverted():
     """blis has no --streaming flag, so presence of --no-streaming means the
     bundle key `streaming` is FALSE. Getting this backwards would silently

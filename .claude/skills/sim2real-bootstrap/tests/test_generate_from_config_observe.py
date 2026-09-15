@@ -10,7 +10,7 @@ Covers acceptance criteria from issues #403 and #602:
     transcribed into extraArgs (#602)
   - Rendered YAML has correct provenance for extracted vs defaulted keys
   - Rendered YAML round-trips through PyYAML with expected typing
-  - Rendered YAML matches the 5-key schema validated by manifest.py
+  - Rendered YAML matches the nine-key schema validated by manifest.py
 """
 import sys
 from pathlib import Path
@@ -309,9 +309,10 @@ def test_render_all_defaults_when_parsed_empty():
     assert out.startswith("blis_observe:\n")
     # Every key present with the sim2real-bootstrap default source.
     for key in ("maxConcurrency", "timeout", "warmupRequests",
-                "prewarmDuration", "extraArgs"):
+                "prewarmDuration", "detectors", "apiFormat",
+                "recordItl", "streaming", "extraArgs"):
         assert key in out
-    assert out.count("# source: sim2real-bootstrap default") == 5
+    assert out.count("# source: sim2real-bootstrap default") == 9
     assert "# source: config.md" not in out
 
 
@@ -325,14 +326,14 @@ def test_render_full_block_all_from_config():
     out = gfc.render_blis_observe_yaml(parsed)
     # 4 sourced from config.md, extraArgs sourced from default.
     assert out.count("# source: config.md") == 4
-    assert out.count("# source: sim2real-bootstrap default") == 1
+    assert out.count("# source: sim2real-bootstrap default") == 5
 
 
 def test_render_mixed_provenance():
     parsed = {"maxConcurrency": "500", "prewarmDuration": "30s"}
     out = gfc.render_blis_observe_yaml(parsed)
     assert out.count("# source: config.md") == 2
-    assert out.count("# source: sim2real-bootstrap default") == 3
+    assert out.count("# source: sim2real-bootstrap default") == 7
 
 
 def test_render_output_parses_as_yaml_with_expected_types():
@@ -346,11 +347,21 @@ def test_render_output_parses_as_yaml_with_expected_types():
             "timeout": 1800,
             "warmupRequests": 50,
             "prewarmDuration": "60s",
+            "detectors": "composite",
+            "apiFormat": "completions",
+            "recordItl": False,
+            "streaming": True,
             "extraArgs": "",
         }
     }
-    for v in loaded["blis_observe"].values():
-        assert not isinstance(v, bool)
+    # recordItl and streaming are bools by design since #900; every other key
+    # must still not be one (a YAML `true` in an int field is the bug the
+    # manifest's per-key type check exists to catch).
+    for k, v in loaded["blis_observe"].items():
+        if k in ("recordItl", "streaming"):
+            assert isinstance(v, bool), f"{k} must be a real YAML boolean"
+        else:
+            assert not isinstance(v, bool), f"{k} must not be a bool"
 
 
 def test_render_extra_args_from_config_stays_a_string():
@@ -367,8 +378,8 @@ def test_render_key_order_is_canonical():
     lines = [ln.strip() for ln in out.splitlines() if ln.strip() and not ln.startswith("blis_observe")]
     keys_in_order = [ln.split(":")[0] for ln in lines]
     assert keys_in_order == [
-        "maxConcurrency", "timeout", "warmupRequests",
-        "prewarmDuration", "extraArgs",
+        "maxConcurrency", "timeout", "warmupRequests", "prewarmDuration",
+        "detectors", "apiFormat", "recordItl", "streaming", "extraArgs",
     ]
 
 
@@ -409,12 +420,16 @@ def test_cli_emit_observe_full_block(tmp_path):
             "timeout": 1800,
             "warmupRequests": 50,
             "prewarmDuration": "60s",
+            "detectors": "composite",
+            "apiFormat": "completions",
+            "recordItl": False,
+            "streaming": True,
             "extraArgs": "",
         }
     }
     # 4 keys from config.md, extraArgs defaulted.
     assert stdout.count("# source: config.md") == 4
-    assert stdout.count("# source: sim2real-bootstrap default") == 1
+    assert stdout.count("# source: sim2real-bootstrap default") == 5
 
 
 def test_cli_emit_observe_partial_block(tmp_path):
@@ -432,7 +447,7 @@ blis observe \\
     assert loaded["blis_observe"]["timeout"] == 60
     # warmupRequests + prewarmDuration + extraArgs defaulted.
     assert stdout.count("# source: config.md") == 2
-    assert stdout.count("# source: sim2real-bootstrap default") == 3
+    assert stdout.count("# source: sim2real-bootstrap default") == 7
 
 
 def test_cli_emit_observe_no_block_all_defaults(tmp_path):
@@ -441,9 +456,13 @@ def test_cli_emit_observe_no_block_all_defaults(tmp_path):
     loaded = yaml.safe_load(stdout)
     assert loaded == {"blis_observe": {
         "maxConcurrency": 10000, "timeout": 1800, "warmupRequests": 50,
-        "prewarmDuration": "60s", "extraArgs": "",
+        "prewarmDuration": "60s", "detectors": "composite",
+ "apiFormat": "completions",
+ "recordItl": False,
+ "streaming": True,
+ "extraArgs": "",
     }}
-    assert stdout.count("# source: sim2real-bootstrap default") == 5
+    assert stdout.count("# source: sim2real-bootstrap default") == 9
 
 
 def test_cli_emit_observe_absent_config_all_defaults(tmp_path):
@@ -453,7 +472,11 @@ def test_cli_emit_observe_absent_config_all_defaults(tmp_path):
     loaded = yaml.safe_load(stdout)
     assert loaded == {"blis_observe": {
         "maxConcurrency": 10000, "timeout": 1800, "warmupRequests": 50,
-        "prewarmDuration": "60s", "extraArgs": "",
+        "prewarmDuration": "60s", "detectors": "composite",
+ "apiFormat": "completions",
+ "recordItl": False,
+ "streaming": True,
+ "extraArgs": "",
     }}
 
 
@@ -510,5 +533,9 @@ defaults:
         "timeout": 1800,
         "warmupRequests": 50,
         "prewarmDuration": "60s",
+        "detectors": "composite",
+        "apiFormat": "completions",
+        "recordItl": False,
+        "streaming": True,
         "extraArgs": "",
     }

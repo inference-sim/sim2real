@@ -213,9 +213,13 @@ OBSERVE_PIPELINE_INJECTED_FLAGS = {
 # change (the second is easy to miss):
 #   1. cmd/observe_cmd.go — flags registered directly on observeCmd. Match EVERY
 #      pflag setter, including Int64Var/Float64Var/DurationVar, not just Int/String.
-#   2. cmd/root.go:registerSaturationFlags(observeCmd) — the --saturation-* /
-#      backlog-drift block, shared with `blis run`/`blis replay` and registered
-#      on observe via that helper call (observe_cmd.go).
+#   2. cmd/saturation.go:registerDetectorFlags(observeCmd) — the detector block
+#      (--detectors / --saturation-*), shared with `blis run`/`blis replay` and
+#      registered on observe via that helper call (observe_cmd.go:200).
+#      This was `cmd/root.go:registerSaturationFlags` before inference-sim
+#      #1516, which replaced the legacy saturation bank: BOTH the file and the
+#      function name changed, so a grep for the old name finds nothing and
+#      silently suggests there is nothing to regenerate.
 OBSERVE_VALID_FLAGS = {
     # --- cmd/observe_cmd.go (registered directly on observeCmd) ---
     "--api-format", "--api-key", "--concurrency", "--concurrent-sessions",
@@ -255,13 +259,29 @@ OBSERVE_REPLAY_ONLY_FLAGS = {
     "--total-kv-blocks", "--hardware", "--tp",             # sim hardware/model
 }
 
-# Match pipeline/pipeline.yaml:36-50. Update in lockstep if those defaults
-# ever change.
+# Defaults for every blis_observe key, in canonical emission order. These MUST
+# match ``OBSERVE_FLAGS`` in pipeline/lib/observe_argv.py, which is the runtime
+# authority — the renderer there applies these same values when a bundle omits a
+# key, so a mismatch means the generated transfer.yaml documents one value while
+# the pipeline runs another. test_observe_flag_lists.py asserts the key sets are
+# identical.
+#
+# This dict also decides what render_blis_observe_yaml EMITS: it iterates these
+# keys, so a key parsed from config.md but absent here is silently discarded.
+# That is precisely how #900's first pass regressed --api-format / --record-itl /
+# --no-streaming, which previously survived into extraArgs.
+#
+# (The old pointer to pipeline/pipeline.yaml's param defaults is gone: #900
+# deleted those params, so observe_argv.py is the only source now.)
 OBSERVE_DEFAULTS = {
     "maxConcurrency": "10000",
     "timeout": "1800",
     "warmupRequests": "50",
     "prewarmDuration": "60s",
+    "detectors": "composite",
+    "apiFormat": "completions",
+    "recordItl": False,
+    "streaming": True,
     "extraArgs": "",
 }
 
@@ -1386,6 +1406,13 @@ def render_blis_observe_yaml(parsed: dict[str, str]) -> str:
         else:
             value = default
             source = "sim2real-bootstrap default"
+        # Bools first: `isdigit` is a str method and raises AttributeError on a
+        # bool, and a quoted "True" is a STRING to YAML rather than a boolean —
+        # manifest.py's per-key type check would then reject it.
+        if isinstance(value, bool):
+            rendered = "true" if value else "false"
+            lines.append(f"  {key}: {rendered}  # source: {source}")
+            continue
         # Emit as bare int when the value is purely digits (no leading zero
         # edge case: '0' is fine as int, '007' would still parse fine).
         if value.isdigit():

@@ -416,6 +416,39 @@ class TestObserveArgsRewiring:
         # ...but observe no longer takes it; its copy lives inside observeArgs.
         assert "tracePath" not in {p["name"] for p in self._observe_task()["params"]}
 
+    def test_pipeline_matches_the_pinned_observe_task_exactly(self):
+        """Both directions are Tekton ADMISSION errors at PipelineRun creation,
+        not soft failures: sending a param the Task does not declare, and
+        omitting one it declares with no default. This pair is why #900 and
+        tektonc#70 had to land together, so guard it against a submodule bump
+        that changes the Task's param set."""
+        import pathlib
+
+        import yaml as _yaml
+
+        from pipeline.lib import layout
+
+        task_path = (pathlib.Path(layout.repo_root()) / "tektonc-data-collection"
+                     / "tekton" / "tasks"
+                     / "run-workload-blis-observe-binary.yaml")
+        if not task_path.exists():
+            pytest.skip("tektonc-data-collection submodule not checked out")
+        declared = {p["name"]: p
+                    for p in _yaml.safe_load(task_path.read_text())["spec"]["params"]}
+        sent = {p["name"] for p in self._observe_task()["params"]}
+
+        undeclared = sorted(sent - set(declared))
+        assert not undeclared, (
+            f"pipeline.yaml sends params the pinned Task does not declare: "
+            f"{undeclared} — Tekton rejects the PipelineRun outright"
+        )
+        required = {n for n, p in declared.items() if "default" not in p}
+        missing = sorted(required - sent)
+        assert not missing, (
+            f"the pinned Task requires {missing} with no default, and "
+            f"pipeline.yaml does not send them — PipelineRun creation fails"
+        )
+
     def test_every_declared_param_is_consumed_by_some_task(self):
         """A param declared and forwarded nowhere is dead weight — the smell
         #900 exists to remove. Two pre-existing exceptions are grandfathered:
