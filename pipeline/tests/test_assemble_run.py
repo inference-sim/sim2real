@@ -1773,99 +1773,177 @@ class TestAssembleResolveContract:
         )
 
 
-class TestLoadWorkloadTraceValidation:
-    """`_load_workload` validates the trace-workload shape and rejects
-    ambiguous workloads that declare both trace and generative keys."""
+class TestLoadWorkloadCorpusValidation:
+    """`_load_workload` validates the corpus/replay document strictly (issue
+    #901) and refuses documents whose kind is ambiguous or whose shape is the
+    deleted `trace:` one."""
 
-    _VALID_TRACE = {
-        "name": "exgentic-agentic-trace",
-        "trace": {
-            "source": "hf:Exgentic/agent-llm-traces",
-            "shards": 39,
-            "pool": {"concurrent_sessions": 128, "total_sessions": 192},
+    _VALID = {
+        "corpus": {
+            "upstream": {"source": "hf:Exgentic/agent-llm-traces", "shards": 39},
+            "select": {"min_rounds": 2},
         },
+        "replay": {"concurrent_sessions": 128, "total_sessions": 192},
     }
 
-    def _write(self, tmp_path: Path, data) -> Path:
+    def _write(self, tmp_path: Path, data, stem="w") -> Path:
         exp_root = tmp_path / "exp"
         (exp_root / "workloads").mkdir(parents=True, exist_ok=True)
-        (exp_root / "workloads" / "w.yaml").write_text(yaml.dump(data))
+        (exp_root / "workloads" / f"{stem}.yaml").write_text(yaml.dump(data))
         return exp_root
 
-    def test_valid_trace_workload_loads(self, tmp_path):
-        exp_root = self._write(tmp_path, self._VALID_TRACE)
+    # ── acceptance ──────────────────────────────────────────────────────
+
+    def test_valid_corpus_workload_loads(self, tmp_path):
+        exp_root = self._write(tmp_path, self._VALID)
         data = assemble_run._load_workload(exp_root, "workloads/w.yaml")
-        assert data["trace"]["source"] == "hf:Exgentic/agent-llm-traces"
+        assert data["corpus"]["upstream"]["source"] == "hf:Exgentic/agent-llm-traces"
 
     def test_valid_generative_workload_loads(self, tmp_path):
-        exp_root = self._write(
-            tmp_path, {"name": "wl", "version": 1, "clients": []}
-        )
+        exp_root = self._write(tmp_path, {"name": "wl", "version": 1, "clients": []})
         data = assemble_run._load_workload(exp_root, "workloads/w.yaml")
-        assert "trace" not in data
+        assert "corpus" not in data
 
-    def test_trace_missing_pool_concurrent_sessions_raises(self, tmp_path):
+    def test_name_comes_from_the_filename_stem(self, tmp_path):
+        """A corpus document carries no `name:` — the stem is the name (#901)."""
+        exp_root = self._write(tmp_path, self._VALID, stem="wl_chat")
+        data = assemble_run._load_workload(exp_root, "workloads/wl_chat.yaml")
+        assert data["workload_name"] == "wl_chat"
+
+    def test_total_sessions_zero_is_allowed(self, tmp_path):
+        ok = {"corpus": {"upstream": {"source": "hf:x"}},
+              "replay": {"concurrent_sessions": 1, "total_sessions": 0}}
+        exp_root = self._write(tmp_path, ok)
+        data = assemble_run._load_workload(exp_root, "workloads/w.yaml")
+        assert data["replay"]["total_sessions"] == 0
+
+    # ── the four defects #901 documents ─────────────────────────────────
+
+    def test_unknown_key_under_replay_rejected(self, tmp_path):
+        """Defect 1: `pool.warmup_requests: 0` used to pass validation, ride
+        along inside traceSpec, change nothing, and report nothing."""
         bad = {
+            "corpus": {"upstream": {"source": "hf:x"}},
+            "replay": {"concurrent_sessions": 1, "total_sessions": 0,
+                       "warmup_requests": 0},
+        }
+        exp_root = self._write(tmp_path, bad)
+        with pytest.raises(assemble_run.AssembleError, match="warmup_requests"):
+            assemble_run._load_workload(exp_root, "workloads/w.yaml")
+
+    def test_hashed_but_unapplied_field_rejected(self, tmp_path):
+        """Defect 2, first half: `convert.max_think_time` was folded into the
+        cache key and never passed to the converter."""
+        bad = {
+            "corpus": {"upstream": {"source": "hf:x"},
+                       "reconstruct": {"max_think_time": "15s"}},
+            "replay": {"concurrent_sessions": 1, "total_sessions": 0},
+        }
+        exp_root = self._write(tmp_path, bad)
+        with pytest.raises(assemble_run.AssembleError,
+                           match=r"corpus\.reconstruct\.max_think_time"):
+            assemble_run._load_workload(exp_root, "workloads/w.yaml")
+
+    def test_skip_branching_rejected(self, tmp_path):
+        """Defect 2, second half: `filters.skip_branching` never had task-side
+        support at all, so it is simply not a legal key."""
+        bad = {
+            "corpus": {"upstream": {"source": "hf:x"},
+                       "select": {"skip_branching": True}},
+            "replay": {"concurrent_sessions": 1, "total_sessions": 0},
+        }
+        exp_root = self._write(tmp_path, bad)
+        with pytest.raises(assemble_run.AssembleError, match="skip_branching"):
+            assemble_run._load_workload(exp_root, "workloads/w.yaml")
+
+    def test_legacy_trace_document_is_rejected_not_misread(self, tmp_path):
+        """Defect 4, inverted. The OLD shape must now fail loudly. Previously a
+        `corpus:` document was accepted and handed to blis as a WorkloadSpec
+        whose content was `{corpus: ..., replay: ...}`; now the roles swap and
+        the deleted shape is the one that must not slip through."""
+        legacy = {
             "name": "wl",
             "trace": {
-                "source": "hf:x",
-                "pool": {"total_sessions": 192},
+                "source": "hf:Exgentic/agent-llm-traces",
+                "pool": {"concurrent_sessions": 128, "total_sessions": 192},
             },
         }
-        exp_root = self._write(tmp_path, bad)
-        with pytest.raises(assemble_run.AssembleError, match="concurrent_sessions"):
+        exp_root = self._write(tmp_path, legacy)
+        with pytest.raises(assemble_run.AssembleError, match="'trace:'"):
             assemble_run._load_workload(exp_root, "workloads/w.yaml")
 
-    def test_trace_missing_pool_raises(self, tmp_path):
-        bad = {"name": "wl", "trace": {"source": "hf:x"}}
+    def test_legacy_trace_rejection_names_the_replacement_fields(self, tmp_path):
+        """The error has to be actionable — an operator should not need to read
+        the issue to migrate."""
+        legacy = {"trace": {"source": "hf:x",
+                            "pool": {"concurrent_sessions": 1,
+                                     "total_sessions": 0}}}
+        exp_root = self._write(tmp_path, legacy)
+        with pytest.raises(assemble_run.AssembleError) as exc:
+            assemble_run._load_workload(exp_root, "workloads/w.yaml")
+        msg = str(exc.value)
+        assert "corpus.upstream.source" in msg
+        assert "replay." in msg
+
+    def test_empty_trace_mapping_is_still_generative(self, tmp_path):
+        """An empty `trace: {}` was never a trace workload and must not trip
+        the legacy guard — it is an ordinary (if odd) generative document."""
+        doc = {"name": "wl", "version": 1, "clients": [], "trace": {}}
+        exp_root = self._write(tmp_path, doc)
+        data = assemble_run._load_workload(exp_root, "workloads/w.yaml")
+        assert data["name"] == "wl"
+
+    # ── kind ambiguity ──────────────────────────────────────────────────
+
+    def test_corpus_beside_cohorts_rejected(self, tmp_path):
+        """AC3."""
+        bad = dict(self._VALID, cohorts=[])
         exp_root = self._write(tmp_path, bad)
-        with pytest.raises(assemble_run.AssembleError, match="trace.pool"):
+        with pytest.raises(assemble_run.AssembleError, match="exactly one kind"):
             assemble_run._load_workload(exp_root, "workloads/w.yaml")
 
-    def test_trace_missing_source_raises(self, tmp_path):
-        bad = {
-            "name": "wl",
-            "trace": {"pool": {"concurrent_sessions": 4, "total_sessions": 0}},
-        }
+    def test_corpus_beside_clients_rejected(self, tmp_path):
+        bad = dict(self._VALID, clients=[])
         exp_root = self._write(tmp_path, bad)
-        with pytest.raises(assemble_run.AssembleError, match="trace.source"):
+        with pytest.raises(assemble_run.AssembleError, match="exactly one kind"):
+            assemble_run._load_workload(exp_root, "workloads/w.yaml")
+
+    def test_explicit_name_key_rejected(self, tmp_path):
+        bad = dict(self._VALID, name="wl")
+        exp_root = self._write(tmp_path, bad)
+        with pytest.raises(assemble_run.AssembleError, match="name"):
+            assemble_run._load_workload(exp_root, "workloads/w.yaml")
+
+    # ── required fields ─────────────────────────────────────────────────
+
+    def test_missing_source_raises(self, tmp_path):
+        bad = {"corpus": {"upstream": {}},
+               "replay": {"concurrent_sessions": 4, "total_sessions": 0}}
+        exp_root = self._write(tmp_path, bad)
+        with pytest.raises(assemble_run.AssembleError,
+                           match=r"corpus\.upstream\.source"):
+            assemble_run._load_workload(exp_root, "workloads/w.yaml")
+
+    def test_missing_replay_raises(self, tmp_path):
+        bad = {"corpus": {"upstream": {"source": "hf:x"}}}
+        exp_root = self._write(tmp_path, bad)
+        with pytest.raises(assemble_run.AssembleError, match="replay"):
+            assemble_run._load_workload(exp_root, "workloads/w.yaml")
+
+    def test_missing_concurrent_sessions_raises(self, tmp_path):
+        bad = {"corpus": {"upstream": {"source": "hf:x"}},
+               "replay": {"total_sessions": 192}}
+        exp_root = self._write(tmp_path, bad)
+        with pytest.raises(assemble_run.AssembleError,
+                           match="concurrent_sessions"):
             assemble_run._load_workload(exp_root, "workloads/w.yaml")
 
     def test_concurrent_sessions_below_one_raises(self, tmp_path):
-        bad = {
-            "name": "wl",
-            "trace": {
-                "source": "hf:x",
-                "pool": {"concurrent_sessions": 0, "total_sessions": 0},
-            },
-        }
+        bad = {"corpus": {"upstream": {"source": "hf:x"}},
+               "replay": {"concurrent_sessions": 0, "total_sessions": 0}}
         exp_root = self._write(tmp_path, bad)
-        with pytest.raises(assemble_run.AssembleError, match="concurrent_sessions"):
-            assemble_run._load_workload(exp_root, "workloads/w.yaml")
-
-    def test_total_sessions_zero_is_allowed(self, tmp_path):
-        ok = {
-            "name": "wl",
-            "trace": {
-                "source": "hf:x",
-                "pool": {"concurrent_sessions": 1, "total_sessions": 0},
-            },
-        }
-        exp_root = self._write(tmp_path, ok)
-        data = assemble_run._load_workload(exp_root, "workloads/w.yaml")
-        assert data["trace"]["pool"]["total_sessions"] == 0
-
-    def test_both_trace_and_clients_raises(self, tmp_path):
-        bad = {
-            "name": "wl",
-            "clients": [],
-            "trace": {
-                "source": "hf:x",
-                "pool": {"concurrent_sessions": 1, "total_sessions": 1},
-            },
-        }
-        exp_root = self._write(tmp_path, bad)
-        with pytest.raises(assemble_run.AssembleError, match="both 'trace' and 'clients'"):
+        with pytest.raises(assemble_run.AssembleError,
+                           match="concurrent_sessions"):
             assemble_run._load_workload(exp_root, "workloads/w.yaml")
 
 
@@ -1939,7 +2017,8 @@ class TestLoadWorkloadErrors:
         wl = tmp_path / "workloads" / "wl_chat.yaml"
         wl.parent.mkdir(parents=True)
         wl.write_text(yaml.dump({
-            "trace": {"source": "data.csv", "pool": {"concurrent_sessions": 1, "total_sessions": 10}},
+            "corpus": {"upstream": {"source": "data.csv"}},
+            "replay": {"concurrent_sessions": 1, "total_sessions": 10},
         }))
         result = assemble_run._load_workload(tmp_path, "workloads/wl_chat.yaml")
         assert result["workload_name"] == "wl_chat"

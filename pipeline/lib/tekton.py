@@ -1,8 +1,7 @@
 """Tekton PipelineRun generation for sim2real."""
-import hashlib
-import json
-
 import yaml
+
+from pipeline.lib import corpus_schema
 
 _SPEC_BASE_DIR = "/workspace/source/llm-d-benchmark"
 _SCENARIO_FILE_PATH = "/tmp/llmdbench-config/scenario.yaml"
@@ -89,39 +88,72 @@ _OBSERVE_PARAM_ORDER = (
 )
 
 
+def _render_corpus_params(corpus: dict, replay: dict) -> list[dict]:
+    """Render the corpus/replay document as PipelineRun params.
+
+    Driven entirely by ``corpus_schema``'s tables, so a field cannot be legal in
+    the schema yet reach no param (issue #901's invariant). Order follows the
+    tables' insertion order, which keeps generated PipelineRun YAML diffable.
+
+    Callers must have validated the document first: this asserts rather than
+    guesses when a required field is missing, so a skipped validation surfaces
+    as a loud error instead of a param rendered from a sentinel.
+    """
+    out: list[dict] = []
+    for key, field in corpus_schema.REPLAY_FIELDS.items():
+        if key not in replay:
+            raise KeyError(
+                f"replay.{key} is required but absent — validate the document "
+                f"with corpus_schema.validate_corpus_document before rendering"
+            )
+        out.append({"name": field.param, "value": field.render(replay[key])})
+    for section, fields in corpus_schema.CORPUS_FIELDS.items():
+        written = corpus.get(section) or {}
+        for key, field in fields.items():
+            value = written.get(key, field.default)
+            if value is corpus_schema.REQUIRED:
+                raise KeyError(
+                    f"corpus.{section}.{key} is required but absent — validate "
+                    f"the document with corpus_schema.validate_corpus_document "
+                    f"before rendering"
+                )
+            out.append({"name": field.param, "value": field.render(value)})
+    return out
+
+
 def is_trace_workload(workload: dict) -> bool:
-    """Return True iff ``workload`` declares a non-empty ``trace`` mapping.
+    """Return True iff ``workload`` is a corpus (trace) workload.
 
-    A trace workload sources its request stream from a recorded trace
-    (prepare-trace + a session pool) rather than a generative WorkloadSpec.
-    Any workload without a non-empty ``trace`` block is generative and flows
-    through the existing ``workloadSpec`` path unchanged.
+    The discriminator is the presence of a non-empty top-level ``corpus:``
+    mapping — see :mod:`pipeline.lib.corpus_schema`. Such a workload sources its
+    request stream from a recorded corpus (prepare-trace + a replay pool) rather
+    than from a generative WorkloadSpec. Anything else is generative and flows
+    through the ``workloadSpec`` path unchanged.
+
+    The legacy ``trace:`` mapping is NOT recognized (issue #901): it was
+    replaced outright rather than dual-supported. A document still carrying it
+    is refused by ``assemble_run._validate_workload`` rather than silently
+    treated as generative.
     """
-    trace = workload.get("trace")
-    return isinstance(trace, dict) and bool(trace)
+    return corpus_schema.is_corpus_document(workload)
 
 
-def trace_path(wl_name: str, trace: dict) -> str:
-    """Return the deterministic relative path ``traces/<safe_wl_name>-<sha12>``
-    for a trace descriptor.
+def trace_path(corpus: dict) -> str:
+    """Return the content-addressed corpus path ``traces/<sha12>``.
 
-    ``<sha12>`` is the first 12 hex chars of sha256 over a CANONICAL JSON
-    serialization of the trace descriptor's CONTENT fields (``sort_keys=True``,
-    no whitespace) so the path is STABLE across runs for identical descriptors
-    and CHANGES when the built corpus would differ. ``<safe_wl_name>`` is the
-    workload name with ``_`` → ``-``.
+    The key covers the ``corpus:`` mapping ALONE. Two consequences, both
+    deliberate (issue #901):
 
-    The ``pool`` block (``concurrent_sessions`` / ``total_sessions``) is
-    EXCLUDED from the hash: it is a replay parameter consumed at observe time
-    (``--concurrent-sessions`` / ``--total-sessions``), not an input to
-    prepare-trace. Two descriptors that differ only in ``pool`` build the
-    identical corpus, so they share a trace path and reuse the same cache entry.
+    * **No workload name.** The previous ``traces/<safe_wl_name>-<sha12>`` form
+      made two cells with byte-identical corpus content resolve to different
+      paths and build the identical corpus twice.
+    * **No ``replay:``.** Session counts are consumed by ``blis observe`` at
+      replay time and cannot change the corpus, so cells differing only in
+      ``replay:`` share one cache entry by construction.
+
+    See :func:`pipeline.lib.corpus_schema.corpus_cache_key` for the hash itself.
     """
-    content = {k: v for k, v in trace.items() if k != "pool"}
-    canonical = json.dumps(content, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    sha12 = hashlib.sha256(canonical).hexdigest()[:12]
-    safe = wl_name.replace("_", "-")
-    return f"traces/{safe}-{sha12}"
+    return f"traces/{corpus_schema.corpus_cache_key(corpus)}"
 
 
 def make_pipelinerun_scenario(
@@ -156,31 +188,22 @@ def make_pipelinerun_scenario(
     # workloads keep the historical workloadSpec path byte-for-byte unchanged.
     trace_mode = is_trace_workload(workload)
     if trace_mode:
-        trace = workload["trace"]
+        corpus = workload["corpus"]
         wl_spec_str = ""
-        trace_spec_str = yaml.dump(trace, default_flow_style=True).strip()
-        t_path = trace_path(wl_name, trace)
-        pool = trace.get("pool", {})
-        concurrent_sessions = str(pool.get("concurrent_sessions"))
-        total_sessions = str(pool.get("total_sessions"))
-        # Scalar projections of the trace descriptor. The prepare-trace task
-        # steps consume these directly so no in-container YAML parsing of the
-        # compact traceSpec is needed (line-based sed on single-line flow YAML
-        # was fragile and could extract an empty source → 404 on download).
-        trace_source = trace["source"]
-        trace_shards = str(trace.get("shards", 39))
-        trace_min_rounds = str((trace.get("filters") or {}).get("min_rounds", 2))
-        trace_split = str(trace.get("split", "test"))
-        trace_context_growth = str(
-            (trace.get("convert") or {}).get("context_growth", "accumulate")
-        )
-        # Sample-selection controls (build-otel dedup/shuffle). Part of the trace
-        # descriptor, so they also affect tracePath (trace_path hashes the whole
-        # trace dict) → changing them forces a corpus rebuild. Defaults: dedup on,
-        # seed 42.
-        trace_sample = trace.get("sample") or {}
-        trace_dedup = "1" if trace_sample.get("dedup_by_conversation", True) else "0"
-        trace_shuffle_seed = str(trace_sample.get("shuffle_seed", 42))
+        # Only traceSpec's EMPTINESS is load-bearing: prepare-trace tests
+        # `[ -z "$(params.traceSpec)" ]` to recognize a generative workload and
+        # skip the corpus build. Nothing parses the content, so this carries the
+        # corpus mapping purely to keep the PipelineRun self-describing for an
+        # operator reading it. (sim2real#900 collapses these params.)
+        trace_spec_str = yaml.dump(corpus, default_flow_style=True).strip()
+        t_path = trace_path(corpus)
+        # Scalar projections of the corpus/replay document, generated from the
+        # schema tables so the set of emitted params cannot drift from the set
+        # of legal fields. The prepare-trace steps consume these directly, so no
+        # in-container YAML parsing of the compact traceSpec is needed
+        # (line-based sed on single-line flow YAML was fragile and could extract
+        # an empty source → 404 on download).
+        trace_scalars = _render_corpus_params(corpus, workload.get("replay") or {})
     else:
         wl_spec = {k: v for k, v in workload.items() if k != "workload_name"}
         wl_spec_str = yaml.dump(wl_spec, default_flow_style=True).strip()
@@ -202,24 +225,14 @@ def make_pipelinerun_scenario(
         {"name": "replica",          "value": str(iteration)},
     ]
     if trace_mode:
-        # Trace-only params, adjacent to workloadSpec. Generative workloads
+        # Corpus-only params, adjacent to workloadSpec. Generative workloads
         # deliberately do NOT emit these so their param list stays identical
         # to prior releases.
         params += [
-            {"name": "traceSpec",          "value": trace_spec_str},
-            {"name": "tracePath",          "value": t_path},
-            {"name": "concurrentSessions", "value": concurrent_sessions},
-            {"name": "totalSessions",      "value": total_sessions},
-            # Scalar fields the prepare-trace steps read directly (no in-pod
-            # YAML parsing of traceSpec). Emitted only for trace workloads.
-            {"name": "traceSource",        "value": trace_source},
-            {"name": "traceShards",        "value": trace_shards},
-            {"name": "traceMinRounds",     "value": trace_min_rounds},
-            {"name": "traceSplit",         "value": trace_split},
-            {"name": "traceContextGrowth", "value": trace_context_growth},
-            {"name": "traceDedupByConversation", "value": trace_dedup},
-            {"name": "traceShuffleSeed",   "value": trace_shuffle_seed},
+            {"name": "traceSpec", "value": trace_spec_str},
+            {"name": "tracePath", "value": t_path},
         ]
+        params += trace_scalars
     if observe:
         # Emit only specified keys; omitted ones fall through to Pipeline-level
         # defaults declared in pipeline/pipeline.yaml. Tekton params are strings.

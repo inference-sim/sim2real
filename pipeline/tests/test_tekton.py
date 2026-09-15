@@ -1,5 +1,8 @@
 """Tests for Tekton PipelineRun generation."""
 
+import copy
+
+import pytest
 import yaml
 
 from pipeline.lib.tekton import (
@@ -367,21 +370,27 @@ def test_make_pipelinerun_scenario_emits_replica_param_explicit():
     assert params["replica"] == "5"
 
 
-# ── Tests for trace workloads ───────────────────────────────────────────────
+# ── Tests for corpus (trace) workloads ──────────────────────────────────────
 
 _TRACE_WORKLOAD = {
-    "name": "exgentic_agentic_trace",
-    "trace": {
-        "source": "hf:Exgentic/agent-llm-traces",
-        "shards": 39,
-        "filters": {"min_rounds": 2, "skip_branching": True},
-        "convert": {"context_growth": "accumulate", "max_think_time": "15s"},
-        "pool": {"concurrent_sessions": 128, "total_sessions": 192},
+    "corpus": {
+        "upstream": {"source": "hf:Exgentic/agent-llm-traces", "shards": 39},
+        "select": {"min_rounds": 2},
+        "reconstruct": {"context_growth": "accumulate"},
     },
+    "replay": {"concurrent_sessions": 128, "total_sessions": 192},
 }
 
 
-def test_is_trace_workload_detects_trace_block():
+def _trace_params(workload: dict) -> dict:
+    pr = make_pipelinerun_scenario(
+        phase="baseline", workload=workload, run_name="r", namespace="ns",
+        pipeline_name="sim2real", scenario_content="{}",
+    )
+    return {p["name"]: p["value"] for p in pr["spec"]["params"]}
+
+
+def test_is_trace_workload_detects_corpus_block():
     assert is_trace_workload(_TRACE_WORKLOAD) is True
 
 
@@ -389,123 +398,122 @@ def test_is_trace_workload_false_for_generative():
     assert is_trace_workload({"name": "wl", "clients": [], "version": 1}) is False
 
 
-def test_is_trace_workload_false_for_empty_trace():
-    """An empty (or absent) trace mapping is not a trace workload."""
-    assert is_trace_workload({"name": "wl", "trace": {}}) is False
+def test_is_trace_workload_false_for_empty_corpus():
+    assert is_trace_workload({"name": "wl", "corpus": {}}) is False
     assert is_trace_workload({"name": "wl"}) is False
 
 
-def test_trace_path_shape_and_prefix():
-    """tracePath is traces/<safe_wl_name>-<12hex>."""
-    p = trace_path("exgentic_agentic_trace", _TRACE_WORKLOAD["trace"])
-    assert p.startswith("traces/exgentic-agentic-trace-")
-    sha = p.rsplit("-", 1)[-1]
+def test_is_trace_workload_false_for_legacy_trace_block():
+    """`trace:` is replaced, not dual-supported (#901). A legacy document is NOT
+    a trace workload — assemble refuses it instead of guessing."""
+    legacy = {"name": "wl", "trace": {"source": "hf:o/d",
+                                      "pool": {"concurrent_sessions": 1,
+                                               "total_sessions": 0}}}
+    assert is_trace_workload(legacy) is False
+
+
+# ── content-addressed corpus key ────────────────────────────────────────────
+
+
+def test_trace_path_is_content_addressed_without_the_workload_name():
+    p = trace_path(_TRACE_WORKLOAD["corpus"])
+    assert p.startswith("traces/")
+    sha = p.removeprefix("traces/")
     assert len(sha) == 12
     assert all(c in "0123456789abcdef" for c in sha)
+    assert "exgentic" not in p.lower()
 
 
-def test_trace_path_deterministic_for_same_descriptor():
-    a = trace_path("wl", _TRACE_WORKLOAD["trace"])
-    b = trace_path("wl", dict(_TRACE_WORKLOAD["trace"]))
+def test_identical_corpus_different_replay_shares_one_build():
+    """AC1: two cells differing only in replay: resolve to the SAME path."""
+    other = copy.deepcopy(_TRACE_WORKLOAD)
+    other["replay"] = {"concurrent_sessions": 4, "total_sessions": 8}
+    assert (_trace_params(_TRACE_WORKLOAD)["tracePath"]
+            == _trace_params(other)["tracePath"])
+
+
+def test_identical_corpus_different_workload_name_shares_one_build():
+    """#901 defect 3: the name-keyed path built the identical corpus twice."""
+    a = dict(_TRACE_WORKLOAD, workload_name="cell_a")
+    b = dict(_TRACE_WORKLOAD, workload_name="cell_b")
+    assert _trace_params(a)["tracePath"] == _trace_params(b)["tracePath"]
+
+
+def test_trace_path_deterministic_and_order_independent():
+    a = trace_path(_TRACE_WORKLOAD["corpus"])
+    b = trace_path({
+        "reconstruct": {"context_growth": "accumulate"},
+        "select": {"min_rounds": 2},
+        "upstream": {"shards": 39, "source": "hf:Exgentic/agent-llm-traces"},
+    })
     assert a == b
 
 
-def test_trace_path_changes_when_descriptor_changes():
-    changed = dict(_TRACE_WORKLOAD["trace"])
-    changed["shards"] = 40
-    assert trace_path("wl", changed) != trace_path("wl", _TRACE_WORKLOAD["trace"])
+def test_trace_path_changes_when_corpus_content_changes():
+    changed = copy.deepcopy(_TRACE_WORKLOAD["corpus"])
+    changed["upstream"]["source"] = "hf:Other/dataset"
+    assert trace_path(changed) != trace_path(_TRACE_WORKLOAD["corpus"])
 
 
-def test_trace_path_ignores_pool():
-    """pool (concurrent_sessions/total_sessions) is a replay param, not corpus
-    content: changing it must NOT bust the trace-content cache. Two descriptors
-    differing only in pool share the same trace path."""
-    other_pool = dict(_TRACE_WORKLOAD["trace"])
-    other_pool["pool"] = {"concurrent_sessions": 1, "total_sessions": 1}
-    assert trace_path("wl", other_pool) == trace_path("wl", _TRACE_WORKLOAD["trace"])
-
-    # Adding vs. omitting the pool block entirely is likewise a no-op.
-    no_pool = {k: v for k, v in _TRACE_WORKLOAD["trace"].items() if k != "pool"}
-    assert trace_path("wl", no_pool) == trace_path("wl", _TRACE_WORKLOAD["trace"])
+def test_trace_path_deterministic_across_calls():
+    assert (_trace_params(_TRACE_WORKLOAD)["tracePath"]
+            == _trace_params(_TRACE_WORKLOAD)["tracePath"])
 
 
-def test_trace_path_independent_of_key_order():
-    """Canonical serialization means key ordering does not affect the hash."""
-    reordered = {
-        "pool": {"total_sessions": 192, "concurrent_sessions": 128},
-        "shards": 39,
-        "source": "hf:Exgentic/agent-llm-traces",
-        "filters": {"skip_branching": True, "min_rounds": 2},
-        "convert": {"max_think_time": "15s", "context_growth": "accumulate"},
-    }
-    assert trace_path("wl", reordered) == trace_path("wl", _TRACE_WORKLOAD["trace"])
+# ── param emission ──────────────────────────────────────────────────────────
 
 
 def test_trace_workload_emits_locked_params():
-    pr = make_pipelinerun_scenario(
-        phase="baseline", workload=_TRACE_WORKLOAD, run_name="r",
-        namespace="ns", pipeline_name="sim2real",
-        scenario_content="scenario: []",
-    )
-    params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
+    params = _trace_params(_TRACE_WORKLOAD)
     # workloadSpec is empty in trace mode — observe must not use --workload-spec.
     assert params["workloadSpec"] == ""
-    # traceSpec is the trace block as compact single-line YAML.
+    # traceSpec carries the corpus mapping. Only its EMPTINESS is load-bearing:
+    # prepare-trace tests `[ -z "$(params.traceSpec)" ]` to detect a generative
+    # workload and never parses the content.
     assert params["traceSpec"] == yaml.dump(
-        _TRACE_WORKLOAD["trace"], default_flow_style=True
+        _TRACE_WORKLOAD["corpus"], default_flow_style=True
     ).strip()
-    assert params["tracePath"] == trace_path(
-        "exgentic_agentic_trace", _TRACE_WORKLOAD["trace"]
-    )
+    assert params["tracePath"] == trace_path(_TRACE_WORKLOAD["corpus"])
     assert params["concurrentSessions"] == "128"
     assert params["totalSessions"] == "192"
-    # Scalar projections of the trace descriptor — the prepare-trace steps
-    # consume these directly (no in-pod YAML parsing of traceSpec).
+    # Scalar projections the prepare-trace steps read directly.
     assert params["traceSource"] == "hf:Exgentic/agent-llm-traces"
     assert params["traceShards"] == "39"
     assert params["traceMinRounds"] == "2"
     assert params["traceSplit"] == "test"
     assert params["traceContextGrowth"] == "accumulate"
-    # Sample-selection controls default to dedup-on / seed 42 when no sample block.
     assert params["traceDedupByConversation"] == "1"
     assert params["traceShuffleSeed"] == "42"
 
 
-def test_trace_sample_block_overrides_dedup_and_seed():
-    """A trace.sample block controls build-otel dedup + shuffle seed."""
+def test_select_block_overrides_dedup_and_seed():
     wl = {
-        "name": "sampled-trace",
-        "trace": {
-            "source": "hf:Org/dataset",
-            "pool": {"concurrent_sessions": 4, "total_sessions": 8},
-            "sample": {"dedup_by_conversation": False, "shuffle_seed": 7},
-        },
+        "corpus": {"upstream": {"source": "hf:Org/dataset"},
+                   "select": {"dedup_by_conversation": False, "shuffle_seed": 7}},
+        "replay": {"concurrent_sessions": 4, "total_sessions": 8},
     }
-    pr = make_pipelinerun_scenario(
-        phase="baseline", workload=wl, run_name="r",
-        namespace="ns", pipeline_name="sim2real", scenario_content="{}",
-    )
-    params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
+    params = _trace_params(wl)
     assert params["traceDedupByConversation"] == "0"
     assert params["traceShuffleSeed"] == "7"
 
 
-def test_trace_workload_scalar_params_use_defaults_when_absent():
-    """When the descriptor omits shards/filters/split/convert, the scalar
-    params fall back to the documented defaults (39/2/test/accumulate)."""
+def test_partition_maps_to_trace_split():
     wl = {
-        "name": "minimal-trace",
-        "trace": {
-            "source": "hf:Org/dataset",
-            "pool": {"concurrent_sessions": 4, "total_sessions": 8},
-        },
+        "corpus": {"upstream": {"source": "hf:Org/dataset"},
+                   "select": {"partition": "train"}},
+        "replay": {"concurrent_sessions": 1, "total_sessions": 0},
     }
-    pr = make_pipelinerun_scenario(
-        phase="baseline", workload=wl, run_name="r",
-        namespace="ns", pipeline_name="sim2real",
-        scenario_content="scenario: []",
-    )
-    params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
+    assert _trace_params(wl)["traceSplit"] == "train"
+
+
+def test_minimal_corpus_uses_documented_defaults():
+    """When the document omits every optional field, the scalar params fall
+    back to the documented defaults (39 / test / 2 / accumulate / 1 / 42)."""
+    wl = {
+        "corpus": {"upstream": {"source": "hf:Org/dataset"}},
+        "replay": {"concurrent_sessions": 4, "total_sessions": 8},
+    }
+    params = _trace_params(wl)
     assert params["traceSource"] == "hf:Org/dataset"
     assert params["traceShards"] == "39"
     assert params["traceMinRounds"] == "2"
@@ -515,22 +523,24 @@ def test_trace_workload_scalar_params_use_defaults_when_absent():
     assert params["traceShuffleSeed"] == "42"
 
 
-def test_trace_workload_path_is_deterministic_across_calls():
-    pr1 = make_pipelinerun_scenario(
-        phase="baseline", workload=_TRACE_WORKLOAD, run_name="r",
-        namespace="ns", pipeline_name="sim2real", scenario_content="{}",
-    )
-    pr2 = make_pipelinerun_scenario(
-        phase="baseline", workload=_TRACE_WORKLOAD, run_name="r",
-        namespace="ns", pipeline_name="sim2real", scenario_content="{}",
-    )
-    p1 = {p["name"]: p["value"] for p in pr1["spec"]["params"]}["tracePath"]
-    p2 = {p["name"]: p["value"] for p in pr2["spec"]["params"]}["tracePath"]
-    assert p1 == p2
+def test_rendering_without_validation_raises_rather_than_emitting_a_sentinel():
+    """A skipped validation must fail loudly, not render a param from the
+    REQUIRED sentinel."""
+    wl = {"corpus": {"select": {"min_rounds": 2}},
+          "replay": {"concurrent_sessions": 1, "total_sessions": 0}}
+    with pytest.raises(KeyError, match="corpus.upstream.source"):
+        _trace_params(wl)
+
+
+def test_rendering_without_replay_raises():
+    wl = {"corpus": {"upstream": {"source": "hf:o/d"}}}
+    with pytest.raises(KeyError, match="replay.concurrent_sessions"):
+        _trace_params(wl)
 
 
 def test_generative_workload_unchanged_param_set():
-    """Generative workloads emit a non-empty workloadSpec and NO trace params."""
+    """AC5: generative workloads emit a non-empty workloadSpec and NO corpus
+    params, so their PipelineRun is byte-identical to prior releases."""
     pr = make_pipelinerun_scenario(
         phase="baseline", workload={"name": "wl-a", "num_requests": 10},
         run_name="r", namespace="ns", pipeline_name="sim2real",
