@@ -288,6 +288,39 @@ def test_rendered_argv_is_never_empty():
         assert ("--workload-spec" in got) or ("--corpus-header" in got)
 
 
+def test_whitespace_only_argv_is_treated_as_empty():
+    """A bare non-empty test accepts "   ", which word-splits to nothing and
+    reaches blis exactly as "" would — the same defect wearing a disguise. The
+    guard checks the joined string stripped, so a flag table that somehow
+    rendered only blanks is caught too."""
+    assert _render().strip() == _render()
+    # No rendered argv may begin or end with padding, since the Task word-splits
+    # and a padded value is indistinguishable from a missing one in a log line.
+    for over in ({}, {"observe": {"extraArgs": "  --rate 5  "}},
+                 {"workload": _CORPUS_WORKLOAD, "trace_path": "traces/x"}):
+        got = _render(**over)
+        assert got == got.strip()
+        assert "  " not in got, "double space would split to an empty word"
+
+
+def test_blis_rejects_corpus_plus_spec_flags_loudly():
+    """Documents the DOWNSTREAM backstop, verified in blis rather than assumed:
+    validateObserveCorpusFlags (cmd/observe_corpus.go:61) returns
+    "--workload-spec is invalid with --concurrent-sessions" and the caller
+    logrus.Fatalf's it at observe_cmd.go:300 — BEFORE the corpus branch. So a
+    renderer regression cannot silently replay the wrong workload.
+
+    That backstop does NOT make the renderer check redundant: failing at
+    assemble beats a pod that starts and dies. It does mean the failure mode is
+    loud rather than silent, so this test asserts the renderer never emits the
+    pair and records why over-widening validation on a permissiveness
+    assumption would be wrong."""
+    spec = _render()
+    corpus = _render(workload=_CORPUS_WORKLOAD, trace_path="traces/x")
+    assert "--concurrent-sessions" not in spec
+    assert "--workload-spec" not in corpus
+
+
 def test_empty_argv_guard_exists_and_is_unreachable_by_construction():
     """The `if not argv` guard is deliberately NOT driven by a test.
 
@@ -304,5 +337,5 @@ def test_empty_argv_guard_exists_and_is_unreachable_by_construction():
     import inspect
 
     src = inspect.getsource(observe_argv.render_observe_argv)
-    assert "if not argv:" in src
+    assert "if not rendered.strip():" in src
     assert "argv is empty" in src

@@ -157,6 +157,22 @@ OBSERVE_TUNING_FLAGS = {
     "--timeout": "timeout",
     "--warmup-requests": "warmupRequests",
     "--prewarm-duration": "prewarmDuration",
+    # Folded in by sim2real#900. `--detectors` is the CURRENT name; the Tekton
+    # task used to hardcode `--post-hoc-detector`, which inference-sim #1516
+    # renamed and which therefore no longer exists in blis.
+    "--detectors": "detectors",
+    "--api-format": "apiFormat",
+}
+
+# Valueless flags that map to a BOOLEAN blis_observe key. These cannot route
+# through OBSERVE_TUNING_FLAGS, which requires a value token: `--record-itl` and
+# `--no-streaming` take no argument, so presence IS the value.
+#
+# `--no-streaming` is INVERTED: blis has no `--streaming` flag, so the bundle key
+# `streaming` defaults true and presence of `--no-streaming` sets it false.
+OBSERVE_PRESENCE_FLAGS = {
+    "--record-itl": ("recordItl", True),
+    "--no-streaming": ("streaming", False),
 }
 
 # Hardcoded by tekton/tasks/run-workload-blis-observe-binary.yaml — the block
@@ -180,7 +196,6 @@ OBSERVE_PIPELINE_INJECTED_FLAGS = {
     "--trace-header",
     "--trace-data",
     "--saturation-report",
-    "--post-hoc-detector",
     "--corpus-header",
     "--corpus-data",
     "--concurrent-sessions",
@@ -207,21 +222,22 @@ OBSERVE_VALID_FLAGS = {
     "--corpus-data", "--corpus-header", "--defaults-filepath", "--horizon",
     "--itl-output", "--lazy-generation", "--max-concurrency", "--model",
     "--no-streaming", "--num-requests", "--output-tokens", "--output-tokens-max",
-    "--output-tokens-min", "--output-tokens-stdev", "--post-hoc-detector",
-    "--prefix-tokens", "--prewarm-duration", "--prompt-tokens",
+    "--output-tokens-min", "--output-tokens-stdev", "--prefix-tokens", "--prewarm-duration", "--prompt-tokens",
     "--prompt-tokens-max", "--prompt-tokens-min", "--prompt-tokens-stdev",
     "--rate", "--record-itl", "--rtt-ms", "--saturation-report",
-    "--saturation-threshold-ms", "--seed", "--server-type", "--server-url",
+    "--seed", "--server-type", "--server-url",
     "--session-id-header", "--slo-e2e", "--slo-itl", "--slo-ttft",
     "--think-time-dist", "--think-time-ms", "--timeout", "--total-sessions",
     "--trace-data", "--trace-header", "--unconstrained-output",
     "--warmup-requests", "--workload", "--workload-spec",
-    # --- cmd/root.go:registerSaturationFlags (attached to observeCmd) ---
-    "--saturation-ci", "--saturation-classifier",
-    "--saturation-drain-ratio-saturated", "--saturation-drain-ratio-transient",
-    "--saturation-min-windows", "--saturation-peak-band",
-    "--saturation-peak-ratio", "--saturation-tail-windows",
-    "--saturation-warmup-windows", "--saturation-window",
+    # --- cmd/saturation.go:registerDetectorFlags (attached to observeCmd) ---
+    # inference-sim #1516 replaced the 10-flag legacy saturation bank plus
+    # --saturation-threshold-ms with these, and renamed --post-hoc-detector to
+    # --detectors. Keeping the removed names here was not harmless: a config.md
+    # naming one would be transcribed verbatim into extraArgs and reach blis,
+    # which exits on an unknown flag — the same failure that broke the observe
+    # task. test_observe_valid_flags_all_exist_in_blis now guards this list.
+    "--detectors", "--saturation-config", "--saturation-final-window",
 }
 
 # Flags that belong to `blis replay` (the simulator's load generator) or to
@@ -1294,6 +1310,14 @@ def parse_observe_block(config_md_text: str) -> dict[str, str]:
         )
         # Tokens this flag consumes: itself, plus a separate value token if any.
         step = 2 if has_next_value else 1
+
+        if flag_name in OBSERVE_PRESENCE_FLAGS:
+            # Valueless boolean. Presence sets the key; any inline value is
+            # meaningless for a bool flag and is ignored rather than parsed.
+            key, val = OBSERVE_PRESENCE_FLAGS[flag_name]
+            parsed[key] = val
+            i += 1
+            continue
 
         if flag_name in OBSERVE_TUNING_FLAGS:
             value = inline_value if inline_value is not None else (

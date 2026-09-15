@@ -364,10 +364,14 @@ def render_observe_argv(
     # Unreachable today (the flag table always renders at least the tuning
     # defaults, --model and a workload source), so this exists to keep a future
     # refactor from silently opening the hole.
-    if not argv:
+    rendered = " ".join(argv)
+    # Whitespace-only is the same defect wearing a disguise: a bare non-empty
+    # test accepts "   ", which word-splits to nothing and reaches blis exactly
+    # as "" would. Check the JOINED string stripped, not just the list.
+    if not rendered.strip():
         raise ObserveArgvError(
             "rendered observe argv is empty, so blis observe would run with no "
             "workload source. This is a renderer bug — every cell must resolve "
             "to at least a workload source and the tuning defaults"
         )
-    return " ".join(argv)
+    return rendered

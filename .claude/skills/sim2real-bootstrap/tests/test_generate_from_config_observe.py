@@ -35,7 +35,6 @@ blis observe \\
   --prewarm-duration 60s \\
   --warmup-requests 50 \\
   --timeout 1800 \\
-  --post-hoc-detector composite \\
   --trace-header trace.yaml \\
   --trace-data trace.csv \\
   --saturation-report saturation.json
@@ -79,7 +78,7 @@ def test_absent_block_returns_empty_dict():
 
 def test_pipeline_injected_flags_are_dropped_not_extraargs():
     """--server-url, --model, --workload-spec, --trace-*, --saturation-report,
-    --post-hoc-detector are hardcoded by the Tekton task and MUST NOT leak
+    --saturation-report are supplied by the pipeline and MUST NOT leak
     into extraArgs."""
     text = """\
 ```bash
@@ -90,7 +89,6 @@ blis observe \\
   --trace-header t.yaml \\
   --trace-data t.csv \\
   --saturation-report s.json \\
-  --post-hoc-detector composite
 ```
 """
     assert gfc.parse_observe_block(text) == {}
@@ -204,7 +202,10 @@ blis observe \\
 """
     parsed = gfc.parse_observe_block(text)
     assert parsed["timeout"] == "60"
-    assert parsed["extraArgs"] == "--rate 50 --num-requests 1000 --no-streaming"
+    # --no-streaming is no longer extraArgs filler: #900 made it a first-class
+    # key, inverted (blis has no --streaming, so presence means streaming off).
+    assert parsed["streaming"] is False
+    assert parsed["extraArgs"] == "--rate 50 --num-requests 1000"
 
 
 def test_seed_and_saturation_flags_pass_through_to_extraargs():
@@ -216,15 +217,15 @@ def test_seed_and_saturation_flags_pass_through_to_extraargs():
 ```bash
 blis observe \\
   --seed 42 \\
-  --saturation-window 5s \\
-  --saturation-classifier composite \\
+  --rtt-ms 5 \\
+  --slo-ttft 500 \\
   --timeout 60
 ```
 """
     parsed = gfc.parse_observe_block(text)
     assert parsed["timeout"] == "60"
     assert parsed["extraArgs"] == (
-        "--seed 42 --saturation-window 5s --saturation-classifier composite"
+        "--seed 42 --rtt-ms 5 --slo-ttft 500"
     )
 
 
