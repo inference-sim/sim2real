@@ -217,6 +217,14 @@ def test_bool_keys_render_as_yaml_booleans():
     # "do NOT disable streaming" => streaming ON. The double negative is the
     # whole reason this needs a test rather than an eyeball.
     ("--no-streaming=false", {"streaming": True}),
+    # strconv.ParseBool's single-letter spellings, which pflag also accepts.
+    # Rejecting these while claiming pflag fidelity would be the same silent
+    # default drift in miniature: blis takes `--record-itl=t` without complaint.
+    ("--record-itl=t", {"recordItl": True}),
+    ("--record-itl=T", {"recordItl": True}),
+    ("--record-itl=f", {"recordItl": False}),
+    ("--no-streaming=f", {"streaming": True}),
+    ("--no-streaming=T", {"streaming": False}),
 ])
 def test_boolean_flags_honor_pflag_negation(form, expected):
     """Both flags are registered with pflag BoolVar (observe_cmd.go:159,195), for

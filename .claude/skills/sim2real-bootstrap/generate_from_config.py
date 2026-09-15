@@ -181,9 +181,24 @@ OBSERVE_PRESENCE_FLAGS = {
     "--no-streaming": ("streaming", False),
 }
 
-# Hardcoded by tekton/tasks/run-workload-blis-observe-binary.yaml — the block
-# in config.md typically lists them for readability but the Tekton task
-# supplies them at runtime, so they must NOT leak into extraArgs.
+# The FULL grammar Go's strconv.ParseBool accepts, which is what pflag's BoolVar
+# uses. Accepting a narrower set than blis would contradict the pflag-fidelity
+# rationale above: `--record-itl=t` is a boolean blis takes without complaint, so
+# telling the operator it is "not a boolean" and applying the default instead
+# would be exactly the silent default drift this change exists to remove.
+_PFLAG_TRUE = frozenset({"1", "t", "true"})
+_PFLAG_FALSE = frozenset({"0", "f", "false"})
+
+# Supplied by the PIPELINE, not by config.md — a block that lists them for
+# readability must not leak them into extraArgs, or they would be passed twice.
+#
+# Since #900 "the pipeline" means the ASSEMBLER for all but one: `observe_argv.py`
+# renders --model, --workload-spec, --trace-header/--trace-data,
+# --saturation-report, --corpus-header/--corpus-data and the replay pool flags
+# into observeArgs at assemble time. The Task's shell appends only --server-url,
+# which is a runtime task result (the standup endpoint) that assemble cannot know.
+# Before #900 the Task built all of these itself, which is what the older wording
+# here described.
 #
 # The corpus-mode trio (--corpus-header/--corpus-data and the pool flags
 # --concurrent-sessions/--total-sessions) is injected by the task's trace-mode
@@ -1356,9 +1371,9 @@ def parse_observe_block(config_md_text: str) -> dict[str, str]:
             key, asserted = OBSERVE_PRESENCE_FLAGS[flag_name]
             if inline_value is None:
                 parsed[key] = asserted
-            elif inline_value.strip().lower() in ("true", "1"):
+            elif inline_value.strip().lower() in _PFLAG_TRUE:
                 parsed[key] = asserted
-            elif inline_value.strip().lower() in ("false", "0"):
+            elif inline_value.strip().lower() in _PFLAG_FALSE:
                 parsed[key] = not asserted
             else:
                 # Unparseable — warn and drop, matching every other drop path in
