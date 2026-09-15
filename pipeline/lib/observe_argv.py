@@ -68,16 +68,40 @@ class _Flag:
       ``"present"`` -> ``--flag`` when truthy, nothing otherwise
       ``"absent"``  -> ``--flag`` when FALSY, nothing otherwise (inverted; blis
                        has no ``--streaming``, only ``--no-streaming``)
+
+    ``check`` is the TYPE predicate, consumed by ``manifest.load_manifest`` so
+    the ``blis_observe`` allowlist and this table cannot disagree about what a
+    key accepts. Value-level validity (a detector name, an api-format choice)
+    is checked here at render time instead, so neither layer duplicates the
+    other: manifest answers "is this the right type", the renderer answers "is
+    this a value blis will accept".
     """
 
-    __slots__ = ("flag", "default", "kind", "choices", "describe")
+    __slots__ = ("flag", "default", "kind", "choices", "check", "describe")
 
-    def __init__(self, flag, default, kind="value", choices=None, describe=""):
+    def __init__(self, flag, default, check, kind="value", choices=None,
+                 describe=""):
         self.flag = flag
         self.default = default
+        self.check = check
         self.kind = kind
         self.choices = choices
         self.describe = describe
+
+
+def _is_int(value) -> bool:
+    """Non-bool int. ``bool`` subclasses ``int``, so YAML ``true`` would
+    otherwise satisfy an int field — the guard the pre-#900 blanket scalar
+    check existed to provide, kept per-key rather than dropped."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_str(value) -> bool:
+    return isinstance(value, str)
+
+
+def _is_bool(value) -> bool:
+    return isinstance(value, bool)
 
 
 #: Valid ``--detectors`` names, mirroring inference-sim's roster
@@ -95,24 +119,42 @@ DETECTOR_ROSTER = ("composite", "threshold", "backlog-drift", "peak-rate")
 #: current invocation dies at argument parsing. The key is named for the flag
 #: that exists, not the one that was deleted.
 OBSERVE_FLAGS: dict[str, _Flag] = {
-    "maxConcurrency": _Flag("--max-concurrency", 10000,
-                            describe="must be a positive int"),
-    "timeout": _Flag("--timeout", 1800, describe="must be a positive int"),
-    "prewarmDuration": _Flag("--prewarm-duration", "60s",
-                             describe="must be a Go duration string"),
-    "warmupRequests": _Flag("--warmup-requests", 50,
-                            describe="must be an int >= 0"),
-    "detectors": _Flag("--detectors", "composite",
-                       describe=f"must be empty, 'all', or one or more of "
-                                f"{', '.join(DETECTOR_ROSTER)}"),
-    "apiFormat": _Flag("--api-format", "completions",
+    "maxConcurrency": _Flag("--max-concurrency", 10000, _is_int,
+                            describe="must be an int"),
+    "timeout": _Flag("--timeout", 1800, _is_int, describe="must be an int"),
+    "prewarmDuration": _Flag("--prewarm-duration", "60s", _is_str,
+                             describe="must be a Go duration string (e.g. 60s)"),
+    "warmupRequests": _Flag("--warmup-requests", 50, _is_int,
+                            describe="must be an int"),
+    "detectors": _Flag("--detectors", "composite", _is_str,
+                       describe=f"must be a string: empty (off), 'all', or one "
+                                f"or more of {', '.join(DETECTOR_ROSTER)}"),
+    "apiFormat": _Flag("--api-format", "completions", _is_str,
                        choices=("completions", "chat"),
                        describe="must be 'completions' or 'chat'"),
-    "recordItl": _Flag("--record-itl", False, kind="present",
+    "recordItl": _Flag("--record-itl", False, _is_bool, kind="present",
                        describe="must be a bool"),
-    "streaming": _Flag("--no-streaming", True, kind="absent",
+    "streaming": _Flag("--no-streaming", True, _is_bool, kind="absent",
                        describe="must be a bool"),
 }
+
+#: ``extraArgs`` is a free-form flag TAIL rather than a single flag, so it has no
+#: ``_Flag`` entry — it is appended verbatim (word-split) after everything else.
+#: It is still a legal ``blis_observe`` key, hence this separate constant.
+VALID_OBSERVE_KEYS: frozenset[str] = frozenset(OBSERVE_FLAGS) | {"extraArgs"}
+
+
+def check_observe_type(key: str, value) -> str | None:
+    """Return an error phrase if ``value`` is the wrong TYPE for ``key``, else
+    None. The single type authority for ``blis_observe``, consumed by
+    ``manifest.load_manifest`` so the allowlist cannot drift from this table.
+    """
+    if key == "extraArgs":
+        return None if _is_str(value) else "must be a string"
+    spec = OBSERVE_FLAGS.get(key)
+    if spec is None:
+        return "is not a recognized blis_observe key"
+    return None if spec.check(value) else spec.describe
 
 
 def _validate_word(value: str, where: str, *, allow_space: bool) -> None:

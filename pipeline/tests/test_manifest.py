@@ -233,12 +233,67 @@ def test_blis_observe_rejects_unknown_keys(tmp_path):
         load_manifest(path)
 
 
-@pytest.mark.parametrize("bad_value", [True, [1, 2], {"nested": 1}, None])
-def test_blis_observe_rejects_non_scalar_values(tmp_path, bad_value):
+@pytest.mark.parametrize("bad_value", [True, [1, 2], {"nested": 1}, None, "60"])
+def test_blis_observe_rejects_wrong_typed_int_values(tmp_path, bad_value):
+    """`timeout` is an int key. Since #900 the check is per-key rather than one
+    blanket scalar predicate, but the original guard's intent is preserved: YAML
+    `true` must never satisfy an int field (bool subclasses int). A numeric
+    STRING is also rejected — it would render as `--timeout 60` and work, but
+    accepting two spellings of one value invites drift."""
     data = {**MINIMAL_V3, "blis_observe": {"timeout": bad_value}}
     path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="blis_observe.timeout.*scalar"):
+    with pytest.raises(ManifestError, match="blis_observe.timeout must be an int"):
         load_manifest(path)
+
+
+@pytest.mark.parametrize("key,value", [
+    ("detectors", "composite"),
+    ("detectors", ""),
+    ("apiFormat", "chat"),
+    ("recordItl", True),
+    ("streaming", False),
+    ("maxConcurrency", 5000),
+    ("prewarmDuration", "30s"),
+    ("extraArgs", "--rate 5"),
+])
+def test_blis_observe_accepts_the_nine_keys(tmp_path, key, value):
+    """#900 folds in detectors/apiFormat/recordItl/streaming. Two are BOOLS,
+    which the pre-#900 blanket scalar check rejected outright."""
+    data = {**MINIMAL_V3, "blis_observe": {key: value}}
+    assert load_manifest(_write_manifest(tmp_path, data))["blis_observe"][key] == value
+
+
+@pytest.mark.parametrize("key,bad", [
+    ("recordItl", "true"),      # string, not bool
+    ("streaming", 1),           # int, not bool
+    ("detectors", 5),           # int, not str
+    ("apiFormat", True),        # bool, not str
+    ("prewarmDuration", 60),    # int, not duration string
+])
+def test_blis_observe_rejects_wrong_types_per_key(tmp_path, key, bad):
+    data = {**MINIMAL_V3, "blis_observe": {key: bad}}
+    with pytest.raises(ManifestError, match=f"blis_observe.{key} must be"):
+        load_manifest(_write_manifest(tmp_path, data))
+
+
+def test_blis_observe_unknown_key_message_lists_all_nine(tmp_path):
+    data = {**MINIMAL_V3, "blis_observe": {"postHocDetector": "composite"}}
+    with pytest.raises(ManifestError) as exc:
+        load_manifest(_write_manifest(tmp_path, data))
+    msg = str(exc.value)
+    for key in ("detectors", "apiFormat", "recordItl", "streaming",
+                "extraArgs", "maxConcurrency", "timeout", "warmupRequests",
+                "prewarmDuration"):
+        assert key in msg
+
+
+def test_manifest_allowlist_matches_the_renderer_table(tmp_path):
+    """The allowlist is DERIVED from the renderer's table, so a key cannot be
+    accepted by the manifest yet reach no flag. Assert the derivation rather
+    than a hardcoded list, so the two cannot drift."""
+    from pipeline.lib import observe_argv
+    assert observe_argv.VALID_OBSERVE_KEYS == frozenset(
+        observe_argv.OBSERVE_FLAGS) | {"extraArgs"}
 
 
 
