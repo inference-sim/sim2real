@@ -44,17 +44,31 @@ REQUIRED = object()
 class _Field:
     """One legal field of the corpus/replay document.
 
-    ``param``    — the PipelineRun param it drives (declared in ``pipeline/pipeline.yaml``).
+    Exactly one of ``param`` / ``flag`` is set, and which one says where the
+    field's value LANDS — a distinction issue #900 introduced:
+
+    ``param``    — the PipelineRun param it drives (declared in
+                   ``pipeline/pipeline.yaml``). Used by every ``corpus:`` field,
+                   which feed the ``prepare-trace`` Task.
+    ``flag``     — the ``blis observe`` CLI flag it drives, rendered into the
+                   ``observeArgs`` param by ``observe_argv.py``. Used by every
+                   ``replay:`` field: #900 collapsed ``concurrentSessions`` and
+                   ``totalSessions`` from standalone PipelineRun params into the
+                   rendered argv, so those params no longer exist and naming
+                   them here would be a dangling reference.
     ``default``  — value used when the document omits it, or ``REQUIRED``.
-    ``render``   — value → Tekton param string (Tekton params are always strings).
+    ``render``   — value → string (Tekton params and argv words are both strings).
     ``check``    — validity predicate, run at assemble time.
     ``describe`` — operator-facing phrase completing "corpus.x.y <describe>".
     """
 
-    __slots__ = ("param", "default", "render", "check", "describe")
+    __slots__ = ("param", "flag", "default", "render", "check", "describe")
 
-    def __init__(self, param, default, render, check, describe):
+    def __init__(self, default, render, check, describe, param=None, flag=None):
+        if (param is None) == (flag is None):
+            raise ValueError("exactly one of param / flag must be set")
         self.param = param
+        self.flag = flag
         self.default = default
         self.render = render
         self.check = check
@@ -148,12 +162,12 @@ CORPUS_FIELDS: dict[str, dict[str, _Field]] = {
 #: one cache entry, which is the property ``corpus_cache_key`` exists to give.
 REPLAY_FIELDS: dict[str, _Field] = {
     "concurrent_sessions": _Field(
-        param="concurrentSessions", default=REQUIRED, render=str,
+        flag="--concurrent-sessions", default=REQUIRED, render=str,
         check=_int_at_least(1),
         describe="must be an int >= 1",
     ),
     "total_sessions": _Field(
-        param="totalSessions", default=REQUIRED, render=str,
+        flag="--total-sessions", default=REQUIRED, render=str,
         check=_int_at_least(0),
         describe="must be an int >= 0 (0 = exhaust the corpus)",
     ),

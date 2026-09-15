@@ -195,7 +195,7 @@ def _names(pr):
 def test_observe_absent_emits_no_observe_params():
     """observe=None (or absent) leaves the PipelineRun param list at its base set."""
     pr = make_pipelinerun_scenario(
-        phase="baseline", workload={"name": "wl"}, run_name="r",
+        phase="baseline", workload={"name": "wl", "clients": []}, run_name="r",
         namespace="ns", pipeline_name="sim2real-r",
         scenario_content="{}",
     )
@@ -207,7 +207,7 @@ def test_observe_absent_emits_no_observe_params():
 def test_observe_empty_dict_emits_no_observe_params():
     """observe={} (the manifest default when section is absent) emits nothing."""
     pr = make_pipelinerun_scenario(
-        phase="baseline", workload={"name": "wl"}, run_name="r",
+        phase="baseline", workload={"name": "wl", "clients": []}, run_name="r",
         namespace="ns", pipeline_name="sim2real-r",
         scenario_content="{}",
         observe={},
@@ -217,62 +217,50 @@ def test_observe_empty_dict_emits_no_observe_params():
         assert k not in names
 
 
-def test_observe_partial_emits_only_specified_keys():
-    """Omitted keys are left for Tekton to fall through to Pipeline-level defaults."""
+def test_observe_values_land_in_observe_args_not_scalar_params():
+    """#900: the five tuning scalars are no longer PipelineRun params — their
+    values are rendered into observeArgs. Absence of the params is the contract
+    (pipeline.yaml no longer declares them, so emitting one would be a Tekton
+    admission error)."""
     pr = make_pipelinerun_scenario(
-        phase="baseline", workload={"name": "wl"}, run_name="r",
-        namespace="ns", pipeline_name="sim2real-r",
-        scenario_content="{}",
+        phase="baseline", workload={"name": "wl", "clients": []}, run_name="r",
+        namespace="ns", pipeline_name="sim2real-r", scenario_content="{}",
         observe={"timeout": 3600, "maxConcurrency": 5000},
     )
     params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
-    assert params["timeout"] == "3600"
-    assert params["maxConcurrency"] == "5000"
-    for k in ("warmupRequests", "prewarmDuration", "extraArgs"):
-        assert k not in params
+    for k in _OBSERVE_KEYS:
+        assert k not in params, f"{k} must no longer be a PipelineRun param"
+    assert "--timeout 3600" in params["observeArgs"]
+    assert "--max-concurrency 5000" in params["observeArgs"]
 
 
-def test_observe_full_dict_emits_all_keys_as_strings():
-    """All five keys flow through; values are coerced to strings for Tekton."""
+def test_observe_full_dict_lands_in_observe_args():
     pr = make_pipelinerun_scenario(
-        phase="baseline", workload={"name": "wl"}, run_name="r",
-        namespace="ns", pipeline_name="sim2real-r",
-        scenario_content="{}",
+        phase="baseline", workload={"name": "wl", "clients": []}, run_name="r",
+        namespace="ns", pipeline_name="sim2real-r", scenario_content="{}",
         observe={
-            "maxConcurrency": 5000,
-            "timeout": 3600,
-            "warmupRequests": 25,
-            "prewarmDuration": "30s",
-            "extraArgs": "--foo bar",
+            "maxConcurrency": 5000, "timeout": 3600, "warmupRequests": 25,
+            "prewarmDuration": "30s", "extraArgs": "--foo bar",
         },
     )
+    argv = {p["name"]: p["value"] for p in pr["spec"]["params"]}["observeArgs"]
+    for frag in ("--max-concurrency 5000", "--timeout 3600",
+                 "--warmup-requests 25", "--prewarm-duration 30s"):
+        assert frag in argv
+    assert argv.endswith("--foo bar")
+
+
+def test_model_is_no_longer_a_pipelinerun_param():
+    """#900 drops it: the renderer carries --model inside observeArgs, and
+    pipeline.yaml no longer declares a top-level `model`."""
+    pr = make_pipelinerun_scenario(
+        phase="baseline", workload={"name": "wl", "clients": []}, run_name="r",
+        namespace="ns", pipeline_name="sim2real-r", scenario_content="{}",
+        model="qwen/qwen3-14b",
+    )
     params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
-    assert params["maxConcurrency"] == "5000"
-    assert params["timeout"] == "3600"
-    assert params["warmupRequests"] == "25"
-    assert params["prewarmDuration"] == "30s"
-    assert params["extraArgs"] == "--foo bar"
-
-
-def test_make_pipelinerun_scenario_iteration_default_is_one():
-    """When iteration is not passed, default is 1 and name gets '-i1' suffix."""
-    pr = make_pipelinerun_scenario(
-        phase="baseline", workload={"name": "wl"}, run_name="r",
-        namespace="ns", pipeline_name="sim2real",
-        scenario_content="scenario: []",
-    )
-    assert pr["metadata"]["name"] == "baseline-wl-r-i1"
-
-
-def test_make_pipelinerun_scenario_iteration_explicit():
-    """Explicit iteration=N produces '-i<N>' suffix on metadata.name."""
-    pr = make_pipelinerun_scenario(
-        phase="baseline", workload={"name": "wl"}, run_name="r",
-        namespace="ns", pipeline_name="sim2real",
-        scenario_content="scenario: []",
-        iteration=5,
-    )
-    assert pr["metadata"]["name"] == "baseline-wl-r-i5"
+    assert "model" not in params
+    assert "--model qwen/qwen3-14b" in params["observeArgs"]
 
 
 # ── Tests for build_results_dir + RESULTS_DIR_TEMPLATE ──────────────────────
@@ -474,8 +462,11 @@ def test_trace_workload_emits_locked_params():
         _TRACE_WORKLOAD["corpus"], default_flow_style=True
     ).strip()
     assert params["tracePath"] == trace_path(_TRACE_WORKLOAD["corpus"])
-    assert params["concurrentSessions"] == "128"
-    assert params["totalSessions"] == "192"
+    # #900: the session counts are no longer params — they are argv flags.
+    assert "concurrentSessions" not in params
+    assert "totalSessions" not in params
+    assert "--concurrent-sessions 128" in params["observeArgs"]
+    assert "--total-sessions 192" in params["observeArgs"]
     # Scalar projections the prepare-trace steps read directly.
     assert params["traceSource"] == "hf:Exgentic/agent-llm-traces"
     assert params["traceShards"] == "39"
@@ -533,8 +524,11 @@ def test_rendering_without_validation_raises_rather_than_emitting_a_sentinel():
 
 
 def test_rendering_without_replay_raises():
+    """Now raised by the argv renderer rather than the param renderer: #900
+    moved the replay fields from PipelineRun params into observeArgs."""
+    from pipeline.lib.observe_argv import ObserveArgvError
     wl = {"corpus": {"upstream": {"source": "hf:o/d"}}}
-    with pytest.raises(KeyError, match="replay.concurrent_sessions"):
+    with pytest.raises(ObserveArgvError, match="replay.concurrent_sessions"):
         _trace_params(wl)
 
 

@@ -157,11 +157,48 @@ OBSERVE_TUNING_FLAGS = {
     "--timeout": "timeout",
     "--warmup-requests": "warmupRequests",
     "--prewarm-duration": "prewarmDuration",
+    # Folded in by sim2real#900. `--detectors` is the CURRENT name; the Tekton
+    # task used to hardcode `--post-hoc-detector`, which inference-sim #1516
+    # renamed and which therefore no longer exists in blis.
+    "--detectors": "detectors",
+    "--api-format": "apiFormat",
 }
 
-# Hardcoded by tekton/tasks/run-workload-blis-observe-binary.yaml — the block
-# in config.md typically lists them for readability but the Tekton task
-# supplies them at runtime, so they must NOT leak into extraArgs.
+# Boolean flags mapped to a BOOLEAN blis_observe key: flag -> (key, value when
+# ASSERTED). They cannot route through OBSERVE_TUNING_FLAGS, which requires a
+# value token, because bare presence is the normal spelling.
+#
+# But bare presence is not the ONLY spelling: both are registered with pflag's
+# BoolVar (observe_cmd.go:159,195), so `--flag=false` is canonical negation and a
+# parser that ignored it would silently invert the author's intent. The tuple's
+# second element is the asserted value; a negation flips it.
+#
+# `--no-streaming` is INVERTED: blis has no `--streaming` flag, so the bundle key
+# `streaming` defaults true, a bare `--no-streaming` sets it false, and
+# `--no-streaming=false` ("do not disable streaming") sets it back to true.
+OBSERVE_PRESENCE_FLAGS = {
+    "--record-itl": ("recordItl", True),
+    "--no-streaming": ("streaming", False),
+}
+
+# The FULL grammar Go's strconv.ParseBool accepts, which is what pflag's BoolVar
+# uses. Accepting a narrower set than blis would contradict the pflag-fidelity
+# rationale above: `--record-itl=t` is a boolean blis takes without complaint, so
+# telling the operator it is "not a boolean" and applying the default instead
+# would be exactly the silent default drift this change exists to remove.
+_PFLAG_TRUE = frozenset({"1", "t", "true"})
+_PFLAG_FALSE = frozenset({"0", "f", "false"})
+
+# Supplied by the PIPELINE, not by config.md — a block that lists them for
+# readability must not leak them into extraArgs, or they would be passed twice.
+#
+# Since #900 "the pipeline" means the ASSEMBLER for all but one: `observe_argv.py`
+# renders --model, --workload-spec, --trace-header/--trace-data,
+# --saturation-report, --corpus-header/--corpus-data and the replay pool flags
+# into observeArgs at assemble time. The Task's shell appends only --server-url,
+# which is a runtime task result (the standup endpoint) that assemble cannot know.
+# Before #900 the Task built all of these itself, which is what the older wording
+# here described.
 #
 # The corpus-mode trio (--corpus-header/--corpus-data and the pool flags
 # --concurrent-sessions/--total-sessions) is injected by the task's trace-mode
@@ -180,7 +217,6 @@ OBSERVE_PIPELINE_INJECTED_FLAGS = {
     "--trace-header",
     "--trace-data",
     "--saturation-report",
-    "--post-hoc-detector",
     "--corpus-header",
     "--corpus-data",
     "--concurrent-sessions",
@@ -198,30 +234,35 @@ OBSERVE_PIPELINE_INJECTED_FLAGS = {
 # change (the second is easy to miss):
 #   1. cmd/observe_cmd.go — flags registered directly on observeCmd. Match EVERY
 #      pflag setter, including Int64Var/Float64Var/DurationVar, not just Int/String.
-#   2. cmd/root.go:registerSaturationFlags(observeCmd) — the --saturation-* /
-#      backlog-drift block, shared with `blis run`/`blis replay` and registered
-#      on observe via that helper call (observe_cmd.go).
+#   2. cmd/saturation.go:registerDetectorFlags(observeCmd) — the detector block
+#      (--detectors / --saturation-*), shared with `blis run`/`blis replay` and
+#      registered on observe via that helper call (observe_cmd.go:200).
+#      This was `cmd/root.go:registerSaturationFlags` before inference-sim
+#      #1516, which replaced the legacy saturation bank: BOTH the file and the
+#      function name changed, so a grep for the old name finds nothing and
+#      silently suggests there is nothing to regenerate.
 OBSERVE_VALID_FLAGS = {
     # --- cmd/observe_cmd.go (registered directly on observeCmd) ---
     "--api-format", "--api-key", "--concurrency", "--concurrent-sessions",
     "--corpus-data", "--corpus-header", "--defaults-filepath", "--horizon",
     "--itl-output", "--lazy-generation", "--max-concurrency", "--model",
     "--no-streaming", "--num-requests", "--output-tokens", "--output-tokens-max",
-    "--output-tokens-min", "--output-tokens-stdev", "--post-hoc-detector",
-    "--prefix-tokens", "--prewarm-duration", "--prompt-tokens",
+    "--output-tokens-min", "--output-tokens-stdev", "--prefix-tokens", "--prewarm-duration", "--prompt-tokens",
     "--prompt-tokens-max", "--prompt-tokens-min", "--prompt-tokens-stdev",
     "--rate", "--record-itl", "--rtt-ms", "--saturation-report",
-    "--saturation-threshold-ms", "--seed", "--server-type", "--server-url",
+    "--seed", "--server-type", "--server-url",
     "--session-id-header", "--slo-e2e", "--slo-itl", "--slo-ttft",
     "--think-time-dist", "--think-time-ms", "--timeout", "--total-sessions",
     "--trace-data", "--trace-header", "--unconstrained-output",
     "--warmup-requests", "--workload", "--workload-spec",
-    # --- cmd/root.go:registerSaturationFlags (attached to observeCmd) ---
-    "--saturation-ci", "--saturation-classifier",
-    "--saturation-drain-ratio-saturated", "--saturation-drain-ratio-transient",
-    "--saturation-min-windows", "--saturation-peak-band",
-    "--saturation-peak-ratio", "--saturation-tail-windows",
-    "--saturation-warmup-windows", "--saturation-window",
+    # --- cmd/saturation.go:registerDetectorFlags (attached to observeCmd) ---
+    # inference-sim #1516 replaced the 10-flag legacy saturation bank plus
+    # --saturation-threshold-ms with these, and renamed --post-hoc-detector to
+    # --detectors. Keeping the removed names here was not harmless: a config.md
+    # naming one would be transcribed verbatim into extraArgs and reach blis,
+    # which exits on an unknown flag — the same failure that broke the observe
+    # task. test_observe_valid_flags_all_exist_in_blis now guards this list.
+    "--detectors", "--saturation-config", "--saturation-final-window",
 }
 
 # Flags that belong to `blis replay` (the simulator's load generator) or to
@@ -239,13 +280,29 @@ OBSERVE_REPLAY_ONLY_FLAGS = {
     "--total-kv-blocks", "--hardware", "--tp",             # sim hardware/model
 }
 
-# Match pipeline/pipeline.yaml:36-50. Update in lockstep if those defaults
-# ever change.
+# Defaults for every blis_observe key, in canonical emission order. These MUST
+# match ``OBSERVE_FLAGS`` in pipeline/lib/observe_argv.py, which is the runtime
+# authority — the renderer there applies these same values when a bundle omits a
+# key, so a mismatch means the generated transfer.yaml documents one value while
+# the pipeline runs another. test_observe_flag_lists.py asserts the key sets are
+# identical.
+#
+# This dict also decides what render_blis_observe_yaml EMITS: it iterates these
+# keys, so a key parsed from config.md but absent here is silently discarded.
+# That is precisely how #900's first pass regressed --api-format / --record-itl /
+# --no-streaming, which previously survived into extraArgs.
+#
+# (The old pointer to pipeline/pipeline.yaml's param defaults is gone: #900
+# deleted those params, so observe_argv.py is the only source now.)
 OBSERVE_DEFAULTS = {
     "maxConcurrency": "10000",
     "timeout": "1800",
     "warmupRequests": "50",
     "prewarmDuration": "60s",
+    "detectors": "composite",
+    "apiFormat": "completions",
+    "recordItl": False,
+    "streaming": True,
     "extraArgs": "",
 }
 
@@ -1295,6 +1352,41 @@ def parse_observe_block(config_md_text: str) -> dict[str, str]:
         # Tokens this flag consumes: itself, plus a separate value token if any.
         step = 2 if has_next_value else 1
 
+        if flag_name in OBSERVE_PRESENCE_FLAGS:
+            # Boolean flag. Bare presence asserts it; `--flag=false` NEGATES it.
+            # Both are registered with pflag's BoolVar (observe_cmd.go:159,195),
+            # and `--flag=false` is BoolVar's canonical negation — so discarding
+            # an inline value silently inverts what the author wrote. It did:
+            # `--record-itl=false` used to yield recordItl: true.
+            #
+            # `asserted` is the key's value when the flag IS asserted, so a
+            # negation flips it. That matters most for the inverted flag:
+            # `--no-streaming=false` means "do NOT disable streaming", i.e.
+            # streaming: true — the opposite of a bare `--no-streaming`.
+            #
+            # Only an INLINE value counts. pflag does not accept a
+            # space-separated bool (`--record-itl false` sets the flag true and
+            # leaves `false` a positional), so consuming the next token here
+            # would diverge from the tool.
+            key, asserted = OBSERVE_PRESENCE_FLAGS[flag_name]
+            if inline_value is None:
+                parsed[key] = asserted
+            elif inline_value.strip().lower() in _PFLAG_TRUE:
+                parsed[key] = asserted
+            elif inline_value.strip().lower() in _PFLAG_FALSE:
+                parsed[key] = not asserted
+            else:
+                # Unparseable — warn and drop, matching every other drop path in
+                # this function rather than guessing a polarity.
+                print(
+                    f"WARNING: dropping '{flag_name}={inline_value}' from the "
+                    f"blis observe block (not a boolean); the "
+                    f"sim2real-bootstrap default will apply.",
+                    file=sys.stderr,
+                )
+            i += 1
+            continue
+
         if flag_name in OBSERVE_TUNING_FLAGS:
             value = inline_value if inline_value is not None else (
                 flag_tokens[i + 1] if has_next_value else None
@@ -1348,7 +1440,9 @@ def parse_observe_block(config_md_text: str) -> dict[str, str]:
 def render_blis_observe_yaml(parsed: dict[str, str]) -> str:
     """Render a `blis_observe:` YAML block with provenance comments.
 
-    Emits all 5 keys in canonical order. Keys present in `parsed` are marked
+    Emits every OBSERVE_DEFAULTS key in canonical order (nine as of #900).
+    Bools render as bare YAML `true`/`false`; a quoted "True" would be a
+    string and manifest.py's per-key type check would reject it. Keys present in `parsed` are marked
     `# source: config.md`; keys absent are defaulted from OBSERVE_DEFAULTS
     and marked `# source: sim2real-bootstrap default`. Numeric-string values
     (all-digit) emit as bare YAML integers; other values emit as double-
@@ -1362,6 +1456,13 @@ def render_blis_observe_yaml(parsed: dict[str, str]) -> str:
         else:
             value = default
             source = "sim2real-bootstrap default"
+        # Bools first: `isdigit` is a str method and raises AttributeError on a
+        # bool, and a quoted "True" is a STRING to YAML rather than a boolean —
+        # manifest.py's per-key type check would then reject it.
+        if isinstance(value, bool):
+            rendered = "true" if value else "false"
+            lines.append(f"  {key}: {rendered}  # source: {source}")
+            continue
         # Emit as bare int when the value is purely digits (no leading zero
         # edge case: '0' is fine as int, '007' would still parse fine).
         if value.isdigit():

@@ -1,7 +1,7 @@
 """Tekton PipelineRun generation for sim2real."""
 import yaml
 
-from pipeline.lib import corpus_schema
+from pipeline.lib import corpus_schema, observe_argv
 
 _SPEC_BASE_DIR = "/workspace/source/llm-d-benchmark"
 _SCENARIO_FILE_PATH = "/tmp/llmdbench-config/scenario.yaml"
@@ -83,30 +83,26 @@ def _apply_workspace_bindings(ws_names: list, bindings: dict) -> list:
     ]
 
 
-_OBSERVE_PARAM_ORDER = (
-    "maxConcurrency", "timeout", "warmupRequests", "prewarmDuration", "extraArgs",
-)
+def _render_corpus_params(corpus: dict) -> list[dict]:
+    """Render the ``corpus:`` sections as ``prepare-trace`` PipelineRun params.
 
+    Driven entirely by ``corpus_schema.CORPUS_FIELDS``, so a field cannot be
+    legal in the schema yet reach no param (issue #901's invariant). Order
+    follows the table's insertion order, which keeps generated PipelineRun YAML
+    diffable.
 
-def _render_corpus_params(corpus: dict, replay: dict) -> list[dict]:
-    """Render the corpus/replay document as PipelineRun params.
-
-    Driven entirely by ``corpus_schema``'s tables, so a field cannot be legal in
-    the schema yet reach no param (issue #901's invariant). Order follows the
-    tables' insertion order, which keeps generated PipelineRun YAML diffable.
+    ``replay:`` is deliberately NOT rendered here. Issue #900 collapsed
+    ``concurrentSessions``/``totalSessions`` into the rendered observe argv, so
+    those params no longer exist; the replay fields are applied by
+    ``observe_argv.render_observe_argv`` as ``--concurrent-sessions`` /
+    ``--total-sessions`` instead. #901's applied-or-rejected invariant still
+    holds — the destination moved, not the guarantee.
 
     Callers must have validated the document first: this asserts rather than
     guesses when a required field is missing, so a skipped validation surfaces
     as a loud error instead of a param rendered from a sentinel.
     """
     out: list[dict] = []
-    for key, field in corpus_schema.REPLAY_FIELDS.items():
-        if key not in replay:
-            raise KeyError(
-                f"replay.{key} is required but absent — validate the document "
-                f"with corpus_schema.validate_corpus_document before rendering"
-            )
-        out.append({"name": field.param, "value": field.render(replay[key])})
     for section, fields in corpus_schema.CORPUS_FIELDS.items():
         written = corpus.get(section) or {}
         for key, field in fields.items():
@@ -203,10 +199,25 @@ def make_pipelinerun_scenario(
         # in-container YAML parsing of the compact traceSpec is needed
         # (line-based sed on single-line flow YAML was fragile and could extract
         # an empty source → 404 on download).
-        trace_scalars = _render_corpus_params(corpus, workload.get("replay") or {})
+        trace_scalars = _render_corpus_params(corpus)
     else:
         wl_spec = {k: v for k, v in workload.items() if k != "workload_name"}
         wl_spec_str = yaml.dump(wl_spec, default_flow_style=True).strip()
+        t_path = ""
+
+    # The whole `blis observe` command line, rendered here rather than
+    # reassembled by the Task's shell from a dozen scalar params (issue #900).
+    # `--server-url` is excluded: it is a runtime Task result (the standup task's
+    # endpoint), so the Task appends it. resultsDir is rendered from the SAME
+    # helper pipeline.yaml uses for the Task's `resultsDir` param, so the argv's
+    # output paths cannot drift from the directory the Task chmods and lists.
+    observe_args = observe_argv.render_observe_argv(
+        workload=workload,
+        observe=observe,
+        model=model,
+        results_dir=build_results_dir(run_name, phase, wl_name, iteration),
+        trace_path=t_path,
+    )
 
     params: list[dict] = [
         {"name": "experimentId",      "value": run_name},
@@ -221,24 +232,24 @@ def make_pipelinerun_scenario(
         {"name": "benchmarkGitCommit", "value": benchmark_git_commit},
         {"name": "blisGitRepoUrl",   "value": blis_git_repo_url},
         {"name": "blisGitCommit",     "value": blis_git_commit},
-        {"name": "model",            "value": model},
         {"name": "replica",          "value": str(iteration)},
+        # The rendered observe command line. Replaces the nine scalar params the
+        # Task used to reassemble (maxConcurrency, timeout, warmupRequests,
+        # prewarmDuration, extraArgs, tracePath-as-observe-input,
+        # concurrentSessions, totalSessions) plus `model`, which is now a flag
+        # inside the argv rather than a param of its own (#900).
+        {"name": "observeArgs",      "value": observe_args},
     ]
     if trace_mode:
         # Corpus-only params, adjacent to workloadSpec. Generative workloads
         # deliberately do NOT emit these so their param list stays identical
-        # to prior releases.
+        # to prior releases. These feed `prepare-trace`, NOT observe — observe's
+        # copy of the corpus path now lives inside observeArgs.
         params += [
             {"name": "traceSpec", "value": trace_spec_str},
             {"name": "tracePath", "value": t_path},
         ]
         params += trace_scalars
-    if observe:
-        # Emit only specified keys; omitted ones fall through to Pipeline-level
-        # defaults declared in pipeline/pipeline.yaml. Tekton params are strings.
-        for k in _OBSERVE_PARAM_ORDER:
-            if k in observe:
-                params.append({"name": k, "value": str(observe[k])})
 
     spec: dict = {
         "pipelineRef": {"name": pipeline_name},

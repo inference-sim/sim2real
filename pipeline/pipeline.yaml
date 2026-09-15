@@ -20,6 +20,14 @@ spec:
       type: string
     - name: workloadSpec
       type: string
+    - name: observeArgs
+      type: string
+      description: >-
+        The complete `blis observe` argv except --server-url, rendered by
+        assemble (pipeline/lib/observe_argv.py, issue #900). Consumed by
+        run-workload-blis-observe-binary, which appends --server-url and runs
+        it. No default: an unrendered PipelineRun must fail at creation rather
+        than reach blis with an empty command line.
     - name: benchmarkGitRepoUrl
       type: string
     - name: benchmarkGitCommit
@@ -28,26 +36,9 @@ spec:
       type: string
     - name: blisGitCommit
       type: string
-    - name: model
-      type: string
     - name: skipTeardown
       type: string
       default: "false"
-    - name: maxConcurrency
-      type: string
-      default: "10000"
-    - name: timeout
-      type: string
-      default: "1800"
-    - name: warmupRequests
-      type: string
-      default: "50"
-    - name: prewarmDuration
-      type: string
-      default: "60s"
-    - name: extraArgs
-      type: string
-      default: ""
     - name: replica
       type: string
       default: "1"
@@ -55,12 +46,6 @@ spec:
       type: string
       default: ""
     - name: tracePath
-      type: string
-      default: ""
-    - name: concurrentSessions
-      type: string
-      default: ""
-    - name: totalSessions
       type: string
       default: ""
     - name: traceSource
@@ -233,30 +218,14 @@ spec:
         - name: data
           workspace: data-storage
       params:
-        - name: model
-          value: "$(params.model)"
         - name: endpoint
           value: "$(tasks.llmdbenchmark-standup.results.endpoint)"
+        - name: observeArgs
+          value: "$(params.observeArgs)"
         - name: workloadSpec
           value: "$(params.workloadSpec)"
         - name: resultsDir
           value: "$(params.runName)/$(params.phase)/$(params.workloadName)/i$(params.replica)"
-        - name: maxConcurrency
-          value: "$(params.maxConcurrency)"
-        - name: timeout
-          value: "$(params.timeout)"
-        - name: warmupRequests
-          value: "$(params.warmupRequests)"
-        - name: prewarmDuration
-          value: "$(params.prewarmDuration)"
-        - name: extraArgs
-          value: "$(params.extraArgs)"
-        - name: tracePath
-          value: "$(params.tracePath)"
-        - name: concurrentSessions
-          value: "$(params.concurrentSessions)"
-        - name: totalSessions
-          value: "$(params.totalSessions)"
 
     - name: collect-results
       runAfter: ["run-workload-blis-observe-binary"]

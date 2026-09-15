@@ -1,4 +1,5 @@
 """Tests for pipeline.yaml structural correctness."""
+import pytest
 import yaml
 from pathlib import Path
 
@@ -359,3 +360,107 @@ class TestReplicaParamThreading:
                     assert "$(params.replica)" in param["value"], (
                         f"task {task['name']}.resultsDir does not thread replica"
                     )
+
+
+class TestObserveArgsRewiring:
+    """#900 collapsed the observe scalars into one rendered argv param."""
+
+    _OBSERVE = "run-workload-blis-observe-binary"
+
+    #: Params no task consumes after #900. `tracePath` is deliberately NOT here:
+    #: `prepare-trace` still consumes it, so it stays top-level and only leaves
+    #: the observe task's block. Derived by scanning every `$(params.X)`
+    #: reference per task, not from the issue's list, which omitted that.
+    _DELETED = ("model", "maxConcurrency", "timeout", "warmupRequests",
+                "prewarmDuration", "extraArgs", "concurrentSessions",
+                "totalSessions")
+
+    def _pipeline(self):
+        import pathlib
+
+        import yaml as _yaml
+
+        from pipeline.lib import layout
+        return _yaml.safe_load(
+            (pathlib.Path(layout.repo_root()) / "pipeline" / "pipeline.yaml").read_text()
+        )
+
+    def _observe_task(self):
+        return next(t for t in self._pipeline()["spec"]["tasks"]
+                    if t["name"] == self._OBSERVE)
+
+    def test_observe_args_declared_without_a_default(self):
+        """No default is deliberate: an un-rendered PipelineRun must fail at
+        creation rather than reach blis with an empty command line."""
+        decl = {p["name"]: p for p in self._pipeline()["spec"]["params"]}
+        assert "observeArgs" in decl
+        assert "default" not in decl["observeArgs"]
+
+    def test_observe_task_forwards_exactly_four_params(self):
+        names = [p["name"] for p in self._observe_task()["params"]]
+        assert sorted(names) == ["endpoint", "observeArgs", "resultsDir",
+                                 "workloadSpec"]
+
+    @pytest.mark.parametrize("name", _DELETED)
+    def test_absorbed_param_no_longer_declared(self, name):
+        decl = {p["name"] for p in self._pipeline()["spec"]["params"]}
+        assert name not in decl, (
+            f"{name} is still declared but no task consumes it after #900"
+        )
+
+    def test_trace_path_survives_because_prepare_trace_needs_it(self):
+        pl = self._pipeline()
+        assert "tracePath" in {p["name"] for p in pl["spec"]["params"]}
+        prepare = next(t for t in pl["spec"]["tasks"] if t["name"] == "prepare-trace")
+        assert "tracePath" in {p["name"] for p in prepare["params"]}
+        # ...but observe no longer takes it; its copy lives inside observeArgs.
+        assert "tracePath" not in {p["name"] for p in self._observe_task()["params"]}
+
+    def test_pipeline_matches_the_pinned_observe_task_exactly(self):
+        """Both directions are Tekton ADMISSION errors at PipelineRun creation,
+        not soft failures: sending a param the Task does not declare, and
+        omitting one it declares with no default. This pair is why #900 and
+        tektonc#70 had to land together, so guard it against a submodule bump
+        that changes the Task's param set."""
+        import pathlib
+
+        import yaml as _yaml
+
+        from pipeline.lib import layout
+
+        task_path = (pathlib.Path(layout.repo_root()) / "tektonc-data-collection"
+                     / "tekton" / "tasks"
+                     / "run-workload-blis-observe-binary.yaml")
+        if not task_path.exists():
+            pytest.skip("tektonc-data-collection submodule not checked out")
+        declared = {p["name"]: p
+                    for p in _yaml.safe_load(task_path.read_text())["spec"]["params"]}
+        sent = {p["name"] for p in self._observe_task()["params"]}
+
+        undeclared = sorted(sent - set(declared))
+        assert not undeclared, (
+            f"pipeline.yaml sends params the pinned Task does not declare: "
+            f"{undeclared} — Tekton rejects the PipelineRun outright"
+        )
+        required = {n for n, p in declared.items() if "default" not in p}
+        missing = sorted(required - sent)
+        assert not missing, (
+            f"the pinned Task requires {missing} with no default, and "
+            f"pipeline.yaml does not send them — PipelineRun creation fails"
+        )
+
+    def test_every_declared_param_is_consumed_by_some_task(self):
+        """A param declared and forwarded nowhere is dead weight — the smell
+        #900 exists to remove. Two pre-existing exceptions are grandfathered:
+        `experimentId` and `skipTeardown` were already dead before #900 and
+        removing them is out of scope (they are not observe-related)."""
+        import re
+        pl = self._pipeline()
+        grandfathered = {"experimentId", "skipTeardown"}
+        blob = "\n".join(str(t) for t in pl["spec"]["tasks"])
+        unused = [
+            p["name"] for p in pl["spec"]["params"]
+            if p["name"] not in grandfathered
+            and not re.search(r"\$\(params\." + re.escape(p["name"]) + r"\)", blob)
+        ]
+        assert not unused, f"declared but consumed by no task: {unused}"

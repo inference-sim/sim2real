@@ -3,6 +3,8 @@ import re
 import yaml
 from pathlib import Path
 
+from pipeline.lib import observe_argv
+
 
 class ManifestError(Exception):
     """Manifest validation error."""
@@ -260,19 +262,28 @@ def _validate_v3_fields(data: dict) -> None:
     elif not isinstance(observe_raw, dict):
         raise ManifestError("blis_observe must be a mapping")
     else:
-        _valid_observe_keys = {
-            "maxConcurrency", "timeout", "warmupRequests",
-            "prewarmDuration", "extraArgs",
-        }
-        unknown_observe = set(observe_raw.keys()) - _valid_observe_keys
+        # The key set and the per-key TYPES both come from
+        # ``observe_argv.OBSERVE_FLAGS``, the table that also renders them into
+        # the argv — so a key cannot be accepted here yet reach no flag, and the
+        # two cannot disagree about what a key accepts (#900).
+        #
+        # Types are per-key rather than one blanket scalar predicate because the
+        # block now carries heterogeneous types: ints (maxConcurrency), duration
+        # strings (prewarmDuration), enums (apiFormat, detectors) and bools
+        # (recordItl, streaming). The old blanket check rejected ALL bools to
+        # stop YAML ``true`` satisfying an int field; that guard is preserved
+        # per-key by ``_is_int`` rather than dropped.
+        #
+        # VALUE validity (a real detector name, a legal api-format) is checked by
+        # the renderer at render time, not duplicated here.
+        unknown_observe = set(observe_raw.keys()) - observe_argv.VALID_OBSERVE_KEYS
         if unknown_observe:
             raise ManifestError(
                 f"blis_observe contains unknown keys: {sorted(unknown_observe)}. "
-                f"Valid keys: {sorted(_valid_observe_keys)}"
+                f"Valid keys: {sorted(observe_argv.VALID_OBSERVE_KEYS)}"
             )
         for k, v in observe_raw.items():
-            if not isinstance(v, (str, int, float)) or isinstance(v, bool):
-                raise ManifestError(
-                    f"blis_observe.{k} must be a scalar (string or number)"
-                )
+            problem = observe_argv.check_observe_type(k, v)
+            if problem:
+                raise ManifestError(f"blis_observe.{k} {problem}, got {v!r}")
         data["blis_observe"] = dict(observe_raw)

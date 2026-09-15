@@ -824,7 +824,7 @@ Assemble transfer manifest from all prior task outputs.
     `python3 "$SKILL_DIR/generate_from_config.py" "$EXPERIMENT_ROOT/config.md" --emit-observe-yaml`
     and pasting its stdout verbatim between `workloads:` and `context:`. The
     script parses the `blis observe \ ... \` block in config.md and emits all
-    5 keys with per-key `# source:` provenance comments; if `config.md` is
+    nine keys with per-key `# source:` provenance comments; if `config.md` is
     absent or the block is missing, an all-defaults fragment is emitted. Do
     NOT hand-edit the fragment — regenerate by re-running the script.
     The block is validated against `blis observe`'s flag namespace (issue
@@ -871,13 +871,19 @@ workloads: <list from task-4>
 
 blis_observe:
   # Populated by `generate_from_config.py --emit-observe-yaml` (see Derivation
-  # step 10 below). Each key carries a `# source:` comment indicating whether
-  # it came from the `blis observe \ ... \` block in config.md or from the
-  # sim2real-bootstrap default (which matches pipeline/pipeline.yaml).
+  # step 10 below). Each key carries a `# source:` comment indicating whether it
+  # came from the `blis observe \ ... \` block in config.md or from the
+  # sim2real-bootstrap default. Those defaults match `OBSERVE_FLAGS` in
+  # pipeline/lib/observe_argv.py, which is the runtime authority — issue #900
+  # deleted the pipeline.yaml params this used to point at.
   maxConcurrency: <value>  # source: config.md | sim2real-bootstrap default
   timeout: <value>         # source: config.md | sim2real-bootstrap default
   warmupRequests: <value>  # source: config.md | sim2real-bootstrap default
   prewarmDuration: <value> # source: config.md | sim2real-bootstrap default
+  detectors: <value>       # source: config.md | sim2real-bootstrap default
+  apiFormat: <value>       # source: config.md | sim2real-bootstrap default
+  recordItl: <bool>        # source: config.md | sim2real-bootstrap default
+  streaming: <bool>        # source: config.md | sim2real-bootstrap default
   extraArgs: <value>       # source: config.md | sim2real-bootstrap default
 
 context:
@@ -951,10 +957,16 @@ ls "$EXPERIMENT_ROOT/baselines/defaults/"*.yaml \
 - All names (baselines, algorithms) must be lowercase alphanumeric only, 1-20 chars
 - `context.files` paths resolved relative to experiment root
 - `component` required when `algorithms` is non-empty
-- `blis_observe` keys must match the schema in `pipeline/lib/manifest.py`:
-  exactly the 5 keys `maxConcurrency`, `timeout`, `warmupRequests`,
-  `prewarmDuration`, `extraArgs`. Values must be scalars (string or number,
-  not bool). Do not add other keys — the manifest validator rejects them.
+- `blis_observe` keys must match the schema, which since issue #900 is defined by
+  `OBSERVE_FLAGS` in `pipeline/lib/observe_argv.py` and consumed by
+  `pipeline/lib/manifest.py` — the nine keys `maxConcurrency`, `timeout`,
+  `warmupRequests`, `prewarmDuration`, `detectors`, `apiFormat`, `recordItl`,
+  `streaming`, `extraArgs`. Types are now **per key**, not a blanket scalar rule:
+  ints for the three counts, duration/enum strings for `prewarmDuration`,
+  `detectors` and `apiFormat`, and **bools** for `recordItl` and `streaming`
+  (which the older blanket rule rejected outright). Do not add other keys — the
+  manifest validator rejects them, and the key set is derived from the flag table
+  so an accepted key always reaches a real blis flag.
 
 **Present to user:** Show summary (scenario, component@ref, algorithm count,
 baseline count, workload count, context files) and ask for approval.

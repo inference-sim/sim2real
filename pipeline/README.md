@@ -1078,17 +1078,81 @@ pipeline:                   # optional — defaults applied if absent
   name: sim2real            # Pipeline resource name referenced in PipelineRuns (default: "sim2real")
   yaml: pipeline/pipeline.yaml  # path relative to repo root (default: "pipeline/pipeline.yaml")
 
-blis_observe:               # optional — per-transfer overrides for blis observe tuning
-  maxConcurrency: 10000     # all keys optional; absent keys fall through to the
-  timeout: 1800             # Pipeline-level defaults in pipeline/pipeline.yaml
-  warmupRequests: 50        # (currently 10000 / 1800 / 50 / 60s / "").
-  prewarmDuration: 60s      # Values are emitted as PipelineRun params to override
-  extraArgs: ""             # the Pipeline defaults — Tekton handles the merge.
+blis_observe:               # optional — per-transfer overrides for blis observe
+  maxConcurrency: 10000     # int      → --max-concurrency
+  timeout: 1800             # int      → --timeout
+  warmupRequests: 50        # int      → --warmup-requests
+  prewarmDuration: 60s      # duration → --prewarm-duration
+  detectors: composite      # string   → --detectors  (empty = off)
+  apiFormat: completions    # enum     → --api-format  (completions | chat)
+  recordItl: false          # bool     → --record-itl when true
+  streaming: true           # bool     → --no-streaming when FALSE (inverted)
+  extraArgs: ""             # string   → appended verbatim, last
 ```
+
+All keys are optional; absent keys take the defaults shown above, which reproduce
+the command the pipeline ran before issue #900. Values are **not** emitted as
+individual PipelineRun params — `sim2real assemble` renders the whole
+`blis observe` command line into a single `observeArgs` param. See
+[Observe argv rendering](#observe-argv-rendering) below.
 
 All paths are relative to the experiment root and validated by `sim2real assemble` at load time.
 
 `component.ref` (optional): tag, branch, or commit SHA identifying the expected version of the component submodule. Reserved for step-2 (the skill-driven flow that will consume it).
+
+### Observe argv rendering
+
+`sim2real assemble` renders the entire `blis observe` command line into one
+`observeArgs` PipelineRun param ([`pipeline/lib/observe_argv.py`](lib/observe_argv.py),
+issue #900). Before this, the command lived in three places — 12 scalar params
+from assemble, 17 of `pipeline.yaml`'s 31 params declared purely to forward them,
+and the Task's shell reassembling an argv — so adding one flag meant editing
+three files in two repos, and the effective command existed nowhere until the pod
+ran.
+
+**`--server-url` is the one exclusion.** It is a runtime Task result (the standup
+task's endpoint), so the assembler cannot know it; the Task appends it.
+
+**Two paths are owned by the Task** (`run-workload-blis-observe-binary`) and the
+renderer must match them: the `data` workspace mounts at `/workspace/data`, so
+every data-PVC path carries that prefix; and `write-workload-spec` writes the
+generative spec to `/workspace/workload.yaml`. Both are also documented in the
+Task's own `observeArgs` param description, so the coupling is visible from
+either end.
+
+**Three mutual exclusions are enforced at assemble**, each previously upheld by a
+shell conditional, by blis at runtime, or not at all:
+
+| Exclusion | Why |
+|---|---|
+| corpus-mode vs spec-mode inputs | `--concurrent-sessions` is mutually exclusive with `--workload-spec`. Three distinct errors: both present; a corpus document with no `tracePath`; a generative workload given one. |
+| `recordItl: true` + `streaming: false` | blis rejects `--record-itl` with `--no-streaming` — ITL needs per-chunk timestamps, which only exist for streaming responses. |
+| `detectors: ""` while a saturation report would be emitted | blis errors with `--saturation-report requires --detectors`, so detectors-off suppresses the report too. Safe because `saturation.json` is documented **not load-bearing**. |
+
+**Value validation belongs to the renderer alone.** Tekton substitutes params
+textually into the Task's `OBSERVE_ARGS="$(params.observeArgs)"` assignment, and
+the Task word-splits it unquoted — so a `"`, `$`, backtick or `;` in a rendered
+value breaks out of the assignment before any shell guard can help. Rejected in
+every value: whitespace (except in `extraArgs`, where multiple words are the
+point) and `" ' $ \` ; | & > < \` plus newline. `extraArgs` is **not** exempt from
+the metacharacter rule — a `;` there is command injection into the Task's step.
+
+Glob characters (`*`, `?`, `[`) are deliberately **not** rejected: the Task runs
+`set -f`, which disables pathname expansion while keeping word-splitting. That
+defense sits at the consumer, so it covers every producer. If `set -f` is ever
+removed from the Task, add `*?[` to `FORBIDDEN_CHARS` in the same change.
+
+> **`--detectors`, not `--post-hoc-detector`.** The Task used to hardcode
+> `--post-hoc-detector composite`. inference-sim #1516 (commit `18c2c926`)
+> renamed that flag to `--detectors`, and sim2real #904 bumped the pin past it —
+> so `blis observe` was dying at argument parsing on every run. `#900` and
+> tektonc#70 remove the stale name from the two places it survived.
+> `test_observe_flag_lists.py` now reads the pinned inference-sim source and
+> asserts every flag the bootstrap skill can transcribe is one blis registers,
+> so a future pin bump that renames an observe flag fails in CI rather than in a
+> pod.
+
+---
 
 ### Corpus workload schema
 

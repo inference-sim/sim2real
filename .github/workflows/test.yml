@@ -29,6 +29,22 @@ jobs:
         with:
           submodules: false
 
+      # Shallow-init ONLY inference-sim, whose cmd/ package the observe
+      # flag-list guard reads (#900). `submodules: false` above stays: the other
+      # submodules are large and no test needs them.
+      #
+      # Without this the guard is worse than absent. Its three tests skip on a
+      # missing submodule, so the checks whose entire stated purpose is "a future
+      # pin bump that renames an observe flag fails here instead of in a pod"
+      # would be SKIPPED in exactly the gate meant to catch it — which is how
+      # #904 shipped a pin bump past inference-sim #1516's --post-hoc-detector
+      # rename and broke every observe run with nothing noticing.
+      #
+      # Same reasoning as the pinned detect-secrets install below: make the
+      # behavioral tests executable in the merge gate rather than skipped.
+      - name: Shallow-init inference-sim (observe flag-list guard)
+        run: git submodule update --init --depth 1 inference-sim
+
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
