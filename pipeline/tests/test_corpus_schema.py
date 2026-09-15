@@ -163,12 +163,51 @@ _TRACKED_BY_905 = (
 
 def test_every_deferred_reason_names_the_component_that_must_change():
     """A refusal an operator cannot act on is a dead end. Every reason must
-    point at the Task or the converter, not just say no."""
-    anchors = ("prepare-trace", "blis convert")
+    point at the Task, the converter, or the sim2real emission site."""
+    anchors = ("prepare-trace", "blis convert", "pipeline/pipeline.yaml")
     for path, reason in corpus_schema.DEFERRED_FIELDS.items():
         assert any(a in reason for a in anchors), (
             f"{path} names no component an operator could change"
         )
+
+
+#: The three #905 fields and the PipelineRun param each would drive. The Task
+#: accepts all three at the pinned submodule; sim2real does not send them.
+_905_PARAMS = {
+    "corpus.upstream.revision": "traceRevision",
+    "corpus.upstream.format": "traceFormat",
+    "corpus.reconstruct.max_think_time": "traceMaxThinkTime",
+}
+
+
+def test_905_fields_are_declared_by_the_pinned_task():
+    """The reasons claim task-side support EXISTS at the pin. If that ever stops
+    being true (a submodule rollback), the reasons become wrong and this fails
+    rather than leaving a refusal citing the wrong blocker."""
+    task = (pathlib.Path(layout.repo_root()) / "tektonc-data-collection"
+            / "tekton" / "tasks" / "prepare-trace.yaml")
+    if not task.exists():
+        pytest.skip("tektonc-data-collection submodule not checked out")
+    declared = {p["name"] for p in _yaml.safe_load(task.read_text())["spec"]["params"]}
+    missing = sorted(set(_905_PARAMS.values()) - declared)
+    assert not missing, (
+        f"DEFERRED_FIELDS claims the pinned prepare-trace Task accepts these, "
+        f"but it does not declare: {missing}"
+    )
+
+
+@pytest.mark.parametrize("path,param", sorted(_905_PARAMS.items()))
+def test_905_fields_are_not_yet_emitted_by_sim2real(path, param):
+    """The reasons claim the remaining blocker is sim2real's own emission side.
+    This is the condition that must flip for #905 — when someone declares the
+    param in pipeline.yaml, this fails and points at the field to un-defer."""
+    pl = (pathlib.Path(layout.repo_root()) / "pipeline" / "pipeline.yaml")
+    declared = {p["name"] for p in _yaml.safe_load(pl.read_text())["spec"]["params"]}
+    assert param not in declared, (
+        f"pipeline.yaml now declares {param}, so {path} is no longer blocked on "
+        f"sim2real's emission side — move it out of DEFERRED_FIELDS into the "
+        f"schema tables (#905) and update its reason"
+    )
 
 
 @pytest.mark.parametrize("path", _TRACKED_BY_905)
@@ -393,6 +432,28 @@ def test_every_schema_param_is_declared_in_pipeline_yaml():
     needed |= {"traceSpec", "tracePath"}
     missing = sorted(needed - declared)
     assert not missing, f"not declared in pipeline/pipeline.yaml: {missing}"
+
+
+def test_pipeline_forwards_no_param_the_pinned_task_rejects():
+    """A Pipeline forwarding a param the Task does not declare is a Tekton
+    ADMISSION error at PipelineRun creation, not a soft failure — so a
+    submodule bump has to be checked against pipeline.yaml, not assumed."""
+    root = pathlib.Path(layout.repo_root())
+    task_path = (root / "tektonc-data-collection" / "tekton" / "tasks"
+                 / "prepare-trace.yaml")
+    if not task_path.exists():
+        pytest.skip("tektonc-data-collection submodule not checked out")
+    task_params = {
+        p["name"] for p in _yaml.safe_load(task_path.read_text())["spec"]["params"]
+    }
+    pl = _yaml.safe_load((root / "pipeline" / "pipeline.yaml").read_text())
+    prepare = next(t for t in pl["spec"]["tasks"] if t["name"] == "prepare-trace")
+    forwarded = {p["name"] for p in prepare.get("params", [])}
+    undeclared = sorted(forwarded - task_params)
+    assert not undeclared, (
+        f"pipeline.yaml forwards params the pinned prepare-trace Task does not "
+        f"declare: {undeclared}. Tekton rejects the PipelineRun outright"
+    )
 
 
 def test_trace_path_is_the_cache_key_under_the_traces_prefix():

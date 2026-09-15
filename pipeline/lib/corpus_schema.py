@@ -168,16 +168,20 @@ REPLAY_FIELDS: dict[str, _Field] = {
 #: unknown-key branch is a different error and a test keeps the two distinct.
 DEFERRED_FIELDS: dict[str, str] = {
     "corpus.upstream.revision": (
-        "is not honored by the prepare-trace Task at the pinned "
-        "tektonc-data-collection submodule. Task support merged upstream "
-        "(inference-sim/tektonc-data-collection#67) but the submodule pointer "
-        "predates it, so the param would be rejected by Tekton at PipelineRun "
-        "creation. Tracked by inference-sim/sim2real#905"
+        "is accepted by the prepare-trace Task (traceRevision, "
+        "inference-sim/tektonc-data-collection#67) at the pinned submodule, but "
+        "sim2real does not emit it yet: pipeline/pipeline.yaml declares no "
+        "traceRevision param and tekton.py sends none, so the fetch resolves "
+        "the Task's default (empty => main) no matter what the descriptor says. "
+        "Wiring it up is inference-sim/sim2real#905"
     ),
     "corpus.upstream.format": (
-        "is not honored by the prepare-trace Task yet — format dispatch is "
-        "inference-sim/tektonc-data-collection#68, still open. Tracked by "
-        "inference-sim/sim2real#905"
+        "is accepted by the prepare-trace Task (traceFormat, "
+        "inference-sim/tektonc-data-collection#68) at the pinned submodule, but "
+        "sim2real does not emit it yet: pipeline/pipeline.yaml declares no "
+        "traceFormat param and tekton.py sends none, so the chain runs the "
+        "Task's default (otel-parquet) no matter what the descriptor says. "
+        "Wiring it up is inference-sim/sim2real#905"
     ),
     "corpus.select.partition_pct": (
         "is not a Task parameter: prepare-trace hard-codes the split "
@@ -185,12 +189,16 @@ DEFERRED_FIELDS: dict[str, str] = {
         "change to inference-sim/tektonc-data-collection first"
     ),
     "corpus.reconstruct.max_think_time": (
-        "does not reach the converter yet — prepare-trace never passes "
-        "--max-think-time (inference-sim/tektonc-data-collection#68, still "
-        "open). NOTE: refusing the field does NOT lift the cap; "
-        "'blis convert otel' defaults --max-think-time to 15s, so that clamp "
-        "stays in force and simply cannot be expressed. Tracked by "
-        "inference-sim/sim2real#905"
+        "is accepted by the prepare-trace Task (traceMaxThinkTime, "
+        "inference-sim/tektonc-data-collection#68) at the pinned submodule, but "
+        "sim2real does not emit it yet: pipeline/pipeline.yaml declares no "
+        "traceMaxThinkTime param and tekton.py sends none, so the Task's empty "
+        "default omits the flag entirely. NOTE: refusing the field does NOT "
+        "lift the cap; 'blis convert otel' defaults --max-think-time to 15s, so "
+        "that clamp stays in force and simply cannot be expressed. When it is "
+        "wired up the value must be a Go duration STRING ('60s'), not a bare "
+        "number: --max-think-time is a DurationVar, so 15000000 parses as 15ms, "
+        "a silent 1000x error. Wiring it up is inference-sim/sim2real#905"
     ),
     "corpus.reconstruct.max_context": (
         "has no support anywhere: neither the prepare-trace Task nor "

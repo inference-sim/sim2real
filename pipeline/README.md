@@ -1141,11 +1141,15 @@ These fields are **rejected**, each with its own reason, because nothing downstr
 
 | Field | Why it is refused | Tracked by |
 |-------|-------------------|------------|
-| `corpus.upstream.revision` | Task support merged upstream (tektonc-data-collection#67) but the `tektonc-data-collection` submodule pointer predates it, so Tekton would reject the param at PipelineRun creation. Needs a submodule bump. | sim2real#905 |
-| `corpus.upstream.format` | Format dispatch (`convert otel` vs `convert weka`) is tektonc-data-collection#68, still open. | sim2real#905 |
-| `corpus.reconstruct.max_think_time` | `prepare-trace` never passes `--max-think-time` (tektonc-data-collection#68, still open). | sim2real#905 |
+| `corpus.upstream.revision` | The Task **accepts** `traceRevision` (tektonc-data-collection#67) at the pinned submodule, but sim2real does not emit it: `pipeline/pipeline.yaml` declares no such param and `tekton.py` sends none, so the fetch resolves the Task's default (empty ⇒ `main`) whatever the descriptor says. | sim2real#905 |
+| `corpus.upstream.format` | The Task **accepts** `traceFormat` (tektonc-data-collection#68) at the pinned submodule, but sim2real does not emit it, so the chain runs the Task's default (`otel-parquet`) whatever the descriptor says. | sim2real#905 |
+| `corpus.reconstruct.max_think_time` | The Task **accepts** `traceMaxThinkTime` (tektonc-data-collection#68) at the pinned submodule, but sim2real does not emit it, so the Task's empty default omits the flag entirely. | sim2real#905 |
 | `corpus.select.partition_pct` | Not a Task parameter — `prepare-trace` hard-codes the split percentage as a constant (`TEST_PCT = 30`). | — |
 | `corpus.reconstruct.max_context` | No support anywhere: neither the Task nor `blis convert otel`/`blis convert weka` accepts a context ceiling. | — |
+
+For the first three the blocker is now **sim2real's own emission side**, not the Task: tektonc-data-collection#67 and #68 are both merged and pinned. Wiring them up means declaring each param in `pipeline/pipeline.yaml`, forwarding it in the `prepare-trace` task block, and moving the field out of `DEFERRED_FIELDS` into the schema tables — one change, which is sim2real#905. Two tests keep this description honest: `test_905_fields_are_declared_by_the_pinned_task` fails if a submodule rollback removes the Task-side support these reasons assert, and `test_905_fields_are_not_yet_emitted_by_sim2real` fails the moment `pipeline.yaml` declares one of them, pointing at the field to un-defer.
+
+> **When `max_think_time` is wired up, the value must be a Go duration string** (`"60s"`), not a bare number. `blis convert otel --max-think-time` is a Cobra `DurationVar`, so `15000000` parses as 15000000ns = **15ms**, not 15s — a silent 1000×-too-tight cap with no failure anywhere. The TraceV2 column is `think_time_us`, which makes "microseconds" the intuitive misreading, so the schema must validate that the value parses as a duration.
 
 > **`max_think_time`: refusing the field does NOT lift the cap.** `blis convert otel` defaults `--max-think-time` to **15s** and `prepare-trace` never overrides it, so that clamp stays in force and is simply inexpressible until sim2real#905. Any corpus built before then has its inter-round arrival gaps clamped at 15s. The clamp rewrites `ArrivalTimeUs` and writes no think-time column, so it is not visible in the converted output — check the converter's default rather than the corpus if inter-round timing looks compressed.
 
