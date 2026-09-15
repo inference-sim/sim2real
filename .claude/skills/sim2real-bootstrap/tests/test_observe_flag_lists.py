@@ -205,6 +205,38 @@ def test_bool_keys_render_as_yaml_booleans():
     assert '"true"' not in out and '"True"' not in out
 
 
+@pytest.mark.parametrize("form,expected", [
+    ("--record-itl", {"recordItl": True}),
+    ("--record-itl=true", {"recordItl": True}),
+    ("--record-itl=1", {"recordItl": True}),
+    # BoolVar's canonical negation must NEGATE, not assert.
+    ("--record-itl=false", {"recordItl": False}),
+    ("--record-itl=0", {"recordItl": False}),
+    ("--no-streaming", {"streaming": False}),
+    ("--no-streaming=true", {"streaming": False}),
+    # "do NOT disable streaming" => streaming ON. The double negative is the
+    # whole reason this needs a test rather than an eyeball.
+    ("--no-streaming=false", {"streaming": True}),
+])
+def test_boolean_flags_honor_pflag_negation(form, expected):
+    """Both flags are registered with pflag BoolVar (observe_cmd.go:159,195), for
+    which `--flag=false` is the canonical negation. Discarding the inline value
+    silently inverted the author's intent."""
+    text = "```bash\nblis observe \\\n  %s \\\n  --timeout 60\n```\n" % form
+    parsed = g.parse_observe_block(text)
+    for key, value in expected.items():
+        assert parsed[key] is value, f"{form} gave {key}={parsed.get(key)!r}"
+
+
+def test_unparseable_boolean_warns_and_drops(capsys):
+    """Matches every other drop path in the function rather than guessing a
+    polarity — a wrong guess here changes what the run measures."""
+    text = "```bash\nblis observe \\\n  --record-itl=maybe\n```\n"
+    parsed = g.parse_observe_block(text)
+    assert "recordItl" not in parsed
+    assert "WARNING" in capsys.readouterr().err
+
+
 def test_no_streaming_is_inverted():
     """blis has no --streaming flag, so presence of --no-streaming means the
     bundle key `streaming` is FALSE. Getting this backwards would silently

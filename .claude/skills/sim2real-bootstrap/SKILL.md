@@ -824,7 +824,7 @@ Assemble transfer manifest from all prior task outputs.
     `python3 "$SKILL_DIR/generate_from_config.py" "$EXPERIMENT_ROOT/config.md" --emit-observe-yaml`
     and pasting its stdout verbatim between `workloads:` and `context:`. The
     script parses the `blis observe \ ... \` block in config.md and emits all
-    5 keys with per-key `# source:` provenance comments; if `config.md` is
+    nine keys with per-key `# source:` provenance comments; if `config.md` is
     absent or the block is missing, an all-defaults fragment is emitted. Do
     NOT hand-edit the fragment — regenerate by re-running the script.
     The block is validated against `blis observe`'s flag namespace (issue
@@ -871,13 +871,19 @@ workloads: <list from task-4>
 
 blis_observe:
   # Populated by `generate_from_config.py --emit-observe-yaml` (see Derivation
-  # step 10 below). Each key carries a `# source:` comment indicating whether
-  # it came from the `blis observe \ ... \` block in config.md or from the
-  # sim2real-bootstrap default (which matches pipeline/pipeline.yaml).
+  # step 10 below). Each key carries a `# source:` comment indicating whether it
+  # came from the `blis observe \ ... \` block in config.md or from the
+  # sim2real-bootstrap default. Those defaults match `OBSERVE_FLAGS` in
+  # pipeline/lib/observe_argv.py, which is the runtime authority — issue #900
+  # deleted the pipeline.yaml params this used to point at.
   maxConcurrency: <value>  # source: config.md | sim2real-bootstrap default
   timeout: <value>         # source: config.md | sim2real-bootstrap default
   warmupRequests: <value>  # source: config.md | sim2real-bootstrap default
   prewarmDuration: <value> # source: config.md | sim2real-bootstrap default
+  detectors: <value>       # source: config.md | sim2real-bootstrap default
+  apiFormat: <value>       # source: config.md | sim2real-bootstrap default
+  recordItl: <bool>        # source: config.md | sim2real-bootstrap default
+  streaming: <bool>        # source: config.md | sim2real-bootstrap default
   extraArgs: <value>       # source: config.md | sim2real-bootstrap default
 
 context:
