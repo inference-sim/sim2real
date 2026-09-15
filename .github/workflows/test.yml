@@ -10,6 +10,17 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      # Report both legs independently: a floor failure and a ceiling failure
+      # have different causes, and we want to see both rather than whichever
+      # tripped first.
+      fail-fast: false
+      matrix:
+        # Floor and ceiling. The floor must equal pyproject.toml's
+        # requires-python — pipeline/tests/test_python_version.py asserts that
+        # the lowest leg here and MIN_PYTHON agree, so a floor nobody tests
+        # cannot quietly stop being true (#906).
+        python-version: ["3.12", "3.14"]
     env:
       CI: "true"
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -20,7 +31,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: "3.14"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install test dependencies
         run: |
@@ -28,7 +39,7 @@ jobs:
           # Pinned to the same rev the scaffolded .secrets.baseline / config use,
           # so the sim2real-bootstrap behavioral secret-scan tests (#822) run
           # under the merge gate instead of skipping. Verified to install and run
-          # on the CI Python (3.14).
+          # on both CI Pythons (3.12 and 3.14).
           pip install "detect-secrets @ git+https://github.com/ibm/detect-secrets.git@0.13.1+ibm.64.dss"
           # detect-secrets' --word-list (#896) imports pyahocorasick lazily and
           # raises ModuleNotFoundError without it. The scaffolded hook declares

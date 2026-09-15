@@ -1,0 +1,27 @@
+# Declaration only — sim2real is not built or installed as a package. The
+# install path remains `pip install -r requirements.txt`; this file exists so
+# the supported Python range is stated somewhere machine-readable (issue #906).
+#
+# Two consumers actually read `requires-python` here:
+#
+#   * dependabot's pip updater, which picks the interpreter it resolves
+#     against from this field even when the manifest it is updating is a bare
+#     requirements.txt (dependabot-core #11426). With no such field it
+#     resolves against the newest pre-installed Python (dependabot-core
+#     #13215), which is how numpy's *lower* bound ratcheted 2.5.1 -> 2.5.2 ->
+#     2.5.3 and dragged the Python floor up unnoticed. Expected to stop that,
+#     but treat it as verify-empirically: the "Dependabot is using Python
+#     version ..." line in an update log is the ground truth, and
+#     dependabot-core #13424 reports the field being ignored.
+#   * humans and tooling asking what this repo supports.
+#
+# It does NOT gate `pip install -r requirements.txt` — pip only checks
+# Requires-Python for a distribution it is installing, and never builds one for
+# the ambient directory. Enforcement is pipeline/__init__.py (CLI) plus the
+# repo-root conftest.py (tests).
+#
+# No [build-system] table: nothing here is meant to be built.
+[project]
+name = "sim2real"
+version = "0.0.0"
+requires-python = ">=3.12"
