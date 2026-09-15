@@ -208,6 +208,17 @@ _LEGAL_TOP_LEVEL = frozenset({"corpus", "replay", "workload_name"})
 #: make the document's kind ambiguous rather than merely over-specified.
 _GENERATIVE_MARKERS = ("clients", "cohorts")
 
+#: Keys whose mere PRESENCE declares the document's intent to be a corpus
+#: workload, whatever their value. ``assemble_run._validate_workload`` routes on
+#: these rather than on :func:`is_corpus_document`, so a degenerate value
+#: (``corpus: {}``, ``corpus:`` null, ``corpus: "str"``) is REFUSED rather than
+#: falling through to the generative path and reaching blis as a "WorkloadSpec".
+#:
+#: Neither key exists on a blis WorkloadSpec (inference-sim
+#: ``sim/workload/spec.go``), so presence is unambiguous and generative
+#: documents are never captured by this test.
+DOCUMENT_MARKERS = ("corpus", "replay")
+
 
 def is_corpus_document(doc: dict) -> bool:
     """Return True iff ``doc`` declares a non-empty top-level ``corpus:`` map."""
@@ -244,8 +255,20 @@ def validate_corpus_document(doc: dict, where: str) -> None:
     """
     _validate_top_level(doc, where)
     if not is_corpus_document(doc):
+        # Reached whenever a document declares corpus:/replay: intent but the
+        # corpus value is absent, null, empty, or not a mapping. Name what was
+        # actually found — a bare "must be a mapping" leaves an operator staring
+        # at a `corpus:` line that looks fine until they notice it has no body.
+        found = doc["corpus"] if "corpus" in doc else None
+        detail = (
+            "the key is absent" if "corpus" not in doc
+            else "it is empty" if isinstance(found, dict)
+            else f"it is {type(found).__name__} ({found!r})"
+        )
         raise AssembleError(
-            f"workload {where}: 'corpus' must be a non-empty mapping"
+            f"workload {where}: 'corpus' must be a non-empty mapping, but "
+            f"{detail}. A corpus workload declares corpus.upstream.source at "
+            f"minimum — see pipeline/README.md#corpus-workload-schema"
         )
     _validate_corpus_keys(doc["corpus"], where)
     _validate_corpus_values(doc["corpus"], where)

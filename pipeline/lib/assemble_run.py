@@ -39,7 +39,6 @@ from pipeline.lib import (
 from pipeline.lib.errors import AssembleError
 from pipeline.lib.manifest import ManifestError, load_manifest
 from pipeline.lib.tekton import (
-    is_trace_workload,
     make_pipelinerun_scenario,
     validate_pipelinerun_name,
 )
@@ -1025,7 +1024,23 @@ def _validate_workload(data: dict, wl_path: Path) -> None:
 
     Raises :class:`AssembleError` on any violation.
     """
-    if is_trace_workload(data):
+    # Route on the PRESENCE of a corpus/replay key, not on its value. Using
+    # ``is_trace_workload`` here would let a degenerate value escape entirely:
+    # it requires a NON-EMPTY mapping, so ``corpus: {}``, ``corpus:`` (null),
+    # ``corpus: "hf:o/d"``, ``corpus: []`` and ``corpus: 5`` all answered False,
+    # skipped validation, fell through to the generative path, and were handed
+    # to blis as a "WorkloadSpec" whose content was ``{corpus: null}`` — no
+    # corpus built, no tracePath emitted, run proceeds. That is the same silent
+    # failure the legacy ``trace:`` guard below exists to prevent, and it left
+    # ``validate_corpus_document``'s own "must be a non-empty mapping" check
+    # unreachable from this path.
+    #
+    # Neither key can appear in a legitimate generative WorkloadSpec (see
+    # inference-sim ``sim/workload/spec.go``: version, seed, category, clients,
+    # cohorts, aggregate_rate, horizon, num_requests, servegen_data,
+    # inference_perf, goodput_slo_targets), so presence is unambiguous intent to
+    # be a corpus workload and generative documents are unaffected.
+    if any(marker in data for marker in corpus_schema.DOCUMENT_MARKERS):
         corpus_schema.validate_corpus_document(data, str(wl_path))
         return
     # The legacy ``trace:`` shape was REPLACED by ``corpus:``/``replay:``, not

@@ -1885,6 +1885,61 @@ class TestLoadWorkloadCorpusValidation:
         assert "corpus.upstream.source" in msg
         assert "replay." in msg
 
+    # A degenerate `corpus:` value used to escape validation entirely:
+    # `is_trace_workload` requires a NON-EMPTY mapping, so these all answered
+    # False, skipped `validate_corpus_document`, fell through to the generative
+    # path, and reached blis as a "WorkloadSpec" whose content was
+    # `{corpus: null}` — no corpus built, no tracePath, run proceeds. Routing on
+    # the PRESENCE of the key fixes it. Exercised through `_load_workload` (the
+    # production path) rather than by calling the validator directly: a direct
+    # unit call passed even while this path was broken, which is precisely how
+    # the hole survived its own test.
+    @pytest.mark.parametrize("body", [
+        "corpus: {}\n",
+        "corpus:\n",
+        'corpus: "hf:o/d"\n',
+        "corpus: []\n",
+        "corpus: 5\n",
+    ], ids=["empty-map", "null", "string", "list", "int"])
+    def test_degenerate_corpus_value_is_rejected_not_forwarded(self, tmp_path, body):
+        exp_root = tmp_path / "exp"
+        (exp_root / "workloads").mkdir(parents=True)
+        (exp_root / "workloads" / "w.yaml").write_text(body)
+        with pytest.raises(assemble_run.AssembleError, match="non-empty mapping"):
+            assemble_run._load_workload(exp_root, "workloads/w.yaml")
+
+    def test_replay_without_corpus_is_rejected(self, tmp_path):
+        """`replay:` alone is corpus intent with the corpus missing, not a
+        generative spec — WorkloadSpec has no `replay` key."""
+        bad = {"replay": {"concurrent_sessions": 4, "total_sessions": 8}}
+        exp_root = self._write(tmp_path, bad)
+        with pytest.raises(assemble_run.AssembleError, match="non-empty mapping"):
+            assemble_run._load_workload(exp_root, "workloads/w.yaml")
+
+    def test_empty_corpus_beside_clients_is_rejected(self, tmp_path):
+        """Kind ambiguity is caught even when the corpus block is degenerate,
+        so the mixed-kind check cannot be bypassed by emptying it."""
+        bad = {"corpus": {}, "clients": [], "version": "1"}
+        exp_root = self._write(tmp_path, bad)
+        with pytest.raises(assemble_run.AssembleError, match="exactly one kind"):
+            assemble_run._load_workload(exp_root, "workloads/w.yaml")
+
+    def test_degenerate_corpus_error_names_what_was_found(self, tmp_path):
+        """The message has to be diagnosable — `corpus:` with no body looks fine
+        on the page until you notice it is null."""
+        exp_root = self._write(tmp_path, {"corpus": None})
+        with pytest.raises(assemble_run.AssembleError) as exc:
+            assemble_run._load_workload(exp_root, "workloads/w.yaml")
+        assert "NoneType" in str(exc.value)
+
+    def test_generative_workload_with_no_corpus_markers_still_loads(self, tmp_path):
+        """AC5 guard: routing on key presence must not capture a real spec."""
+        spec = {"version": "1", "clients": [], "aggregate_rate": 0.26,
+                "cohorts": [], "num_requests": 10}
+        exp_root = self._write(tmp_path, spec)
+        data = assemble_run._load_workload(exp_root, "workloads/w.yaml")
+        assert data["aggregate_rate"] == 0.26
+
     def test_empty_trace_mapping_is_still_generative(self, tmp_path):
         """An empty `trace: {}` was never a trace workload and must not trip
         the legacy guard — it is an ordinary (if odd) generative document."""
