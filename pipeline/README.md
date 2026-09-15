@@ -1044,8 +1044,10 @@ algorithms:                 # optional — omit for baseline-only benchmarks
 workloads:
   - <path>                  # one or more workload YAMLs
                             # Each YAML is either a generative workload (any fields understood
-                            # by llm-d-benchmark's WorkloadSpec) or a trace workload (must have
-                            # a non-empty `trace:` mapping — see Trace workload schema below).
+                            # by llm-d-benchmark's WorkloadSpec) or a corpus workload (must have
+                            # a non-empty top-level `corpus:` mapping plus `replay:` — see
+                            # "Corpus workload schema" below). The legacy `trace:` mapping was
+                            # replaced by `corpus:`/`replay:` and is now refused at assemble.
 
 context:
   text: |                   # freeform instructions (consumed by step-2's translation skill)
