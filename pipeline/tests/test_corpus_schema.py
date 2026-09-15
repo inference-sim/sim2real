@@ -222,6 +222,20 @@ def test_max_think_time_reason_states_the_clamp_stays_in_force():
     assert "15s" in reason
 
 
+def test_replay_fields_name_a_flag_not_a_param():
+    """#900: replay values are argv words, not PipelineRun params."""
+    for name, field in corpus_schema.REPLAY_FIELDS.items():
+        assert field.param is None, f"replay.{name} must not name a param"
+        assert field.flag.startswith("--"), f"replay.{name} must name a flag"
+
+
+def test_corpus_fields_name_a_param_not_a_flag():
+    for sec, fields in corpus_schema.CORPUS_FIELDS.items():
+        for name, field in fields.items():
+            assert field.param is not None, f"corpus.{sec}.{name} needs a param"
+            assert field.flag is None
+
+
 def test_no_field_is_both_deferred_and_applied():
     applied = {f"corpus.{sec}.{name}"
                for sec, fields in corpus_schema.CORPUS_FIELDS.items()
@@ -412,8 +426,8 @@ def test_replay_fields_are_applied_but_not_hashed():
                "replay": {"concurrent_sessions": cs, "total_sessions": ts}}
         corpus_schema.validate_corpus_document(doc, "w.yaml")
         params = _params(doc)
-        assert params["concurrentSessions"] == str(cs)
-        assert params["totalSessions"] == str(ts)
+        assert f"--concurrent-sessions {cs}" in params["observeArgs"]
+        assert f"--total-sessions {ts}" in params["observeArgs"]
         keys.add(params["tracePath"])
     assert len(keys) == 1, "replay: must not affect the corpus cache key"
 
@@ -425,10 +439,15 @@ def test_every_schema_param_is_declared_in_pipeline_yaml():
         (pathlib.Path(layout.repo_root()) / "pipeline" / "pipeline.yaml").read_text()
     )
     declared = {p["name"] for p in pl["spec"]["params"]}
+    # Only CORPUS_FIELDS name PipelineRun params. #900 moved the replay fields
+    # into the rendered observe argv, so concurrentSessions/totalSessions no
+    # longer exist as params — asserting them here would be a dangling
+    # reference. That they still reach a FLAG is asserted by
+    # test_observe_argv.py::test_every_replay_field_reaches_a_flag, so #901's
+    # applied-or-rejected invariant stays covered end to end.
     needed = {f.param
               for fields in corpus_schema.CORPUS_FIELDS.values()
               for f in fields.values()}
-    needed |= {f.param for f in corpus_schema.REPLAY_FIELDS.values()}
     needed |= {"traceSpec", "tracePath"}
     missing = sorted(needed - declared)
     assert not missing, f"not declared in pipeline/pipeline.yaml: {missing}"
