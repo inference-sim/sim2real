@@ -165,8 +165,9 @@ OBSERVE_TUNING_FLAGS = {
 #
 # The corpus-mode trio (--corpus-header/--corpus-data and the pool flags
 # --concurrent-sessions/--total-sessions) is injected by the task's trace-mode
-# branch from the trace workload's descriptor (tracePath + pool block via
-# assemble), NOT from config.md. Listing them here keeps a config.md block that
+# branch from the corpus workload's descriptor (tracePath + the `replay:` block
+# via assemble — see pipeline/README.md#corpus-workload-schema and issue #901),
+# NOT from config.md. Listing them here keeps a config.md block that
 # spells them out (for readability) from double-injecting them into extraArgs.
 # --trace-header/--trace-data are the OUTPUT flags the task always injects and
 # stay listed. --session-mode is NOT in this set (the task does not inject it):

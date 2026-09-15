@@ -1088,35 +1088,99 @@ All paths are relative to the experiment root and validated by `sim2real assembl
 
 `component.ref` (optional): tag, branch, or commit SHA identifying the expected version of the component submodule. Reserved for step-2 (the skill-driven flow that will consume it).
 
-### Trace workload schema
+### Corpus workload schema
 
-A workload YAML with a non-empty `trace:` mapping is treated as a **trace workload** — it sources requests from a recorded conversation trace (via `prepare-trace` + session pool) rather than a generative `WorkloadSpec`. `sim2real assemble` detects the presence of `trace:` and switches the PipelineRun to the trace code path.
+A workload YAML is exactly one of two kinds, and the discriminator is **structural**: the presence of a non-empty top-level `corpus:` mapping.
+
+| Kind | Shape | Request source |
+|------|-------|----------------|
+| **corpus** | `corpus:` + `replay:` | a recorded conversation corpus built by `prepare-trace`, replayed by `blis observe` |
+| **generative** | a bare blis `WorkloadSpec` (`version:`, `clients:`/`cohorts:`, …) | generated in-process from the spec |
+
+There is deliberately **no `kind:` field** (a label can contradict the structure it labels) and **no `name:` field** — the workload name is the filename stem, which `sim2real assemble` derives. Both are rejected if present.
+
+The schema is defined once, in [`pipeline/lib/corpus_schema.py`](lib/corpus_schema.py). Validation, PipelineRun param emission, and the corpus cache key all read the same tables, so they cannot drift apart.
 
 ```yaml
-name: <workload-name>         # required; kebab-or-snake-case, unique in the YAML list
-trace:
-  source: <spec>              # required. Dataset location:
-                              #   hf:<org>/<dataset>   — HuggingFace Hub dataset
-                              #   data.csv / <path>    — local file (relative to experiment root)
-  shards: 39                  # optional (default 39) — number of shards to download
-  split: test                 # optional (default "test") — HF dataset split
-  filters:                    # optional — filter conversations before conversion
-    min_rounds: 2             # minimum turns a conversation must have to be kept (default 2)
-  convert:                    # optional — conversion options
-    context_growth: accumulate  # how to build context window: "accumulate" (default) or other
-  pool:                       # required — session pool sizing
-    concurrent_sessions: <N>  # concurrent replays in-flight (maps to --concurrent-sessions)
-    total_sessions: <N>       # total sessions to run (0 = exhaust corpus; maps to --total-sessions)
-  sample:                     # optional — corpus sampling controls (applied at corpus-build time)
-    dedup_by_conversation: true  # deduplicate by conversation ID before sampling (default true)
-    shuffle_seed: 42          # RNG seed for deterministic corpus shuffle (default 42)
+# workloads/exgentic_agentic.yaml  →  workload name "exgentic_agentic"
+corpus:
+  upstream:                     # where the raw corpus comes from
+    source: hf:Exgentic/agent-llm-traces   # REQUIRED. "hf:<org>/<dataset>", or a path
+    shards: 39                  # optional (default 39) — take the first N shard files; 0 = all
+  select:                       # which sessions survive into the corpus
+    partition: test             # optional (default "test") — "test" | "train" | "all"
+    min_rounds: 2               # optional (default 2) — drop sessions with fewer usable turns
+    dedup_by_conversation: true # optional (default true) — one session per conversation
+    shuffle_seed: 42            # optional (default 42) — seeded shuffle; breaks file order so the
+                                #   replay pool's first-N sample spans many conversations
+  reconstruct:                  # how each session's request stream is rebuilt
+    context_growth: accumulate  # optional (default "accumulate") — or "independent"
+replay:                         # REQUIRED — consumed by blis observe at replay time
+  concurrent_sessions: 128      # REQUIRED, int >= 1  → --concurrent-sessions
+  total_sessions: 192           # REQUIRED, int >= 0  → --total-sessions (0 = exhaust the corpus)
 ```
 
-**Required fields:** `source`, `pool.concurrent_sessions`, `pool.total_sessions`.
+**Validation is strict.** An unrecognized key at any level — top level, a `corpus:` section, or `replay:` — fails at assemble time with the legal key set in the message. Nothing is silently ignored. This is the point of the schema: a field that is folded into the corpus cache key but reaches no PipelineRun param changes the key *without* changing the corpus, which is strictly worse than being refused.
 
-**`tracePath`** is deterministic: `sim2real assemble` hashes all `trace:` content fields (excluding `pool:` — replay-time only) and names the path `traces/<safe_wl_name>-<sha12>`. Changing any content field forces a new corpus build; changing only `pool:` reuses the cached corpus.
+**The invariant:** every field under `corpus:` is hashed into the cache key **and** applied to a param. Every field under `replay:` is applied and deliberately **not** hashed. `pipeline/tests/test_corpus_schema.py` asserts both halves, so adding a field to the schema without wiring it up fails the suite.
 
-**`sample.dedup_by_conversation` and `sample.shuffle_seed`** affect the corpus hash (changing them forces a rebuild). They are NOT included in the generative `workloadSpec` path — only trace workloads emit `traceDedupByConversation` and `traceShuffleSeed` PipelineRun params.
+#### `tracePath` is content-addressed
+
+`sim2real assemble` names the corpus `traces/<sha12>`, where `<sha12>` is the first 12 hex chars of SHA-256 over a canonical JSON serialization (`sort_keys=True`, no whitespace) of the `corpus:` mapping **alone**:
+
+- **No workload name.** Two cells with byte-identical `corpus:` content resolve to the same path and share one build. (The earlier `traces/<workload-name>-<sha12>` form built the identical corpus once per cell.)
+- **No `replay:`.** Session counts cannot change the corpus, so cells differing only in `replay:` reuse the same cache entry by construction.
+
+The hash covers the mapping **as written**, with no default-filling. An explicitly written `shards: 39` therefore keys differently from an omitted `shards`, even though both build the same corpus — deliberate conservatism, so that changing a default in `corpus_schema.py` cannot silently re-point existing cache entries.
+
+#### Not yet expressible
+
+These fields are **rejected**, each with its own reason, because nothing downstream honors them. Accepting them would recreate the defect this schema exists to remove. They become legal in the same change that makes them reach the Task.
+
+| Field | Why it is refused | Tracked by |
+|-------|-------------------|------------|
+| `corpus.upstream.revision` | Task support merged upstream (tektonc-data-collection#67) but the `tektonc-data-collection` submodule pointer predates it, so Tekton would reject the param at PipelineRun creation. Needs a submodule bump. | sim2real#905 |
+| `corpus.upstream.format` | Format dispatch (`convert otel` vs `convert weka`) is tektonc-data-collection#68, still open. | sim2real#905 |
+| `corpus.reconstruct.max_think_time` | `prepare-trace` never passes `--max-think-time` (tektonc-data-collection#68, still open). | sim2real#905 |
+| `corpus.select.partition_pct` | Not a Task parameter — `prepare-trace` hard-codes the split percentage as a constant (`TEST_PCT = 30`). | — |
+| `corpus.reconstruct.max_context` | No support anywhere: neither the Task nor `blis convert otel`/`blis convert weka` accepts a context ceiling. | — |
+
+> **`max_think_time`: refusing the field does NOT lift the cap.** `blis convert otel` defaults `--max-think-time` to **15s** and `prepare-trace` never overrides it, so that clamp stays in force and is simply inexpressible until sim2real#905. Any corpus built before then has its inter-round arrival gaps clamped at 15s. The clamp rewrites `ArrivalTimeUs` and writes no think-time column, so it is not visible in the converted output — check the converter's default rather than the corpus if inter-round timing looks compressed.
+
+#### Migrating from the old `trace:` shape
+
+`trace:` was **replaced, not dual-supported**: no trace run had ever executed, so there was no cached corpus, no collected results, and no shipped bundle to keep working. A document still carrying a non-empty `trace:` mapping fails at assemble with a message naming the replacement fields, rather than falling through to the generative path and being handed to blis as a "WorkloadSpec" whose content is `{trace: {...}}`.
+
+| Old | New |
+|-----|-----|
+| `trace.source` | `corpus.upstream.source` |
+| `trace.shards` | `corpus.upstream.shards` |
+| `trace.split` | `corpus.select.partition` |
+| `trace.filters.min_rounds` | `corpus.select.min_rounds` |
+| `trace.sample.dedup_by_conversation` | `corpus.select.dedup_by_conversation` |
+| `trace.sample.shuffle_seed` | `corpus.select.shuffle_seed` |
+| `trace.convert.context_growth` | `corpus.reconstruct.context_growth` |
+| `trace.pool.concurrent_sessions` | `replay.concurrent_sessions` |
+| `trace.pool.total_sessions` | `replay.total_sessions` |
+| `trace.filters.skip_branching` | *removed* — never had task-side support |
+| `trace.convert.max_think_time` | *refused* — see "Not yet expressible" above |
+
+`transfer.yaml`'s `version:` stays **3**. Synthetic (generative) workload descriptors do not change, so nothing a real bundle contains becomes invalid, and their PipelineRun params are byte-identical before and after.
+
+#### Emitted PipelineRun params
+
+Corpus workloads emit these; generative workloads emit **none** of them (and a non-empty `workloadSpec`, which corpus workloads leave empty so `observe` cannot source requests from a spec in corpus mode).
+
+| Param | From |
+|-------|------|
+| `traceSpec` | the `corpus:` mapping as compact YAML. Only its **emptiness** is load-bearing — `prepare-trace` tests `[ -z "$(params.traceSpec)" ]` to recognize a generative workload and skip the corpus build. Nothing parses the content. |
+| `tracePath` | `traces/<sha12>` (above) |
+| `concurrentSessions`, `totalSessions` | `replay.*` |
+| `traceSource`, `traceShards` | `corpus.upstream.*` |
+| `traceSplit`, `traceMinRounds`, `traceDedupByConversation`, `traceShuffleSeed` | `corpus.select.*` |
+| `traceContextGrowth` | `corpus.reconstruct.*` |
+
+Every one of these must also be declared in `pipeline/pipeline.yaml` — Tekton rejects a PipelineRun passing a param the Pipeline does not declare, so a schema addition that skips `pipeline.yaml` is an admission error rather than a soft failure. `test_every_schema_param_is_declared_in_pipeline_yaml` guards that.
 
 ---
 
