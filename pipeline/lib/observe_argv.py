@@ -313,4 +313,19 @@ def render_observe_argv(
         _validate_word(extra, "blis_observe.extraArgs", allow_space=True)
         argv += shlex.split(extra)
 
+    # An EMPTY argv must never leave here. Tekton's "required param" means
+    # SUPPLIED, not non-empty, so an empty string satisfies the Task's `no
+    # default` declaration and reaches blis as `observe --server-url <ep>` —
+    # no workload source, and a failure message that names blis's complaint
+    # rather than the actual cause. The Task guards this too, but only the
+    # renderer can turn it into an assemble-time error naming the cell.
+    # Unreachable today (the flag table always renders at least the tuning
+    # defaults, --model and a workload source), so this exists to keep a future
+    # refactor from silently opening the hole.
+    if not argv:
+        raise ObserveArgvError(
+            "rendered observe argv is empty, so blis observe would run with no "
+            "workload source. This is a renderer bug — every cell must resolve "
+            "to at least a workload source and the tuning defaults"
+        )
     return " ".join(argv)

@@ -271,3 +271,38 @@ def test_every_replay_field_reaches_a_flag():
     for name, field in corpus_schema.REPLAY_FIELDS.items():
         assert field.flag in got, f"replay.{name} reaches no flag"
         assert field.param is None, f"replay.{name} must not name a param"
+
+
+def test_rendered_argv_is_never_empty():
+    """Tekton's "required param" means SUPPLIED, not non-empty, so an empty
+    observeArgs would satisfy the Task's `no default` and reach blis as
+    `observe --server-url <ep>` — no workload source, and a failure naming
+    blis's complaint rather than the cause. Assert non-emptiness for every cell
+    kind so a future refactor cannot open the hole quietly."""
+    for over in ({}, {"observe": {"detectors": ""}},
+                 {"observe": {"extraArgs": ""}},
+                 {"workload": _CORPUS_WORKLOAD, "trace_path": "traces/x"}):
+        got = _render(**over)
+        assert got.strip(), f"empty argv for {over!r}"
+        # A workload source is the one thing blis cannot proceed without.
+        assert ("--workload-spec" in got) or ("--corpus-header" in got)
+
+
+def test_empty_argv_guard_exists_and_is_unreachable_by_construction():
+    """The `if not argv` guard is deliberately NOT driven by a test.
+
+    Reaching it requires emptying OBSERVE_FLAGS, which then makes `_resolved`
+    return {} and every later lookup a KeyError — so the only way to "cover" the
+    line is to make the module tolerate a state it should never be in. That
+    trades a real invariant (`resolved` is always fully populated, so `[]` is
+    the correct accessor and a KeyError would be a genuine bug signal) for one
+    line of coverage. Not worth it.
+
+    What IS asserted is the property the guard protects — see
+    test_rendered_argv_is_never_empty. This test pins the guard's existence so
+    it cannot be deleted as dead code without a deliberate decision."""
+    import inspect
+
+    src = inspect.getsource(observe_argv.render_observe_argv)
+    assert "if not argv:" in src
+    assert "argv is empty" in src
