@@ -25,14 +25,20 @@ from typing import NamedTuple
 
 import yaml
 
-from pipeline.lib import cluster_ops, layout, scope as _scope, slicer, translation_ref as _translation_ref
+from pipeline.lib import (
+    cluster_ops,
+    corpus_schema,
+    layout,
+    scope as _scope,
+    slicer,
+    translation_ref as _translation_ref,
+)
 # ``AssembleError`` lives in ``pipeline.lib.errors`` so low-level modules
 # (e.g. ``slicer``) can raise it without an import cycle. Re-exported below
 # to preserve the existing ``assemble_run.AssembleError`` API.
 from pipeline.lib.errors import AssembleError
 from pipeline.lib.manifest import ManifestError, load_manifest
 from pipeline.lib.tekton import (
-    is_trace_workload,
     make_pipelinerun_scenario,
     validate_pipelinerun_name,
 )
@@ -1003,44 +1009,58 @@ def grow_pair_iterations(
 
 
 def _validate_workload(data: dict, wl_path: Path) -> None:
-    """Validate a loaded workload's kind and (for trace workloads) shape.
+    """Validate a loaded workload's kind and, for corpus workloads, its shape.
 
-    A workload is exactly one kind: TRACE (non-empty ``trace`` mapping) or
-    GENERATIVE (``clients:``/``version:`` WorkloadSpec). Declaring both
-    ``trace:`` and ``clients:`` is an error. When a workload is a trace
-    workload, ``trace.source`` (non-empty str), ``trace.pool.concurrent_sessions``
-    (int >= 1) and ``trace.pool.total_sessions`` (int >= 0) are required.
+    A workload is exactly one kind:
+
+    * **CORPUS** — a non-empty top-level ``corpus:`` mapping. Validated strictly
+      by :func:`pipeline.lib.corpus_schema.validate_corpus_document`, which owns
+      the legal key set, the required fields, and the refusal of fields nothing
+      downstream honors yet. Strict means an unrecognized key is an ERROR: a
+      field that is hashed into the corpus cache key but reaches no PipelineRun
+      param changes the key without changing the corpus (issue #901).
+    * **GENERATIVE** — a bare blis WorkloadSpec (``clients:``/``cohorts:``/
+      ``version:``). Unchanged, and deliberately not validated here.
+
     Raises :class:`AssembleError` on any violation.
     """
-    trace_mode = is_trace_workload(data)
-    if trace_mode and "clients" in data:
-        raise AssembleError(
-            f"workload {wl_path} declares both 'trace' and 'clients'; a "
-            f"workload must be exactly one kind (trace or generative)"
-        )
-    if not trace_mode:
+    # Route on the PRESENCE of a corpus/replay key, not on its value. Using
+    # ``is_trace_workload`` here would let a degenerate value escape entirely:
+    # it requires a NON-EMPTY mapping, so ``corpus: {}``, ``corpus:`` (null),
+    # ``corpus: "hf:o/d"``, ``corpus: []`` and ``corpus: 5`` all answered False,
+    # skipped validation, fell through to the generative path, and were handed
+    # to blis as a "WorkloadSpec" whose content was ``{corpus: null}`` — no
+    # corpus built, no tracePath emitted, run proceeds. That is the same silent
+    # failure the legacy ``trace:`` guard below exists to prevent, and it left
+    # ``validate_corpus_document``'s own "must be a non-empty mapping" check
+    # unreachable from this path.
+    #
+    # Neither key can appear in a legitimate generative WorkloadSpec (see
+    # inference-sim ``sim/workload/spec.go``: version, seed, category, clients,
+    # cohorts, aggregate_rate, horizon, num_requests, servegen_data,
+    # inference_perf, goodput_slo_targets), so presence is unambiguous intent to
+    # be a corpus workload and generative documents are unaffected.
+    if any(marker in data for marker in corpus_schema.DOCUMENT_MARKERS):
+        corpus_schema.validate_corpus_document(data, str(wl_path))
         return
-    trace = data["trace"]
-    source = trace.get("source")
-    if not isinstance(source, str) or not source:
+    # The legacy ``trace:`` shape was REPLACED by ``corpus:``/``replay:``, not
+    # dual-supported (#901). Without this guard such a document is not a corpus
+    # workload, so it falls through to the generative path and is handed to blis
+    # as a "WorkloadSpec" whose content is ``{trace: {...}}`` — no corpus is
+    # built and the run proceeds silently wrong. Fail loudly instead.
+    legacy = data.get("trace")
+    if isinstance(legacy, dict) and legacy:
         raise AssembleError(
-            f"workload {wl_path}: trace.source must be a non-empty string"
-        )
-    pool = trace.get("pool")
-    if not isinstance(pool, dict):
-        raise AssembleError(f"workload {wl_path}: trace.pool is required")
-    # bool is a subclass of int — reject it explicitly so `true`/`false` in
-    # YAML don't slip through the int checks below.
-    cs = pool.get("concurrent_sessions")
-    if isinstance(cs, bool) or not isinstance(cs, int) or cs < 1:
-        raise AssembleError(
-            f"workload {wl_path}: trace.pool.concurrent_sessions must be an "
-            f"int >= 1"
-        )
-    ts = pool.get("total_sessions")
-    if isinstance(ts, bool) or not isinstance(ts, int) or ts < 0:
-        raise AssembleError(
-            f"workload {wl_path}: trace.pool.total_sessions must be an int >= 0"
+            f"workload {wl_path} declares a 'trace:' mapping, which was "
+            f"replaced by the 'corpus:'/'replay:' document (issue #901). "
+            f"Rewrite it as: corpus.upstream.source (was trace.source), "
+            f"corpus.upstream.shards (was trace.shards), "
+            f"corpus.select.partition (was trace.split), "
+            f"corpus.select.min_rounds (was trace.filters.min_rounds), "
+            f"corpus.select.{{dedup_by_conversation,shuffle_seed}} (was "
+            f"trace.sample.*), corpus.reconstruct.context_growth (was "
+            f"trace.convert.context_growth), and replay.* (was trace.pool.*). "
+            f"See pipeline/README.md#corpus-workload-schema"
         )
 
 
