@@ -15,6 +15,10 @@ _TASK_TIMEOUTS: dict[str, str] = {
     "stream-epp-logs": "3h",
     "stream-gpu-stats": "3h",
     "run-workload-blis-observe-binary": "3h",
+    # Runs parallel to standup and gates the 3h observe task, so it has well
+    # under 1h of the 4h budget. A corpus build that needs longer wants a
+    # pre-seeded PVC, not a bigger bound (#902).
+    "prepare-trace": "30m",
 }
 
 
