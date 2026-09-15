@@ -951,10 +951,16 @@ ls "$EXPERIMENT_ROOT/baselines/defaults/"*.yaml \
 - All names (baselines, algorithms) must be lowercase alphanumeric only, 1-20 chars
 - `context.files` paths resolved relative to experiment root
 - `component` required when `algorithms` is non-empty
-- `blis_observe` keys must match the schema in `pipeline/lib/manifest.py`:
-  exactly the 5 keys `maxConcurrency`, `timeout`, `warmupRequests`,
-  `prewarmDuration`, `extraArgs`. Values must be scalars (string or number,
-  not bool). Do not add other keys — the manifest validator rejects them.
+- `blis_observe` keys must match the schema, which since issue #900 is defined by
+  `OBSERVE_FLAGS` in `pipeline/lib/observe_argv.py` and consumed by
+  `pipeline/lib/manifest.py` — the nine keys `maxConcurrency`, `timeout`,
+  `warmupRequests`, `prewarmDuration`, `detectors`, `apiFormat`, `recordItl`,
+  `streaming`, `extraArgs`. Types are now **per key**, not a blanket scalar rule:
+  ints for the three counts, duration/enum strings for `prewarmDuration`,
+  `detectors` and `apiFormat`, and **bools** for `recordItl` and `streaming`
+  (which the older blanket rule rejected outright). Do not add other keys — the
+  manifest validator rejects them, and the key set is derived from the flag table
+  so an accepted key always reaches a real blis flag.
 
 **Present to user:** Show summary (scenario, component@ref, algorithm count,
 baseline count, workload count, context files) and ask for approval.
