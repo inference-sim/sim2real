@@ -14,6 +14,7 @@ _SCENARIO_FILE_PATH = "/tmp/llmdbench-config/scenario.yaml"
 _TASK_TIMEOUTS: dict[str, str] = {
     "stream-epp-logs": "3h",
     "stream-gpu-stats": "3h",
+    "stream-metrics": "3h",
     "run-workload-blis-observe-binary": "3h",
     # Runs parallel to standup and gates the 3h observe task, so it has well
     # under 1h of the 4h budget. A corpus build that needs longer wants a
