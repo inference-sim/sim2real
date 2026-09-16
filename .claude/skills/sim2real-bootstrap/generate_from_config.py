@@ -287,7 +287,7 @@ OBSERVE_REPLAY_ONLY_FLAGS = {
 # the pipeline runs another. test_observe_flag_lists.py asserts the key sets are
 # identical.
 #
-# This dict also decides what render_blis_observe_yaml EMITS: it iterates these
+# This dict also decides what render_measurement_yaml EMITS: it iterates these
 # keys, so a key parsed from config.md but absent here is silently discarded.
 # That is precisely how #900's first pass regressed --api-format / --record-itl /
 # --no-streaming, which previously survived into extraArgs.
@@ -1437,8 +1437,8 @@ def parse_observe_block(config_md_text: str) -> dict[str, str]:
     return parsed
 
 
-def render_blis_observe_yaml(parsed: dict[str, str]) -> str:
-    """Render a `blis_observe:` YAML block with provenance comments.
+def render_measurement_yaml(parsed: dict[str, str]) -> str:
+    """Render a standalone `measurement.yaml` protocol document (#911).
 
     Emits every OBSERVE_DEFAULTS key in canonical order (nine as of #900).
     Bools render as bare YAML `true`/`false`; a quoted "True" would be a
@@ -1447,8 +1447,35 @@ def render_blis_observe_yaml(parsed: dict[str, str]) -> str:
     and marked `# source: sim2real-bootstrap default`. Numeric-string values
     (all-digit) emit as bare YAML integers; other values emit as double-
     quoted YAML strings so a bare `60s` round-trips cleanly.
+
+    This is a whole file rather than a `blis_observe:` fragment: the protocol
+    moved out of transfer.yaml (#911), so the output carries its own
+    `kind`/`version` envelope and is written to `measurement.yaml`, with
+    transfer.yaml carrying only `measurement: measurement.yaml`.
+
+    Keys are emitted UNINDENTED for the same reason — they are top-level in
+    their own document now, not nested under a manifest key.
     """
-    lines = ["blis_observe:"]
+    lines = [
+        "# blis observe protocol for this bundle. Bundle-scoped and constant:",
+        "# holding it identical across cells is what makes cells comparable,",
+        "# so per-cell variation is a threat to validity rather than a feature.",
+        "#",
+        "# timeout is the PER-REQUEST HTTP timeout, not a run cap.",
+        "#",
+        "# warmupRequests excludes the first N *dispatched* requests by global",
+        "# index. For single-turn open-loop traffic that is an unbiased drop. For",
+        "# closed-loop multi-turn replay it is NOT: the leading dispatches are the",
+        "# opening rounds of the initial session pool, which under",
+        "# context_growth: accumulate are the smallest-context, cheapest rounds —",
+        "# excluding them biases inputs and latency rightward and leaves the first",
+        "# pool-worth of sessions head-truncated while later ones stay intact. Set",
+        "# 0 for trace replay and do cold-start exclusion in analysis, where",
+        "# trace_data.csv's session_id and round_index make it exact and reversible.",
+        "kind: measurement-protocol",
+        "version: 1",
+        "",
+    ]
     for key, default in OBSERVE_DEFAULTS.items():
         if key in parsed:
             value = parsed[key]
@@ -1461,7 +1488,7 @@ def render_blis_observe_yaml(parsed: dict[str, str]) -> str:
         # manifest.py's per-key type check would then reject it.
         if isinstance(value, bool):
             rendered = "true" if value else "false"
-            lines.append(f"  {key}: {rendered}  # source: {source}")
+            lines.append(f"{key}: {rendered}  # source: {source}")
             continue
         # Emit as bare int when the value is purely digits (no leading zero
         # edge case: '0' is fine as int, '007' would still parse fine).
@@ -1470,7 +1497,7 @@ def render_blis_observe_yaml(parsed: dict[str, str]) -> str:
         else:
             # Escape embedded double quotes.
             rendered = '"' + value.replace('"', '\\"') + '"'
-        lines.append(f"  {key}: {rendered}  # source: {source}")
+        lines.append(f"{key}: {rendered}  # source: {source}")
     return "\n".join(lines) + "\n"
 
 
@@ -1500,18 +1527,20 @@ def main():
         "--dry-run", action="store_true", help="Print YAML to stdout, don't write file"
     )
     parser.add_argument(
-        "--emit-observe-yaml",
+        "--emit-measurement-yaml",
         action="store_true",
         help=(
-            "Emit only a `blis_observe:` YAML fragment (parsed from the "
-            "`blis observe \\ ... \\` block in config.md) to stdout, then "
-            "exit 0. Skips scenario YAML generation. If config.md is "
-            "missing, emits an all-defaults fragment."
+            "Emit a complete `measurement.yaml` protocol document (parsed from "
+            "the `blis observe \\ ... \\` block in config.md) to stdout, then "
+            "exit 0. Write it to the bundle as measurement.yaml and point "
+            "transfer.yaml at it with `measurement: measurement.yaml` (#911). "
+            "Skips scenario YAML generation. If config.md is missing, emits an "
+            "all-defaults document."
         ),
     )
     args = parser.parse_args()
 
-    if args.emit_observe_yaml:
+    if args.emit_measurement_yaml:
         config_path = args.config
         if os.path.isfile(config_path):
             with open(config_path) as f:
@@ -1519,7 +1548,7 @@ def main():
             parsed = parse_observe_block(text)
         else:
             parsed = {}
-        sys.stdout.write(render_blis_observe_yaml(parsed))
+        sys.stdout.write(render_measurement_yaml(parsed))
         return
 
     config_path = args.config

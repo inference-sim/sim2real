@@ -143,6 +143,13 @@ OBSERVE_FLAGS: dict[str, _Flag] = {
 #: It is still a legal ``blis_observe`` key, hence this separate constant.
 VALID_OBSERVE_KEYS: frozenset[str] = frozenset(OBSERVE_FLAGS) | {"extraArgs"}
 
+#: Where these values come from, as it appears in user-facing errors. The
+#: protocol moved out of ``transfer.yaml``'s ``blis_observe:`` block into a
+#: bundle-level ``measurement.yaml`` (#911); a single constant keeps every
+#: message pointing at the file the operator actually edits, which is the drift
+#: this whole roster exists to prevent.
+SOURCE_LABEL = "measurement"
+
 
 def check_observe_type(key: str, value) -> str | None:
     """Return an error phrase if ``value`` is the wrong TYPE for ``key``, else
@@ -153,7 +160,7 @@ def check_observe_type(key: str, value) -> str | None:
         return None if _is_str(value) else "must be a string"
     spec = OBSERVE_FLAGS.get(key)
     if spec is None:
-        return "is not a recognized blis_observe key"
+        return f"is not a recognized {SOURCE_LABEL} key"
     return None if spec.check(value) else spec.describe
 
 
@@ -181,7 +188,7 @@ def _validate_detectors(value: str) -> None:
         return
     if value == "none":
         raise ObserveArgvError(
-            f"blis_observe.detectors: 'none' is not a valid selection. blis "
+            f"{SOURCE_LABEL}.detectors: 'none' is not a valid selection. blis "
             f"spells 'off' as the EMPTY value, so omit the key or set it to "
             f"''. Valid selections: 'all', or one or more of "
             f"{', '.join(DETECTOR_ROSTER)}"
@@ -192,7 +199,7 @@ def _validate_detectors(value: str) -> None:
             continue
         if name not in DETECTOR_ROSTER:
             raise ObserveArgvError(
-                f"blis_observe.detectors: unknown detector {name!r}. Valid: "
+                f"{SOURCE_LABEL}.detectors: unknown detector {name!r}. Valid: "
                 f"'all', or one or more of {', '.join(DETECTOR_ROSTER)}"
             )
 
@@ -251,7 +258,7 @@ def _check_exclusions(resolved: dict) -> None:
     #    here so it fails at assemble rather than after a pod is scheduled.
     if resolved["recordItl"] and not resolved["streaming"]:
         raise ObserveArgvError(
-            "blis_observe sets recordItl: true with streaming: false. blis "
+            f"{SOURCE_LABEL} sets recordItl: true with streaming: false. blis "
             "rejects --record-itl together with --no-streaming: ITL recording "
             "captures per-chunk timestamps, which only exist for streaming "
             "responses. Set streaming: true or recordItl: false"
@@ -282,7 +289,7 @@ def render_observe_argv(
     unknown = sorted(set(observe) - set(OBSERVE_FLAGS) - {"extraArgs"})
     if unknown:
         raise ObserveArgvError(
-            f"blis_observe contains keys the renderer does not know: {unknown}. "
+            f"{SOURCE_LABEL} contains keys the renderer does not know: {unknown}. "
             f"Valid keys: {sorted(set(OBSERVE_FLAGS) | {'extraArgs'})}"
         )
 
@@ -293,7 +300,7 @@ def render_observe_argv(
 
     if resolved["apiFormat"] not in OBSERVE_FLAGS["apiFormat"].choices:
         raise ObserveArgvError(
-            f"blis_observe.apiFormat: {resolved['apiFormat']!r} is not valid. "
+            f"{SOURCE_LABEL}.apiFormat: {resolved['apiFormat']!r} is not valid. "
             f"{OBSERVE_FLAGS['apiFormat'].describe}"
         )
 
@@ -314,7 +321,7 @@ def render_observe_argv(
         # "--saturation-report requires --detectors").
         if key == "detectors" and rendered == "":
             continue
-        _validate_word(rendered, f"blis_observe.{key}", allow_space=False)
+        _validate_word(rendered, f"{SOURCE_LABEL}.{key}", allow_space=False)
         argv += [spec.flag, rendered]
 
     _validate_word(model, "model", allow_space=False)
@@ -352,7 +359,7 @@ def render_observe_argv(
     # still applies, since a ';' here is injection into the Task's step.
     extra = str(observe.get("extraArgs", "") or "").strip()
     if extra:
-        _validate_word(extra, "blis_observe.extraArgs", allow_space=True)
+        _validate_word(extra, f"{SOURCE_LABEL}.extraArgs", allow_space=True)
         argv += shlex.split(extra)
 
     # An EMPTY argv must never leave here. Tekton's "required param" means

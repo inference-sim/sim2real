@@ -89,7 +89,7 @@ def assembly_slice(manifest: dict) -> dict:
     """Return the assembly-slice projection of ``manifest``.
 
     Everything not in the translation slice: ``workloads``, ``baselines``,
-    ``defaults``, ``kind``, ``version``, ``pipeline``, ``blis_observe``,
+    ``defaults``, ``kind``, ``version``, ``pipeline``, ``measurement``,
     any other top-level field, plus per-algorithm ``{name, defaults}``
     (sorted by name).
     """

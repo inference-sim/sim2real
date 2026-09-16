@@ -130,7 +130,7 @@ def _make_run(
                 ],
                 "workloads": workloads,
                 "defaults": {"disable": []},
-                "blis_observe": {"timeout": 3600},
+                "measurement": {"timeout": 3600},
             },
         )
 
@@ -349,7 +349,7 @@ class TestResolveRunHappyPath:
         assert ma["path"].endswith("manifest.assembly.yaml")
         assert ma["scenario"] == "test-scenario"
         assert ma["workloads"] == ["workloads/code_generation_4.yaml"]
-        assert ma["blis_observe"] == {"timeout": 3600}
+        assert ma["measurement"] == {"timeout": 3600}
 
     def test_populates_cluster_config_path_when_present(self, tmp_path):
         _make_run(tmp_path)

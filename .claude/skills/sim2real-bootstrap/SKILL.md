@@ -820,18 +820,29 @@ Assemble transfer manifest from all prior task outputs.
    In particular do not introduce a new marker into `algorithms/*.go` — the
    specification layer's contract in `/sim2real-specify` forbids in-source marker
    conventions outright, and that rule is unaffected by the labels used here.
-10. `blis_observe`: obtained by invoking
-    `python3 "$SKILL_DIR/generate_from_config.py" "$EXPERIMENT_ROOT/config.md" --emit-observe-yaml`
-    and pasting its stdout verbatim between `workloads:` and `context:`. The
-    script parses the `blis observe \ ... \` block in config.md and emits all
-    nine keys with per-key `# source:` provenance comments; if `config.md` is
-    absent or the block is missing, an all-defaults fragment is emitted. Do
-    NOT hand-edit the fragment — regenerate by re-running the script.
+10. `measurement`: the observe protocol, which since issue #911 lives in its own
+    bundle-level file rather than inside `transfer.yaml`. Obtain it by invoking
+    `python3 "$SKILL_DIR/generate_from_config.py" "$EXPERIMENT_ROOT/config.md" --emit-measurement-yaml`
+    and **writing its stdout to `$EXPERIMENT_ROOT/measurement.yaml`** (a whole
+    file, not a fragment to paste), then add the single line
+    `measurement: measurement.yaml` to `transfer.yaml` between `workloads:` and
+    `context:`. The script parses the `blis observe \ ... \` block in config.md
+    and emits all nine keys with per-key `# source:` provenance comments plus the
+    document's `kind: measurement-protocol` / `version: 1` envelope; if
+    `config.md` is absent or the block is missing, an all-defaults document is
+    emitted. Do NOT hand-edit it — regenerate by re-running the script.
     The block is validated against `blis observe`'s flag namespace (issue
     #602): recognized flags map to their key or `extraArgs`, while replay-only
     flags (e.g. `--session-mode`) and any non-observe flag are dropped with a
     `WARNING:` on stderr rather than transcribed. If a dropped flag was in fact
-    intended, add it to `blis_observe.extraArgs` in `transfer.yaml` by hand.
+    intended, add it to `extraArgs` in `measurement.yaml` by hand.
+
+    A `blis_observe:` block in `transfer.yaml` is now REJECTED by the manifest
+    loader, so a bundle carrying one will not validate — that is deliberate
+    (#911): a half-migrated bundle used to validate and then silently measure
+    with the renderer's defaults. The protocol is bundle-scoped and constant
+    across cells; holding it identical is what makes cells comparable, so do not
+    emit a per-workload variant.
 
 **Output schema:**
 ```yaml
@@ -869,22 +880,8 @@ baselines:
 
 workloads: <list from task-4>
 
-blis_observe:
-  # Populated by `generate_from_config.py --emit-observe-yaml` (see Derivation
-  # step 10 below). Each key carries a `# source:` comment indicating whether it
-  # came from the `blis observe \ ... \` block in config.md or from the
-  # sim2real-bootstrap default. Those defaults match `OBSERVE_FLAGS` in
-  # pipeline/lib/observe_argv.py, which is the runtime authority — issue #900
-  # deleted the pipeline.yaml params this used to point at.
-  maxConcurrency: <value>  # source: config.md | sim2real-bootstrap default
-  timeout: <value>         # source: config.md | sim2real-bootstrap default
-  warmupRequests: <value>  # source: config.md | sim2real-bootstrap default
-  prewarmDuration: <value> # source: config.md | sim2real-bootstrap default
-  detectors: <value>       # source: config.md | sim2real-bootstrap default
-  apiFormat: <value>       # source: config.md | sim2real-bootstrap default
-  recordItl: <bool>        # source: config.md | sim2real-bootstrap default
-  streaming: <bool>        # source: config.md | sim2real-bootstrap default
-  extraArgs: <value>       # source: config.md | sim2real-bootstrap default
+# A pointer, not a block (#911). The values live in the file it names.
+measurement: measurement.yaml
 
 context:
   # Substituted into the /sim2real-translate writer and reviewer prompts as
@@ -957,7 +954,7 @@ ls "$EXPERIMENT_ROOT/baselines/defaults/"*.yaml \
 - All names (baselines, algorithms) must be lowercase alphanumeric only, 1-20 chars
 - `context.files` paths resolved relative to experiment root
 - `component` required when `algorithms` is non-empty
-- `blis_observe` keys must match the schema, which since issue #900 is defined by
+- `measurement.yaml` keys must match the schema, which since issue #900 is defined by
   `OBSERVE_FLAGS` in `pipeline/lib/observe_argv.py` and consumed by
   `pipeline/lib/manifest.py` — the nine keys `maxConcurrency`, `timeout`,
   `warmupRequests`, `prewarmDuration`, `detectors`, `apiFormat`, `recordItl`,

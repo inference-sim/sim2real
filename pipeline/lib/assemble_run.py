@@ -1698,7 +1698,10 @@ def assemble_run(
         run_name=run_name,
         cluster_config=cluster_config,
         pipeline_name=(manifest.get("pipeline") or {}).get("name", "sim2real"),
-        observe=manifest.get("blis_observe") or {},
+        # Resolved measurement-protocol values (#911). load_manifest replaces
+        # the ``measurement:`` pointer with the file's validated contents, so
+        # this is a values dict, never a path.
+        observe=manifest.get("measurement") or {},
         model_name=resolved.model_name,
         submodule_shas=resolved.submodule_shas,
         submodule_urls=resolved.submodule_urls,

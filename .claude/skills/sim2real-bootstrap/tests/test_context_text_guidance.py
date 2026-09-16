@@ -66,7 +66,7 @@ def _task5_step9() -> str:
     """Return derivation step 9 (`context.text`) up to the start of step 10."""
     task5 = _task5()
     m = re.search(
-        r"\n9\. `context\.text`:(?P<body>.*?)(?=\n10\. `blis_observe`)",
+        r"\n9\. `context\.text`:(?P<body>.*?)(?=\n10\. `measurement`)",
         task5,
         re.S,
     )

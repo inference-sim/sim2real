@@ -91,14 +91,14 @@ python pipeline/sim2real.py --experiment-root ../admission-control use --run <ru
 
 | Module | Purpose |
 |--------|---------|
-| `manifest.py` | Loads and validates `transfer.yaml` (v3 schema) |
+| `manifest.py` | Loads and validates `transfer.yaml` (v3 schema). Rejects unknown top-level keys (#911) — previously any misspelled or aspirational key was silently accepted and never read. Resolves the `measurement:` pointer to its protocol file's validated values, replacing the pointer in-place so the values (not the filename) land in the hashed assembly slice; `blis_observe:` is rejected with a migration message, the hard-cutover posture #901 used for `trace:` |
 | `slicer.py` | Splits `transfer.yaml` into translation-slice vs assembly-slice + computes `translation_hash` |
 | `translation_ref.py` | Shared alias/algorithm-name validator, on-read shim for `translation_output.json` (handles both step-1 legacy and step-2 per-algo shapes), and `resolve_translation_ref` (accepts alias / hash prefix / full hash) |
 | `build.py` | Shared build primitives — image-ref construction, skopeo digest probe, buildkit-pod dispatch, atomic JSON write. Consumed by `sim2real build`. |
 | `assemble_run.py` | Assembly logic behind `sim2real assemble` (deep-merge + PipelineRun generation, additive-grow / drift / legacy-run decision tree) |
 | `values.py` | Deep-merge utility (`deep_merge`) used by `assemble_run.py`. Lists of scalars are replaced wholesale, **except** CLI-flag lists at key paths ending `vllm.additionalFlags`, which merge by flag name with `--no-X`/`--X` treated as one key (#851). Still-replacing scalar lists (`router.proxy.args`, `capabilities.add`) surface an assemble-time warning naming the discarded values and the two layers that disagreed |
 | `corpus_schema.py` | Single definition of the corpus/replay workload document (#901) — legal keys, defaults, the PipelineRun param each field drives, the content-addressed `corpus_cache_key`, and `DEFERRED_FIELDS`: fields nothing downstream honors yet, which are **rejected** rather than accepted-and-ignored. Consumed by `assemble_run.py` (validate) and `tekton.py` (emit), so the two cannot drift |
-| `observe_argv.py` | Renders the whole `blis observe` command line into one `observeArgs` PipelineRun param (#900) — flag table (the single authority for `blis_observe` keys, defaults and types, consumed by `manifest.py`), the three mutual exclusions, and value validation. `--server-url` is excluded (runtime Task result). Glob chars are deliberately allowed because the Task runs `set -f` |
+| `observe_argv.py` | Renders the whole `blis observe` command line into one `observeArgs` PipelineRun param (#900) — flag table (the single authority for measurement-protocol keys, defaults and types, consumed by `manifest.py`), the three mutual exclusions, and value validation. `--server-url` is excluded (runtime Task result). Glob chars are deliberately allowed because the Task runs `set -f` |
 | `pairkey.py` | Pair-key parser (canonical grammar `wl-<w>\|<p>\|iN` with legacy `wl-<w>\|<p>` fallback) and `--iteration` spec parser (list + range) |
 | `tekton.py` | Generates PipelineRun YAMLs for scenario-based benchmarks; `validate_pipelinerun_name` enforces the RFC 1123 253-char limit at assemble time |
 | `pod_pending.py` | Classifies pod scheduling failures as recoverable or non-recoverable |
