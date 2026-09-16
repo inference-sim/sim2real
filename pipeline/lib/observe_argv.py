@@ -61,7 +61,7 @@ class ObserveArgvError(AssembleError):
 
 
 class _Flag:
-    """One ``blis_observe`` key and the flag it drives.
+    """One measurement-protocol key and the flag it drives.
 
     ``kind`` selects rendering:
       ``"value"``   -> ``--flag <value>``
@@ -70,7 +70,7 @@ class _Flag:
                        has no ``--streaming``, only ``--no-streaming``)
 
     ``check`` is the TYPE predicate, consumed by ``manifest.load_manifest`` so
-    the ``blis_observe`` allowlist and this table cannot disagree about what a
+    the measurement-protocol allowlist and this table cannot disagree about what a
     key accepts. Value-level validity (a detector name, an api-format choice)
     is checked here at render time instead, so neither layer duplicates the
     other: manifest answers "is this the right type", the renderer answers "is
@@ -109,7 +109,7 @@ def _is_bool(value) -> bool:
 #: EMPTY selection means off, which is blis's own vocabulary ("Empty = off").
 DETECTOR_ROSTER = ("composite", "threshold", "backlog-drift", "peak-rate")
 
-#: ``blis_observe`` key -> flag. Order here is the rendered flag order. It
+#: Protocol key -> flag. Order here is the rendered flag order. It
 #: reproduces the order today's Task builds, so the AC-1 golden comparison is a
 #: straight string equality rather than a set comparison.
 #:
@@ -140,7 +140,7 @@ OBSERVE_FLAGS: dict[str, _Flag] = {
 
 #: ``extraArgs`` is a free-form flag TAIL rather than a single flag, so it has no
 #: ``_Flag`` entry — it is appended verbatim (word-split) after everything else.
-#: It is still a legal ``blis_observe`` key, hence this separate constant.
+#: It is still a legal protocol key, hence this separate constant.
 VALID_OBSERVE_KEYS: frozenset[str] = frozenset(OBSERVE_FLAGS) | {"extraArgs"}
 
 #: Where these values come from, as it appears in user-facing errors. The
@@ -153,7 +153,7 @@ SOURCE_LABEL = "measurement"
 
 def check_observe_type(key: str, value) -> str | None:
     """Return an error phrase if ``value`` is the wrong TYPE for ``key``, else
-    None. The single type authority for ``blis_observe``, consumed by
+    None. The single type authority for the measurement protocol, consumed by
     ``manifest.load_manifest`` so the allowlist cannot drift from this table.
     """
     if key == "extraArgs":

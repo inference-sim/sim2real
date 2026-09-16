@@ -1701,6 +1701,11 @@ def assemble_run(
         # Resolved measurement-protocol values (#911). load_manifest replaces
         # the ``measurement:`` pointer with the file's validated contents, so
         # this is a values dict, never a path.
+        #
+        # The ``or {}`` is inert for a properly loaded manifest — load_manifest
+        # always sets ``measurement`` to a dict, never None. It is kept only for
+        # callers that hand-build a manifest dict without going through
+        # load_manifest (several tests do); it is not guarding a real runtime case.
         observe=manifest.get("measurement") or {},
         model_name=resolved.model_name,
         submodule_shas=resolved.submodule_shas,

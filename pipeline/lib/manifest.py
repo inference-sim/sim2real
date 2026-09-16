@@ -75,7 +75,11 @@ def _load_measurement(pointer, manifest_path: Path) -> dict:
         raw = yaml.safe_load(mpath.read_text())
     except yaml.YAMLError as exc:
         raise ManifestError(f"YAML parse error in {mpath}: {exc}") from exc
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
+        # UnicodeDecodeError is a ValueError, NOT an OSError, so it needs naming
+        # explicitly — a protocol file saved in a non-UTF-8 encoding would
+        # otherwise escape as a raw traceback while every other read failure in
+        # this function surfaces as a ManifestError naming the file.
         raise ManifestError(f"cannot read measurement file {mpath}: {exc}") from exc
 
     if raw is None:

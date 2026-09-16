@@ -149,7 +149,7 @@ VLLM_SECTION_KEYWORDS = [
 VLLM_INDICATOR_FIELDS = {"model", "max_num_seqs", "hardware", "replicas", "gpu_memory_utilization"}
 
 # ---------------------------------------------------------------------------
-# blis observe → blis_observe:  (issue #403)
+# blis observe → measurement.yaml  (issue #403; relocated by #911)
 # ---------------------------------------------------------------------------
 
 OBSERVE_TUNING_FLAGS = {
@@ -164,7 +164,7 @@ OBSERVE_TUNING_FLAGS = {
     "--api-format": "apiFormat",
 }
 
-# Boolean flags mapped to a BOOLEAN blis_observe key: flag -> (key, value when
+# Boolean flags mapped to a BOOLEAN protocol key: flag -> (key, value when
 # ASSERTED). They cannot route through OBSERVE_TUNING_FLAGS, which requires a
 # value token, because bare presence is the normal spelling.
 #
@@ -280,10 +280,10 @@ OBSERVE_REPLAY_ONLY_FLAGS = {
     "--total-kv-blocks", "--hardware", "--tp",             # sim hardware/model
 }
 
-# Defaults for every blis_observe key, in canonical emission order. These MUST
+# Defaults for every protocol key, in canonical emission order. These MUST
 # match ``OBSERVE_FLAGS`` in pipeline/lib/observe_argv.py, which is the runtime
 # authority — the renderer there applies these same values when a bundle omits a
-# key, so a mismatch means the generated transfer.yaml documents one value while
+# key, so a mismatch means the generated measurement.yaml documents one value while
 # the pipeline runs another. test_observe_flag_lists.py asserts the key sets are
 # identical.
 #
@@ -1283,7 +1283,8 @@ def write_provenance_yaml(
 def parse_observe_block(config_md_text: str) -> dict[str, str]:
     """Extract flags from the `blis observe \\ ... \\` command in config.md.
 
-    Returns a dict keyed by transfer.yaml key. Keys are present only when the
+    Returns a dict keyed by measurement.yaml protocol key (#911 moved these out
+    of transfer.yaml). Keys are present only when the
     block contained the corresponding flag. Each flag is validated against
     `blis observe`'s namespace: modeled tuning flags map to their key, other
     real observe flags are passed through verbatim in `extraArgs`

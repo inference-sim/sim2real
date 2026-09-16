@@ -21,7 +21,7 @@ _CORPUS_WORKLOAD = {
     "replay": {"concurrent_sessions": 128, "total_sessions": 192},
 }
 
-#: Flags driven by blis_observe, in rendered order, at their defaults. Mirrors
+#: Flags driven by the measurement protocol, in rendered order, at their defaults. Mirrors
 #: today's intended command: --max-concurrency/--timeout/--prewarm-duration/
 #: --warmup-requests then the detector, with --api-format now explicit and
 #: --record-itl / --no-streaming absent because their defaults are absence.
@@ -339,3 +339,41 @@ def test_empty_argv_guard_exists_and_is_unreachable_by_construction():
     src = inspect.getsource(observe_argv.render_observe_argv)
     assert "if not rendered.strip():" in src
     assert "argv is empty" in src
+
+
+# ── error-message provenance (#911) ──────────────────────────────────────────
+
+def test_error_messages_name_the_measurement_file_not_the_old_manifest_block():
+    """The protocol moved to measurement.yaml (#911), so runtime errors must name
+    that, not the `blis_observe:` block a bundle can no longer declare.
+
+    Asserted because nothing else did: SOURCE_LABEL could be reverted, or a call
+    site re-hardcoded to "blis_observe", and every other test would still pass
+    while every operator-facing error pointed at a key the loader now rejects —
+    the same name-drift class this issue exists to remove.
+    """
+    assert observe_argv.SOURCE_LABEL == "measurement"
+
+    # An unknown key, via the type authority the manifest consumes.
+    assert "measurement" in observe_argv.check_observe_type("bogus", 1)
+    assert "blis_observe" not in observe_argv.check_observe_type("bogus", 1)
+
+    def _err(observe):
+        with pytest.raises(observe_argv.ObserveArgvError) as exc:
+            observe_argv.render_observe_argv(
+                workload={"name": "w"}, observe=observe, model="m",
+                results_dir="run/p/wl/i1",
+            )
+        return str(exc.value)
+
+    # Each render-time path that names the source in its message.
+    for observe, needle in [
+        ({"bogus": 1}, "does not know"),
+        ({"apiFormat": "nope"}, "apiFormat"),
+        ({"detectors": "nope"}, "unknown detector"),
+        ({"recordItl": True, "streaming": False}, "recordItl"),
+    ]:
+        msg = _err(observe)
+        assert needle in msg, msg
+        assert "measurement" in msg, msg
+        assert "blis_observe" not in msg, msg
