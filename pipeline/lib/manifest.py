@@ -79,9 +79,12 @@ def _load_measurement(pointer, manifest_path: Path) -> dict:
         raise ManifestError(f"cannot read measurement file {mpath}: {exc}") from exc
 
     if raw is None:
+        # Only the ENVELOPE is required. A file carrying kind/version and no
+        # protocol keys is legal and means "no overrides" — same as omitting
+        # ``measurement:`` — so this message must not claim otherwise.
         raise ManifestError(
-            f"measurement file {mpath} is empty; it must declare "
-            f"kind: {_MEASUREMENT_KIND} and at least one protocol key"
+            f"measurement file {mpath} is empty; it must declare at least "
+            f"kind: {_MEASUREMENT_KIND} and version: {_MEASUREMENT_VERSION}"
         )
     if not isinstance(raw, dict):
         raise ManifestError(f"measurement file {mpath} must be a mapping")

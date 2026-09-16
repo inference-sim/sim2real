@@ -349,8 +349,14 @@ def test_render_mixed_provenance():
 
 
 def test_render_output_parses_as_yaml_with_expected_types():
-    """Numeric-string keys emit as YAML ints; string keys emit as YAML
-    strings. bool must never appear — manifest.py rejects bool values."""
+    """Numeric-string keys emit as YAML ints; string keys emit as YAML strings.
+
+    Bools appear for exactly two keys. `recordItl` and `streaming` became
+    first-class bool keys in #900; every OTHER key must not be a bool, because a
+    YAML `true` sitting in an int field is the bug manifest.py's per-key type
+    check exists to catch. (This docstring used to say bools must never appear,
+    which stopped being true at #900 and was contradicted by the assertions
+    below.)"""
     out = gfc.render_measurement_yaml({})
     loaded = _protocol_values(out)
     assert loaded == {

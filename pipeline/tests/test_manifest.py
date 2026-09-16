@@ -467,6 +467,39 @@ def test_protocol_rejects_invalid_yaml(tmp_path):
         load_manifest(_with_measurement(tmp_path, "kind: [unclosed\n"))
 
 
+def test_protocol_that_exists_but_cannot_be_read_is_an_error(tmp_path):
+    """The OSError branch: the pointer resolves to something that exists (so the
+    not-found check passes) but cannot be read as a file. A directory is the
+    reachable case; permission bits are not portable to assert."""
+    path = _write_bundle(tmp_path, {"measurement": "measurement.yaml"},
+                         write_protocol=False)
+    (tmp_path / "measurement.yaml").mkdir()
+    with pytest.raises(ManifestError, match="cannot read measurement file"):
+        load_manifest(path)
+
+
+def test_protocol_with_only_an_envelope_is_legal_and_means_no_overrides(tmp_path):
+    """Counterpart to the empty-file error. kind+version and zero protocol keys
+    is legal — it resolves to {} and every key falls through to the roster
+    defaults, exactly as omitting `measurement:` does. The empty-FILE message
+    must therefore not claim a protocol key is required (it once did, while
+    pipeline/README.md said all keys are optional)."""
+    m = load_manifest(_with_measurement(
+        tmp_path, {"kind": "measurement-protocol", "version": 1}))
+    assert m["measurement"] == {}
+
+
+def test_empty_file_error_does_not_claim_a_protocol_key_is_required(tmp_path):
+    """Guards the wording itself, since the code deliberately does not enforce
+    what the old message asserted."""
+    with pytest.raises(ManifestError) as exc:
+        load_manifest(_with_measurement(tmp_path, "", write_protocol=True))
+    msg = str(exc.value)
+    assert "kind: measurement-protocol" in msg
+    assert "version: 1" in msg
+    assert "protocol key" not in msg
+
+
 def test_protocol_may_live_in_a_subdirectory(tmp_path):
     """The pointer is a path, not a bare filename."""
     path = _write_bundle(tmp_path, {"measurement": "protocol/measurement.yaml"},

@@ -1448,9 +1448,13 @@ def render_measurement_yaml(parsed: dict[str, str]) -> str:
     (all-digit) emit as bare YAML integers; other values emit as double-
     quoted YAML strings so a bare `60s` round-trips cleanly.
 
-    This is a whole file rather than a `blis_observe:` fragment: the protocol
-    moved out of transfer.yaml (#911), so the output carries its own
-    `kind`/`version` envelope and is written to `measurement.yaml`, with
+    Returns the document as a string; it writes nothing. The caller decides
+    where it lands — the `--emit-measurement-yaml` CLI path prints it to stdout,
+    and the skill redirects that into the bundle's `measurement.yaml`.
+
+    The output is a whole document rather than a `blis_observe:` fragment: the
+    protocol moved out of transfer.yaml (#911), so it carries its own
+    `kind`/`version` envelope and belongs in `measurement.yaml`, with
     transfer.yaml carrying only `measurement: measurement.yaml`.
 
     Keys are emitted UNINDENTED for the same reason — they are top-level in
