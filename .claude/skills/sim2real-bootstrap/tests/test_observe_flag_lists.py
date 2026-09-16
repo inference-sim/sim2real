@@ -115,7 +115,7 @@ def test_config_md_round_trips_all_four_new_flags_into_the_emitted_yaml():
     """The regression this file exists to prevent, end to end: config.md ->
     parse -> render. The parse half alone passing is what let the emitter drop
     these silently, so assert the RENDERED text, not the parsed dict."""
-    rendered = g.render_blis_observe_yaml(g.parse_observe_block(_CONFIG_BLOCK))
+    rendered = g.render_measurement_yaml(g.parse_observe_block(_CONFIG_BLOCK))
     assert "timeout: 60  # source: config.md" in rendered
     assert 'detectors: "composite"  # source: config.md' in rendered
     assert 'apiFormat: "chat"  # source: config.md' in rendered
@@ -136,14 +136,21 @@ def test_emitted_yaml_is_loadable_and_accepted_by_the_manifest_validator():
     _sys.path.insert(0, str(repo))
     from pipeline.lib import observe_argv
 
-    block = _yaml.safe_load(
-        g.render_blis_observe_yaml(g.parse_observe_block(_CONFIG_BLOCK))
-    )["blis_observe"]
+    document = _yaml.safe_load(
+        g.render_measurement_yaml(g.parse_observe_block(_CONFIG_BLOCK))
+    )
+    # kind/version are the document's own envelope (#911), not roster keys — the
+    # manifest strips them before validating, so this must too or it would assert
+    # that the envelope is a protocol key.
+    assert document["kind"] == "measurement-protocol"
+    assert document["version"] == 1
+    block = {k: v for k, v in document.items() if k not in ("kind", "version")}
+
     assert block["recordItl"] is True
     assert block["streaming"] is False
     for key, value in block.items():
         assert observe_argv.check_observe_type(key, value) is None, (
-            f"emitted blis_observe.{key}={value!r} would be rejected by manifest"
+            f"emitted measurement.{key}={value!r} would be rejected by manifest"
         )
 
 
@@ -158,7 +165,7 @@ def test_observe_defaults_covers_every_key_the_parser_can_produce():
     missing = sorted(producible - set(g.OBSERVE_DEFAULTS))
     assert not missing, (
         f"parse_observe_block can produce {missing}, but OBSERVE_DEFAULTS omits "
-        f"them so render_blis_observe_yaml drops them silently"
+        f"them so render_measurement_yaml drops them silently"
     )
 
 
@@ -199,7 +206,7 @@ def test_observe_defaults_values_match_the_runtime_defaults():
 def test_bool_keys_render_as_yaml_booleans():
     """A quoted "True" is a STRING to YAML, which manifest.py's per-key type
     check then rejects — so the bundle would fail to load, not merely mislead."""
-    out = g.render_blis_observe_yaml({"recordItl": True, "streaming": False})
+    out = g.render_measurement_yaml({"recordItl": True, "streaming": False})
     assert "recordItl: true" in out
     assert "streaming: false" in out
     assert '"true"' not in out and '"True"' not in out

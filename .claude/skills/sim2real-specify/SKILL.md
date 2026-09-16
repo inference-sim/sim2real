@@ -420,7 +420,7 @@ prompt uses a name absent here, or if a name here is used by no prompt.
    python3 .claude/skills/sim2real-bootstrap/generate_from_config.py \
      <experiment-root>/config.md -o "$(mktemp -d)"
    python3 .claude/skills/sim2real-bootstrap/generate_from_config.py \
-     <experiment-root>/config.md --emit-observe-yaml
+     <experiment-root>/config.md --emit-measurement-yaml
    ```
 
    The first must exit 0 — a temp `-o` makes it a dry run, so no bundle file is

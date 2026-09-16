@@ -61,7 +61,7 @@ class ObserveArgvError(AssembleError):
 
 
 class _Flag:
-    """One ``blis_observe`` key and the flag it drives.
+    """One measurement-protocol key and the flag it drives.
 
     ``kind`` selects rendering:
       ``"value"``   -> ``--flag <value>``
@@ -70,7 +70,7 @@ class _Flag:
                        has no ``--streaming``, only ``--no-streaming``)
 
     ``check`` is the TYPE predicate, consumed by ``manifest.load_manifest`` so
-    the ``blis_observe`` allowlist and this table cannot disagree about what a
+    the measurement-protocol allowlist and this table cannot disagree about what a
     key accepts. Value-level validity (a detector name, an api-format choice)
     is checked here at render time instead, so neither layer duplicates the
     other: manifest answers "is this the right type", the renderer answers "is
@@ -109,7 +109,7 @@ def _is_bool(value) -> bool:
 #: EMPTY selection means off, which is blis's own vocabulary ("Empty = off").
 DETECTOR_ROSTER = ("composite", "threshold", "backlog-drift", "peak-rate")
 
-#: ``blis_observe`` key -> flag. Order here is the rendered flag order. It
+#: Protocol key -> flag. Order here is the rendered flag order. It
 #: reproduces the order today's Task builds, so the AC-1 golden comparison is a
 #: straight string equality rather than a set comparison.
 #:
@@ -140,20 +140,27 @@ OBSERVE_FLAGS: dict[str, _Flag] = {
 
 #: ``extraArgs`` is a free-form flag TAIL rather than a single flag, so it has no
 #: ``_Flag`` entry — it is appended verbatim (word-split) after everything else.
-#: It is still a legal ``blis_observe`` key, hence this separate constant.
+#: It is still a legal protocol key, hence this separate constant.
 VALID_OBSERVE_KEYS: frozenset[str] = frozenset(OBSERVE_FLAGS) | {"extraArgs"}
+
+#: Where these values come from, as it appears in user-facing errors. The
+#: protocol moved out of ``transfer.yaml``'s ``blis_observe:`` block into a
+#: bundle-level ``measurement.yaml`` (#911); a single constant keeps every
+#: message pointing at the file the operator actually edits, which is the drift
+#: this whole roster exists to prevent.
+SOURCE_LABEL = "measurement"
 
 
 def check_observe_type(key: str, value) -> str | None:
     """Return an error phrase if ``value`` is the wrong TYPE for ``key``, else
-    None. The single type authority for ``blis_observe``, consumed by
+    None. The single type authority for the measurement protocol, consumed by
     ``manifest.load_manifest`` so the allowlist cannot drift from this table.
     """
     if key == "extraArgs":
         return None if _is_str(value) else "must be a string"
     spec = OBSERVE_FLAGS.get(key)
     if spec is None:
-        return "is not a recognized blis_observe key"
+        return f"is not a recognized {SOURCE_LABEL} key"
     return None if spec.check(value) else spec.describe
 
 
@@ -181,7 +188,7 @@ def _validate_detectors(value: str) -> None:
         return
     if value == "none":
         raise ObserveArgvError(
-            f"blis_observe.detectors: 'none' is not a valid selection. blis "
+            f"{SOURCE_LABEL}.detectors: 'none' is not a valid selection. blis "
             f"spells 'off' as the EMPTY value, so omit the key or set it to "
             f"''. Valid selections: 'all', or one or more of "
             f"{', '.join(DETECTOR_ROSTER)}"
@@ -192,7 +199,7 @@ def _validate_detectors(value: str) -> None:
             continue
         if name not in DETECTOR_ROSTER:
             raise ObserveArgvError(
-                f"blis_observe.detectors: unknown detector {name!r}. Valid: "
+                f"{SOURCE_LABEL}.detectors: unknown detector {name!r}. Valid: "
                 f"'all', or one or more of {', '.join(DETECTOR_ROSTER)}"
             )
 
@@ -251,7 +258,7 @@ def _check_exclusions(resolved: dict) -> None:
     #    here so it fails at assemble rather than after a pod is scheduled.
     if resolved["recordItl"] and not resolved["streaming"]:
         raise ObserveArgvError(
-            "blis_observe sets recordItl: true with streaming: false. blis "
+            f"{SOURCE_LABEL} sets recordItl: true with streaming: false. blis "
             "rejects --record-itl together with --no-streaming: ITL recording "
             "captures per-chunk timestamps, which only exist for streaming "
             "responses. Set streaming: true or recordItl: false"
@@ -282,7 +289,7 @@ def render_observe_argv(
     unknown = sorted(set(observe) - set(OBSERVE_FLAGS) - {"extraArgs"})
     if unknown:
         raise ObserveArgvError(
-            f"blis_observe contains keys the renderer does not know: {unknown}. "
+            f"{SOURCE_LABEL} contains keys the renderer does not know: {unknown}. "
             f"Valid keys: {sorted(set(OBSERVE_FLAGS) | {'extraArgs'})}"
         )
 
@@ -293,7 +300,7 @@ def render_observe_argv(
 
     if resolved["apiFormat"] not in OBSERVE_FLAGS["apiFormat"].choices:
         raise ObserveArgvError(
-            f"blis_observe.apiFormat: {resolved['apiFormat']!r} is not valid. "
+            f"{SOURCE_LABEL}.apiFormat: {resolved['apiFormat']!r} is not valid. "
             f"{OBSERVE_FLAGS['apiFormat'].describe}"
         )
 
@@ -314,7 +321,7 @@ def render_observe_argv(
         # "--saturation-report requires --detectors").
         if key == "detectors" and rendered == "":
             continue
-        _validate_word(rendered, f"blis_observe.{key}", allow_space=False)
+        _validate_word(rendered, f"{SOURCE_LABEL}.{key}", allow_space=False)
         argv += [spec.flag, rendered]
 
     _validate_word(model, "model", allow_space=False)
@@ -352,7 +359,7 @@ def render_observe_argv(
     # still applies, since a ';' here is injection into the Task's step.
     extra = str(observe.get("extraArgs", "") or "").strip()
     if extra:
-        _validate_word(extra, "blis_observe.extraArgs", allow_space=True)
+        _validate_word(extra, f"{SOURCE_LABEL}.extraArgs", allow_space=True)
         argv += shlex.split(extra)
 
     # An EMPTY argv must never leave here. Tekton's "required param" means

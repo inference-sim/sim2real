@@ -878,8 +878,14 @@ def _make_experiment(
     algo_names_registered: list[str],
     algo_names_manifest: list[str],
     image_ref: str = "ghcr.io/foo/bar:v1",
+    measurement: dict | None = None,
 ) -> dict:
-    """Build a minimal experiment on disk and register a translation."""
+    """Build a minimal experiment on disk and register a translation.
+
+    ``measurement`` (#911), when given, writes a ``measurement.yaml`` protocol
+    file and points transfer.yaml at it. Default None keeps the bundle without
+    the key, which is the pre-#911 shape every other test here relies on.
+    """
     exp_root = tmp_path / "exp"
     workspace = exp_root / "workspace"
     layout._EXPERIMENT_ROOT = exp_root
@@ -911,6 +917,12 @@ def _make_experiment(
         "workloads": ["workloads/w1.yaml"],
         "defaults": {"disable": []},
     }
+    if measurement is not None:
+        manifest["measurement"] = "measurement.yaml"
+        _write_yaml(
+            exp_root / "measurement.yaml",
+            {"kind": "measurement-protocol", "version": 1, **measurement},
+        )
     _write_yaml(exp_root / "transfer.yaml", manifest)
     _write_yaml(
         exp_root / "baselines" / "base.yaml",
@@ -1018,6 +1030,63 @@ class TestAssembleRun:
         # scenario is recorded so deploy.py can scope the progress
         # ConfigMap per experiment root (#551).
         assert meta["scenario"] == "test-scenario"
+
+    def test_measurement_file_values_reach_the_rendered_observe_argv(self, tmp_path):
+        """The joining line (assemble_run.py's ``observe=manifest["measurement"]``).
+
+        load_manifest resolving the pointer is tested in test_manifest.py, and
+        rendering from an explicit observe dict is tested in test_tekton.py — but
+        nothing exercised the line that connects them. If it were reverted,
+        typo'd, or dropped in a refactor, every operator-configured measurement
+        value would silently stop reaching blis while the whole suite stayed
+        green: exactly the silent-wrong-measurement failure #911 exists to close.
+
+        Uses non-default values throughout, so a regression that fell back to the
+        roster defaults could not satisfy this test.
+        """
+        fx = _make_experiment(
+            tmp_path,
+            algo_names_registered=["sr"],
+            algo_names_manifest=["sr"],
+            measurement={
+                "maxConcurrency": 4242,
+                "timeout": 999,
+                "warmupRequests": 0,
+                "prewarmDuration": "7s",
+                "apiFormat": "chat",
+            },
+        )
+        assemble_run.assemble_run(
+            translation_hash=fx["translation_hash"],
+            translation_ref=fx["translation_hash"],
+            cluster_id=fx["cluster_id"],
+            run_name="trial-1",
+            experiment_root=fx["exp_root"],
+            manifest_path=fx["manifest_path"],
+            force=False,
+            now_iso="2026-07-01T14:05:00Z",
+        )
+        run_dir = fx["exp_root"] / "workspace" / "runs" / "trial-1"
+        pr = yaml.safe_load(
+            (run_dir / "cluster" / "pipelinerun-wl-a|sr|i1.yaml").read_text()
+        )
+        params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
+        argv = params["observeArgs"]
+
+        assert "--max-concurrency 4242" in argv
+        assert "--timeout 999" in argv
+        assert "--warmup-requests 0" in argv
+        assert "--prewarm-duration 7s" in argv
+        assert "--api-format chat" in argv
+        # And the defaults are NOT what landed — proves the file was read rather
+        # than the renderer falling through.
+        assert "--max-concurrency 10000" not in argv
+        assert "--warmup-requests 50" not in argv
+
+        # The same values are snapshotted for reproducibility (params_hash).
+        ma = yaml.safe_load((run_dir / "manifest.assembly.yaml").read_text())
+        assert ma["measurement"]["maxConcurrency"] == 4242
+        assert ma["measurement"]["warmupRequests"] == 0
 
     def test_fresh_run_with_replicas_3_produces_three_files_per_pair(self, tmp_path):
         fx = _make_experiment(

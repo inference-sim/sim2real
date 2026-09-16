@@ -323,7 +323,7 @@ def _build_manifest_assembly_section(
             "scenario": "",
             "workloads": [],
             "defaults_disable": [],
-            "blis_observe": {},
+            "measurement": {},
         }
     defaults = manifest_assembly.get("defaults") or {}
     return {
@@ -331,7 +331,7 @@ def _build_manifest_assembly_section(
         "scenario": manifest_assembly.get("scenario") or "",
         "workloads": list(manifest_assembly.get("workloads") or []),
         "defaults_disable": list(defaults.get("disable") or []),
-        "blis_observe": dict(manifest_assembly.get("blis_observe") or {}),
+        "measurement": dict(manifest_assembly.get("measurement") or {}),
     }
 
 

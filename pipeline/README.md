@@ -831,7 +831,7 @@ python pipeline/sim2real.py --experiment-root ../admission-control use --run <na
 
 **`sim2real use --run <name>`** — Sets `current_run` in `setup_config.json` to the given run. Errors with `"run doesn't exist; try 'sim2real list runs'"` (exit 2) if `workspace/runs/<name>/run_metadata.json` does not exist. Read-modify-write preserves unrelated keys in `setup_config.json`.
 
-**`sim2real resolve --run <name>`** — Emits a hydrated JSON view of a run on stdout. Reads `workspace/runs/<name>/run_metadata.json` to locate the referenced translation, then walks `workspace/translations/<hash>/`, `workspace/runs/<name>/results/`, `workspace/runs/<name>/cluster/`, and `workspace/runs/<name>/manifest.assembly.yaml` to produce a single JSON document with everything the `/sim2real-check` skill (and other operator tooling) needs to reason about the run: metadata (run_name, cluster_id, params_hash, image_tag, assembled_at, cluster_config_path), translation (hash / alias / source / per-algorithm image_ref+config paths / per-baseline overlay paths from the manifest), results (declared phases, phases with collected data, workloads-by-phase), cluster scenarios (baseline.yaml, per-algorithm treatment YAMLs, pipelinerun-*.yaml files), and the manifest.assembly.yaml slice (scenario, workloads, defaults.disable, blis_observe). Schema is v1; future versions are additive. `translation_hash` appears only under `translation.hash` (not duplicated at top level). Exit codes: `0` with JSON on stdout on success; `2` with a specific error message on stderr (unknown run, corrupt/missing `run_metadata.json`, unresolvable `translation_hash`, missing workspace) — each error names the `sim2real` command that would repair the state.
+**`sim2real resolve --run <name>`** — Emits a hydrated JSON view of a run on stdout. Reads `workspace/runs/<name>/run_metadata.json` to locate the referenced translation, then walks `workspace/translations/<hash>/`, `workspace/runs/<name>/results/`, `workspace/runs/<name>/cluster/`, and `workspace/runs/<name>/manifest.assembly.yaml` to produce a single JSON document with everything the `/sim2real-check` skill (and other operator tooling) needs to reason about the run: metadata (run_name, cluster_id, params_hash, image_tag, assembled_at, cluster_config_path), translation (hash / alias / source / per-algorithm image_ref+config paths / per-baseline overlay paths from the manifest), results (declared phases, phases with collected data, workloads-by-phase), cluster scenarios (baseline.yaml, per-algorithm treatment YAMLs, pipelinerun-*.yaml files), and the manifest.assembly.yaml slice (scenario, workloads, defaults.disable, measurement). Schema is v1; future versions are additive. `translation_hash` appears only under `translation.hash` (not duplicated at top level). Exit codes: `0` with JSON on stdout on success; `2` with a specific error message on stderr (unknown run, corrupt/missing `run_metadata.json`, unresolvable `translation_hash`, missing workspace) — each error names the `sim2real` command that would repair the state.
 
 The previous `run.py inspect` debug view is dropped without replacement — `cat workspace/runs/<name>/run_metadata.json` is the shortest path. `sim2real resolve --run <name>` is the structured superset for tooling.
 
@@ -1078,17 +1078,49 @@ pipeline:                   # optional — defaults applied if absent
   name: sim2real            # Pipeline resource name referenced in PipelineRuns (default: "sim2real")
   yaml: pipeline/pipeline.yaml  # path relative to repo root (default: "pipeline/pipeline.yaml")
 
-blis_observe:               # optional — per-transfer overrides for blis observe
-  maxConcurrency: 10000     # int      → --max-concurrency
-  timeout: 1800             # int      → --timeout
-  warmupRequests: 50        # int      → --warmup-requests
-  prewarmDuration: 60s      # duration → --prewarm-duration
-  detectors: composite      # string   → --detectors  (empty = off)
-  apiFormat: completions    # enum     → --api-format  (completions | chat)
-  recordItl: false          # bool     → --record-itl when true
-  streaming: true           # bool     → --no-streaming when FALSE (inverted)
-  extraArgs: ""             # string   → appended verbatim, last
+measurement: measurement.yaml  # optional — bundle-level observe protocol file (#911)
 ```
+
+Unknown top-level keys are **rejected**, not ignored (#911). The legal set is
+`kind`, `version`, `scenario`, `baselines`, `algorithms`, `workloads`, `context`,
+`defaults`, `component`, `pipeline`, `measurement`.
+
+`blis_observe:` is **rejected** with a message naming its replacement. It was
+removed rather than dual-supported: a bundle that dropped it and added an
+unrecognised `measurement:` key used to validate cleanly while every observe value
+silently fell back to the renderer's defaults, so the run measured something the
+bundle did not describe.
+
+All paths are relative to the experiment root and validated by `sim2real assemble` at load time.
+
+### Measurement protocol
+
+The `blis observe` protocol — how the instrument was configured — lives in its own
+file, named by `measurement:` in `transfer.yaml`. It is the part a paper cites when
+it says how something was measured, which is a different scope from a manifest's
+*what to run against what*.
+
+```yaml
+kind: measurement-protocol
+version: 1
+
+maxConcurrency: 10000     # int      → --max-concurrency
+timeout: 1800             # int      → --timeout  (PER-REQUEST HTTP timeout, not a run cap)
+warmupRequests: 50        # int      → --warmup-requests  (see the caveat below)
+prewarmDuration: 60s      # duration → --prewarm-duration
+detectors: composite      # string   → --detectors  (empty = off)
+apiFormat: completions    # enum     → --api-format  (completions | chat)
+recordItl: false          # bool     → --record-itl when true
+streaming: true           # bool     → --no-streaming when FALSE (inverted)
+extraArgs: ""             # string   → appended verbatim, last
+```
+
+Key names, types and defaults are the roster in `pipeline/lib/observe_argv.py` —
+the same table that renders the flags — reused verbatim rather than remapped.
+Every rename would be a mapping layer, and mapping layers are where this repo's
+drift has come from (`--post-hoc-detector` vs `detectors`, `format` vs
+`traceFormat`). `kind` and `version` are the file's envelope and are not roster
+keys; anything else unknown is rejected, as are wrong per-key types.
 
 All keys are optional; absent keys take the defaults shown above, which reproduce
 the command the pipeline ran before issue #900. Values are **not** emitted as
@@ -1096,7 +1128,34 @@ individual PipelineRun params — `sim2real assemble` renders the whole
 `blis observe` command line into a single `observeArgs` param. See
 [Observe argv rendering](#observe-argv-rendering) below.
 
-All paths are relative to the experiment root and validated by `sim2real assemble` at load time.
+**The protocol is bundle-scoped and constant.** Holding it identical across every
+cell is what makes cells comparable; per-cell variation is a threat to validity,
+not a feature. Hence one file per bundle rather than a per-workload block.
+
+**`warmupRequests` and closed-loop replay.** It excludes the first N *dispatched*
+requests by global index. For single-turn open-loop traffic that is an unbiased
+drop of N iid requests, and 50 (the default) is the established norm. For
+closed-loop multi-turn replay it is not: the leading dispatches are the opening
+rounds of the initial session pool, which under `context_growth: accumulate` are
+the smallest-context, cheapest rounds — excluding them biases inputs and latency
+rightward and leaves the first pool-worth of sessions head-truncated while later
+ones stay intact. Trace bundles should set `warmupRequests: 0` explicitly and do
+cold-start exclusion in analysis, where `trace_data.csv`'s `session_id` and
+`round_index` make it exact and reversible.
+
+**Reproducibility.** `load_manifest` replaces the pointer with the file's resolved
+values, so they are snapshotted into `manifest.assembly.yaml` and covered by
+`params_hash` exactly as the old inline block was. Editing the protocol file
+therefore changes the hash and is detected as drift on re-assemble — had the
+pointer been hashed instead, two runs with identical hashes could have been
+measured with different instrument settings.
+
+To generate one from an experiment's `config.md`:
+
+```bash
+python3 .claude/skills/sim2real-bootstrap/generate_from_config.py \
+    <experiment-root>/config.md --emit-measurement-yaml > <experiment-root>/measurement.yaml
+```
 
 `component.ref` (optional): tag, branch, or commit SHA identifying the expected version of the component submodule. Reserved for step-2 (the skill-driven flow that will consume it).
 

@@ -183,67 +183,204 @@ def test_load_valid_v3_minimal(tmp_path):
     assert m["algorithms"][0]["name"] == "treatment"
 
 
-# ── blis_observe section ────────────────────────────────────────────────────
+# ── measurement protocol file (#911) ─────────────────────────────────────────
+#
+# The observe protocol moved out of transfer.yaml's `blis_observe:` block into a
+# bundle-level measurement file. These tests carry over the per-key type and
+# allowlist coverage the `blis_observe:` tests had — the roster is unchanged, only
+# where it is read from — and add the two things #911 exists to close: a rejected
+# legacy key, and a rejected unknown top-level key.
 
-def test_blis_observe_absent_defaults_to_empty(tmp_path):
-    """When absent, blis_observe loads as an empty dict (fall-through to Pipeline defaults)."""
-    path = _write_manifest(tmp_path, MINIMAL_V3)
-    m = load_manifest(path)
-    assert m["blis_observe"] == {}
+PROTOCOL = {
+    "kind": "measurement-protocol",
+    "version": 1,
+    "maxConcurrency": 10000,
+    "timeout": 1800,
+    "warmupRequests": 0,
+    "prewarmDuration": "60s",
+    "detectors": "composite",
+    "apiFormat": "completions",
+    "recordItl": False,
+    "streaming": True,
+}
 
 
-def test_blis_observe_full_section_loaded(tmp_path):
-    data = {**MINIMAL_V3, "blis_observe": {
-        "maxConcurrency": 5000,
-        "timeout": 3600,
-        "warmupRequests": 25,
-        "prewarmDuration": "30s",
-        "extraArgs": "--foo bar",
-    }}
+def _write_bundle(tmp_path, manifest_extra=None, protocol=PROTOCOL, *,
+                  protocol_name="measurement.yaml", write_protocol=True):
+    """Write transfer.yaml (+ optional protocol file) and return the manifest path."""
+    data = {**MINIMAL_V3}
+    if manifest_extra:
+        data.update(manifest_extra)
     path = _write_manifest(tmp_path, data)
-    m = load_manifest(path)
-    assert m["blis_observe"] == {
-        "maxConcurrency": 5000,
-        "timeout": 3600,
-        "warmupRequests": 25,
-        "prewarmDuration": "30s",
-        "extraArgs": "--foo bar",
+    if write_protocol:
+        target = tmp_path / protocol_name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            protocol if isinstance(protocol, str) else yaml.dump(protocol)
+        )
+    return path
+
+
+def _with_measurement(tmp_path, protocol=PROTOCOL, **kw):
+    return _write_bundle(tmp_path, {"measurement": "measurement.yaml"},
+                         protocol, **kw)
+
+
+# ── AC-1: values come from the file ──────────────────────────────────────────
+
+def test_measurement_pointer_resolves_to_the_files_values(tmp_path):
+    """AC-1. The loader replaces the POINTER with the file's values, so every
+    downstream consumer reads values and never has to resolve a path."""
+    m = load_manifest(_with_measurement(tmp_path))
+    assert m["measurement"] == {
+        "maxConcurrency": 10000, "timeout": 1800, "warmupRequests": 0,
+        "prewarmDuration": "60s", "detectors": "composite",
+        "apiFormat": "completions", "recordItl": False, "streaming": True,
     }
+    # kind/version are the file's envelope, not protocol values — they must not
+    # leak into the roster dict or the renderer would reject them as unknown.
+    assert "kind" not in m["measurement"]
+    assert "version" not in m["measurement"]
 
 
-def test_blis_observe_partial_section_loaded(tmp_path):
-    """Partial sections are preserved; absent keys stay absent (no defaulting in the loader)."""
-    data = {**MINIMAL_V3, "blis_observe": {"timeout": 3600}}
-    path = _write_manifest(tmp_path, data)
-    m = load_manifest(path)
-    assert m["blis_observe"] == {"timeout": 3600}
+def test_measurement_values_land_in_the_hashed_assembly_slice(tmp_path):
+    """The reproducibility property the pointer design would otherwise lose.
+
+    ``params_hash`` is taken over the assembly-slice bytes. Inlining the resolved
+    VALUES means editing the protocol file changes the hash, exactly as editing
+    the old inline block did. Had the pointer been left unresolved, only the
+    FILENAME would be hashed and two runs with identical hashes could have been
+    measured with different instrument settings."""
+    from pipeline.lib import slicer
+    m1 = load_manifest(_with_measurement(tmp_path))
+    slice1 = slicer.assembly_slice(m1)
+    assert slice1["measurement"]["warmupRequests"] == 0
+
+    other = tmp_path / "other"
+    other.mkdir()
+    m2 = load_manifest(_with_measurement(other, {**PROTOCOL, "warmupRequests": 50}))
+    slice2 = slicer.assembly_slice(m2)
+    assert slice2["measurement"]["warmupRequests"] == 50
+    # The whole point: a protocol edit is visible in what gets hashed.
+    assert slice1["measurement"] != slice2["measurement"]
 
 
-def test_blis_observe_rejects_non_mapping(tmp_path):
-    data = {**MINIMAL_V3, "blis_observe": "not_a_mapping"}
-    path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="blis_observe must be a mapping"):
-        load_manifest(path)
+def test_measurement_absent_is_valid_and_falls_through_to_roster_defaults(tmp_path):
+    """Absent is still legal — a bundle that never configured the instrument.
+    What #911 removes is a bundle that DID and was ignored."""
+    m = load_manifest(_write_manifest(tmp_path, MINIMAL_V3))
+    assert m["measurement"] == {}
 
 
-def test_blis_observe_rejects_unknown_keys(tmp_path):
-    data = {**MINIMAL_V3, "blis_observe": {"timeout": 3600, "bogus": 1}}
-    path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="blis_observe.*unknown.*bogus"):
-        load_manifest(path)
+def test_measurement_partial_file_keeps_omitted_keys_absent(tmp_path):
+    """The loader does not default; omitted keys fall through in the renderer."""
+    m = load_manifest(_with_measurement(
+        tmp_path, {"kind": "measurement-protocol", "version": 1, "timeout": 3600}))
+    assert m["measurement"] == {"timeout": 3600}
 
 
-@pytest.mark.parametrize("bad_value", [True, [1, 2], {"nested": 1}, None, "60"])
-def test_blis_observe_rejects_wrong_typed_int_values(tmp_path, bad_value):
-    """`timeout` is an int key. Since #900 the check is per-key rather than one
-    blanket scalar predicate, but the original guard's intent is preserved: YAML
-    `true` must never satisfy an int field (bool subclasses int). A numeric
-    STRING is also rejected — it would render as `--timeout 60` and work, but
-    accepting two spellings of one value invites drift."""
-    data = {**MINIMAL_V3, "blis_observe": {"timeout": bad_value}}
-    path = _write_manifest(tmp_path, data)
-    with pytest.raises(ManifestError, match="blis_observe.timeout must be an int"):
-        load_manifest(path)
+# ── AC-2/AC-3: the hard cutover ──────────────────────────────────────────────
+
+def test_blis_observe_is_rejected_and_names_its_replacement(tmp_path):
+    """AC-2. Rejected, not dual-supported — the #901 posture. The message has to
+    carry the migration, since that is what makes a breaking change navigable."""
+    with pytest.raises(ManifestError) as exc:
+        load_manifest(_write_bundle(tmp_path, {"blis_observe": {"timeout": 900}},
+                                    write_protocol=False))
+    msg = str(exc.value)
+    assert "blis_observe" in msg
+    assert "measurement: measurement.yaml" in msg
+    assert "kind: measurement-protocol" in msg
+    assert "#911" in msg
+    # The message must show the shape, or the operator has to go find it.
+    for key in ("maxConcurrency", "timeout", "warmupRequests", "prewarmDuration",
+                "detectors", "apiFormat", "recordItl", "streaming"):
+        assert key in msg
+
+
+def test_both_keys_present_is_an_error(tmp_path):
+    """AC-3. A half-finished migration must not validate."""
+    with pytest.raises(ManifestError, match="blis_observe"):
+        load_manifest(_write_bundle(
+            tmp_path, {"blis_observe": {}, "measurement": "measurement.yaml"}))
+
+
+def test_missing_measurement_target_is_an_error(tmp_path):
+    """AC-3. A pointer at nothing is the silent-fallback case #911 closes."""
+    with pytest.raises(ManifestError, match="measurement file not found"):
+        load_manifest(_write_bundle(tmp_path, {"measurement": "nope.yaml"},
+                                    write_protocol=False))
+
+
+@pytest.mark.parametrize("bad", [123, [], {}, "", "   ", True])
+def test_measurement_pointer_must_be_a_non_empty_string(tmp_path, bad):
+    """A genuine YAML null is NOT here on purpose — `measurement:` absent means
+    "instrument never configured", which stays legal and is covered above."""
+    with pytest.raises(ManifestError, match="measurement must be a non-empty string"):
+        load_manifest(_write_bundle(tmp_path, {"measurement": bad},
+                                    write_protocol=False))
+
+
+def test_measurement_pointer_must_be_relative(tmp_path):
+    """An absolute path would escape the experiment root and break portability."""
+    with pytest.raises(ManifestError, match="measurement must be a relative path"):
+        load_manifest(_write_bundle(tmp_path, {"measurement": "/etc/measurement.yaml"},
+                                    write_protocol=False))
+
+
+# ── AC-4: unknown top-level manifest keys ────────────────────────────────────
+
+def test_unknown_top_level_key_is_rejected(tmp_path):
+    """AC-4. The trap that made #911 necessary: before this, `measurement:` (or
+    any typo) was accepted and never read."""
+    with pytest.raises(ManifestError, match="unknown top-level keys.*mesurement"):
+        load_manifest(_write_bundle(tmp_path, {"mesurement": "typo.yaml"},
+                                    write_protocol=False))
+
+
+def test_unknown_top_level_key_message_lists_the_valid_set(tmp_path):
+    with pytest.raises(ManifestError) as exc:
+        load_manifest(_write_bundle(tmp_path, {"bogus": 1}, write_protocol=False))
+    msg = str(exc.value)
+    for key in ("kind", "version", "scenario", "baselines", "algorithms",
+                "workloads", "context", "defaults", "component", "pipeline",
+                "measurement"):
+        assert key in msg
+
+
+def test_every_key_the_loader_reads_is_in_the_top_level_allowlist():
+    """A guard against the allowlist being narrower than the schema: any key the
+    loader validates must be spelled in the allowlist, or a VALID bundle breaks.
+    Asserted as a set so adding a schema key without allowlisting it fails."""
+    from pipeline.lib import manifest as mod
+    assert mod._VALID_TOP_KEYS >= set(mod._REQUIRED_TOP)
+    # MINIMAL_V3 is a known-good bundle; every key in it must be allowed.
+    assert set(MINIMAL_V3) <= mod._VALID_TOP_KEYS
+
+
+def test_minimal_manifest_still_validates_under_the_allowlist(tmp_path):
+    """Non-vacuousness for the two tests above: the fixture really does load."""
+    assert load_manifest(_write_manifest(tmp_path, MINIMAL_V3))["kind"] == \
+        "sim2real-transfer"
+
+
+# ── AC-5/AC-6: the protocol file's own validation ────────────────────────────
+
+def test_unknown_key_inside_the_protocol_file_is_rejected(tmp_path):
+    """AC-5. Validated against the observe_argv roster — snake_case spellings are
+    the likely mistake, and every rename is a mapping layer #911 refuses to add."""
+    with pytest.raises(ManifestError, match="unknown keys.*warmup_requests"):
+        load_manifest(_with_measurement(
+            tmp_path, {**PROTOCOL, "warmup_requests": 0}))
+
+
+def test_protocol_unknown_key_message_lists_the_roster(tmp_path):
+    with pytest.raises(ManifestError) as exc:
+        load_manifest(_with_measurement(tmp_path, {**PROTOCOL, "postHocDetector": "x"}))
+    msg = str(exc.value)
+    for key in ("detectors", "apiFormat", "recordItl", "streaming", "extraArgs",
+                "maxConcurrency", "timeout", "warmupRequests", "prewarmDuration"):
+        assert key in msg
 
 
 @pytest.mark.parametrize("key,value", [
@@ -256,11 +393,23 @@ def test_blis_observe_rejects_wrong_typed_int_values(tmp_path, bad_value):
     ("prewarmDuration", "30s"),
     ("extraArgs", "--rate 5"),
 ])
-def test_blis_observe_accepts_the_nine_keys(tmp_path, key, value):
-    """#900 folds in detectors/apiFormat/recordItl/streaming. Two are BOOLS,
-    which the pre-#900 blanket scalar check rejected outright."""
-    data = {**MINIMAL_V3, "blis_observe": {key: value}}
-    assert load_manifest(_write_manifest(tmp_path, data))["blis_observe"][key] == value
+def test_protocol_accepts_every_roster_key(tmp_path, key, value):
+    """The roster admits extraArgs (9 keys, not the 8 in the issue's example), so
+    the protocol file does too — AC-5 says validate against the roster."""
+    m = load_manifest(_with_measurement(
+        tmp_path, {"kind": "measurement-protocol", "version": 1, key: value}))
+    assert m["measurement"][key] == value
+
+
+@pytest.mark.parametrize("bad_value", [True, [1, 2], {"nested": 1}, None, "60"])
+def test_protocol_rejects_wrong_typed_int_values(tmp_path, bad_value):
+    """Carried over from the blis_observe tests: YAML `true` must never satisfy an
+    int field (bool subclasses int), and a numeric STRING is rejected too —
+    accepting two spellings of one value invites drift."""
+    with pytest.raises(ManifestError, match="timeout must be an int"):
+        load_manifest(_with_measurement(
+            tmp_path, {"kind": "measurement-protocol", "version": 1,
+                       "timeout": bad_value}))
 
 
 @pytest.mark.parametrize("key,bad", [
@@ -270,21 +419,92 @@ def test_blis_observe_accepts_the_nine_keys(tmp_path, key, value):
     ("apiFormat", True),        # bool, not str
     ("prewarmDuration", 60),    # int, not duration string
 ])
-def test_blis_observe_rejects_wrong_types_per_key(tmp_path, key, bad):
-    data = {**MINIMAL_V3, "blis_observe": {key: bad}}
-    with pytest.raises(ManifestError, match=f"blis_observe.{key} must be"):
-        load_manifest(_write_manifest(tmp_path, data))
+def test_protocol_rejects_wrong_types_per_key(tmp_path, key, bad):
+    """AC-6. Types come from observe_argv, not restated here."""
+    with pytest.raises(ManifestError, match=f"{key} must be"):
+        load_manifest(_with_measurement(
+            tmp_path, {"kind": "measurement-protocol", "version": 1, key: bad}))
 
 
-def test_blis_observe_unknown_key_message_lists_all_nine(tmp_path):
-    data = {**MINIMAL_V3, "blis_observe": {"postHocDetector": "composite"}}
+def test_protocol_error_names_the_file(tmp_path):
+    """A type error has to say WHICH file, since the value is no longer inline."""
+    with pytest.raises(ManifestError, match=r"measurement\.yaml"):
+        load_manifest(_with_measurement(
+            tmp_path, {"kind": "measurement-protocol", "version": 1,
+                       "timeout": "sixty"}))
+
+
+# ── the protocol file's envelope ─────────────────────────────────────────────
+
+def test_protocol_requires_its_kind(tmp_path):
+    with pytest.raises(ManifestError, match="expected kind: measurement-protocol"):
+        load_manifest(_with_measurement(tmp_path, {**PROTOCOL, "kind": "nope"}))
+
+
+def test_protocol_requires_a_version(tmp_path):
+    proto = {k: v for k, v in PROTOCOL.items() if k != "version"}
+    with pytest.raises(ManifestError, match="missing required field: version"):
+        load_manifest(_with_measurement(tmp_path, proto))
+
+
+def test_protocol_rejects_an_unsupported_version(tmp_path):
+    with pytest.raises(ManifestError, match="unsupported version: 2"):
+        load_manifest(_with_measurement(tmp_path, {**PROTOCOL, "version": 2}))
+
+
+def test_protocol_rejects_an_empty_file(tmp_path):
+    with pytest.raises(ManifestError, match="is empty"):
+        load_manifest(_with_measurement(tmp_path, "", write_protocol=True))
+
+
+def test_protocol_rejects_a_non_mapping(tmp_path):
+    with pytest.raises(ManifestError, match="must be a mapping"):
+        load_manifest(_with_measurement(tmp_path, "- a\n- b\n"))
+
+
+def test_protocol_rejects_invalid_yaml(tmp_path):
+    with pytest.raises(ManifestError, match="YAML parse error"):
+        load_manifest(_with_measurement(tmp_path, "kind: [unclosed\n"))
+
+
+def test_protocol_that_exists_but_cannot_be_read_is_an_error(tmp_path):
+    """The OSError branch: the pointer resolves to something that exists (so the
+    not-found check passes) but cannot be read as a file. A directory is the
+    reachable case; permission bits are not portable to assert."""
+    path = _write_bundle(tmp_path, {"measurement": "measurement.yaml"},
+                         write_protocol=False)
+    (tmp_path / "measurement.yaml").mkdir()
+    with pytest.raises(ManifestError, match="cannot read measurement file"):
+        load_manifest(path)
+
+
+def test_protocol_with_only_an_envelope_is_legal_and_means_no_overrides(tmp_path):
+    """Counterpart to the empty-file error. kind+version and zero protocol keys
+    is legal — it resolves to {} and every key falls through to the roster
+    defaults, exactly as omitting `measurement:` does. The empty-FILE message
+    must therefore not claim a protocol key is required (it once did, while
+    pipeline/README.md said all keys are optional)."""
+    m = load_manifest(_with_measurement(
+        tmp_path, {"kind": "measurement-protocol", "version": 1}))
+    assert m["measurement"] == {}
+
+
+def test_empty_file_error_does_not_claim_a_protocol_key_is_required(tmp_path):
+    """Guards the wording itself, since the code deliberately does not enforce
+    what the old message asserted."""
     with pytest.raises(ManifestError) as exc:
-        load_manifest(_write_manifest(tmp_path, data))
+        load_manifest(_with_measurement(tmp_path, "", write_protocol=True))
     msg = str(exc.value)
-    for key in ("detectors", "apiFormat", "recordItl", "streaming",
-                "extraArgs", "maxConcurrency", "timeout", "warmupRequests",
-                "prewarmDuration"):
-        assert key in msg
+    assert "kind: measurement-protocol" in msg
+    assert "version: 1" in msg
+    assert "protocol key" not in msg
+
+
+def test_protocol_may_live_in_a_subdirectory(tmp_path):
+    """The pointer is a path, not a bare filename."""
+    path = _write_bundle(tmp_path, {"measurement": "protocol/measurement.yaml"},
+                         PROTOCOL, protocol_name="protocol/measurement.yaml")
+    assert load_manifest(path)["measurement"]["timeout"] == 1800
 
 
 def test_manifest_allowlist_matches_the_renderer_table(tmp_path):

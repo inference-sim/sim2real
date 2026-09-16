@@ -23,6 +23,114 @@ def _validate_package_name(name: str, context: str) -> None:
 
 _REQUIRED_TOP = ["kind", "version", "scenario"]
 
+#: Every legal top-level manifest key. Unknown keys are REJECTED (#911) rather
+#: than silently accepted: before this, a bundle could carry ``measurement:``
+#: (or a typo of any real key) and validate cleanly while the value it named was
+#: never read — the observe protocol then fell through to the renderer's roster
+#: defaults and the run measured something the bundle did not describe. Same
+#: posture #901 took for the workload document, applied one level up.
+_VALID_TOP_KEYS = frozenset({
+    "kind", "version", "scenario", "baselines", "algorithms", "workloads",
+    "context", "defaults", "component", "pipeline", "measurement",
+})
+
+#: The measurement protocol file's own envelope keys, which are NOT roster keys
+#: and so are exempt from the roster allowlist inside the file.
+_MEASUREMENT_KIND = "measurement-protocol"
+_MEASUREMENT_VERSION = 1
+_MEASUREMENT_META_KEYS = frozenset({"kind", "version"})
+
+
+def _load_measurement(pointer, manifest_path: Path) -> dict:
+    """Resolve a ``measurement:`` pointer to its validated protocol values.
+
+    Returns ``{}`` when the key is absent — every roster key then falls through
+    to ``observe_argv``'s defaults, which is the pre-#911 behaviour for a bundle
+    that never configured the instrument. What #911 removes is the case where a
+    bundle DID try to configure it and was silently ignored.
+
+    Validated against ``observe_argv``'s roster rather than a second schema, so
+    the file's key names, types and the flags they drive cannot drift from the
+    table that renders them (the mistake that produced ``--post-hoc-detector``
+    vs ``--detectors``). ``kind``/``version`` are the file's own envelope and are
+    exempt from the roster check.
+    """
+    if pointer is None:
+        return {}
+    if not isinstance(pointer, str) or not pointer.strip():
+        raise ManifestError(
+            f"measurement must be a non-empty string naming a protocol file, "
+            f"got: {pointer!r}"
+        )
+    if Path(pointer).is_absolute():
+        raise ManifestError(
+            f"measurement must be a relative path (resolved against the "
+            f"experiment root), got: {pointer}"
+        )
+
+    mpath = manifest_path.parent / pointer
+    if not mpath.exists():
+        raise ManifestError(f"measurement file not found: {mpath}")
+    try:
+        raw = yaml.safe_load(mpath.read_text())
+    except yaml.YAMLError as exc:
+        raise ManifestError(f"YAML parse error in {mpath}: {exc}") from exc
+    except (OSError, UnicodeDecodeError) as exc:
+        # UnicodeDecodeError is a ValueError, NOT an OSError, so it needs naming
+        # explicitly — a protocol file saved in a non-UTF-8 encoding would
+        # otherwise escape as a raw traceback while every other read failure in
+        # this function surfaces as a ManifestError naming the file.
+        raise ManifestError(f"cannot read measurement file {mpath}: {exc}") from exc
+
+    if raw is None:
+        # Only the ENVELOPE is required. A file carrying kind/version and no
+        # protocol keys is legal and means "no overrides" — same as omitting
+        # ``measurement:`` — so this message must not claim otherwise.
+        raise ManifestError(
+            f"measurement file {mpath} is empty; it must declare at least "
+            f"kind: {_MEASUREMENT_KIND} and version: {_MEASUREMENT_VERSION}"
+        )
+    if not isinstance(raw, dict):
+        raise ManifestError(f"measurement file {mpath} must be a mapping")
+
+    if raw.get("kind") != _MEASUREMENT_KIND:
+        raise ManifestError(
+            f"measurement file {mpath}: expected kind: {_MEASUREMENT_KIND}, "
+            f"got: {raw.get('kind')!r}"
+        )
+    mversion = raw.get("version")
+    if mversion is None:
+        raise ManifestError(
+            f"measurement file {mpath}: missing required field: version"
+        )
+    if mversion != _MEASUREMENT_VERSION:
+        raise ManifestError(
+            f"measurement file {mpath}: unsupported version: {mversion} "
+            f"(expected {_MEASUREMENT_VERSION})"
+        )
+
+    values = {k: v for k, v in raw.items() if k not in _MEASUREMENT_META_KEYS}
+
+    unknown = set(values) - observe_argv.VALID_OBSERVE_KEYS
+    if unknown:
+        raise ManifestError(
+            f"measurement file {mpath} contains unknown keys: {sorted(unknown)}. "
+            f"Valid keys: {sorted(observe_argv.VALID_OBSERVE_KEYS)}"
+        )
+
+    # Per-key TYPES come from the same table that renders the flags, so this
+    # allowlist cannot disagree with what a key actually accepts (#900). VALUE
+    # validity (a real detector name, a legal api-format) is the renderer's job
+    # at render time and is not duplicated here.
+    for k, v in values.items():
+        problem = observe_argv.check_observe_type(k, v)
+        if problem:
+            raise ManifestError(
+                f"measurement file {mpath}: {k} {problem}, got {v!r}"
+            )
+
+    return values
+
 
 def load_manifest(path: "Path | str") -> dict:
     """Load and validate a sim2real transfer manifest."""
@@ -47,6 +155,46 @@ def load_manifest(path: "Path | str") -> dict:
     for field in _REQUIRED_TOP:
         if field not in data:
             raise ManifestError(f"Missing required field: {field}")
+
+    # ── Hard cutover: blis_observe: → measurement: (#911) ───────────────────
+    # Checked BEFORE the unknown-key sweep so the operator gets the migration
+    # path rather than a bare "unknown key". Rejected, not dual-supported, for
+    # the same reason #901 rejected ``trace:``: a single global block with
+    # fall-through defaults is exactly what let a half-migrated bundle validate
+    # and then measure with roster defaults. Both keys present also lands here,
+    # which is the error we want — it means a migration was started, not
+    # finished.
+    if "blis_observe" in data:
+        raise ManifestError(
+            "transfer.yaml declares 'blis_observe:', which was replaced by a "
+            "bundle-level measurement protocol file (issue #911). Delete the "
+            "block and add 'measurement: measurement.yaml', then put the same "
+            "keys — unchanged names — in that file:\n"
+            "  kind: measurement-protocol\n"
+            "  version: 1\n"
+            "  maxConcurrency: 10000\n"
+            "  timeout: 1800          # PER-REQUEST HTTP timeout, not a run cap\n"
+            "  warmupRequests: 50     # 0 for closed-loop multi-turn replay\n"
+            "  prewarmDuration: 60s\n"
+            "  detectors: composite\n"
+            "  apiFormat: completions\n"
+            "  recordItl: false\n"
+            "  streaming: true\n"
+            "The protocol is bundle-scoped and constant across cells — holding "
+            "it identical is what makes cells comparable. "
+            "See pipeline/README.md#measurement-protocol"
+        )
+
+    # ── Reject unknown top-level keys (#911) ───────────────────────────────
+    unknown_top = set(data.keys()) - _VALID_TOP_KEYS
+    if unknown_top:
+        raise ManifestError(
+            f"transfer.yaml contains unknown top-level keys: "
+            f"{sorted(unknown_top)}. Valid keys: {sorted(_VALID_TOP_KEYS)}. "
+            f"Unknown keys are rejected rather than ignored: a key that is "
+            f"silently accepted but never read makes a bundle describe a run "
+            f"it does not produce."
+        )
 
     # Normalize workloads: absent/null → [] (standby mode — stack up, no benchmarks)
     wl = data.get("workloads")
@@ -164,6 +312,23 @@ def load_manifest(path: "Path | str") -> dict:
 
     _validate_v3_fields(data)
 
+    # measurement (optional): a bundle-level pointer to the observe protocol
+    # file, replacing the inline ``blis_observe:`` block (#911). Resolved here
+    # rather than in ``_validate_v3_fields`` because it needs ``path`` to locate
+    # the file relative to the experiment root.
+    #
+    # The POINTER is replaced by the RESOLVED VALUES under the same key. That is
+    # load-bearing, not a convenience: ``slicer.assembly_slice`` copies every
+    # non-translation top-level key and ``params_hash`` is taken over those
+    # bytes. A bare pointer would put only the FILENAME in the hash, so editing
+    # the protocol file would leave ``params_hash`` unchanged and two runs with
+    # identical hashes could have been measured with different instrument
+    # settings. Inlining preserves exactly the reproducibility the inline block
+    # had, and keeps ``manifest.assembly.yaml`` self-contained — an operator
+    # reading the snapshot sees values, not a filename pointing at a file that
+    # may since have changed.
+    data["measurement"] = _load_measurement(data.get("measurement"), path)
+
     return data
 
 
@@ -253,37 +418,3 @@ def _validate_v3_fields(data: dict) -> None:
             f"pipeline.yaml must be a relative path, got: {pipeline['yaml']}"
         )
 
-    # blis_observe (optional): per-transfer overrides for the blis-observe
-    # tuning params the sim2real Pipeline accepts (see pipeline/pipeline.yaml).
-    # Absent or partial → omitted keys fall through to Pipeline-level defaults.
-    observe_raw = data.get("blis_observe")
-    if observe_raw is None:
-        data["blis_observe"] = {}
-    elif not isinstance(observe_raw, dict):
-        raise ManifestError("blis_observe must be a mapping")
-    else:
-        # The key set and the per-key TYPES both come from
-        # ``observe_argv.OBSERVE_FLAGS``, the table that also renders them into
-        # the argv — so a key cannot be accepted here yet reach no flag, and the
-        # two cannot disagree about what a key accepts (#900).
-        #
-        # Types are per-key rather than one blanket scalar predicate because the
-        # block now carries heterogeneous types: ints (maxConcurrency), duration
-        # strings (prewarmDuration), enums (apiFormat, detectors) and bools
-        # (recordItl, streaming). The old blanket check rejected ALL bools to
-        # stop YAML ``true`` satisfying an int field; that guard is preserved
-        # per-key by ``_is_int`` rather than dropped.
-        #
-        # VALUE validity (a real detector name, a legal api-format) is checked by
-        # the renderer at render time, not duplicated here.
-        unknown_observe = set(observe_raw.keys()) - observe_argv.VALID_OBSERVE_KEYS
-        if unknown_observe:
-            raise ManifestError(
-                f"blis_observe contains unknown keys: {sorted(unknown_observe)}. "
-                f"Valid keys: {sorted(observe_argv.VALID_OBSERVE_KEYS)}"
-            )
-        for k, v in observe_raw.items():
-            problem = observe_argv.check_observe_type(k, v)
-            if problem:
-                raise ManifestError(f"blis_observe.{k} {problem}, got {v!r}")
-        data["blis_observe"] = dict(observe_raw)

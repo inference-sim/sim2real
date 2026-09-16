@@ -1,4 +1,4 @@
-"""Tests for parse_observe_block + render_blis_observe_yaml.
+"""Tests for parse_observe_block + render_measurement_yaml.
 
 Covers acceptance criteria from issues #403 and #602:
   - Full `blis observe \\ ... \\` block → all 4 tuning keys extracted
@@ -300,13 +300,25 @@ blis observe --max-concurrency 42 --timeout 7
     assert parsed == {"maxConcurrency": "42", "timeout": "7"}
 
 
+
+def _protocol_values(out: str) -> dict:
+    """Load an emitted measurement document and drop its kind/version envelope,
+    leaving only the roster values — which is what the manifest validates and
+    what the renderer consumes."""
+    loaded = yaml.safe_load(out)
+    return {k: v for k, v in loaded.items() if k not in ("kind", "version")}
+
 # ---------------------------------------------------------------------------
-# render_blis_observe_yaml
+# render_measurement_yaml
 # ---------------------------------------------------------------------------
 
 def test_render_all_defaults_when_parsed_empty():
-    out = gfc.render_blis_observe_yaml({})
-    assert out.startswith("blis_observe:\n")
+    out = gfc.render_measurement_yaml({})
+    # A standalone document now (#911), so it carries its own envelope
+    # rather than being nested under a manifest key.
+    assert "kind: measurement-protocol" in out
+    assert "version: 1" in out
+    assert "blis_observe" not in out
     # Every key present with the sim2real-bootstrap default source.
     for key in ("maxConcurrency", "timeout", "warmupRequests",
                 "prewarmDuration", "detectors", "apiFormat",
@@ -323,7 +335,7 @@ def test_render_full_block_all_from_config():
         "warmupRequests": "50",
         "prewarmDuration": "60s",
     }
-    out = gfc.render_blis_observe_yaml(parsed)
+    out = gfc.render_measurement_yaml(parsed)
     # 4 sourced from config.md, extraArgs sourced from default.
     assert out.count("# source: config.md") == 4
     assert out.count("# source: sim2real-bootstrap default") == 5
@@ -331,18 +343,23 @@ def test_render_full_block_all_from_config():
 
 def test_render_mixed_provenance():
     parsed = {"maxConcurrency": "500", "prewarmDuration": "30s"}
-    out = gfc.render_blis_observe_yaml(parsed)
+    out = gfc.render_measurement_yaml(parsed)
     assert out.count("# source: config.md") == 2
     assert out.count("# source: sim2real-bootstrap default") == 7
 
 
 def test_render_output_parses_as_yaml_with_expected_types():
-    """Numeric-string keys emit as YAML ints; string keys emit as YAML
-    strings. bool must never appear — manifest.py rejects bool values."""
-    out = gfc.render_blis_observe_yaml({})
-    loaded = yaml.safe_load(out)
+    """Numeric-string keys emit as YAML ints; string keys emit as YAML strings.
+
+    Bools appear for exactly two keys. `recordItl` and `streaming` became
+    first-class bool keys in #900; every OTHER key must not be a bool, because a
+    YAML `true` sitting in an int field is the bug manifest.py's per-key type
+    check exists to catch. (This docstring used to say bools must never appear,
+    which stopped being true at #900 and was contradicted by the assertions
+    below.)"""
+    out = gfc.render_measurement_yaml({})
+    loaded = _protocol_values(out)
     assert loaded == {
-        "blis_observe": {
             "maxConcurrency": 10000,
             "timeout": 1800,
             "warmupRequests": 50,
@@ -351,13 +368,12 @@ def test_render_output_parses_as_yaml_with_expected_types():
             "apiFormat": "completions",
             "recordItl": False,
             "streaming": True,
-            "extraArgs": "",
-        }
+        "extraArgs": "",
     }
     # recordItl and streaming are bools by design since #900; every other key
     # must still not be one (a YAML `true` in an int field is the bug the
     # manifest's per-key type check exists to catch).
-    for k, v in loaded["blis_observe"].items():
+    for k, v in loaded.items():
         if k in ("recordItl", "streaming"):
             assert isinstance(v, bool), f"{k} must be a real YAML boolean"
         else:
@@ -366,16 +382,19 @@ def test_render_output_parses_as_yaml_with_expected_types():
 
 def test_render_extra_args_from_config_stays_a_string():
     parsed = {"extraArgs": "--rate 50 --no-streaming"}
-    out = gfc.render_blis_observe_yaml(parsed)
-    loaded = yaml.safe_load(out)
-    assert loaded["blis_observe"]["extraArgs"] == "--rate 50 --no-streaming"
+    out = gfc.render_measurement_yaml(parsed)
+    assert _protocol_values(out)["extraArgs"] == "--rate 50 --no-streaming"
 
 
 def test_render_key_order_is_canonical():
     """Order must be stable so operators skimming transfer.yaml find keys
     predictably. Mirrors OBSERVE_DEFAULTS declaration order."""
-    out = gfc.render_blis_observe_yaml({})
-    lines = [ln.strip() for ln in out.splitlines() if ln.strip() and not ln.startswith("blis_observe")]
+    out = gfc.render_measurement_yaml({})
+    lines = [
+        ln.strip() for ln in out.splitlines()
+        if ln.strip() and not ln.startswith("#")
+        and not ln.startswith(("kind:", "version:"))
+    ]
     keys_in_order = [ln.split(":")[0] for ln in lines]
     assert keys_in_order == [
         "maxConcurrency", "timeout", "warmupRequests", "prewarmDuration",
@@ -384,7 +403,7 @@ def test_render_key_order_is_canonical():
 
 
 # ---------------------------------------------------------------------------
-# --emit-observe-yaml CLI mode
+# --emit-measurement-yaml CLI mode
 # ---------------------------------------------------------------------------
 
 import subprocess
@@ -393,7 +412,7 @@ SCRIPT = str(Path(__file__).parents[1] / "generate_from_config.py")
 
 
 def _run_emit_observe(tmp_path, config_text: str | None):
-    """Invoke `generate_from_config.py --emit-observe-yaml` and return (stdout, stderr, rc).
+    """Invoke `generate_from_config.py --emit-measurement-yaml` and return (stdout, stderr, rc).
 
     If config_text is None, do not create the file (test config-absent case).
     Otherwise, write it to tmp_path/config.md and pass that path.
@@ -404,7 +423,7 @@ def _run_emit_observe(tmp_path, config_text: str | None):
         config_path = tmp_path / "config.md"
         config_path.write_text(config_text)
     result = subprocess.run(
-        ["python3", SCRIPT, str(config_path), "--emit-observe-yaml"],
+        ["python3", SCRIPT, str(config_path), "--emit-measurement-yaml"],
         capture_output=True, text=True,
     )
     return result.stdout, result.stderr, result.returncode
@@ -413,19 +432,16 @@ def _run_emit_observe(tmp_path, config_text: str | None):
 def test_cli_emit_observe_full_block(tmp_path):
     stdout, stderr, rc = _run_emit_observe(tmp_path, SAMPLE_FULL_BLOCK)
     assert rc == 0, stderr
-    loaded = yaml.safe_load(stdout)
-    assert loaded == {
-        "blis_observe": {
-            "maxConcurrency": 10000,
-            "timeout": 1800,
-            "warmupRequests": 50,
-            "prewarmDuration": "60s",
-            "detectors": "composite",
-            "apiFormat": "completions",
-            "recordItl": False,
-            "streaming": True,
-            "extraArgs": "",
-        }
+    assert _protocol_values(stdout) == {
+        "maxConcurrency": 10000,
+        "timeout": 1800,
+        "warmupRequests": 50,
+        "prewarmDuration": "60s",
+        "detectors": "composite",
+        "apiFormat": "completions",
+        "recordItl": False,
+        "streaming": True,
+        "extraArgs": "",
     }
     # 4 keys from config.md, extraArgs defaulted.
     assert stdout.count("# source: config.md") == 4
@@ -442,9 +458,8 @@ blis observe \\
 """
     stdout, stderr, rc = _run_emit_observe(tmp_path, text)
     assert rc == 0, stderr
-    loaded = yaml.safe_load(stdout)
-    assert loaded["blis_observe"]["maxConcurrency"] == 500
-    assert loaded["blis_observe"]["timeout"] == 60
+    assert _protocol_values(stdout)["maxConcurrency"] == 500
+    assert _protocol_values(stdout)["timeout"] == 60
     # warmupRequests + prewarmDuration + extraArgs defaulted.
     assert stdout.count("# source: config.md") == 2
     assert stdout.count("# source: sim2real-bootstrap default") == 7
@@ -453,15 +468,12 @@ blis observe \\
 def test_cli_emit_observe_no_block_all_defaults(tmp_path):
     stdout, stderr, rc = _run_emit_observe(tmp_path, "# Nothing here\n")
     assert rc == 0, stderr
-    loaded = yaml.safe_load(stdout)
-    assert loaded == {"blis_observe": {
+    assert _protocol_values(stdout) == {
         "maxConcurrency": 10000, "timeout": 1800, "warmupRequests": 50,
         "prewarmDuration": "60s", "detectors": "composite",
- "apiFormat": "completions",
- "recordItl": False,
- "streaming": True,
- "extraArgs": "",
-    }}
+        "apiFormat": "completions", "recordItl": False,
+        "streaming": True, "extraArgs": "",
+    }
     assert stdout.count("# source: sim2real-bootstrap default") == 9
 
 
@@ -469,15 +481,12 @@ def test_cli_emit_observe_absent_config_all_defaults(tmp_path):
     """Per issue #403 acceptance criteria: config.md absent → all defaults, exit 0."""
     stdout, stderr, rc = _run_emit_observe(tmp_path, None)
     assert rc == 0, stderr
-    loaded = yaml.safe_load(stdout)
-    assert loaded == {"blis_observe": {
+    assert _protocol_values(stdout) == {
         "maxConcurrency": 10000, "timeout": 1800, "warmupRequests": 50,
         "prewarmDuration": "60s", "detectors": "composite",
- "apiFormat": "completions",
- "recordItl": False,
- "streaming": True,
- "extraArgs": "",
-    }}
+        "apiFormat": "completions", "recordItl": False,
+        "streaming": True, "extraArgs": "",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -488,17 +497,23 @@ REPO_ROOT = Path(__file__).parents[4]  # …/sim2real
 sys.path.insert(0, str(REPO_ROOT / "pipeline" / "lib"))
 
 
-def test_emitted_fragment_loads_through_manifest_validator(tmp_path):
-    """The whole point of the bootstrap change: a transfer.yaml with the
-    emitted blis_observe: block must validate cleanly through
-    pipeline/lib/manifest.py:load_manifest."""
+def test_emitted_document_loads_through_manifest_validator(tmp_path):
+    """The whole point of the bootstrap change: a bundle built from what the
+    generator emits must validate cleanly through
+    pipeline/lib/manifest.py:load_manifest.
+
+    Since #911 the emitted YAML is a SEPARATE FILE, so this writes the real
+    two-file shape — transfer.yaml with `measurement: measurement.yaml` plus the
+    document beside it — rather than splicing a fragment inline. That is the
+    coupling worth testing: the generator and the loader must agree on the file's
+    envelope and key names, and previously they silently did not have to."""
     import manifest as pipeline_manifest  # noqa: E402
 
-    # Emit the fragment.
-    fragment = gfc.render_blis_observe_yaml(gfc.parse_observe_block(SAMPLE_FULL_BLOCK))
+    # Emit the protocol document and write it as its own file.
+    document = gfc.render_measurement_yaml(gfc.parse_observe_block(SAMPLE_FULL_BLOCK))
+    (tmp_path / "measurement.yaml").write_text(document)
 
-    # Assemble a minimal transfer.yaml that includes it.
-    transfer_yaml = f"""kind: sim2real-transfer
+    transfer_yaml = """kind: sim2real-transfer
 version: 3
 scenario: test
 component:
@@ -518,7 +533,8 @@ baselines:
     scenario: baselines/baseline.yaml
 workloads:
   - workloads/w1.yaml
-{fragment}context:
+measurement: measurement.yaml
+context:
   text: "test"
   files: []
 defaults:
@@ -528,7 +544,7 @@ defaults:
     manifest_path.write_text(transfer_yaml)
 
     loaded = pipeline_manifest.load_manifest(str(manifest_path))
-    assert loaded["blis_observe"] == {
+    assert loaded["measurement"] == {
         "maxConcurrency": 10000,
         "timeout": 1800,
         "warmupRequests": 50,
