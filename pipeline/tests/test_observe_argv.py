@@ -377,3 +377,50 @@ def test_error_messages_name_the_measurement_file_not_the_old_manifest_block():
         assert needle in msg, msg
         assert "measurement" in msg, msg
         assert "blis_observe" not in msg, msg
+
+
+# ── prewarmDuration is a real duration, not merely a string (#905) ────────────
+
+
+@pytest.mark.parametrize("good", ["0", "60s", "15m", "1h30m", "1.5s", "500ms"])
+def test_prewarm_duration_accepts_go_durations(good):
+    assert observe_argv.check_observe_type("prewarmDuration", good) is None
+
+
+@pytest.mark.parametrize("bad", [
+    "60",       # unitless: blis dies at flag parsing, in-cluster
+    "",         # rendered as `--prewarm-duration ''`, which blis also refuses
+    "60000ns",  # parses fine, prewarms for 60us instead of 60s — see note below
+    "-5s",      # blis refuses < 0 itself (observe_cmd.go:355)
+    60, 1.5, True, None, "abc", "1 s",
+])
+def test_prewarm_duration_rejects_non_durations(bad):
+    """`--prewarm-duration` is a Cobra DurationVar (observe_cmd.go:154), so the
+    old `_is_str` check let three distinct failures through: an unitless string
+    that dies at blis flag parsing, an empty string that does the same, and a
+    negative that blis refuses on its own. Each now fails at assemble instead.
+
+    `60000ns` is the exception: it is a legal duration and IS accepted — listed
+    here only because a reader will look for it. See
+    test_duration.py::test_the_silent_thousandfold_error_is_accepted_and_that_is_the_point.
+    """
+    if bad == "60000ns":
+        assert observe_argv.check_observe_type("prewarmDuration", bad) is None
+        return
+    assert observe_argv.check_observe_type("prewarmDuration", bad) is not None
+
+
+def test_prewarm_duration_and_max_think_time_share_one_rule():
+    """Both land on a Go DurationVar, so they must not drift into two different
+    notions of a valid duration."""
+    from pipeline.lib import corpus_schema
+    mtt = corpus_schema.CORPUS_FIELDS["reconstruct"]["max_think_time"]
+    assert mtt.check is observe_argv.OBSERVE_FLAGS["prewarmDuration"].check
+
+
+def test_timeout_stays_an_int_because_its_flag_is_an_intvar():
+    """`--timeout` is an IntVar of SECONDS (observe_cmd.go:192), not a
+    DurationVar, so it must NOT acquire the duration check: "1800s" would be
+    rejected by blis. Pinned because the two flags look interchangeable."""
+    assert observe_argv.check_observe_type("timeout", 1800) is None
+    assert observe_argv.check_observe_type("timeout", "1800s") is not None

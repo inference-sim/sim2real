@@ -1107,7 +1107,7 @@ version: 1
 maxConcurrency: 10000     # int      → --max-concurrency
 timeout: 1800             # int      → --timeout  (PER-REQUEST HTTP timeout, not a run cap)
 warmupRequests: 50        # int      → --warmup-requests  (see the caveat below)
-prewarmDuration: 60s      # duration → --prewarm-duration
+prewarmDuration: 60s      # Go duration string → --prewarm-duration ("0" = off)
 detectors: composite      # string   → --detectors  (empty = off)
 apiFormat: completions    # enum     → --api-format  (completions | chat)
 recordItl: false          # bool     → --record-itl when true
@@ -1127,6 +1127,16 @@ the command the pipeline ran before issue #900. Values are **not** emitted as
 individual PipelineRun params — `sim2real assemble` renders the whole
 `blis observe` command line into a single `observeArgs` param. See
 [Observe argv rendering](#observe-argv-rendering) below.
+
+> **`prewarmDuration` must be a real Go duration string, and `timeout` must not be.**
+> They look interchangeable and are not: `--prewarm-duration` is a Cobra
+> `DurationVar`, so it needs an explicit unit (`60s`, `15m`, or `0` for off),
+> while `--timeout` is an `IntVar` of **seconds**, so `1800` is right and
+> `"1800s"` is refused. Since sim2real#905 `prewarmDuration` is validated with
+> the same duration grammar as `corpus.reconstruct.max_think_time` (they share
+> one predicate in `pipeline/lib/duration.py`). Before that it was checked only
+> for being a *string*, which let `"60"` and `""` through to die at blis argument
+> parsing in-cluster, and `"60000ns"` through to prewarm for 60 µs.
 
 **The protocol is bundle-scoped and constant.** Holding it identical across every
 cell is what makes cells comparable; per-cell variation is a threat to validity,
@@ -1231,6 +1241,9 @@ The schema is defined once, in [`pipeline/lib/corpus_schema.py`](lib/corpus_sche
 corpus:
   upstream:                     # where the raw corpus comes from
     source: hf:Exgentic/agent-llm-traces   # REQUIRED. "hf:<org>/<dataset>", or a path
+    revision: 8f21c0a           # optional (default "" = upstream default branch) — HF dataset
+                                #   revision: commit SHA, tag, or branch
+    format: otel-parquet        # optional (default "otel-parquet") — or "weka-jsonl"
     shards: 39                  # optional (default 39) — take the first N shard files; 0 = all
   select:                       # which sessions survive into the corpus
     partition: test             # optional (default "test") — "test" | "train" | "all"
@@ -1240,10 +1253,52 @@ corpus:
                                 #   replay pool's first-N sample spans many conversations
   reconstruct:                  # how each session's request stream is rebuilt
     context_growth: accumulate  # optional (default "accumulate") — or "independent"
+    max_think_time: 60s         # REQUIRED — Go duration string; cap on the per-round client
+                                #   think gap. "0" = no cap. No default: see below
 replay:                         # REQUIRED — consumed by blis observe at replay time
   concurrent_sessions: 128      # REQUIRED, int >= 1  → --concurrent-sessions
   total_sessions: 192           # REQUIRED, int >= 0  → --total-sessions (0 = exhaust the corpus)
 ```
+
+##### `max_think_time` is required, and has no default on purpose
+
+It is the only required field under `corpus:`. Every candidate default is wrong somewhere, silently:
+
+- **Omitting the flag** (what the Task does when the value is empty) lets each converter apply its own — and they differ in *opposite* directions: `blis convert otel` caps at 15s, `blis convert weka` does not cap at all. One descriptor would then mean two different things depending on `format`.
+- **Any fixed value** is a guess about a distribution the schema cannot see. Measured on the exgentic corpus, inter-round gaps are **bimodal**: p50 8.0s, p90 27.6s, p99 14,406s. So a 15s cap distorts **22.4%** of gaps, cutting into the normal within-task band, while anything from 60s to 3600s clamps the same **~2%** outlier cluster. `60s` is the value that corpus argues for — above p90, below the outliers — but that is a fact about *that* corpus, not a default.
+- **No cap** is not an option for anything we have: uncapped, exgentic's worst single session idles **5.03 h** against a 4 h pipeline timeout, so the run cannot finish. A weka session measured ~63 h.
+
+> **Write the unit.** The value goes to `--max-think-time`, a Go `DurationVar`, so `"60s"` and `"15m"` are durations while a bare `60` is refused at assemble. A bare number is not merely untidy: Go rejects an unitless value itself, but only once the converter runs — inside a pod, after a namespace slot and a corpus download have been spent. The genuinely silent error is a **wrong unit**: TraceV2's column is `think_time_us`, so a number transcribed out of it invites `us` (correct by luck) or `ns` — and `15000000ns` is 15 ms, a 1000×-too-tight cap that fails nowhere. Forcing the unit to be written is what makes that visible in review.
+
+> **Choose the cap against KV residency, not just the gap distribution.** Any cap converts a cache-*cold* return (hours idle, prefix long since evicted) into a warmer one. That is unavoidable inside a bounded run, and it is material because prefix-cache hit rate dominates prefill cost in these corpora — so the cap that reproduces production behaviour is the one that reflects the deployment's KV residency time, not only where the gap distribution's knee sits.
+
+##### `format` selects the whole chain
+
+`otel-parquet` (the default) discovers `.parquet` files, runs `build-otel`, and converts with `blis convert otel`. `weka-jsonl` discovers `.jsonl`, **skips** `build-otel` (JSONL is already blis's native Weka shape), and converts with `blis convert weka`. The legal set mirrors the `prepare-trace` guard step exactly, and a test parses that guard's `case` arm to keep the two from drifting.
+
+> **A `weka-jsonl` descriptor should set `shards: 0`.** The shard cap is applied *after* discovery and is format-agnostic, so the default of 39 truncates the discovered `.jsonl` list the same way it truncates parquet shards. The default is itself a dataset-specific number (39 is exgentic's shard count) — tracked as #913.
+
+###### `weka-jsonl` refuses three otel-only fields
+
+`build-otel` is what applies `select.partition`, `select.dedup_by_conversation` and `select.shuffle_seed` — and `build-otel` is **skipped** for `weka-jsonl`. `blis convert weka` has no flag for any of the three and does no internal equivalent, so on a weka corpus they would change nothing while still being hashed into the cache key. Writing any of them alongside `format: weka-jsonl` therefore **fails at assemble**:
+
+```
+workload workloads/w.yaml: corpus.select.shuffle_seed has no effect when
+corpus.upstream.format is 'weka-jsonl'. It seeds the shuffle that build-otel
+applies — and build-otel is skipped for weka-jsonl. ...
+```
+
+Only a field the document actually **wrote** is refused; omitting it is fine. The `prepare-trace` Task cannot make this distinction — an operator's explicit `shuffle_seed: 42` and sim2real's default arrive as the same non-empty param — which is why the Task marks exactly these three params `OTEL-PARQUET ONLY` and states the rejection has to live at assemble time. A test derives the refused set from those markers, so if `blis convert weka` ever gains a split or shuffle, it fails and points at a rejection to lift.
+
+`select.min_rounds`, `reconstruct.context_growth` and `reconstruct.max_think_time` stay live on both paths — the convert step passes all three to `blis convert weka` — so they are deliberately *not* refused.
+
+> **Removing the field does not give weka the behaviour.** The capability is absent there, not merely unset. In particular a weka corpus is **unshuffled**, so it stays in its on-disk, conversation-contiguous order and a replay pool taking the first *N* sessions draws a **correlated** sample rather than one spanning the corpus. That is a measurement-validity limitation of the weka path today, not a formatting detail — lifting it needs weka-side support in blis or a filter step in the Task.
+
+##### `revision` pins the dataset, and a moving ref defeats the purpose
+
+`revision` accepts a commit SHA, tag, or branch; empty (the default) resolves the upstream default branch. The Task resolves whatever is given to a commit SHA and keys its raw-download cache by `<repo>@<sha>`, so a moving ref that advances upstream lands in a fresh download directory.
+
+> **Prefer a commit SHA.** `tracePath` hashes the descriptor **as written**, so `revision: main` keys *stably* while upstream moves — and the converted-trace cache is keyed by `tracePath`, not by the resolved SHA. A re-run therefore reuses the previously converted trace even though `main` has advanced. Pinning a SHA is what makes the corpus reproducible; naming a branch only makes it *look* pinned.
 
 **Validation is strict.** An unrecognized key at any level — top level, a `corpus:` section, or `replay:` — fails at assemble time with the legal key set in the message. Nothing is silently ignored. This is the point of the schema: a field that is folded into the corpus cache key but reaches no PipelineRun param changes the key *without* changing the corpus, which is strictly worse than being refused.
 
@@ -1264,17 +1319,18 @@ These fields are **rejected**, each with its own reason, because nothing downstr
 
 | Field | Why it is refused | Tracked by |
 |-------|-------------------|------------|
-| `corpus.upstream.revision` | The Task **accepts** `traceRevision` (tektonc-data-collection#67) at the pinned submodule, but sim2real does not emit it: `pipeline/pipeline.yaml` declares no such param and `tekton.py` sends none, so the fetch resolves the Task's default (empty ⇒ `main`) whatever the descriptor says. | sim2real#905 |
-| `corpus.upstream.format` | The Task **accepts** `traceFormat` (tektonc-data-collection#68) at the pinned submodule, but sim2real does not emit it, so the chain runs the Task's default (`otel-parquet`) whatever the descriptor says. | sim2real#905 |
-| `corpus.reconstruct.max_think_time` | The Task **accepts** `traceMaxThinkTime` (tektonc-data-collection#68) at the pinned submodule, but sim2real does not emit it, so the Task's empty default omits the flag entirely. | sim2real#905 |
 | `corpus.select.partition_pct` | Not a Task parameter — `prepare-trace` hard-codes the split percentage as a constant (`TEST_PCT = 30`). | — |
 | `corpus.reconstruct.max_context` | No support anywhere: neither the Task nor `blis convert otel`/`blis convert weka` accepts a context ceiling. | — |
 
-For the first three the blocker is now **sim2real's own emission side**, not the Task: tektonc-data-collection#67 and #68 are both merged and pinned. Wiring them up means declaring each param in `pipeline/pipeline.yaml`, forwarding it in the `prepare-trace` task block, and moving the field out of `DEFERRED_FIELDS` into the schema tables — one change, which is sim2real#905. Two tests keep this description honest: `test_905_fields_are_declared_by_the_pinned_task` fails if a submodule rollback removes the Task-side support these reasons assert, and `test_905_fields_are_not_yet_emitted_by_sim2real` fails the moment `pipeline.yaml` declares one of them, pointing at the field to un-defer.
+`corpus.upstream.revision`, `corpus.upstream.format` and `corpus.reconstruct.max_think_time` used to sit in this table. sim2real#905 wired all three: it declared each param in `pipeline/pipeline.yaml`, forwarded it in the `prepare-trace` task block, and moved the field into the schema tables — one change, per the rule that a field becomes legal in the same commit that makes it reach the Task.
 
-> **When `max_think_time` is wired up, the value must be a Go duration string** (`"60s"`), not a bare number. `blis convert otel --max-think-time` is a Cobra `DurationVar`, so `15000000` parses as 15000000ns = **15ms**, not 15s — a silent 1000×-too-tight cap with no failure anywhere. The TraceV2 column is `think_time_us`, which makes "microseconds" the intuitive misreading, so the schema must validate that the value parses as a duration.
+Three tests keep the wiring honest, in a chain from the schema to the pinned Task:
 
-> **`max_think_time`: refusing the field does NOT lift the cap.** `blis convert otel` defaults `--max-think-time` to **15s** and `prepare-trace` never overrides it, so that clamp stays in force and is simply inexpressible until sim2real#905. Any corpus built before then has its inter-round arrival gaps clamped at 15s. The clamp rewrites `ArrivalTimeUs` and writes no think-time column, so it is not visible in the converted output — check the converter's default rather than the corpus if inter-round timing looks compressed.
+| Test | What it would catch |
+|------|---------------------|
+| `test_every_schema_param_is_declared_in_pipeline_yaml` | a schema field whose param the Pipeline never declares — a Tekton admission error |
+| `test_every_schema_param_is_forwarded_to_prepare_trace` | a param declared but not forwarded to the taskRef — **silently dormant**, since the Task then runs its own default |
+| `test_905_params_are_declared_by_the_pinned_task` | a submodule rollback that drops a param assemble now always sends — every corpus PipelineRun would be rejected |
 
 #### Migrating from the old `trace:` shape
 
@@ -1292,7 +1348,7 @@ For the first three the blocker is now **sim2real's own emission side**, not the
 | `trace.pool.concurrent_sessions` | `replay.concurrent_sessions` |
 | `trace.pool.total_sessions` | `replay.total_sessions` |
 | `trace.filters.skip_branching` | *removed* — never had task-side support |
-| `trace.convert.max_think_time` | *refused* — see "Not yet expressible" above |
+| `trace.convert.max_think_time` | `corpus.reconstruct.max_think_time` — now **required**, as a Go duration string (sim2real#905) |
 
 `transfer.yaml`'s `version:` stays **3**. Synthetic (generative) workload descriptors do not change, so nothing a real bundle contains becomes invalid, and their PipelineRun params are byte-identical before and after.
 
@@ -1304,12 +1360,18 @@ Corpus workloads emit these; generative workloads emit **none** of them (and a n
 |-------|------|
 | `traceSpec` | the `corpus:` mapping as compact YAML. Only its **emptiness** is load-bearing — `prepare-trace` tests `[ -z "$(params.traceSpec)" ]` to recognize a generative workload and skip the corpus build. Nothing parses the content. |
 | `tracePath` | `traces/<sha12>` (above) |
-| `concurrentSessions`, `totalSessions` | `replay.*` |
-| `traceSource`, `traceShards` | `corpus.upstream.*` |
+| `traceSource`, `traceRevision`, `traceFormat`, `traceShards` | `corpus.upstream.*` |
 | `traceSplit`, `traceMinRounds`, `traceDedupByConversation`, `traceShuffleSeed` | `corpus.select.*` |
-| `traceContextGrowth` | `corpus.reconstruct.*` |
+| `traceContextGrowth`, `traceMaxThinkTime` | `corpus.reconstruct.*` |
 
-Every one of these must also be declared in `pipeline/pipeline.yaml` — Tekton rejects a PipelineRun passing a param the Pipeline does not declare, so a schema addition that skips `pipeline.yaml` is an admission error rather than a soft failure. `test_every_schema_param_is_declared_in_pipeline_yaml` guards that.
+`replay.*` emits **no** params of its own: #900 folded `concurrent_sessions` / `total_sessions` into the rendered `observeArgs` as `--concurrent-sessions` / `--total-sessions`, so the standalone `concurrentSessions` / `totalSessions` params no longer exist.
+
+Every param above must be both **declared** in `pipeline/pipeline.yaml` and **forwarded** to the `prepare-trace` taskRef, and the two failures differ:
+
+- Not declared → Tekton rejects the PipelineRun outright at creation. Loud.
+- Declared but not forwarded → the PipelineRun carries the value, the Task never receives it, and it applies its own default. **Silent**, and exactly the dormancy sim2real#905 existed to remove.
+
+`test_every_schema_param_is_declared_in_pipeline_yaml` and `test_every_schema_param_is_forwarded_to_prepare_trace` guard the two halves respectively.
 
 ---
 

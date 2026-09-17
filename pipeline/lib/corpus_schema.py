@@ -29,11 +29,16 @@ changing the corpus, which is strictly worse than being refused.
 
 That is why fields the ``prepare-trace`` Task does not yet honor live in
 ``DEFERRED_FIELDS`` and are REJECTED rather than accepted-and-ignored. They
-become legal in the same change that makes them reach the Task (issue #905).
+become legal in the same change that makes them reach the Task — which is what
+issue #905 did for ``upstream.revision``, ``upstream.format`` and
+``reconstruct.max_think_time``, moving all three out of ``DEFERRED_FIELDS`` and
+into the tables below in the same commit that declared their params in
+``pipeline/pipeline.yaml``.
 """
 import hashlib
 import json
 
+from pipeline.lib import duration
 from pipeline.lib.errors import AssembleError
 
 # Sentinel for a field with no default: the document MUST set it.
@@ -107,6 +112,20 @@ def _flag(value) -> str:
     return "1" if value else "0"
 
 
+#: Upstream corpus formats, mirroring the ``traceFormat`` guard step in
+#: ``tektonc-data-collection/tekton/tasks/prepare-trace.yaml``
+#: (``case`` arm ``otel-parquet|weka-jsonl``). The guard is a deliberate in-pod
+#: BACKSTOP; this tuple is the real gate, because refusing here costs nothing
+#: while refusing there has already consumed a namespace slot. A test parses that
+#: ``case`` arm and compares it against this tuple, so the two cannot drift.
+#:
+#: Each value selects the WHOLE chain, not just a parser: ``otel-parquet``
+#: discovers ``.parquet``, runs build-otel, and converts with ``blis convert
+#: otel``; ``weka-jsonl`` discovers ``.jsonl``, SKIPS build-otel (JSONL is
+#: already blis's native Weka shape), and converts with ``blis convert weka``.
+CORPUS_FORMATS = ("otel-parquet", "weka-jsonl")
+
+
 #: ``corpus:`` — everything that determines the bytes of the built corpus, and
 #: therefore everything the cache key covers. Section order and field order set
 #: PipelineRun param order, so keep them stable for diffable output.
@@ -117,6 +136,16 @@ CORPUS_FIELDS: dict[str, dict[str, _Field]] = {
             param="traceSource", default=REQUIRED, render=str,
             check=_nonempty_str,
             describe="must be a non-empty string (e.g. 'hf:<org>/<dataset>')",
+        ),
+        "revision": _Field(
+            param="traceRevision", default="", render=str,
+            check=_nonempty_str,
+            describe="must be a non-empty string (a commit SHA, tag, or branch)",
+        ),
+        "format": _Field(
+            param="traceFormat", default="otel-parquet", render=str,
+            check=_one_of(*CORPUS_FORMATS),
+            describe=f"must be one of {', '.join(CORPUS_FORMATS)}",
         ),
         "shards": _Field(
             param="traceShards", default=39, render=str,
@@ -154,6 +183,34 @@ CORPUS_FIELDS: dict[str, dict[str, _Field]] = {
             check=_one_of("accumulate", "independent"),
             describe="must be 'accumulate' or 'independent'",
         ),
+        # REQUIRED, uniquely among corpus fields, and deliberately so. Every
+        # candidate default is wrong somewhere, silently:
+        #
+        # * Omitting the flag (the Task's own default) lets each converter apply
+        #   its own, and they differ in OPPOSITE directions — `convert otel` caps
+        #   at 15s, `convert weka` does not cap at all. One descriptor would then
+        #   mean two different things depending on `format`.
+        # * Any fixed value is a guess about a distribution this module cannot
+        #   see. Measured on the exgentic corpus, inter-round gaps are BIMODAL —
+        #   p50 8.0s, p90 27.6s, p99 14406s — so a 15s cap distorts 22.4% of
+        #   gaps, cutting into the normal within-task band, while anything from
+        #   60s to 3600s clamps the same ~2% outlier cluster. The right value
+        #   comes from the corpus, and the two corpora we have disagree.
+        # * No cap is not an option: uncapped, exgentic's worst single session
+        #   idles 5.03h against a 4h pipeline timeout, so the run cannot finish.
+        #
+        # Requiring it costs almost nothing — `reconstruct` exists only for
+        # corpus workloads, and no corpus descriptor has ever executed a measured
+        # run — and it makes the cap auditable in the PipelineRun instead of
+        # implied by whichever converter happened to run.
+        "max_think_time": _Field(
+            param="traceMaxThinkTime", default=REQUIRED, render=str,
+            check=duration.is_go_duration,
+            describe=(
+                f"{duration.DESCRIBE}. '0' means no cap, which is only safe on a "
+                f"corpus whose longest session fits the pipeline timeout"
+            ),
+        ),
     },
 }
 
@@ -181,43 +238,57 @@ REPLAY_FIELDS: dict[str, _Field] = {
 #: Wording constraint: these must not contain the word "unknown" — the strict
 #: unknown-key branch is a different error and a test keeps the two distinct.
 DEFERRED_FIELDS: dict[str, str] = {
-    "corpus.upstream.revision": (
-        "is accepted by the prepare-trace Task (traceRevision, "
-        "inference-sim/tektonc-data-collection#67) at the pinned submodule, but "
-        "sim2real does not emit it yet: pipeline/pipeline.yaml declares no "
-        "traceRevision param and tekton.py sends none, so the fetch resolves "
-        "the Task's default (empty => main) no matter what the descriptor says. "
-        "Wiring it up is inference-sim/sim2real#905"
-    ),
-    "corpus.upstream.format": (
-        "is accepted by the prepare-trace Task (traceFormat, "
-        "inference-sim/tektonc-data-collection#68) at the pinned submodule, but "
-        "sim2real does not emit it yet: pipeline/pipeline.yaml declares no "
-        "traceFormat param and tekton.py sends none, so the chain runs the "
-        "Task's default (otel-parquet) no matter what the descriptor says. "
-        "Wiring it up is inference-sim/sim2real#905"
-    ),
     "corpus.select.partition_pct": (
         "is not a Task parameter: prepare-trace hard-codes the split "
         "percentage as a constant (TEST_PCT = 30). Parameterizing it needs a "
         "change to inference-sim/tektonc-data-collection first"
     ),
-    "corpus.reconstruct.max_think_time": (
-        "is accepted by the prepare-trace Task (traceMaxThinkTime, "
-        "inference-sim/tektonc-data-collection#68) at the pinned submodule, but "
-        "sim2real does not emit it yet: pipeline/pipeline.yaml declares no "
-        "traceMaxThinkTime param and tekton.py sends none, so the Task's empty "
-        "default omits the flag entirely. NOTE: refusing the field does NOT "
-        "lift the cap; 'blis convert otel' defaults --max-think-time to 15s, so "
-        "that clamp stays in force and simply cannot be expressed. When it is "
-        "wired up the value must be a Go duration STRING ('60s'), not a bare "
-        "number: --max-think-time is a DurationVar, so 15000000 parses as 15ms, "
-        "a silent 1000x error. Wiring it up is inference-sim/sim2real#905"
-    ),
     "corpus.reconstruct.max_context": (
         "has no support anywhere: neither the prepare-trace Task nor "
         "'blis convert otel'/'blis convert weka' accepts a context ceiling. "
         "Capping accumulated context needs that capability to exist first"
+    ),
+}
+
+#: Fields that are legal on the otel-parquet path and INERT on weka-jsonl, so
+#: writing one alongside ``format: weka-jsonl`` is refused.
+#:
+#: ``build-otel`` is what applies all three, and ``build-otel`` is SKIPPED for
+#: weka-jsonl (JSONL is already blis's native Weka shape). ``blis convert weka``
+#: has no flag for any of them and does no internal equivalent, so on a weka
+#: corpus they change nothing — while still being hashed into the cache key,
+#: which is the accept-and-ignore shape this module exists to refuse. The pinned
+#: prepare-trace Task marks exactly these three params "OTEL-PARQUET ONLY" and
+#: says the rejection "has to live at assemble time", because the Task cannot
+#: tell an operator asking for a shuffle from sim2real emitting its default —
+#: both arrive as a non-empty param. Here the difference IS visible: only a
+#: field the document actually WROTE is refused.
+#:
+#: ``min_rounds`` and ``context_growth`` are deliberately absent: the convert
+#: step threads both to ``blis convert weka`` (``--min-rounds``,
+#: ``--context-growth``), so they stay live on the weka path. ``max_think_time``
+#: likewise reaches the converter on both paths.
+#:
+#: A test derives this set from the Task's own "OTEL-PARQUET ONLY" markers, so if
+#: tektonc ever gives weka a split or shuffle, the two cannot silently disagree.
+WEKA_INERT_FIELDS: dict[str, str] = {
+    "corpus.select.partition": (
+        "selects a deterministic SHA1 split, which build-otel applies — and "
+        "build-otel is skipped for weka-jsonl. 'blis convert weka' has no split "
+        "flag, so the WHOLE corpus would be converted (train sessions included) "
+        "while the cache key claimed a split"
+    ),
+    "corpus.select.dedup_by_conversation": (
+        "keeps one session per conversation, which build-otel applies — and "
+        "build-otel is skipped for weka-jsonl. 'blis convert weka' has no "
+        "equivalent, so every session would be kept regardless of the value"
+    ),
+    "corpus.select.shuffle_seed": (
+        "seeds the shuffle that build-otel applies — and build-otel is skipped "
+        "for weka-jsonl. A weka corpus therefore stays in its on-disk, "
+        "conversation-contiguous order, so a replay pool taking the first N "
+        "sessions draws a CORRELATED sample rather than one spanning the corpus. "
+        "That is a measurement-validity problem, not a cosmetic gap"
     ),
 }
 
@@ -294,6 +365,7 @@ def validate_corpus_document(doc: dict, where: str) -> None:
         )
     _validate_corpus_keys(doc["corpus"], where)
     _validate_corpus_values(doc["corpus"], where)
+    _validate_format_conditional(doc["corpus"], where)
     _validate_replay(doc.get("replay"), where)
 
 
@@ -361,6 +433,29 @@ def _validate_corpus_values(corpus: dict, where: str) -> None:
                 raise AssembleError(
                     f"workload {where}: {path} {field.describe}, got {value!r}"
                 )
+
+
+def _validate_format_conditional(corpus: dict, where: str) -> None:
+    """Refuse fields that the selected ``format`` renders inert.
+
+    Runs AFTER value validation, so the format itself is already known good.
+    Only a field the document actually WROTE is refused — an omitted field is a
+    default, not a request, and refusing those would make ``weka-jsonl``
+    unreachable without also spelling out three fields that do nothing.
+    """
+    written_format = (corpus.get("upstream") or {}).get("format")
+    if written_format != "weka-jsonl":
+        return
+    for path, reason in WEKA_INERT_FIELDS.items():
+        _, section, key = path.split(".")
+        if key in (corpus.get(section) or {}):
+            raise AssembleError(
+                f"workload {where}: {path} has no effect when "
+                f"corpus.upstream.format is 'weka-jsonl'. It {reason}. Remove "
+                f"the field, or use format 'otel-parquet' if you need it. Note "
+                f"that removing it does NOT give the weka path the behaviour: "
+                f"the capability is absent there, not merely unset"
+            )
 
 
 def _validate_replay(replay, where: str) -> None:

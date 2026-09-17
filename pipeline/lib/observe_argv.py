@@ -40,7 +40,7 @@ coupling is discoverable from either end.
 """
 import shlex
 
-from pipeline.lib import corpus_schema
+from pipeline.lib import corpus_schema, duration
 from pipeline.lib.errors import AssembleError
 
 #: Mount point of the ``data`` workspace inside the observe pod. Task-owned.
@@ -122,8 +122,15 @@ OBSERVE_FLAGS: dict[str, _Flag] = {
     "maxConcurrency": _Flag("--max-concurrency", 10000, _is_int,
                             describe="must be an int"),
     "timeout": _Flag("--timeout", 1800, _is_int, describe="must be an int"),
-    "prewarmDuration": _Flag("--prewarm-duration", "60s", _is_str,
-                             describe="must be a Go duration string (e.g. 60s)"),
+    # Checked with the real duration grammar, not `_is_str`: --prewarm-duration
+    # is a Cobra DurationVar (inference-sim cmd/observe_cmd.go:154), so a
+    # unitless string reached blis and died at flag parsing, and "60000ns"
+    # reached it and silently prewarmed for 60us instead of 60s. `_is_str` caught
+    # neither. Shared with corpus.reconstruct.max_think_time so the one rule that
+    # matters here — write the unit — is enforced identically in both places.
+    "prewarmDuration": _Flag("--prewarm-duration", "60s",
+                             duration.is_go_duration,
+                             describe=duration.DESCRIBE),
     "warmupRequests": _Flag("--warmup-requests", 50, _is_int,
                             describe="must be an int"),
     "detectors": _Flag("--detectors", "composite", _is_str,
