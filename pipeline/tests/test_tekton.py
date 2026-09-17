@@ -364,7 +364,10 @@ _TRACE_WORKLOAD = {
     "corpus": {
         "upstream": {"source": "hf:Exgentic/agent-llm-traces", "shards": 39},
         "select": {"min_rounds": 2},
-        "reconstruct": {"context_growth": "accumulate"},
+        # max_think_time is REQUIRED (#905) — rendering asserts rather than
+        # guesses when a required field is absent.
+        "reconstruct": {"context_growth": "accumulate",
+                        "max_think_time": "60s"},
     },
     "replay": {"concurrent_sessions": 128, "total_sessions": 192},
 }
@@ -430,7 +433,7 @@ def test_identical_corpus_different_workload_name_shares_one_build():
 def test_trace_path_deterministic_and_order_independent():
     a = trace_path(_TRACE_WORKLOAD["corpus"])
     b = trace_path({
-        "reconstruct": {"context_growth": "accumulate"},
+        "reconstruct": {"max_think_time": "60s", "context_growth": "accumulate"},
         "select": {"min_rounds": 2},
         "upstream": {"shards": 39, "source": "hf:Exgentic/agent-llm-traces"},
     })
@@ -480,6 +483,7 @@ def test_trace_workload_emits_locked_params():
 def test_select_block_overrides_dedup_and_seed():
     wl = {
         "corpus": {"upstream": {"source": "hf:Org/dataset"},
+                   "reconstruct": {"max_think_time": "60s"},
                    "select": {"dedup_by_conversation": False, "shuffle_seed": 7}},
         "replay": {"concurrent_sessions": 4, "total_sessions": 8},
     }
@@ -491,6 +495,7 @@ def test_select_block_overrides_dedup_and_seed():
 def test_partition_maps_to_trace_split():
     wl = {
         "corpus": {"upstream": {"source": "hf:Org/dataset"},
+                   "reconstruct": {"max_think_time": "60s"},
                    "select": {"partition": "train"}},
         "replay": {"concurrent_sessions": 1, "total_sessions": 0},
     }
@@ -499,9 +504,12 @@ def test_partition_maps_to_trace_split():
 
 def test_minimal_corpus_uses_documented_defaults():
     """When the document omits every optional field, the scalar params fall
-    back to the documented defaults (39 / test / 2 / accumulate / 1 / 42)."""
+    back to the documented defaults (39 / test / 2 / accumulate / 1 / 42), plus
+    #905's two optional additions: no revision (upstream default branch) and
+    otel-parquet. max_think_time has no default and so is written here."""
     wl = {
-        "corpus": {"upstream": {"source": "hf:Org/dataset"}},
+        "corpus": {"upstream": {"source": "hf:Org/dataset"},
+                   "reconstruct": {"max_think_time": "60s"}},
         "replay": {"concurrent_sessions": 4, "total_sessions": 8},
     }
     params = _trace_params(wl)
@@ -512,6 +520,9 @@ def test_minimal_corpus_uses_documented_defaults():
     assert params["traceContextGrowth"] == "accumulate"
     assert params["traceDedupByConversation"] == "1"
     assert params["traceShuffleSeed"] == "42"
+    assert params["traceRevision"] == ""
+    assert params["traceFormat"] == "otel-parquet"
+    assert params["traceMaxThinkTime"] == "60s"
 
 
 def test_rendering_without_validation_raises_rather_than_emitting_a_sentinel():
@@ -527,7 +538,11 @@ def test_rendering_without_replay_raises():
     """Now raised by the argv renderer rather than the param renderer: #900
     moved the replay fields from PipelineRun params into observeArgs."""
     from pipeline.lib.observe_argv import ObserveArgvError
-    wl = {"corpus": {"upstream": {"source": "hf:o/d"}}}
+    # max_think_time is present so the corpus params render cleanly and the
+    # MISSING REPLAY is what fails — corpus params render first, so omitting it
+    # here would make this test pass for the wrong reason.
+    wl = {"corpus": {"upstream": {"source": "hf:o/d"},
+                     "reconstruct": {"max_think_time": "60s"}}}
     with pytest.raises(ObserveArgvError, match="replay.concurrent_sessions"):
         _trace_params(wl)
 

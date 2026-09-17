@@ -258,3 +258,35 @@ def test_no_streaming_is_inverted():
     disable streaming on every run that mentioned the flag."""
     assert g.OBSERVE_PRESENCE_FLAGS["--no-streaming"] == ("streaming", False)
     assert g.OBSERVE_PRESENCE_FLAGS["--record-itl"] == ("recordItl", True)
+
+
+# ── generated defaults must satisfy the assemble-time validators (#905) ───────
+
+
+def test_generated_prewarm_duration_default_is_a_valid_go_duration():
+    """The generated measurement.yaml has to survive its own assemble.
+
+    Since #905 `prewarmDuration` is checked against the real Go duration grammar
+    rather than merely `isinstance(str)`, because `--prewarm-duration` is a Cobra
+    DurationVar. That makes this default load-bearing in a way it was not:
+    changing it from "60s" to "60" would emit a bundle refused at assemble for
+    every cell. Nothing else ties the generator's default to the validator that
+    judges it.
+    """
+    sys.path.insert(0, str(_SKILL.parents[2]))
+    from pipeline.lib import duration
+
+    value = g.OBSERVE_DEFAULTS["prewarmDuration"]
+    assert duration.is_go_duration(value), (
+        f"OBSERVE_DEFAULTS['prewarmDuration'] = {value!r} is not a Go duration "
+        f"string, so every generated measurement.yaml would be refused"
+    )
+
+
+def test_only_the_int_valued_keys_render_as_bare_ints():
+    """The generator renders an all-digit value as a BARE YAML int. That is
+    correct for the three int-typed keys and would be wrong for a
+    duration-typed one, whose flag needs a unit."""
+    bare_ints = {k for k, v in g.OBSERVE_DEFAULTS.items()
+                 if isinstance(v, str) and v.isdigit()}
+    assert bare_ints == {"maxConcurrency", "timeout", "warmupRequests"}

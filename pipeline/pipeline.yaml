@@ -51,6 +51,16 @@ spec:
     - name: traceSource
       type: string
       default: ""
+    # Optional HF dataset revision. Empty resolves the repo's default branch.
+    - name: traceRevision
+      type: string
+      default: ""
+    # Upstream corpus format; selects the whole fetch/build/convert chain.
+    # Empty lets the Task apply its own otel-parquet default, which is what a
+    # PipelineRun generated before #905 relies on.
+    - name: traceFormat
+      type: string
+      default: ""
     - name: traceShards
       type: string
       default: ""
@@ -61,6 +71,12 @@ spec:
       type: string
       default: ""
     - name: traceContextGrowth
+      type: string
+      default: ""
+    # Cap on the per-round client think gap, as a Go duration string. Empty
+    # OMITS --max-think-time so each converter keeps its own default, which
+    # differ (otel 15s, weka none) — assemble always sends an explicit value.
+    - name: traceMaxThinkTime
       type: string
       default: ""
     - name: traceDedupByConversation
@@ -114,6 +130,10 @@ spec:
           value: "$(params.tracePath)"
         - name: traceSource
           value: "$(params.traceSource)"
+        - name: traceRevision
+          value: "$(params.traceRevision)"
+        - name: traceFormat
+          value: "$(params.traceFormat)"
         - name: traceShards
           value: "$(params.traceShards)"
         - name: traceMinRounds
@@ -122,6 +142,8 @@ spec:
           value: "$(params.traceSplit)"
         - name: traceContextGrowth
           value: "$(params.traceContextGrowth)"
+        - name: traceMaxThinkTime
+          value: "$(params.traceMaxThinkTime)"
         - name: traceDedupByConversation
           value: "$(params.traceDedupByConversation)"
         - name: traceShuffleSeed

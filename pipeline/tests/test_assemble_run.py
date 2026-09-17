@@ -1851,6 +1851,8 @@ class TestLoadWorkloadCorpusValidation:
         "corpus": {
             "upstream": {"source": "hf:Exgentic/agent-llm-traces", "shards": 39},
             "select": {"min_rounds": 2},
+            # Required since #905 — see corpus_schema.CORPUS_FIELDS.
+            "reconstruct": {"max_think_time": "60s"},
         },
         "replay": {"concurrent_sessions": 128, "total_sessions": 192},
     }
@@ -1880,7 +1882,8 @@ class TestLoadWorkloadCorpusValidation:
         assert data["workload_name"] == "wl_chat"
 
     def test_total_sessions_zero_is_allowed(self, tmp_path):
-        ok = {"corpus": {"upstream": {"source": "hf:x"}},
+        ok = {"corpus": {"upstream": {"source": "hf:x"},
+                         "reconstruct": {"max_think_time": "60s"}},
               "replay": {"concurrent_sessions": 1, "total_sessions": 0}}
         exp_root = self._write(tmp_path, ok)
         data = assemble_run._load_workload(exp_root, "workloads/w.yaml")
@@ -1892,7 +1895,8 @@ class TestLoadWorkloadCorpusValidation:
         """Defect 1: `pool.warmup_requests: 0` used to pass validation, ride
         along inside traceSpec, change nothing, and report nothing."""
         bad = {
-            "corpus": {"upstream": {"source": "hf:x"}},
+            "corpus": {"upstream": {"source": "hf:x"},
+                       "reconstruct": {"max_think_time": "60s"}},
             "replay": {"concurrent_sessions": 1, "total_sessions": 0,
                        "warmup_requests": 0},
         }
@@ -1901,16 +1905,38 @@ class TestLoadWorkloadCorpusValidation:
             assemble_run._load_workload(exp_root, "workloads/w.yaml")
 
     def test_hashed_but_unapplied_field_rejected(self, tmp_path):
-        """Defect 2, first half: `convert.max_think_time` was folded into the
-        cache key and never passed to the converter."""
+        """Defect 2, first half: a field folded into the cache key but never
+        passed to the converter.
+
+        `max_think_time` was this test's original subject; #905 gave it a
+        PipelineRun param, so it graduated out of DEFERRED_FIELDS and is now
+        legal. `max_context` is the surviving example — no task-side or converter
+        support anywhere — so the defect class stays covered. If it ever gains
+        support too, repoint this at whatever remains deferred rather than
+        deleting it.
+        """
         bad = {
             "corpus": {"upstream": {"source": "hf:x"},
-                       "reconstruct": {"max_think_time": "15s"}},
+                       "reconstruct": {"max_think_time": "60s",
+                                       "max_context": 8192}},
             "replay": {"concurrent_sessions": 1, "total_sessions": 0},
         }
         exp_root = self._write(tmp_path, bad)
         with pytest.raises(assemble_run.AssembleError,
-                           match=r"corpus\.reconstruct\.max_think_time"):
+                           match=r"corpus\.reconstruct\.max_context"):
+            assemble_run._load_workload(exp_root, "workloads/w.yaml")
+
+    def test_max_think_time_is_required_through_the_production_path(self, tmp_path):
+        """#905 made it required. Exercised through `_load_workload` rather than
+        the validator directly, because that is the path a real assemble takes.
+        """
+        bad = {
+            "corpus": {"upstream": {"source": "hf:x"}},
+            "replay": {"concurrent_sessions": 1, "total_sessions": 0},
+        }
+        exp_root = self._write(tmp_path, bad)
+        with pytest.raises(assemble_run.AssembleError,
+                           match=r"corpus\.reconstruct\.max_think_time is required"):
             assemble_run._load_workload(exp_root, "workloads/w.yaml")
 
     def test_skip_branching_rejected(self, tmp_path):
@@ -2048,26 +2074,37 @@ class TestLoadWorkloadCorpusValidation:
                            match=r"corpus\.upstream\.source"):
             assemble_run._load_workload(exp_root, "workloads/w.yaml")
 
+    # Each corpus below carries max_think_time (required since #905) so the
+    # REPLAY error under test is the one actually raised — corpus values are
+    # validated before replay. The `match=` patterns are also anchored on the
+    # message text rather than a bare field name: the error embeds the workload
+    # path, pytest derives tmp_path from the test's own name, and so "replay" and
+    # "concurrent_sessions" appeared in it by coincidence. Two of these three
+    # were passing on that coincidence alone.
     def test_missing_replay_raises(self, tmp_path):
-        bad = {"corpus": {"upstream": {"source": "hf:x"}}}
+        bad = {"corpus": {"upstream": {"source": "hf:x"},
+                          "reconstruct": {"max_think_time": "60s"}}}
         exp_root = self._write(tmp_path, bad)
-        with pytest.raises(assemble_run.AssembleError, match="replay"):
+        with pytest.raises(assemble_run.AssembleError,
+                           match="'replay' is required"):
             assemble_run._load_workload(exp_root, "workloads/w.yaml")
 
     def test_missing_concurrent_sessions_raises(self, tmp_path):
-        bad = {"corpus": {"upstream": {"source": "hf:x"}},
+        bad = {"corpus": {"upstream": {"source": "hf:x"},
+                          "reconstruct": {"max_think_time": "60s"}},
                "replay": {"total_sessions": 192}}
         exp_root = self._write(tmp_path, bad)
         with pytest.raises(assemble_run.AssembleError,
-                           match="concurrent_sessions"):
+                           match=r"replay\.concurrent_sessions is required"):
             assemble_run._load_workload(exp_root, "workloads/w.yaml")
 
     def test_concurrent_sessions_below_one_raises(self, tmp_path):
-        bad = {"corpus": {"upstream": {"source": "hf:x"}},
+        bad = {"corpus": {"upstream": {"source": "hf:x"},
+                          "reconstruct": {"max_think_time": "60s"}},
                "replay": {"concurrent_sessions": 0, "total_sessions": 0}}
         exp_root = self._write(tmp_path, bad)
         with pytest.raises(assemble_run.AssembleError,
-                           match="concurrent_sessions"):
+                           match=r"replay\.concurrent_sessions must be an int"):
             assemble_run._load_workload(exp_root, "workloads/w.yaml")
 
 
@@ -2141,7 +2178,8 @@ class TestLoadWorkloadErrors:
         wl = tmp_path / "workloads" / "wl_chat.yaml"
         wl.parent.mkdir(parents=True)
         wl.write_text(yaml.dump({
-            "corpus": {"upstream": {"source": "data.csv"}},
+            "corpus": {"upstream": {"source": "data.csv"},
+                       "reconstruct": {"max_think_time": "60s"}},
             "replay": {"concurrent_sessions": 1, "total_sessions": 10},
         }))
         result = assemble_run._load_workload(tmp_path, "workloads/wl_chat.yaml")
