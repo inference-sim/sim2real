@@ -351,6 +351,113 @@ def test_each_new_field_changes_the_corpus_cache_key(section, field, value):
     assert trace_path(c) != before
 
 
+# ── #905: weka-jsonl renders three otel-only fields inert ────────────────
+
+
+#: The three fields, and a non-default value for each, for the rejection tests.
+_INERT = [("partition", "train"),
+          ("dedup_by_conversation", False),
+          ("shuffle_seed", 7)]
+
+
+def _weka_doc() -> dict:
+    """A legal weka-jsonl document: `_VALID` minus the three inert select fields.
+
+    Built by REMOVING them rather than by writing a fresh literal, so a schema
+    change that adds a select field is inherited here instead of silently leaving
+    this fixture behind.
+    """
+    d = _doc()
+    d["corpus"]["upstream"]["format"] = "weka-jsonl"
+    for field, _ in _INERT:
+        d["corpus"]["select"].pop(field, None)
+    return d
+
+
+def test_weka_doc_fixture_is_actually_valid():
+    """The negative tests below are only meaningful if the fixture they start
+    from passes — otherwise they could report the wrong field and still pass."""
+    corpus_schema.validate_corpus_document(_weka_doc(), "w.yaml")
+
+
+@pytest.mark.parametrize("field,value", _INERT)
+def test_weka_refuses_fields_build_otel_would_have_applied(field, value):
+    """build-otel applies these and is SKIPPED for weka-jsonl, so accepting one
+    would hash it into the cache key while changing nothing about the corpus.
+
+    Only the field under test is present, so the error must name THAT field —
+    starting from a document carrying all three would let whichever comes first
+    in iteration order satisfy every case.
+    """
+    d = _weka_doc()
+    d["corpus"]["select"][field] = value
+    with pytest.raises(AssembleError) as exc:
+        corpus_schema.validate_corpus_document(d, "w.yaml")
+    msg = str(exc.value)
+    assert f"corpus.select.{field}" in msg
+    assert "weka-jsonl" in msg
+    # Must not read as a typo report — the field IS legal, just not here.
+    assert "unrecognized" not in msg
+
+
+@pytest.mark.parametrize("field,value", _INERT)
+def test_the_same_fields_are_fine_on_the_otel_path(field, value):
+    """Explicitly and by default: otel-parquet is where build-otel runs."""
+    for fmt in ("otel-parquet", None):
+        d = _doc()
+        if fmt:
+            d["corpus"]["upstream"]["format"] = fmt
+        d["corpus"]["select"][field] = value
+        corpus_schema.validate_corpus_document(d, "w.yaml")
+
+
+def test_weka_without_the_inert_fields_is_accepted():
+    """The rejection keys on what the document WROTE, not on the resolved value.
+    Refusing defaults too would make weka-jsonl unreachable."""
+    corpus_schema.validate_corpus_document(_weka_doc(), "w.yaml")
+
+
+@pytest.mark.parametrize("section,field,value", [
+    ("select", "min_rounds", 5),
+    ("reconstruct", "context_growth", "independent"),
+    ("reconstruct", "max_think_time", "90s"),
+])
+def test_weka_keeps_the_fields_the_converter_actually_receives(section, field, value):
+    """`blis convert weka` is passed --min-rounds, --context-growth and
+    --max-think-time, so these stay live on the weka path and must NOT be
+    swept up by the inert-field rejection."""
+    d = _weka_doc()
+    d["corpus"][section][field] = value
+    corpus_schema.validate_corpus_document(d, "w.yaml")
+
+
+def test_weka_inert_fields_are_all_real_schema_fields():
+    """A typo'd path here would be a rejection that never fires."""
+    for path in corpus_schema.WEKA_INERT_FIELDS:
+        _, section, key = path.split(".")
+        assert key in corpus_schema.CORPUS_FIELDS[section], path
+
+
+def test_weka_inert_set_matches_the_pinned_tasks_own_markers():
+    """The Task marks exactly the params it cannot honor on the weka path
+    "OTEL-PARQUET ONLY". Derive the set from those markers rather than trusting
+    this module's copy: if tektonc ever gives weka a split or a shuffle, the
+    marker goes away and this fails, pointing at a rejection to lift."""
+    task = (pathlib.Path(layout.repo_root()) / "tektonc-data-collection"
+            / "tekton" / "tasks" / "prepare-trace.yaml")
+    if not task.exists():
+        pytest.skip("tektonc-data-collection submodule not checked out")
+    spec = _yaml.safe_load(task.read_text())["spec"]
+    otel_only = {p["name"] for p in spec["params"]
+                 if "OTEL-PARQUET ONLY" in (p.get("description") or "")}
+    ours = {corpus_schema.CORPUS_FIELDS[s][k].param
+            for s, k in (p.split(".")[1:] for p in corpus_schema.WEKA_INERT_FIELDS)}
+    assert ours == otel_only, (
+        f"schema refuses {sorted(ours)} for weka but the pinned Task marks "
+        f"{sorted(otel_only)} as otel-only"
+    )
+
+
 def test_new_fields_are_picked_up_without_touching_the_renderer():
     """``tekton._render_corpus_params`` is driven entirely by CORPUS_FIELDS, so
     #905 added no emission code. Assert the table alone is what produced the
@@ -528,38 +635,73 @@ def test_non_default_mapping_covers_every_declared_corpus_field():
                 for sec, fields in corpus_schema.CORPUS_FIELDS.items()
                 for name in fields}
     assert declared == set(_NON_DEFAULT), (
-        "the schema changed — extend _NON_DEFAULT so the invariant test below "
-        "still covers every field"
+        "the schema changed — extend _NON_DEFAULT so the invariant tests below "
+        "still cover every field"
     )
 
 
-def _all_fields_doc() -> dict:
-    corpus: dict = {}
-    for (sec, name), val in _NON_DEFAULT.items():
-        corpus.setdefault(sec, {})[name] = val
-    return {"corpus": corpus,
-            "replay": {"concurrent_sessions": 3, "total_sessions": 9}}
+#: Fields that cannot share one document with `format: weka-jsonl`, because #905
+#: refuses them there (build-otel applies them and weka skips build-otel).
+_WEKA_EXCLUDED = {tuple(p.split(".")[1:]) for p in corpus_schema.WEKA_INERT_FIELDS}
+
+
+def _all_fields_docs() -> list[tuple[dict, set]]:
+    """Every corpus field at a non-default value, spread over the FEWEST legal
+    documents rather than crammed into one.
+
+    One document no longer suffices: `format: weka-jsonl` and
+    `select.partition`/`dedup_by_conversation`/`shuffle_seed` are now mutually
+    exclusive. Splitting keeps the invariant tests covering all ten fields while
+    every document they build is one assemble would actually accept — a single
+    document could only stay legal by dropping a field from coverage, which is
+    the opposite of what these tests are for.
+
+    Returns (document, fields-it-covers) pairs whose field sets union to
+    everything in ``_NON_DEFAULT``.
+    """
+    def build(keys):
+        corpus: dict = {}
+        for sec, name in keys:
+            corpus.setdefault(sec, {})[name] = _NON_DEFAULT[(sec, name)]
+        return ({"corpus": corpus,
+                 "replay": {"concurrent_sessions": 3, "total_sessions": 9}},
+                set(keys))
+
+    all_keys = set(_NON_DEFAULT)
+    # Doc 1: the weka document — format at its non-default, minus the three it
+    # renders inert.
+    weka = all_keys - _WEKA_EXCLUDED
+    # Doc 2: the otel document — the three excluded fields, plus everything
+    # required to make a valid document, with format left at its default.
+    otel = (all_keys - {("upstream", "format")})
+    docs = [build(sorted(weka)), build(sorted(otel))]
+    covered = set().union(*(c for _, c in docs))
+    assert covered == all_keys, sorted(all_keys - covered)
+    return docs
 
 
 def test_every_corpus_field_is_applied_to_its_param():
     """AC4, first half. A field in the schema that reaches no param would
     change the cache key without changing the corpus."""
-    doc = _all_fields_doc()
-    corpus_schema.validate_corpus_document(doc, "w.yaml")
-    params = _params(doc)
-    for (sec, name), val in _NON_DEFAULT.items():
-        field = corpus_schema.CORPUS_FIELDS[sec][name]
-        assert params[field.param] == field.render(val), f"{sec}.{name} not applied"
+    for doc, keys in _all_fields_docs():
+        corpus_schema.validate_corpus_document(doc, "w.yaml")
+        params = _params(doc)
+        for sec, name in keys:
+            field = corpus_schema.CORPUS_FIELDS[sec][name]
+            expected = field.render(_NON_DEFAULT[(sec, name)])
+            assert params[field.param] == expected, f"{sec}.{name} not applied"
 
 
 def test_every_corpus_field_is_hashed_into_the_cache_key():
     """AC4, second half. Dropping any one field must move the key."""
-    doc = _all_fields_doc()
-    base = corpus_schema.corpus_cache_key(doc["corpus"])
-    for sec, name in _NON_DEFAULT:
-        c = copy.deepcopy(doc["corpus"])
-        del c[sec][name]
-        assert corpus_schema.corpus_cache_key(c) != base, f"{sec}.{name} not hashed"
+    for doc, keys in _all_fields_docs():
+        base = corpus_schema.corpus_cache_key(doc["corpus"])
+        for sec, name in keys:
+            c = copy.deepcopy(doc["corpus"])
+            del c[sec][name]
+            assert corpus_schema.corpus_cache_key(c) != base, (
+                f"{sec}.{name} not hashed"
+            )
 
 
 def test_replay_fields_are_applied_but_not_hashed():

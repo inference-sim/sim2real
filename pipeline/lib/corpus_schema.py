@@ -250,6 +250,48 @@ DEFERRED_FIELDS: dict[str, str] = {
     ),
 }
 
+#: Fields that are legal on the otel-parquet path and INERT on weka-jsonl, so
+#: writing one alongside ``format: weka-jsonl`` is refused.
+#:
+#: ``build-otel`` is what applies all three, and ``build-otel`` is SKIPPED for
+#: weka-jsonl (JSONL is already blis's native Weka shape). ``blis convert weka``
+#: has no flag for any of them and does no internal equivalent, so on a weka
+#: corpus they change nothing — while still being hashed into the cache key,
+#: which is the accept-and-ignore shape this module exists to refuse. The pinned
+#: prepare-trace Task marks exactly these three params "OTEL-PARQUET ONLY" and
+#: says the rejection "has to live at assemble time", because the Task cannot
+#: tell an operator asking for a shuffle from sim2real emitting its default —
+#: both arrive as a non-empty param. Here the difference IS visible: only a
+#: field the document actually WROTE is refused.
+#:
+#: ``min_rounds`` and ``context_growth`` are deliberately absent: the convert
+#: step threads both to ``blis convert weka`` (``--min-rounds``,
+#: ``--context-growth``), so they stay live on the weka path. ``max_think_time``
+#: likewise reaches the converter on both paths.
+#:
+#: A test derives this set from the Task's own "OTEL-PARQUET ONLY" markers, so if
+#: tektonc ever gives weka a split or shuffle, the two cannot silently disagree.
+WEKA_INERT_FIELDS: dict[str, str] = {
+    "corpus.select.partition": (
+        "selects a deterministic SHA1 split, which build-otel applies — and "
+        "build-otel is skipped for weka-jsonl. 'blis convert weka' has no split "
+        "flag, so the WHOLE corpus would be converted (train sessions included) "
+        "while the cache key claimed a split"
+    ),
+    "corpus.select.dedup_by_conversation": (
+        "keeps one session per conversation, which build-otel applies — and "
+        "build-otel is skipped for weka-jsonl. 'blis convert weka' has no "
+        "equivalent, so every session would be kept regardless of the value"
+    ),
+    "corpus.select.shuffle_seed": (
+        "seeds the shuffle that build-otel applies — and build-otel is skipped "
+        "for weka-jsonl. A weka corpus therefore stays in its on-disk, "
+        "conversation-contiguous order, so a replay pool taking the first N "
+        "sessions draws a CORRELATED sample rather than one spanning the corpus. "
+        "That is a measurement-validity problem, not a cosmetic gap"
+    ),
+}
+
 #: Top-level keys a corpus document may carry. ``workload_name`` is INJECTED by
 #: ``assemble_run._load_workload`` from the filename stem before validation
 #: runs, so it must be tolerated here even though no document writes it.
@@ -323,6 +365,7 @@ def validate_corpus_document(doc: dict, where: str) -> None:
         )
     _validate_corpus_keys(doc["corpus"], where)
     _validate_corpus_values(doc["corpus"], where)
+    _validate_format_conditional(doc["corpus"], where)
     _validate_replay(doc.get("replay"), where)
 
 
@@ -390,6 +433,29 @@ def _validate_corpus_values(corpus: dict, where: str) -> None:
                 raise AssembleError(
                     f"workload {where}: {path} {field.describe}, got {value!r}"
                 )
+
+
+def _validate_format_conditional(corpus: dict, where: str) -> None:
+    """Refuse fields that the selected ``format`` renders inert.
+
+    Runs AFTER value validation, so the format itself is already known good.
+    Only a field the document actually WROTE is refused — an omitted field is a
+    default, not a request, and refusing those would make ``weka-jsonl``
+    unreachable without also spelling out three fields that do nothing.
+    """
+    written_format = (corpus.get("upstream") or {}).get("format")
+    if written_format != "weka-jsonl":
+        return
+    for path, reason in WEKA_INERT_FIELDS.items():
+        _, section, key = path.split(".")
+        if key in (corpus.get(section) or {}):
+            raise AssembleError(
+                f"workload {where}: {path} has no effect when "
+                f"corpus.upstream.format is 'weka-jsonl'. It {reason}. Remove "
+                f"the field, or use format 'otel-parquet' if you need it. Note "
+                f"that removing it does NOT give the weka path the behaviour: "
+                f"the capability is absent there, not merely unset"
+            )
 
 
 def _validate_replay(replay, where: str) -> None:

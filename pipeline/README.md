@@ -1278,6 +1278,22 @@ It is the only required field under `corpus:`. Every candidate default is wrong 
 
 > **A `weka-jsonl` descriptor should set `shards: 0`.** The shard cap is applied *after* discovery and is format-agnostic, so the default of 39 truncates the discovered `.jsonl` list the same way it truncates parquet shards. The default is itself a dataset-specific number (39 is exgentic's shard count) — tracked as #913.
 
+###### `weka-jsonl` refuses three otel-only fields
+
+`build-otel` is what applies `select.partition`, `select.dedup_by_conversation` and `select.shuffle_seed` — and `build-otel` is **skipped** for `weka-jsonl`. `blis convert weka` has no flag for any of the three and does no internal equivalent, so on a weka corpus they would change nothing while still being hashed into the cache key. Writing any of them alongside `format: weka-jsonl` therefore **fails at assemble**:
+
+```
+workload workloads/w.yaml: corpus.select.shuffle_seed has no effect when
+corpus.upstream.format is 'weka-jsonl'. It seeds the shuffle that build-otel
+applies — and build-otel is skipped for weka-jsonl. ...
+```
+
+Only a field the document actually **wrote** is refused; omitting it is fine. The `prepare-trace` Task cannot make this distinction — an operator's explicit `shuffle_seed: 42` and sim2real's default arrive as the same non-empty param — which is why the Task marks exactly these three params `OTEL-PARQUET ONLY` and states the rejection has to live at assemble time. A test derives the refused set from those markers, so if `blis convert weka` ever gains a split or shuffle, it fails and points at a rejection to lift.
+
+`select.min_rounds`, `reconstruct.context_growth` and `reconstruct.max_think_time` stay live on both paths — the convert step passes all three to `blis convert weka` — so they are deliberately *not* refused.
+
+> **Removing the field does not give weka the behaviour.** The capability is absent there, not merely unset. In particular a weka corpus is **unshuffled**, so it stays in its on-disk, conversation-contiguous order and a replay pool taking the first *N* sessions draws a **correlated** sample rather than one spanning the corpus. That is a measurement-validity limitation of the weka path today, not a formatting detail — lifting it needs weka-side support in blis or a filter step in the Task.
+
 ##### `revision` pins the dataset, and a moving ref defeats the purpose
 
 `revision` accepts a commit SHA, tag, or branch; empty (the default) resolves the upstream default branch. The Task resolves whatever is given to a commit SHA and keys its raw-download cache by `<repo>@<sha>`, so a moving ref that advances upstream lands in a fresh download directory.
