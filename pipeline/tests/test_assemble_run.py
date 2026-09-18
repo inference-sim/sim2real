@@ -714,6 +714,162 @@ class TestInjectHfSecret:
             assemble_run.inject_hf_secret_name({"scenario": []}, "hf-secret")
 
 
+class TestPerPackageObserveModel:
+    """`observe --model` comes from each package's OWN scenario (issue #915).
+
+    It used to be one run-wide value read off the FIRST baseline and handed to
+    every pair, so a two-baseline bundle asked the second package's server for the
+    first baseline's model. The deploy path was already per-package, which is what
+    made this survive: the pods came up correctly and only the replay's model was
+    wrong, so nothing failed until blis asked for a model the server did not have.
+    """
+
+    _CLUSTER = {"namespaces": ["ns-0"], "workspaces": {}}
+
+    def _pkg(self, model):
+        return {"scenario": [{"name": "s", "model": {"name": model}}]}
+
+    def _build(self, packages, workloads=None):
+        return assemble_run.build_pipelineruns(
+            packages=packages,
+            workloads=workloads or [{"name": "wl_a", "num_requests": 10}],
+            run_name="r",
+            cluster_config=self._CLUSTER,
+            pipeline_name="sim2real",
+            observe={},
+            submodule_shas={},
+            submodule_urls={},
+        )
+
+    @staticmethod
+    def _params(pr):
+        return {p["name"]: p["value"] for p in pr["spec"]["params"]}
+
+    def _models_by_package(self, built):
+        """Map package name -> the --model it was rendered with."""
+        out = {}
+        for fname, pr in built:
+            params = self._params(pr)
+            argv = params["observeArgs"].split()
+            model = argv[argv.index("--model") + 1]
+            out[params["scenario"] if "scenario" in params else fname] = model
+        return out
+
+    def test_each_package_gets_its_own_model(self):
+        """The regression. Two baselines serving different models: each pair must
+        request the model ITS server is serving."""
+        built = self._build([
+            ("baseline", self._pkg("Qwen/Qwen3-30B-A3B-Instruct-2507")),
+            ("weka", self._pkg("Qwen/Qwen3-Next-80B-A3B-Instruct")),
+        ])
+        got = {}
+        for fname, pr in built:
+            argv = self._params(pr)["observeArgs"].split()
+            got[fname] = argv[argv.index("--model") + 1]
+        by_pkg = {("weka" if "|weka|" in f else "baseline"): m
+                  for f, m in got.items()}
+        assert by_pkg == {
+            "baseline": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+            "weka": "Qwen/Qwen3-Next-80B-A3B-Instruct",
+        }
+
+    def test_second_package_does_not_inherit_the_first_models(self):
+        """Stated as its own assertion because it is the exact defect: before the
+        fix BOTH values were the first baseline's."""
+        built = self._build([
+            ("baseline", self._pkg("model-A")),
+            ("weka", self._pkg("model-B")),
+        ])
+        weka = next(pr for f, pr in built if "|weka|" in f)
+        argv = self._params(weka)["observeArgs"].split()
+        assert argv[argv.index("--model") + 1] == "model-B"
+
+    def test_package_order_does_not_change_any_model(self):
+        """The old value depended on which baseline came first, so reversing the
+        list changed what every pair requested. It must now be inert."""
+        pkgs = [("baseline", self._pkg("model-A")), ("weka", self._pkg("model-B"))]
+        forward = {f.split("|")[1]: self._params(pr)["observeArgs"]
+                   for f, pr in self._build(pkgs)}
+        reverse = {f.split("|")[1]: self._params(pr)["observeArgs"]
+                   for f, pr in self._build(list(reversed(pkgs)))}
+        assert forward == reverse
+
+    def test_single_package_run_is_unchanged(self):
+        """Byte-identity for the single-baseline case: the one package IS the
+        first baseline, so per-package derivation yields the same value the
+        run-wide computation did."""
+        built = self._build([("baseline", self._pkg("only-model"))])
+        argv = self._params(built[0][1])["observeArgs"].split()
+        assert argv[argv.index("--model") + 1] == "only-model"
+
+    def test_algorithm_package_uses_its_own_resolved_model(self):
+        """An algorithm resolves from the baseline named in its `defaults:`, so a
+        treatment sitting beside a different first baseline still gets its own."""
+        built = self._build([
+            ("baseline", self._pkg("first-baseline-model")),
+            ("weka", self._pkg("weka-model")),
+            ("sr-on-weka", self._pkg("weka-model")),
+        ])
+        for fname, pr in built:
+            argv = self._params(pr)["observeArgs"].split()
+            model = argv[argv.index("--model") + 1]
+            expected = ("first-baseline-model" if "|baseline|" in fname
+                        else "weka-model")
+            assert model == expected, fname
+
+    def test_scenario_content_stays_per_package(self):
+        """The deploy path was always correct; assert the fix did not disturb it,
+        since scenarioContent and --model must now agree by construction."""
+        built = self._build([
+            ("baseline", self._pkg("model-A")),
+            ("weka", self._pkg("model-B")),
+        ])
+        for fname, pr in built:
+            params = self._params(pr)
+            argv = params["observeArgs"].split()
+            model = argv[argv.index("--model") + 1]
+            assert model in params["scenarioContent"], (
+                f"{fname}: --model {model} absent from its own scenarioContent"
+            )
+
+    @pytest.mark.parametrize("resolved,label", [
+        ({"scenario": []}, "empty scenario list"),
+        ({}, "no scenario key"),
+        ({"scenario": [{"name": "s"}]}, "no model mapping"),
+        ({"scenario": [{"name": "s", "model": {}}]}, "model with no name"),
+        ({"scenario": [{"name": "s", "model": {"name": ""}}]}, "empty model name"),
+    ])
+    def test_package_without_a_model_is_refused(self, resolved, label):
+        """Refused, not defaulted. The only run-wide value to fall back to is the
+        first baseline's — the wrong answer this change exists to stop sending —
+        and an empty string is not safe either: nothing downstream rejects it, so
+        it would render `--model ''` and fail in-cluster after a slot and a model
+        standup were spent."""
+        with pytest.raises(assemble_run.AssembleError) as exc:
+            self._build([("weka", resolved)])
+        msg = str(exc.value)
+        assert "weka" in msg, label
+        assert "model" in msg, label
+
+    def test_refusal_names_the_offending_package_not_the_first_one(self):
+        """With several packages the message has to identify which one is short a
+        model, or an operator has to bisect the bundle to find it."""
+        with pytest.raises(assemble_run.AssembleError) as exc:
+            self._build([
+                ("baseline", self._pkg("model-A")),
+                ("weka", {"scenario": [{"name": "s"}]}),
+            ])
+        assert "'weka'" in str(exc.value)
+
+    def test_build_pipelineruns_takes_no_model_name_argument(self):
+        """The run-wide parameter is gone, not merely unused. Leaving it accepted
+        would let a caller keep passing the first baseline's model and silently
+        reintroduce the bug."""
+        import inspect
+        sig = inspect.signature(assemble_run.build_pipelineruns)
+        assert "model_name" not in sig.parameters
+
+
 class TestGeneratePipelineruns:
     def test_one_pipelinerun_per_workload_x_package(self, tmp_path):
         run_dir = tmp_path / "runs" / "trial-1"
@@ -737,7 +893,6 @@ class TestGeneratePipelineruns:
                 cluster_config=cluster_config,
                 pipeline_name="sim2real",
                 observe={},
-                model_name="M",
                 submodule_shas={"llm-d-benchmark": "abc", "inference-sim": "def"},
                 submodule_urls={"llm-d-benchmark": "git@e/b", "inference-sim": "git@e/i"},
             ),
@@ -777,7 +932,6 @@ class TestGeneratePipelineruns:
                 cluster_config=cluster_config,
                 pipeline_name="sim2real",
                 observe={},
-                model_name="M",
                 submodule_shas={},
                 submodule_urls={},
                 iterations=range(1, 3),
@@ -812,7 +966,6 @@ class TestGeneratePipelineruns:
                 cluster_config=cluster_config,
                 pipeline_name="sim2real",
                 observe={},
-                model_name="M",
                 submodule_shas={},
                 submodule_urls={},
                 iterations=range(1, 4),
@@ -854,7 +1007,6 @@ class TestGeneratePipelineruns:
                 cluster_config=cluster_config,
                 pipeline_name="sim2real",
                 observe={},
-                model_name="M",
                 submodule_shas={},
                 submodule_urls={},
             )
