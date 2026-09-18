@@ -727,6 +727,44 @@ def plan_pairs(
     return plans
 
 
+def _package_model_name(pkg_name: str, resolved: dict) -> str:
+    """Return the model name from a package's OWN resolved scenario.
+
+    Issue #915: this used to be one run-wide value taken from the FIRST baseline
+    and handed to every pair, so a bundle with two baselines sent
+    ``observe --model <first baseline's model>`` while the server for the second
+    package was serving something else. The deploy path was always per-package
+    (``scenarioContent``); only the model blis asked for was wrong.
+
+    Every package has its own answer here. A baseline's resolved scenario is
+    ``framework defaults -> bundle -> overlay``, and an algorithm's is
+    ``resolve_treatment(baseline_resolved, diffs, overlay)`` against ITS OWN
+    baseline, so an algorithm inherits the model of the baseline it declares in
+    ``defaults:`` rather than of whichever baseline happens to be listed first.
+
+    Refuses rather than defaulting. There is deliberately no fallback to a
+    run-wide value: the only value available to fall back TO is the first
+    baseline's, which is precisely the wrong answer this function exists to stop
+    emitting — a fallback would keep the bug alive for exactly the multi-baseline
+    bundles that motivated the fix, while looking like it had been fixed. Nor is
+    an empty string safe to pass through: nothing downstream rejects it
+    (``render_observe_argv`` only screens the value for argv-breaking
+    characters), so it would render ``--model ''`` and fail in-cluster after a
+    namespace slot and a model standup had been spent.
+    """
+    scenarios = resolved.get("scenario") or []
+    name = scenarios[0].get("model", {}).get("name", "") if scenarios else ""
+    if not name:
+        raise AssembleError(
+            f"package '{pkg_name}': cannot determine a model name — its resolved "
+            f"scenario has no scenario[0].model.name. 'blis observe --model' is "
+            f"rendered from each package's own scenario (issue #915), so there is "
+            f"nothing to send. Check the baseline this package resolves from, and "
+            f"the treatment overlay if it is an algorithm package"
+        )
+    return name
+
+
 def build_pipelineruns(
     *,
     packages: list[tuple[str, dict]],
@@ -735,7 +773,6 @@ def build_pipelineruns(
     cluster_config: dict,
     pipeline_name: str,
     observe: dict,
-    model_name: str,
     submodule_shas: dict,
     submodule_urls: dict,
     iterations: "range | list[int]" = range(1, 2),
@@ -771,6 +808,7 @@ def build_pipelineruns(
         scenario_content = yaml.dump(
             resolved, default_flow_style=False, allow_unicode=True
         )
+        model = _package_model_name(pkg_name, resolved)
         for wl in workloads:
             wl_name = wl.get("name", wl.get("workload_name", "unknown"))
             for iteration in iterations:
@@ -791,7 +829,7 @@ def build_pipelineruns(
                         benchmark_git_repo_url=submodule_urls.get("llm-d-benchmark", ""),
                         blis_git_commit=submodule_shas.get("inference-sim", ""),
                         blis_git_repo_url=submodule_urls.get("inference-sim", ""),
-                        model=model_name,
+                        model=model,
                         observe=observe,
                         iteration=iteration,
                     )
@@ -1110,7 +1148,6 @@ class _ResolvedPackages(NamedTuple):
     skipped_algo_names: list[str]
     translated_algos: dict[str, dict]
     workloads: list[dict]
-    model_name: str
     submodule_shas: dict[str, str]
     submodule_urls: dict[str, str]
     missing_submodules: list[str]
@@ -1242,14 +1279,9 @@ def _resolve_packages(
         inject_hf_secret_name(resolved, hf_secret)
 
     workloads = [_load_workload(exp_root, wl) for wl in manifest.get("workloads", [])]
-    first_baseline = next(
-        (resolved for name, resolved in packages if name in resolved_baselines),
-        packages[0][1] if packages else {},
-    )
-    scenarios_list = first_baseline.get("scenario", [])
-    model_name = (
-        scenarios_list[0].get("model", {}).get("name", "") if scenarios_list else ""
-    )
+    # No run-wide model name is computed. `build_pipelineruns` derives one per
+    # package via `_package_model_name`, because a run may carry several
+    # baselines serving different models (issue #915).
     submodule_shas, submodule_urls, missing_submodules = (
         discover_framework_submodules(_REPO_ROOT)
     )
@@ -1261,7 +1293,6 @@ def _resolve_packages(
         skipped_algo_names=skipped_algo_names,
         translated_algos=translated_algos,
         workloads=workloads,
-        model_name=model_name,
         submodule_shas=submodule_shas,
         submodule_urls=submodule_urls,
         missing_submodules=missing_submodules,
@@ -1707,7 +1738,6 @@ def assemble_run(
         # callers that hand-build a manifest dict without going through
         # load_manifest (several tests do); it is not guarding a real runtime case.
         observe=manifest.get("measurement") or {},
-        model_name=resolved.model_name,
         submodule_shas=resolved.submodule_shas,
         submodule_urls=resolved.submodule_urls,
         iterations=iterations,
