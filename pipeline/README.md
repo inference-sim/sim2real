@@ -438,6 +438,7 @@ python pipeline/sim2real.py assemble \
     --translation REF \
     --cluster CLUSTER_ID \
     --run RUN_NAME \
+    [--baseline NAME] \
     [--replicas N] \
     [--workload NAME ...] [--package NAME ...] \
     [--force] [--no-wipe] [-y|--yes]
@@ -448,6 +449,7 @@ python pipeline/sim2real.py assemble \
 | `--translation REF` | yes | Alias, hash prefix (min 4 chars), or full hash. |
 | `--cluster CLUSTER_ID` | yes | Matches `workspace/clusters/<id>/`. |
 | `--run RUN_NAME` | yes | Directory created at `workspace/runs/<run>/`. |
+| `--baseline NAME` | no | The single baseline package to resolve every arm against. On a fresh run, defaults to the entry named `baseline`, else the first in `transfer.yaml:baselines[]`; on an existing run, defaults to that run's recorded selection. Naming no entry exits 2 listing the available names. Cannot be combined with `--workload` / `--package`. See [Baseline selection](#baseline-selection-one-per-run). |
 | `--replicas N` | no | Iterations per (workload, package) pair. Default 1. Cannot be combined with `--workload` / `--package`. |
 | `--workload NAME ...` | no | Scope to these workloads. Comma- or space-separated; shell globs accepted. Requires an existing run. |
 | `--package NAME ...` | no | Scope to these packages (`baseline` or an algorithm name). Same grammar as `--workload`. |
@@ -460,12 +462,12 @@ python pipeline/sim2real.py assemble \
 **Inputs read:**
 
 - `workspace/translations/<hash>/translation_output.json` — algorithms with per-algo `image_ref`. Legacy step-1 files (top-level `image_ref`) are read transparently via `pipeline/lib/translation_ref.py`'s on-read shim.
-- `workspace/translations/<hash>/generated/baselines/<name>/baseline_config.yaml` — per-baseline overlay (skill-driven; written by `/sim2real-translate` for each baseline that any algorithm's `defaults` names). Nested under a `baselines/` umbrella (issue #544). Assemble applies each entry to its matching `manifest.baselines[]` entry.
-- `workspace/translations/<hash>/generated/baseline_config.yaml` — legacy BYO overlay (written by `translation register --baseline-config`). Applied to every baseline in the manifest when the per-baseline directory above is absent — falls back automatically so BYO translations remain resolvable.
+- `workspace/translations/<hash>/generated/baselines/<name>/baseline_config.yaml` — per-baseline overlay (skill-driven; written by `/sim2real-translate` for each baseline that any algorithm's `defaults` names). Nested under a `baselines/` umbrella (issue #544). Assemble *reuses* whichever of these exists rather than keying the lookup on the selected baseline's name — see [Baseline selection](#baseline-selection-one-per-run).
+- `workspace/translations/<hash>/generated/baseline_config.yaml` — legacy BYO overlay (written by `translation register --baseline-config`). The last fallback when no per-baseline directory above exists, so BYO translations remain resolvable.
 - `workspace/translations/<hash>/generated/<algo>/<algo>_config.yaml` — per-algorithm treatment overlay.
 - `workspace/clusters/<cluster_id>/cluster_config.json` — namespaces, workspace bindings, hf secret name.
 - `<experiment-root>/transfer.yaml` (or `config/transfer.yaml`) — v3 manifest.
-- `<experiment-root>/baselines/baseline.yaml` — baseline bundle referenced by `transfer.yaml:baselines[0].scenario`. The baseline identifier is always the literal string `baseline` (issue #544).
+- `<experiment-root>/baselines/<name>.yaml` — the bundle referenced by the selected baseline's `scenario` (see [Baseline selection](#baseline-selection-one-per-run)). `baseline` is the standardized identifier (issue #544) and the default selection, but `baselines[]` may declare others and `--baseline` may name one.
 - `<experiment-root>/baselines/defaults/*.yaml` — framework defaults overlays (opt-out via `transfer.yaml:defaults.disable`).
 - `<sim2real-repo>/.gitmodules` and `<sim2real-repo>/{inference-sim,llm-d-benchmark}/` — the framework submodules' clone URLs (from `.gitmodules`) and HEAD SHAs (from `git rev-parse HEAD`), which populate `benchmarkGitRepoUrl` / `benchmarkGitCommit` / `blisGitRepoUrl` / `blisGitCommit` in every generated PipelineRun. Initialize with `git submodule update --init` in the sim2real repo before running `sim2real assemble`; a missing submodule falls back to `"unknown"` for its commit SHA (assemble prints a warning) and the cluster-side `git clone` step then fails visibly at the right point.
 
@@ -473,9 +475,9 @@ python pipeline/sim2real.py assemble \
 
 | File | Purpose |
 |------|---------|
-| `manifest.assembly.yaml` | Verbatim snapshot of the assembly slice from `transfer.yaml` (produced by `pipeline/lib/slicer.py`), preceded by a top-level `replicas: N` field. |
+| `manifest.assembly.yaml` | Verbatim snapshot of the assembly slice from `transfer.yaml` (produced by `pipeline/lib/slicer.py`), preceded by top-level `replicas: N` and `baseline: <name>` fields. `baseline` names the single baseline package the run resolved and — unlike `replicas` — is part of `params_hash`. |
 | `run_metadata.json` | `{version, run_name, translation_hash, cluster_id, params_hash, image_tag, replicas, assembled_at, scenario}` — pinned schema, `version: 1`. `scenario` is the value of `transfer.yaml:scenario`, threaded through by `deploy.py` to name the progress ConfigMap `sim2real-progress-{scenario}-{run}` (issue #551). |
-| `cluster/baseline.yaml` | Resolved baseline scenario (framework defaults → bundle → baseline overlay). |
+| `cluster/<baseline>.yaml` | Resolved baseline scenario (framework defaults → bundle → baseline overlay). Exactly one, named for the selected baseline — `baseline.yaml` by default, `weka.yaml` under `--baseline weka`. |
 | `cluster/<algo>.yaml` | Resolved treatment scenario per registered algorithm (baseline_resolved → treatment bundle diffs → algo overlay → injected image_tag). |
 | `cluster/pipelinerun-<workload>\|<package>\|iN.yaml` | One PipelineRun per (workload, package, iteration) tuple. Consumed by `deploy.py run`. |
 
@@ -488,7 +490,34 @@ treatment_resolved = deep_merge(baseline_resolved, treatment_bundle_diffs, algo_
 
 Then each treatment scenario has `router.epp.image` set from that algorithm's own `translation_output.json:algorithms[i].image_ref` (split into `registry` + bare `repository` fields for the routerlib chart's expected shape), and every scenario has `huggingface.secretName` set from `cluster_config.json:secret_names.hf_token`.
 
-**`params_hash`** is SHA-256 over the canonical bytes of `manifest.assembly.yaml` with the top-level `replicas` field excluded — bumping `--replicas N` must not change the hash. Recorded in `run_metadata.json` for drift detection on re-assemble.
+**`params_hash`** is SHA-256 over the canonical bytes of `manifest.assembly.yaml` with the top-level `replicas` field excluded — bumping `--replicas N` must not change the hash. The `baseline` field is *not* excluded: two runs differing only in `--baseline` can serve different models, so a hash that could not tell them apart would report them as the same parameters. Recorded in `run_metadata.json` for drift detection on re-assemble.
+
+### Baseline selection: one per run
+
+`transfer.yaml` may declare several entries under `baselines[]`, but a run resolves exactly **one** of them (issue #921). `--baseline NAME` picks which; omitting it selects the entry named `baseline`, else the first. Every algorithm arm is resolved against that selection, overriding its own `algorithms[*].defaults` — assemble prints a `note:` naming any algorithm whose `defaults` disagreed.
+
+Comparing one algorithm across two server configs therefore means **two runs**, not two arms in one run:
+
+```bash
+python pipeline/sim2real.py assemble --translation REF --cluster C --run trial-30b
+python pipeline/sim2real.py assemble --translation REF --cluster C --run trial-weka --baseline weka
+```
+
+**The selection is sticky.** Re-assembling an existing run without `--baseline` inherits that run's recorded selection rather than re-deriving the default — the same way `--replicas` falls back to the recorded count. Without this, a `--force` re-assemble picking up an unrelated `transfer.yaml` edit would silently re-resolve every arm against the default baseline, serving a different model, with no signal beyond a prune warning blaming `transfer.yaml`. Passing `--baseline` with a name the run did *not* record is a parameter change, so it trips drift detection and needs `--force`.
+
+**`--baseline` cannot be combined with `--workload` / `--package`.** The baseline is run-wide, and a scoped assemble writes neither `manifest.assembly.yaml` nor `run_metadata.json`, so it has nowhere to record a selection; honouring the flag would rewrite the scoped packages against a different baseline while the snapshot kept describing the old one. Re-assemble unscoped with `--baseline` first, then scope.
+
+**The generated overlay is reused, not looked up by name.** `sim2real translate` only asks `/sim2real-translate` for overlays covering baselines that some algorithm's `defaults` cross-references, so a baseline nothing references never gets a `generated/baselines/<name>/` directory. Keying the lookup on the selected name would resolve to nothing for exactly the baseline `--baseline` exists to select, and the arm would deploy with the Helm chart's stock `default-plugins.yaml`. Resolution order:
+
+1. `generated/baselines/<selected>/baseline_config.yaml` — the selected baseline's own, when one exists.
+2. The sole `generated/baselines/*/baseline_config.yaml`, when exactly one exists.
+3. When several exist, the one under the default baseline's name. If that one is absent, assemble **refuses** and names the candidates rather than guessing, since they configure different EPPs.
+4. The legacy flat `generated/baseline_config.yaml` (BYO).
+5. Nothing — resolution continues with an empty overlay layer, as before.
+
+Whichever overlay is chosen, its `scenario[0].name` is realigned to the selected bundle's before merging, and so are the treatment diffs and each algorithm overlay. A reused overlay was authored against a different baseline's scenario name, and a mismatch makes `deep_merge` append a second scenario entry that llm-d-benchmark renders as a separate deployment (issue #516).
+
+**What reuse cannot fix.** Nothing validates overlay *content*. The convention that the plugin config carries `modelName: ${model.name}` (expanded per package at render time) is what makes reuse safe across baselines serving different models; it is a convention the translate skill follows, not an enforced invariant. Rejecting a reused overlay that carries a literal model name is not implemented — see issue #921.
 
 **Replicas.** `--replicas N` (default 1) is the number of iterations per (workload, package) pair. Each iteration gets its own PipelineRun (`{phase}-{workload}-{run}-iN`, with `_` → `-` normalization) and its own results subdirectory (`results/<phase>/<workload>/iN/`). `manifest.assembly.yaml` carries a top-level `replicas: N`, and `run_metadata.json` carries the same value as a schema field. Both are set on every assemble.
 
@@ -831,7 +860,7 @@ python pipeline/sim2real.py --experiment-root ../admission-control use --run <na
 
 **`sim2real use --run <name>`** — Sets `current_run` in `setup_config.json` to the given run. Errors with `"run doesn't exist; try 'sim2real list runs'"` (exit 2) if `workspace/runs/<name>/run_metadata.json` does not exist. Read-modify-write preserves unrelated keys in `setup_config.json`.
 
-**`sim2real resolve --run <name>`** — Emits a hydrated JSON view of a run on stdout. Reads `workspace/runs/<name>/run_metadata.json` to locate the referenced translation, then walks `workspace/translations/<hash>/`, `workspace/runs/<name>/results/`, `workspace/runs/<name>/cluster/`, and `workspace/runs/<name>/manifest.assembly.yaml` to produce a single JSON document with everything the `/sim2real-check` skill (and other operator tooling) needs to reason about the run: metadata (run_name, cluster_id, params_hash, image_tag, assembled_at, cluster_config_path), translation (hash / alias / source / per-algorithm image_ref+config paths / per-baseline overlay paths from the manifest), results (declared phases, phases with collected data, workloads-by-phase), cluster scenarios (baseline.yaml, per-algorithm treatment YAMLs, pipelinerun-*.yaml files), and the manifest.assembly.yaml slice (scenario, workloads, defaults.disable, measurement). Schema is v1; future versions are additive. `translation_hash` appears only under `translation.hash` (not duplicated at top level). Exit codes: `0` with JSON on stdout on success; `2` with a specific error message on stderr (unknown run, corrupt/missing `run_metadata.json`, unresolvable `translation_hash`, missing workspace) — each error names the `sim2real` command that would repair the state.
+**`sim2real resolve --run <name>`** — Emits a hydrated JSON view of a run on stdout. Reads `workspace/runs/<name>/run_metadata.json` to locate the referenced translation, then walks `workspace/translations/<hash>/`, `workspace/runs/<name>/results/`, `workspace/runs/<name>/cluster/`, and `workspace/runs/<name>/manifest.assembly.yaml` to produce a single JSON document with everything the `/sim2real-check` skill (and other operator tooling) needs to reason about the run: metadata (run_name, cluster_id, params_hash, image_tag, assembled_at, cluster_config_path), translation (hash / alias / source / per-algorithm image_ref+config paths / per-baseline overlay paths from the manifest), results (declared phases, phases with collected data, workloads-by-phase), cluster scenarios (`baseline_package` — the selected baseline's name, read from the snapshot's `baseline` key and defaulting to `baseline` for pre-#921 runs — plus that package's scenario YAML, the per-algorithm treatment YAMLs, and the pipelinerun-*.yaml files), and the manifest.assembly.yaml slice (scenario, workloads, defaults.disable, measurement). Schema is v1; future versions are additive. `translation_hash` appears only under `translation.hash` (not duplicated at top level). Exit codes: `0` with JSON on stdout on success; `2` with a specific error message on stderr (unknown run, corrupt/missing `run_metadata.json`, unresolvable `translation_hash`, missing workspace) — each error names the `sim2real` command that would repair the state.
 
 The previous `run.py inspect` debug view is dropped without replacement — `cat workspace/runs/<name>/run_metadata.json` is the shortest path. `sim2real resolve --run <name>` is the structured superset for tooling.
 
@@ -1009,7 +1038,7 @@ All artifacts live under `<experiment-root>/workspace/` (gitignored). Key files:
 | `translations/<hash>/registered.json` | `sim2real translation register` (batched; N per-algo entries in `algorithms`) | audit trail |
 | `translations/<hash>/generated/…` | `sim2real translation register` | `sim2real assemble` |
 | `runs/<run>/run_metadata.json` | `sim2real assemble` | `deploy.py`, `sim2real.py list runs` |
-| `runs/<run>/manifest.assembly.yaml` | `sim2real assemble` | reproducibility / drift detection (step-5) |
+| `runs/<run>/manifest.assembly.yaml` | `sim2real assemble` | reproducibility / drift detection (step-5); carries top-level `replicas: N` and `baseline: <name>` |
 | `runs/<run>/cluster/…` | `sim2real assemble` | `deploy.py` |
 | `runs/<run>/results/{phase}/` | `deploy.py collect` | `/sim2real-analyze` skill, `deploy.py wipe` |
 | ConfigMap `sim2real-progress-{scenario}-{run}` | `deploy.py run`, `deploy.py reset` | all `deploy.py` subcommands |

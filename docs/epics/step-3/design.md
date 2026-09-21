@@ -160,10 +160,10 @@ sim2real resolve --run <name> [--experiment-root <path>]
 - Top-level (run_name, run_dir, cluster_id, params_hash, image_tag, assembled_at): `run_metadata.json` (written by `sim2real assemble`).
 - `cluster_config_path`: composed as `<experiment-root>/workspace/clusters/<cluster_id>/cluster_config.json`. Exists check performed; emitted as-is if present, `null` if the file is absent (partial workspace).
 - `translation.*`: `translation_output.json` (via `pipeline/lib/translation_ref.py:read_translation_output`) + filesystem probes for generated dirs.
-- `results.phases_declared`: union of `baselines[].name` + `algorithms[].name` from `manifest.assembly.yaml`. Represents what SHOULD have run.
+- `results.phases_declared`: union of `baselines[].name` + `algorithms[].name` from `manifest.assembly.yaml`. Represents what SHOULD have run. **Amended by issue #921:** a run now resolves exactly one baseline, so when `manifest.assembly.yaml` records a `baseline:` key only that baseline is listed. Snapshots without the key predate #921 and did deploy every declared baseline, so all of them are still listed for those.
 - `results.phases_with_data`: `phases_declared` filtered to entries whose subdir contains at least one workload with `trace_data.csv`. Predicate accepts either shape: `results/<phase>/<workload>/trace_data.csv` (legacy flat) OR `results/<phase>/<workload>/iN/trace_data.csv` where `iN` matches `^i[1-9][0-9]*$` (replica shape written by `sim2real assemble` when `replicas > 1`). See `pipeline/lib/resolve.py:_workload_has_data` (issue #572). Invariant: `phases_with_data ⊆ phases_declared`.
 - `results.workloads_by_phase`: filesystem listing per-phase using the same predicate as `phases_with_data`.
-- `cluster_scenarios.*`: filesystem listing of `cluster/*.yaml`.
+- `cluster_scenarios.*`: filesystem listing of `cluster/*.yaml`. **Amended by issue #921:** a `baseline_package` field names the baseline the run resolved, and `baseline_yaml` is matched against that name rather than the literal `baseline`, so a run assembled with `--baseline weka` reports `cluster/weka.yaml` instead of `null`.
 - `manifest_assembly.*`: parsed `manifest.assembly.yaml`.
 
 ### Code location

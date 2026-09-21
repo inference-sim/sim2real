@@ -662,3 +662,60 @@ class TestWorkloadHasData:
         monkeypatch.setattr(Path, "iterdir", lambda self: raise_oserror())
         result = resolve._workload_has_data(wl_dir)
         assert result is False
+
+
+class TestSelectedBaselineIsHonored:
+    """resolve --run must follow the recorded selection, not the literal name.
+
+    ``_build_cluster_scenarios_section`` used to match ``cluster/baseline.yaml``
+    by name, so a run assembled with ``--baseline weka`` reported
+    ``baseline_yaml: null`` and ``/sim2real-check`` lost its baseline entirely.
+    """
+
+    def _run_dir(self, tmp_path, *, baseline_key, scenario_stem):
+        run_dir = tmp_path / "runs" / "r1"
+        (run_dir / "cluster").mkdir(parents=True)
+        ma = {
+            "replicas": 1,
+            "baselines": [
+                {"name": "baseline", "scenario": "baselines/baseline.yaml"},
+                {"name": "weka", "scenario": "baselines/baseline-weka.yaml"},
+            ],
+            "algorithms": [{"name": "algoa", "defaults": "baseline"}],
+            "workloads": ["workloads/w1.yaml"],
+        }
+        if baseline_key is not None:
+            ma["baseline"] = baseline_key
+        (run_dir / "manifest.assembly.yaml").write_text(yaml.dump(ma))
+        (run_dir / "cluster" / f"{scenario_stem}.yaml").write_text("scenario: []\n")
+        (run_dir / "cluster" / "algoa.yaml").write_text("scenario: []\n")
+        return run_dir, ma
+
+    def test_baseline_yaml_follows_the_recorded_selection(self, tmp_path):
+        run_dir, ma = self._run_dir(
+            tmp_path, baseline_key="weka", scenario_stem="weka"
+        )
+        section = resolve._build_cluster_scenarios_section(run_dir, ma)
+        assert section["baseline_package"] == "weka"
+        assert section["baseline_yaml"] == str(run_dir / "cluster" / "weka.yaml")
+        assert set(section["treatment_yamls"]) == {"algoa"}
+
+    def test_legacy_snapshot_without_the_key_still_finds_baseline_yaml(self, tmp_path):
+        run_dir, ma = self._run_dir(
+            tmp_path, baseline_key=None, scenario_stem="baseline"
+        )
+        section = resolve._build_cluster_scenarios_section(run_dir, ma)
+        assert section["baseline_package"] == "baseline"
+        assert section["baseline_yaml"] == str(run_dir / "cluster" / "baseline.yaml")
+
+    def test_phases_declared_lists_only_the_selected_baseline(self, tmp_path):
+        _, ma = self._run_dir(tmp_path, baseline_key="weka", scenario_stem="weka")
+        assert resolve._phases_declared_from_manifest(ma) == ["weka", "algoa"]
+
+    def test_phases_declared_falls_back_to_all_baselines_when_unrecorded(
+        self, tmp_path
+    ):
+        _, ma = self._run_dir(tmp_path, baseline_key=None, scenario_stem="baseline")
+        assert resolve._phases_declared_from_manifest(ma) == [
+            "baseline", "weka", "algoa",
+        ]

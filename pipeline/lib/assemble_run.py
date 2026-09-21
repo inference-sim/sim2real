@@ -271,18 +271,35 @@ def inject_hf_secret_name(scenario_dict: dict, hf_secret_name: str) -> None:
 
 
 def write_manifest_assembly(
-    run_dir: Path, manifest: dict, *, now_iso: str, replicas: int = 1,
+    run_dir: Path,
+    manifest: dict,
+    *,
+    now_iso: str,
+    replicas: int = 1,
+    baseline: str | None = None,
 ) -> Path:
-    """Serialize ``slicer.assembly_slice(manifest)`` + ``replicas: N`` to
-    ``manifest.assembly.yaml``.
+    """Serialize ``slicer.assembly_slice(manifest)`` + ``replicas``/``baseline``
+    to ``manifest.assembly.yaml``.
+
+    ``baseline`` is the single baseline package this run resolves (issue #921).
+    Unlike ``replicas`` it is *included* in ``params_hash``: two runs that
+    differ only in ``--baseline`` can serve different models, so a hash that
+    could not tell them apart would report them as the same parameters.
+
+    ``baseline=None`` omits the key, producing the pre-#921 snapshot shape.
+    ``_additive_grow`` uses that to preserve a legacy run's shape, since it
+    preserves that run's ``params_hash`` too and the two must agree.
 
     Prepends a one-line comment header naming the tool and timestamp.
     Returns the written path.
     """
     slice_ = slicer.assembly_slice(manifest)
-    # Emit replicas at the top of the file for human readability, before the
-    # rest of the assembly slice.
-    out_dict = {"replicas": replicas, **slice_}
+    # Emit replicas and the baseline selection at the top of the file for human
+    # readability, before the rest of the assembly slice.
+    out_dict: dict = {"replicas": replicas}
+    if baseline is not None:
+        out_dict["baseline"] = baseline
+    out_dict.update(slice_)
     body = yaml.dump(
         out_dict, default_flow_style=False, allow_unicode=True, sort_keys=False
     )
@@ -299,6 +316,11 @@ def compute_params_hash(manifest_assembly_path: Path) -> str:
     trip drift detection on re-assemble. Canonical form uses
     ``sort_keys=True`` so the hash is deterministic across YAML formatter
     ordering differences.
+
+    ``baseline`` (issue #921) is deliberately NOT excluded. It names the single
+    baseline package the run resolves, and two runs differing only in it can
+    serve different models — so it belongs in the identity of the parameters.
+    Snapshots written before #921 carry no such key and hash exactly as before.
     """
     data = yaml.safe_load(manifest_assembly_path.read_text()) or {}
     if isinstance(data, dict):
@@ -396,6 +418,11 @@ def resolve_baseline(
     point at a non-existent file (BYO baseline without a baseline overlay).
     Bundle is required — a missing bundle raises AssembleError.
 
+    Both the framework defaults and the overlay have their ``scenario[0].name``
+    realigned to the bundle's before merging. The overlay needs it because
+    ``find_baseline_overlay`` may return an overlay generated for a *different*
+    baseline and reused (issue #921).
+
     Before the merge, ``framework_defaults[scenario][0].name`` is realigned
     to the bundle's ``scenario[0].name`` so both sides collapse into a single
     scenario entry (see ``_align_overlay_name``). Without this, a defaults
@@ -416,6 +443,13 @@ def resolve_baseline(
         if overlay_path is not None and overlay_path.exists()
         else {}
     )
+    # Realign the overlay's scenario name to the bundle's, for the same reason
+    # the framework defaults are realigned below: a name mismatch makes
+    # deep_merge append a second scenario entry, which llm-d-benchmark renders
+    # as a separate deployment (issue #516). This matters now that the overlay
+    # may have been generated for a different baseline and reused (issue #921),
+    # and is a no-op when the names already agree.
+    overlay = _align_overlay_name(bundle, overlay)
     aligned_defaults = _align_overlay_name(bundle, copy.deepcopy(framework_defaults))
     resolved = _merge_layer(
         aligned_defaults, bundle,
@@ -441,6 +475,16 @@ def resolve_treatment(
     point at non-existent files — the corresponding layer is treated as
     empty. Baseline is required (starts from an already-resolved dict).
 
+    Both layers have their ``scenario[0].name`` realigned to the resolved
+    baseline's, for the reason spelled out in ``_align_overlay_name``: a name
+    mismatch makes ``deep_merge`` append a second scenario entry, which
+    llm-d-benchmark renders as a separate deployment carrying the
+    framework-default model (issue #516). This is load-bearing now that an
+    algorithm rebases onto whichever baseline ``--baseline`` selected (issue
+    #921) — its generated overlay was authored against the scenario name of the
+    baseline its ``defaults`` named, which need not be the selected one. A
+    no-op when the names already agree.
+
     ``sink`` behaves as in ``resolve_baseline``: it collects scalar-list
     replacement warnings tagged with the layer pair that disagreed.
     """
@@ -454,6 +498,8 @@ def resolve_treatment(
         if overlay_path is not None and overlay_path.exists()
         else {}
     )
+    diffs = _align_overlay_name(baseline_resolved, diffs)
+    overlay = _align_overlay_name(baseline_resolved, overlay)
     resolved = _merge_layer(
         copy.deepcopy(baseline_resolved), diffs,
         layer="baseline -> treatment diffs", sink=sink,
@@ -1135,6 +1181,109 @@ def _resolve_scenario_path(
     return fallback if fallback.exists() else None
 
 
+#: The standardized baseline identifier (issue #544). Used as the default
+#: selection and as the tie-break when several generated overlays exist.
+_DEFAULT_BASELINE_NAME = "baseline"
+
+
+def default_baseline_name(baselines: list[dict]) -> str:
+    """Return the baseline name ``--baseline`` defaults to.
+
+    The entry named ``baseline`` (the standardized identifier from issue #544)
+    when present, else the first entry's name, else ``""`` for an empty list.
+    """
+    names = [bl.get("name", "") for bl in baselines]
+    if _DEFAULT_BASELINE_NAME in names:
+        return _DEFAULT_BASELINE_NAME
+    return names[0] if names else ""
+
+
+def select_baseline(baselines: list[dict], requested: str | None) -> dict:
+    """Return the single ``baselines[]`` entry this assemble will resolve.
+
+    Assemble emits exactly one baseline package (issue #921). Before that, it
+    emitted one per entry in ``baselines[]``, which meant a bundle declaring a
+    second deployment got that deployment deployed whether or not any algorithm
+    named it — and, because ``sim2real translate`` only requests overlays for
+    baselines some ``algorithms[*].defaults`` cross-references, deployed it with
+    no EPP config at all.
+
+    ``requested`` is the ``--baseline`` value, or ``None`` for the default
+    (see :func:`default_baseline_name`). Raises AssembleError when ``requested``
+    names no entry, or when there are no baselines to choose from.
+    """
+    if not baselines:
+        raise AssembleError(
+            "transfer.yaml declares no baselines; assemble needs one to "
+            "resolve every package against"
+        )
+    name = default_baseline_name(baselines) if requested is None else requested
+    for bl in baselines:
+        if bl.get("name") == name:
+            return bl
+    raise AssembleError(
+        f"--baseline '{requested}' names no baseline in transfer.yaml; "
+        f"available: {sorted(bl.get('name', '') for bl in baselines)}"
+    )
+
+
+def find_baseline_overlay(
+    generated_root: Path, *, selected: str, default_name: str
+) -> tuple[Path | None, bool]:
+    """Return ``(overlay_path, reused)`` for the selected baseline.
+
+    The overlay is *reused*, not looked up by name (issue #921). An
+    unreferenced baseline never gets a ``generated/baselines/<name>/``
+    directory, because ``sim2real translate`` only asks the skill for overlays
+    that some ``algorithms[*].defaults`` cross-references. Keying the lookup on
+    the selected name would therefore resolve to nothing for exactly the
+    baseline ``--baseline`` exists to select, and assemble would deploy it with
+    the Helm chart's stock plugin config.
+
+    Order:
+
+    1. ``baselines/<selected>/baseline_config.yaml`` — the selected baseline's
+       own, when the skill (or an operator) produced one. ``reused`` is False.
+    2. The sole ``baselines/*/baseline_config.yaml``, when exactly one exists.
+    3. When several exist, the one under ``default_name``; absent that, refuse
+       rather than pick, because the candidates configure different EPPs and
+       guessing is what this issue is about.
+    4. The legacy flat ``baseline_config.yaml`` that BYO ``translation
+       register`` writes at the generated root.
+    5. ``None`` — no overlay anywhere. Resolution continues with an empty
+       overlay layer, which is the pre-existing behavior; making that warn or
+       fail is tracked separately (issue #921 "Separable from this").
+
+    ``reused`` is True whenever the returned path is not case 1, and is what
+    tells the caller the overlay was authored against a different baseline.
+    """
+    own = generated_root / "baselines" / selected / "baseline_config.yaml"
+    if own.exists():
+        return own, False
+
+    candidates = {
+        p.parent.name: p
+        for p in sorted(generated_root.glob("baselines/*/baseline_config.yaml"))
+    }
+    if len(candidates) == 1:
+        return next(iter(candidates.values())), True
+    if len(candidates) > 1:
+        if default_name in candidates:
+            return candidates[default_name], True
+        raise AssembleError(
+            f"baseline '{selected}' has no generated overlay and several "
+            f"others do ({sorted(candidates)}), none of them the default "
+            f"'{default_name}' — cannot choose which to reuse. Re-run "
+            "`sim2real translate` so the selected baseline gets its own "
+            "overlay, or pass --baseline naming one that has one."
+        )
+
+    legacy = generated_root / "baseline_config.yaml"
+    if legacy.exists():
+        return legacy, True
+    return None, False
+
+
 class _ResolvedPackages(NamedTuple):
     """Return value of ``_resolve_packages``.
 
@@ -1144,6 +1293,13 @@ class _ResolvedPackages(NamedTuple):
     """
     packages: list[tuple[str, dict]]
     resolved_baselines: dict[str, dict]
+    #: The single baseline this run resolves (issue #921). Recorded in
+    #: ``manifest.assembly.yaml`` and hashed into ``params_hash``.
+    baseline_name: str
+    #: Algorithms whose ``defaults`` names a baseline other than the selected
+    #: one, and which were therefore rebased onto the selection. Exposed for
+    #: the CLI wrapper to surface as a note.
+    rebased_algorithms: list[str]
     kept_algos: list[dict]
     skipped_algo_names: list[str]
     translated_algos: dict[str, dict]
@@ -1165,6 +1321,7 @@ def _resolve_packages(
     tout_path: Path,
     cluster_config: dict,
     translation_ref: str,
+    baseline_request: str | None = None,
 ) -> _ResolvedPackages:
     """Shared resolution pipeline for both fresh assemble and additive grow.
 
@@ -1218,54 +1375,54 @@ def _resolve_packages(
     generated_root = translation_dir / "generated"
 
     packages: list[tuple[str, dict]] = []
-    resolved_baselines: dict[str, dict] = {}
     scalar_list_conflicts: list[str] = []
-    for bl in manifest.get("baselines", []):
-        bl_name = bl["name"]
-        bundle_path = _resolve_scenario_path(
-            exp_root, bl.get("scenario"), "baseline.yaml"
-        )
-        if bundle_path is None:
-            raise AssembleError(f"baseline '{bl_name}' has no scenario file")
-        # Per-baseline overlay layout: ``generated/baselines/<name>/baseline_config.yaml``.
-        # The ``baselines/`` umbrella (issue #544) avoids the awkward
-        # ``baseline_baseline/`` shape from the pre-#544 flat layout under
-        # the standardized ``name: baseline`` identifier, and keeps
-        # multi-baseline test cases (``baselines/base/``, ``baselines/alt/``)
-        # readable.
-        overlay_path = generated_root / "baselines" / bl_name / "baseline_config.yaml"
-        if not overlay_path.exists():
-            # BYO ``translation register`` writes the shared step-1
-            # ``generated/baseline_config.yaml`` at the generated root.
-            # Fall back to that layout when the per-baseline dir is
-            # absent so BYO translations remain resolvable.
-            legacy_overlay = generated_root / "baseline_config.yaml"
-            overlay_path = legacy_overlay if legacy_overlay.exists() else None
-        resolved = resolve_baseline(
-            bundle_path=bundle_path,
-            overlay_path=overlay_path,
-            framework_defaults=framework_defaults,
-            sink=scalar_list_conflicts,
-        )
-        resolved_baselines[bl_name] = resolved
-        packages.append((bl_name, resolved))
 
+    # Exactly one baseline package per run (issue #921). Emitting one per entry
+    # in ``baselines[]`` deployed every declared baseline whether or not any
+    # algorithm named it, while ``sim2real translate`` only produced overlays
+    # for the named ones — so an unreferenced baseline was deployed with the
+    # Helm chart's stock plugin config, silently.
+    manifest_baselines = manifest.get("baselines", []) or []
+    selected = select_baseline(manifest_baselines, baseline_request)
+    baseline_name = selected["name"]
+    bundle_path = _resolve_scenario_path(
+        exp_root, selected.get("scenario"), "baseline.yaml"
+    )
+    if bundle_path is None:
+        raise AssembleError(f"baseline '{baseline_name}' has no scenario file")
+    overlay_path, _reused = find_baseline_overlay(
+        generated_root,
+        selected=baseline_name,
+        default_name=default_baseline_name(manifest_baselines),
+    )
+    baseline_resolved = resolve_baseline(
+        bundle_path=bundle_path,
+        overlay_path=overlay_path,
+        framework_defaults=framework_defaults,
+        sink=scalar_list_conflicts,
+    )
+    resolved_baselines: dict[str, dict] = {baseline_name: baseline_resolved}
+    packages.append((baseline_name, baseline_resolved))
+
+    # Every algorithm rebases onto the selected baseline, overriding its own
+    # ``defaults`` (issue #921). ``defaults`` still decides which baseline the
+    # translate skill generates an overlay for; here it is only recorded when it
+    # disagrees, so the CLI can say which arms were rebased. A ``defaults`` that
+    # names no baseline at all is still refused — by ``manifest.py``'s
+    # cross-reference check at load time, ahead of this.
+    rebased_algorithms: list[str] = []
     for algo in kept_algos:
         algo_name = algo["name"]
-        base_name = algo["defaults"]
-        if base_name not in resolved_baselines:
-            raise AssembleError(
-                f"algorithm '{algo_name}' references unknown baseline "
-                f"'{base_name}'; known: {sorted(resolved_baselines)}"
-            )
+        if algo.get("defaults") != baseline_name:
+            rebased_algorithms.append(algo_name)
         diffs_path = _resolve_scenario_path(
             exp_root, algo.get("scenario"), "treatment.yaml"
         )
-        overlay_path = generated_root / algo_name / f"{algo_name}_config.yaml"
+        algo_overlay_path = generated_root / algo_name / f"{algo_name}_config.yaml"
         resolved = resolve_treatment(
-            baseline_resolved=resolved_baselines[base_name],
+            baseline_resolved=baseline_resolved,
             diffs_path=diffs_path,
-            overlay_path=overlay_path,
+            overlay_path=algo_overlay_path,
             sink=scalar_list_conflicts,
         )
         algo_image_ref = translated_algos[algo_name]["image_ref"]
@@ -1289,6 +1446,8 @@ def _resolve_packages(
     return _ResolvedPackages(
         packages=packages,
         resolved_baselines=resolved_baselines,
+        baseline_name=baseline_name,
+        rebased_algorithms=rebased_algorithms,
         kept_algos=kept_algos,
         skipped_algo_names=skipped_algo_names,
         translated_algos=translated_algos,
@@ -1307,6 +1466,7 @@ def _additive_grow(
     prior_replicas: int,
     new_replicas: int,
     now_iso: str,
+    recorded_baseline: str | None = None,
 ) -> list[str]:
     """Grow an existing run's replica count from ``prior_replicas`` to
     ``new_replicas`` (``new_replicas > prior_replicas``).
@@ -1350,8 +1510,14 @@ def _additive_grow(
         run_dir, prior_replicas=prior_replicas, new_replicas=new_replicas
     )
 
-    # Rewrite manifest.assembly.yaml with new replicas count.
-    write_manifest_assembly(run_dir, manifest, now_iso=now_iso, replicas=new_replicas)
+    # Rewrite manifest.assembly.yaml with new replicas count. The baseline
+    # selection is carried over verbatim rather than re-derived: grow preserves
+    # params_hash (the drift check passed), and a snapshot whose baseline key
+    # disagreed with that hash would make the next assemble report false drift.
+    write_manifest_assembly(
+        run_dir, manifest, now_iso=now_iso, replicas=new_replicas,
+        baseline=recorded_baseline,
+    )
 
     # Rewrite run_metadata.json. params_hash is preserved (drift check passed).
     # `scenario` is also refreshed from the manifest so legacy runs (assembled
@@ -1376,6 +1542,7 @@ def assemble_run(
     experiment_root: Path,
     manifest_path: Path,
     force: bool,
+    baseline_request: "str | None" = None,
     replicas: "int | None" = None,
     workload_filter: "list[str] | None" = None,
     package_filter: "list[str] | None" = None,
@@ -1462,12 +1629,38 @@ def assemble_run(
     Scalar lists that one layer replaced wholesale, discarding an earlier
     layer's values, are recorded on ``assemble_run.scalar_list_conflicts`` for
     the same wrapper to surface (issue #851).
+
+    ``baseline_request`` names the single baseline package to resolve every arm
+    against (issue #921). The resolved name lands on
+    ``assemble_run.baseline_name`` and the algorithms whose ``defaults``
+    disagreed with it on ``assemble_run.rebased_algorithms``, both for the CLI
+    wrapper to surface. Resolution of ``None``:
+
+    - On a fresh run, the entry named ``baseline``, else the first.
+    - On an existing run, the selection that run already recorded in its
+      ``manifest.assembly.yaml``. The flag is *sticky*, for the same reason
+      ``--replicas`` falls back to the recorded count: otherwise a ``--force``
+      re-assemble after an unrelated ``transfer.yaml`` edit would silently
+      re-resolve every arm against the default baseline, serving a different
+      model with no signal beyond a prune warning blaming ``transfer.yaml``.
+
+    An explicit ``baseline_request`` that disagrees with the record is *not*
+    absorbed — it trips the drift check, because changing which baseline a run
+    resolves is a parameter change rather than a silent rebase.
+
+    ``baseline_request`` is rejected outright when scoped. The baseline is
+    run-wide state, and a scoped assemble writes neither
+    ``manifest.assembly.yaml`` nor ``run_metadata.json``, so it has nowhere to
+    record one; honouring it would rewrite the scoped packages against a
+    different baseline while the snapshot kept describing the old one.
     """
     layout.set_experiment_root(experiment_root)
     # Reset side-band state each call — see docstring above.
     assemble_run.skipped_algorithms = []  # type: ignore[attr-defined]
     assemble_run.missing_submodules = []  # type: ignore[attr-defined]
     assemble_run.scalar_list_conflicts = []  # type: ignore[attr-defined]
+    assemble_run.rebased_algorithms = []  # type: ignore[attr-defined]
+    assemble_run.baseline_name = ""  # type: ignore[attr-defined]
     assemble_run.already_assembled = 0  # type: ignore[attr-defined]
     assemble_run.pruned_files = []  # type: ignore[attr-defined]
     assemble_run.wiped_results = []  # type: ignore[attr-defined]
@@ -1512,7 +1705,25 @@ def assemble_run(
         _scope.parse_name_list(workload_filter) is not None
         or _scope.parse_name_list(package_filter) is not None
     )
+    if scoped and baseline_request is not None:
+        raise AssembleError(
+            "--baseline cannot be combined with --workload/--package: the "
+            "baseline is a run-wide choice, and a scoped assemble writes "
+            "neither manifest.assembly.yaml nor run_metadata.json, so it "
+            "cannot record one. Honouring it would rewrite the scoped "
+            "packages against a different baseline while the snapshot kept "
+            "saying otherwise. Re-assemble unscoped with --baseline first, "
+            "then scope."
+        )
     run_dir = layout.runs_dir() / run_name
+    # An explicit --baseline is sticky: a re-assemble that omits the flag
+    # inherits the run's recorded selection rather than re-deriving the default,
+    # mirroring how --replicas falls back to the recorded count. Without this,
+    # `--force` after an unrelated transfer.yaml edit silently re-resolves every
+    # arm against the default baseline — a different model, with no
+    # operator-visible signal beyond a prune warning that blames transfer.yaml.
+    # Set below, once the prior snapshot has been read.
+    baseline_effective = baseline_request
     additive_grow_from: int | None = None
     # A scoped assemble cannot repair run-wide state, because it does not
     # rewrite manifest.assembly.yaml or run_metadata.json. Every structural
@@ -1569,6 +1780,16 @@ def assemble_run(
                     ) from exc
                 repairing = True
 
+        # Inherit the recorded baseline when the operator did not name one (see
+        # ``baseline_effective`` above). An explicit --baseline that disagrees
+        # with the record is left alone, so it still trips the drift check below
+        # — changing which baseline a run resolves is a parameter change, not a
+        # silent rebase.
+        if baseline_request is None and isinstance(prior_ma, dict):
+            recorded_baseline = prior_ma.get("baseline")
+            if isinstance(recorded_baseline, str) and recorded_baseline:
+                baseline_effective = recorded_baseline
+
         prior_replicas = (
             prior_ma.get("replicas") if isinstance(prior_ma, dict) else None
         )
@@ -1609,7 +1830,22 @@ def assemble_run(
                     f"replicas; refusing to shrink to {replicas_effective}. "
                     "Replica shrink is tracked in #506."
                 )
+            # Mirror write_manifest_assembly + compute_params_hash exactly: the
+            # snapshot's ``baseline`` key is hashed, so the comparison dict must
+            # carry it too. A snapshot written before #921 has no such key;
+            # comparing without it there keeps every pre-existing run from
+            # reporting false drift on its next assemble. The cost is that a
+            # legacy run re-assembled with an explicit --baseline is rebased
+            # without a drift refusal — the operator asked for it, and the
+            # rewritten snapshot records it from then on.
             new_slice = slicer.assembly_slice(manifest)
+            if isinstance(prior_ma, dict) and prior_ma.get("baseline") is not None:
+                new_slice = {
+                    "baseline": select_baseline(
+                        manifest.get("baselines", []) or [], baseline_effective
+                    )["name"],
+                    **new_slice,
+                }
             new_canonical = yaml.dump(
                 new_slice, sort_keys=True, default_flow_style=False,
                 allow_unicode=True,
@@ -1647,6 +1883,9 @@ def assemble_run(
             prior_replicas=additive_grow_from,
             new_replicas=replicas_effective,
             now_iso=now_iso,
+            recorded_baseline=(
+                prior_ma.get("baseline") if isinstance(prior_ma, dict) else None
+            ),
         )
         # Files in cluster/ whose names did not parse were skipped, so their
         # pairs did not grow. Surfaced rather than dropped: otherwise the only
@@ -1678,12 +1917,15 @@ def assemble_run(
         tout_path=tout_path,
         cluster_config=cluster_config,
         translation_ref=translation_ref,
+        baseline_request=baseline_effective,
     )
     packages = resolved.packages
     kept_algos = resolved.kept_algos
     translated_algos = resolved.translated_algos
     assemble_run.missing_submodules = resolved.missing_submodules  # type: ignore[attr-defined]
     assemble_run.scalar_list_conflicts = resolved.scalar_list_conflicts  # type: ignore[attr-defined]
+    assemble_run.rebased_algorithms = resolved.rebased_algorithms  # type: ignore[attr-defined]
+    assemble_run.baseline_name = resolved.baseline_name  # type: ignore[attr-defined]
 
     # 5. Resolve the pair scope and decide what to do per pair -------------
     package_names = [name for name, _ in packages]
@@ -1807,7 +2049,8 @@ def assemble_run(
     params_hash = ""
     if not scoped:
         manifest_assembly_path = write_manifest_assembly(
-            run_dir, manifest, now_iso=now_iso, replicas=replicas_effective
+            run_dir, manifest, now_iso=now_iso, replicas=replicas_effective,
+            baseline=resolved.baseline_name,
         )
         params_hash = compute_params_hash(manifest_assembly_path)
 

@@ -226,6 +226,20 @@ def _build_translation_section(
     }
 
 
+def _selected_baseline_name(manifest_assembly: dict | None) -> str:
+    """Return the baseline package the run resolved, per its snapshot.
+
+    ``sim2real assemble`` records its single baseline selection as a top-level
+    ``baseline`` key (issue #921). Snapshots written before that carry no key,
+    and for those the historical answer is the literal ``"baseline"`` — the
+    standardized identifier from issue #544 — which is what every pre-#921 run
+    named its baseline scenario file.
+    """
+    ma = manifest_assembly or {}
+    recorded = ma.get("baseline")
+    return recorded if isinstance(recorded, str) and recorded else "baseline"
+
+
 def _build_results_section(run_dir: Path, manifest_assembly: dict | None) -> dict:
     """Hydrate the ``results.*`` sub-object.
 
@@ -268,13 +282,16 @@ def _build_cluster_scenarios_section(
     """Hydrate the ``cluster_scenarios.*`` sub-object.
 
     Enumerates the resolved-scenario YAMLs written by ``sim2real
-    assemble`` under ``<run>/cluster/``. ``baseline_yaml`` is the
-    (currently singular) baseline scenario file; ``treatment_yamls``
+    assemble`` under ``<run>/cluster/``. ``baseline_package`` is the baseline
+    the run resolved, read from the snapshot's ``baseline`` key (issue #921)
+    and defaulting to ``"baseline"`` for pre-#921 runs; ``baseline_yaml`` is
+    that package's scenario file. ``treatment_yamls``
     maps each algorithm name to its resolved treatment scenario file;
     ``pipelinerun_yamls`` is the sorted list of ``pipelinerun-*.yaml``
     files (one per (workload, package, iteration) pair).
     """
     cluster_dir = run_dir / "cluster"
+    baseline_package = _selected_baseline_name(manifest_assembly)
     baseline_yaml: str | None = None
     treatment_yamls: dict[str, str] = {}
     pipelinerun_yamls: list[str] = []
@@ -289,7 +306,7 @@ def _build_cluster_scenarios_section(
             name = yaml_path.stem
             if name.startswith("pipelinerun-"):
                 pipelinerun_yamls.append(str(yaml_path))
-            elif name == "baseline":
+            elif name == baseline_package:
                 baseline_yaml = str(yaml_path)
             elif name in algo_names:
                 treatment_yamls[name] = str(yaml_path)
@@ -300,6 +317,7 @@ def _build_cluster_scenarios_section(
 
     return {
         "cluster_dir": str(cluster_dir),
+        "baseline_package": baseline_package,
         "baseline_yaml": baseline_yaml,
         "treatment_yamls": treatment_yamls,
         "pipelinerun_yamls": pipelinerun_yamls,
@@ -425,17 +443,30 @@ def _resolve_cluster_config_path(cluster_id: str) -> Path | None:
 
 
 def _phases_declared_from_manifest(manifest_assembly: dict | None) -> list[str]:
-    """Return the union of baseline names + algorithm names from the manifest.
+    """Return the baseline phase(s) + algorithm names from the manifest.
 
-    Order: baselines first (in manifest order), then algorithms (in
+    A run resolves exactly one baseline (issue #921), so when the snapshot
+    records which one, that is the only baseline phase that can hold results.
+    Pre-#921 snapshots carry no ``baseline`` key and did deploy every declared
+    baseline, so all of them are listed for those.
+
+    Order: baseline(s) first (in manifest order), then algorithms (in
     manifest order). Empty when the manifest is absent.
     """
     if manifest_assembly is None:
         return []
+    declared_baselines = [
+        bl["name"]
+        for bl in manifest_assembly.get("baselines") or []
+        if isinstance(bl, dict) and bl.get("name")
+    ]
     names: list[str] = []
-    for bl in manifest_assembly.get("baselines") or []:
-        if isinstance(bl, dict) and bl.get("name"):
-            names.append(bl["name"])
+    if manifest_assembly.get("baseline"):
+        selected = _selected_baseline_name(manifest_assembly)
+        if selected in declared_baselines:
+            names.append(selected)
+    else:
+        names.extend(declared_baselines)
     for algo in manifest_assembly.get("algorithms") or []:
         if isinstance(algo, dict) and algo.get("name"):
             names.append(algo["name"])

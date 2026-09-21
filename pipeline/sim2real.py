@@ -1192,6 +1192,17 @@ def build_parser() -> argparse.ArgumentParser:
              "one, discarding their collected results unless --no-wipe",
     )
     asm.add_argument(
+        "--baseline",
+        metavar="NAME",
+        default=None,
+        help="baseline package to resolve every arm against (default on a "
+             "fresh run: the entry named 'baseline', else the first in "
+             "transfer.yaml; on an existing run: that run's recorded "
+             "selection). A run carries exactly one baseline, so comparing an "
+             "algorithm across two server configs means two runs. Cannot be "
+             "combined with --workload/--package",
+    )
+    asm.add_argument(
         "--replicas",
         type=_positive_int,
         default=None,
@@ -2575,6 +2586,7 @@ def _cmd_assemble(args) -> int:
             experiment_root=exp_root,
             manifest_path=manifest_path,
             force=args.force,
+            baseline_request=args.baseline,
             replicas=args.replicas,
             workload_filter=args.workload,
             package_filter=args.package,
@@ -2590,6 +2602,14 @@ def _cmd_assemble(args) -> int:
         print(
             f"warning: algorithm '{name}' declared in transfer.yaml but not "
             "in translation_output.json — skipped",
+            file=sys.stderr,
+        )
+    rebased = getattr(_assemble_run_lib.assemble_run, "rebased_algorithms", [])
+    if rebased:
+        selected = getattr(_assemble_run_lib.assemble_run, "baseline_name", "")
+        print(
+            f"note: {', '.join(rebased)} declare a different 'defaults' in "
+            f"transfer.yaml but were resolved against baseline '{selected}'",
             file=sys.stderr,
         )
     for msg in getattr(_assemble_run_lib.assemble_run, "scalar_list_conflicts", []):

@@ -227,6 +227,71 @@ class TestWriteManifestAssembly:
         assert "component" not in parsed
         assert parsed["algorithms"] == [{"name": "sr", "defaults": "baseline"}]
 
+    def test_writes_baseline_field_when_provided(self, tmp_path):
+        manifest = {
+            "kind": "sim2real-transfer",
+            "version": 3,
+            "scenario": "test",
+            "component": {"repo": "acme/foo"},
+            "context": {"text": "", "files": []},
+            "baselines": [{"name": "weka", "scenario": "b.yaml"}],
+            "algorithms": [],
+            "workloads": [],
+            "defaults": {"disable": []},
+        }
+        run_dir = tmp_path / "runs" / "t"
+        run_dir.mkdir(parents=True)
+        p = assemble_run.write_manifest_assembly(
+            run_dir, manifest, now_iso="2026-09-21T00:00:00Z", baseline="weka"
+        )
+        assert yaml.safe_load(p.read_text())["baseline"] == "weka"
+
+    def test_omits_baseline_field_when_none(self, tmp_path):
+        manifest = {
+            "kind": "sim2real-transfer",
+            "version": 3,
+            "scenario": "test",
+            "component": {"repo": "acme/foo"},
+            "context": {"text": "", "files": []},
+            "baselines": [{"name": "baseline", "scenario": "b.yaml"}],
+            "algorithms": [],
+            "workloads": [],
+            "defaults": {"disable": []},
+        }
+        run_dir = tmp_path / "runs" / "t"
+        run_dir.mkdir(parents=True)
+        p = assemble_run.write_manifest_assembly(
+            run_dir, manifest, now_iso="2026-09-21T00:00:00Z"
+        )
+        assert "baseline" not in yaml.safe_load(p.read_text())
+
+    def test_params_hash_includes_baseline_but_not_replicas(self, tmp_path):
+        manifest = {
+            "kind": "sim2real-transfer",
+            "version": 3,
+            "scenario": "test",
+            "component": {"repo": "acme/foo"},
+            "context": {"text": "", "files": []},
+            "baselines": [{"name": "baseline", "scenario": "b.yaml"}],
+            "algorithms": [],
+            "workloads": [],
+            "defaults": {"disable": []},
+        }
+        hashes = {}
+        for label, kwargs in {
+            "a_r1": {"baseline": "baseline", "replicas": 1},
+            "a_r5": {"baseline": "baseline", "replicas": 5},
+            "b_r1": {"baseline": "weka", "replicas": 1},
+        }.items():
+            d = tmp_path / label
+            d.mkdir()
+            p = assemble_run.write_manifest_assembly(
+                d, manifest, now_iso="2026-09-21T00:00:00Z", **kwargs
+            )
+            hashes[label] = assemble_run.compute_params_hash(p)
+        assert hashes["a_r1"] == hashes["a_r5"], "replicas must not affect the hash"
+        assert hashes["a_r1"] != hashes["b_r1"], "baseline must affect the hash"
+
     def test_writes_replicas_field_when_provided(self, tmp_path):
         manifest = {
             "kind": "sim2real-transfer",
