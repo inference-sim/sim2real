@@ -1135,6 +1135,109 @@ def _resolve_scenario_path(
     return fallback if fallback.exists() else None
 
 
+#: The standardized baseline identifier (issue #544). Used as the default
+#: selection and as the tie-break when several generated overlays exist.
+_DEFAULT_BASELINE_NAME = "baseline"
+
+
+def default_baseline_name(baselines: list[dict]) -> str:
+    """Return the baseline name ``--baseline`` defaults to.
+
+    The entry named ``baseline`` (the standardized identifier from issue #544)
+    when present, else the first entry's name, else ``""`` for an empty list.
+    """
+    names = [bl.get("name", "") for bl in baselines]
+    if _DEFAULT_BASELINE_NAME in names:
+        return _DEFAULT_BASELINE_NAME
+    return names[0] if names else ""
+
+
+def select_baseline(baselines: list[dict], requested: str | None) -> dict:
+    """Return the single ``baselines[]`` entry this assemble will resolve.
+
+    Assemble emits exactly one baseline package (issue #921). Before that, it
+    emitted one per entry in ``baselines[]``, which meant a bundle declaring a
+    second deployment got that deployment deployed whether or not any algorithm
+    named it — and, because ``sim2real translate`` only requests overlays for
+    baselines some ``algorithms[*].defaults`` cross-references, deployed it with
+    no EPP config at all.
+
+    ``requested`` is the ``--baseline`` value, or ``None`` for the default
+    (see :func:`default_baseline_name`). Raises AssembleError when ``requested``
+    names no entry, or when there are no baselines to choose from.
+    """
+    if not baselines:
+        raise AssembleError(
+            "transfer.yaml declares no baselines; assemble needs one to "
+            "resolve every package against"
+        )
+    name = default_baseline_name(baselines) if requested is None else requested
+    for bl in baselines:
+        if bl.get("name") == name:
+            return bl
+    raise AssembleError(
+        f"--baseline '{requested}' names no baseline in transfer.yaml; "
+        f"available: {sorted(bl.get('name', '') for bl in baselines)}"
+    )
+
+
+def find_baseline_overlay(
+    generated_root: Path, *, selected: str, default_name: str
+) -> tuple[Path | None, bool]:
+    """Return ``(overlay_path, reused)`` for the selected baseline.
+
+    The overlay is *reused*, not looked up by name (issue #921). An
+    unreferenced baseline never gets a ``generated/baselines/<name>/``
+    directory, because ``sim2real translate`` only asks the skill for overlays
+    that some ``algorithms[*].defaults`` cross-references. Keying the lookup on
+    the selected name would therefore resolve to nothing for exactly the
+    baseline ``--baseline`` exists to select, and assemble would deploy it with
+    the Helm chart's stock plugin config.
+
+    Order:
+
+    1. ``baselines/<selected>/baseline_config.yaml`` — the selected baseline's
+       own, when the skill (or an operator) produced one. ``reused`` is False.
+    2. The sole ``baselines/*/baseline_config.yaml``, when exactly one exists.
+    3. When several exist, the one under ``default_name``; absent that, refuse
+       rather than pick, because the candidates configure different EPPs and
+       guessing is what this issue is about.
+    4. The legacy flat ``baseline_config.yaml`` that BYO ``translation
+       register`` writes at the generated root.
+    5. ``None`` — no overlay anywhere. Resolution continues with an empty
+       overlay layer, which is the pre-existing behavior; making that warn or
+       fail is tracked separately (issue #921 "Separable from this").
+
+    ``reused`` is True whenever the returned path is not case 1, and is what
+    tells the caller the overlay was authored against a different baseline.
+    """
+    own = generated_root / "baselines" / selected / "baseline_config.yaml"
+    if own.exists():
+        return own, False
+
+    candidates = {
+        p.parent.name: p
+        for p in sorted(generated_root.glob("baselines/*/baseline_config.yaml"))
+    }
+    if len(candidates) == 1:
+        return next(iter(candidates.values())), True
+    if len(candidates) > 1:
+        if default_name in candidates:
+            return candidates[default_name], True
+        raise AssembleError(
+            f"baseline '{selected}' has no generated overlay and several "
+            f"others do ({sorted(candidates)}), none of them the default "
+            f"'{default_name}' — cannot choose which to reuse. Re-run "
+            "`sim2real translate` so the selected baseline gets its own "
+            "overlay, or pass --baseline naming one that has one."
+        )
+
+    legacy = generated_root / "baseline_config.yaml"
+    if legacy.exists():
+        return legacy, True
+    return None, False
+
+
 class _ResolvedPackages(NamedTuple):
     """Return value of ``_resolve_packages``.
 
