@@ -1629,6 +1629,12 @@ def assemble_run(
     Scalar lists that one layer replaced wholesale, discarding an earlier
     layer's values, are recorded on ``assemble_run.scalar_list_conflicts`` for
     the same wrapper to surface (issue #851).
+
+    ``baseline_request`` names the single baseline package to resolve every arm
+    against (issue #921); ``None`` selects the entry named ``baseline``, else the
+    first. The resolved name lands on ``assemble_run.baseline_name`` and the
+    algorithms whose ``defaults`` disagreed with it on
+    ``assemble_run.rebased_algorithms``, both for the CLI wrapper to surface.
     """
     layout.set_experiment_root(experiment_root)
     # Reset side-band state each call — see docstring above.
@@ -1636,6 +1642,7 @@ def assemble_run(
     assemble_run.missing_submodules = []  # type: ignore[attr-defined]
     assemble_run.scalar_list_conflicts = []  # type: ignore[attr-defined]
     assemble_run.rebased_algorithms = []  # type: ignore[attr-defined]
+    assemble_run.baseline_name = ""  # type: ignore[attr-defined]
     assemble_run.already_assembled = 0  # type: ignore[attr-defined]
     assemble_run.pruned_files = []  # type: ignore[attr-defined]
     assemble_run.wiped_results = []  # type: ignore[attr-defined]
@@ -1872,6 +1879,7 @@ def assemble_run(
     assemble_run.missing_submodules = resolved.missing_submodules  # type: ignore[attr-defined]
     assemble_run.scalar_list_conflicts = resolved.scalar_list_conflicts  # type: ignore[attr-defined]
     assemble_run.rebased_algorithms = resolved.rebased_algorithms  # type: ignore[attr-defined]
+    assemble_run.baseline_name = resolved.baseline_name  # type: ignore[attr-defined]
 
     # 5. Resolve the pair scope and decide what to do per pair -------------
     package_names = [name for name, _ in packages]

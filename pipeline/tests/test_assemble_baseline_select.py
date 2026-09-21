@@ -494,3 +494,22 @@ class TestBaselineSelectionIsHashed:
         # Must not raise.
         _assemble(env, run="r1", baseline="baseline")
         assert assemble_run.assemble_run.status == "noop"
+
+
+class TestBaselineFlagParsing:
+    def test_flag_defaults_to_none(self):
+        from pipeline import sim2real
+        parser = sim2real.build_parser()
+        args = parser.parse_args(
+            ["assemble", "--translation", "abcd", "--cluster", "c", "--run", "r"]
+        )
+        assert args.baseline is None
+
+    def test_flag_captures_the_name(self):
+        from pipeline import sim2real
+        parser = sim2real.build_parser()
+        args = parser.parse_args(
+            ["assemble", "--translation", "abcd", "--cluster", "c", "--run", "r",
+             "--baseline", "weka"]
+        )
+        assert args.baseline == "weka"
