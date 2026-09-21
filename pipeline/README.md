@@ -449,7 +449,7 @@ python pipeline/sim2real.py assemble \
 | `--translation REF` | yes | Alias, hash prefix (min 4 chars), or full hash. |
 | `--cluster CLUSTER_ID` | yes | Matches `workspace/clusters/<id>/`. |
 | `--run RUN_NAME` | yes | Directory created at `workspace/runs/<run>/`. |
-| `--baseline NAME` | no | The single baseline package to resolve every arm against. Default: the entry named `baseline`, else the first in `transfer.yaml:baselines[]`. Naming no entry exits 2 listing the available names. See [Baseline selection](#baseline-selection-one-per-run). |
+| `--baseline NAME` | no | The single baseline package to resolve every arm against. On a fresh run, defaults to the entry named `baseline`, else the first in `transfer.yaml:baselines[]`; on an existing run, defaults to that run's recorded selection. Naming no entry exits 2 listing the available names. Cannot be combined with `--workload` / `--package`. See [Baseline selection](#baseline-selection-one-per-run). |
 | `--replicas N` | no | Iterations per (workload, package) pair. Default 1. Cannot be combined with `--workload` / `--package`. |
 | `--workload NAME ...` | no | Scope to these workloads. Comma- or space-separated; shell globs accepted. Requires an existing run. |
 | `--package NAME ...` | no | Scope to these packages (`baseline` or an algorithm name). Same grammar as `--workload`. |
@@ -467,7 +467,7 @@ python pipeline/sim2real.py assemble \
 - `workspace/translations/<hash>/generated/<algo>/<algo>_config.yaml` — per-algorithm treatment overlay.
 - `workspace/clusters/<cluster_id>/cluster_config.json` — namespaces, workspace bindings, hf secret name.
 - `<experiment-root>/transfer.yaml` (or `config/transfer.yaml`) — v3 manifest.
-- `<experiment-root>/baselines/baseline.yaml` — baseline bundle referenced by `transfer.yaml:baselines[0].scenario`. The baseline identifier is always the literal string `baseline` (issue #544).
+- `<experiment-root>/baselines/<name>.yaml` — the bundle referenced by the selected baseline's `scenario` (see [Baseline selection](#baseline-selection-one-per-run)). `baseline` is the standardized identifier (issue #544) and the default selection, but `baselines[]` may declare others and `--baseline` may name one.
 - `<experiment-root>/baselines/defaults/*.yaml` — framework defaults overlays (opt-out via `transfer.yaml:defaults.disable`).
 - `<sim2real-repo>/.gitmodules` and `<sim2real-repo>/{inference-sim,llm-d-benchmark}/` — the framework submodules' clone URLs (from `.gitmodules`) and HEAD SHAs (from `git rev-parse HEAD`), which populate `benchmarkGitRepoUrl` / `benchmarkGitCommit` / `blisGitRepoUrl` / `blisGitCommit` in every generated PipelineRun. Initialize with `git submodule update --init` in the sim2real repo before running `sim2real assemble`; a missing submodule falls back to `"unknown"` for its commit SHA (assemble prints a warning) and the cluster-side `git clone` step then fails visibly at the right point.
 
@@ -502,6 +502,10 @@ Comparing one algorithm across two server configs therefore means **two runs**, 
 python pipeline/sim2real.py assemble --translation REF --cluster C --run trial-30b
 python pipeline/sim2real.py assemble --translation REF --cluster C --run trial-weka --baseline weka
 ```
+
+**The selection is sticky.** Re-assembling an existing run without `--baseline` inherits that run's recorded selection rather than re-deriving the default — the same way `--replicas` falls back to the recorded count. Without this, a `--force` re-assemble picking up an unrelated `transfer.yaml` edit would silently re-resolve every arm against the default baseline, serving a different model, with no signal beyond a prune warning blaming `transfer.yaml`. Passing `--baseline` with a name the run did *not* record is a parameter change, so it trips drift detection and needs `--force`.
+
+**`--baseline` cannot be combined with `--workload` / `--package`.** The baseline is run-wide, and a scoped assemble writes neither `manifest.assembly.yaml` nor `run_metadata.json`, so it has nowhere to record a selection; honouring the flag would rewrite the scoped packages against a different baseline while the snapshot kept describing the old one. Re-assemble unscoped with `--baseline` first, then scope.
 
 **The generated overlay is reused, not looked up by name.** `sim2real translate` only asks `/sim2real-translate` for overlays covering baselines that some algorithm's `defaults` cross-references, so a baseline nothing references never gets a `generated/baselines/<name>/` directory. Keying the lookup on the selected name would resolve to nothing for exactly the baseline `--baseline` exists to select, and the arm would deploy with the Helm chart's stock `default-plugins.yaml`. Resolution order:
 

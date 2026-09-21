@@ -1195,10 +1195,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--baseline",
         metavar="NAME",
         default=None,
-        help="baseline package to resolve every arm against (default: the "
-             "entry named 'baseline', else the first in transfer.yaml). A run "
-             "carries exactly one baseline, so comparing an algorithm across "
-             "two server configs means two runs",
+        help="baseline package to resolve every arm against (default on a "
+             "fresh run: the entry named 'baseline', else the first in "
+             "transfer.yaml; on an existing run: that run's recorded "
+             "selection). A run carries exactly one baseline, so comparing an "
+             "algorithm across two server configs means two runs. Cannot be "
+             "combined with --workload/--package",
     )
     asm.add_argument(
         "--replicas",

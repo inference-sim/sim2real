@@ -513,3 +513,126 @@ class TestBaselineFlagParsing:
              "--baseline", "weka"]
         )
         assert args.baseline == "weka"
+
+
+class TestSelectionIsStickyAcrossReassemble:
+    """An explicit --baseline must survive a re-assemble that omits the flag.
+
+    Mirrors how ``--replicas`` falls back to the run's recorded count. Without
+    it, `--force` after an unrelated transfer.yaml edit silently re-resolves
+    every arm against the default baseline — a different model, with no
+    operator-visible signal. That is the failure class #921 exists to prevent.
+    """
+
+    def test_omitting_the_flag_inherits_the_recorded_selection(self, tmp_path):
+        env = _make_two_baseline_experiment(tmp_path)
+        _assemble(env, run="r1", baseline="weka")
+        # No --baseline: must not be read as "revert to the default".
+        _assemble(env, run="r1")
+        ma = yaml.safe_load(
+            (_runs(env) / "r1" / "manifest.assembly.yaml").read_text()
+        )
+        assert ma["baseline"] == "weka"
+        assert _scenario_stems(env) == ["algoa", "weka"]
+
+    def test_force_without_the_flag_keeps_the_recorded_selection(self, tmp_path):
+        env = _make_two_baseline_experiment(tmp_path)
+        _assemble(env, run="r1", baseline="weka")
+        _assemble(env, run="r1", force=True)
+        ma = yaml.safe_load(
+            (_runs(env) / "r1" / "manifest.assembly.yaml").read_text()
+        )
+        assert ma["baseline"] == "weka"
+        resolved = yaml.safe_load(
+            (_runs(env) / "r1" / "cluster" / "weka.yaml").read_text()
+        )
+        assert resolved["scenario"][0]["model"]["name"] == "Qwen3-Next-80B"
+        # weka.yaml must not have been pruned in favour of baseline.yaml.
+        assert not (_runs(env) / "r1" / "cluster" / "baseline.yaml").exists()
+        assert assemble_run.assemble_run.pruned_files == []
+
+    def test_explicitly_naming_a_different_baseline_still_drifts(self, tmp_path):
+        env = _make_two_baseline_experiment(tmp_path)
+        _assemble(env, run="r1", baseline="weka")
+        with pytest.raises(AssembleError) as exc:
+            _assemble(env, run="r1", baseline="baseline")
+        assert "changed since last assemble" in str(exc.value)
+
+    def test_a_fresh_run_still_uses_the_default(self, tmp_path):
+        env = _make_two_baseline_experiment(tmp_path)
+        _assemble(env, run="r1", baseline="weka")
+        # A different run name is fresh: no recorded selection to inherit.
+        _assemble(env, run="r2")
+        ma = yaml.safe_load(
+            (_runs(env) / "r2" / "manifest.assembly.yaml").read_text()
+        )
+        assert ma["baseline"] == "baseline"
+
+
+class TestScopedAssembleRejectsBaseline:
+    """--baseline is a run-wide choice; a scoped assemble cannot record it.
+
+    A scoped invocation writes neither manifest.assembly.yaml nor
+    run_metadata.json, so honouring the flag would rewrite the scoped packages
+    against a different baseline while the snapshot kept saying otherwise — on a
+    pre-#921 run, an 80B treatment arm measured against a 30B baseline with
+    nothing on disk recording it.
+    """
+
+    def test_package_scope_with_baseline_refuses(self, tmp_path):
+        env = _make_two_baseline_experiment(tmp_path)
+        _assemble(env, run="r1")
+        with pytest.raises(AssembleError) as exc:
+            assemble_run.assemble_run(
+                translation_hash=env["translation_hash"],
+                translation_ref="x",
+                cluster_id=env["cluster_id"],
+                run_name="r1",
+                experiment_root=env["exp_root"],
+                manifest_path=env["manifest_path"],
+                force=True,
+                package_filter=["algoa"],
+                baseline_request="weka",
+                now_iso="2026-09-21T14:05:00Z",
+            )
+        msg = str(exc.value)
+        assert "--baseline" in msg
+        assert "--workload/--package" in msg
+
+    def test_workload_scope_with_baseline_refuses(self, tmp_path):
+        env = _make_two_baseline_experiment(tmp_path)
+        _assemble(env, run="r1")
+        with pytest.raises(AssembleError) as exc:
+            assemble_run.assemble_run(
+                translation_hash=env["translation_hash"],
+                translation_ref="x",
+                cluster_id=env["cluster_id"],
+                run_name="r1",
+                experiment_root=env["exp_root"],
+                manifest_path=env["manifest_path"],
+                force=False,
+                workload_filter=["wl_a"],
+                baseline_request="weka",
+                now_iso="2026-09-21T14:05:00Z",
+            )
+        assert "--baseline" in str(exc.value)
+
+    def test_scope_without_baseline_is_unaffected(self, tmp_path):
+        env = _make_two_baseline_experiment(tmp_path)
+        _assemble(env, run="r1", baseline="weka")
+        assemble_run.assemble_run(
+            translation_hash=env["translation_hash"],
+            translation_ref="x",
+            cluster_id=env["cluster_id"],
+            run_name="r1",
+            experiment_root=env["exp_root"],
+            manifest_path=env["manifest_path"],
+            force=True,
+            package_filter=["algoa"],
+            now_iso="2026-09-21T14:05:00Z",
+        )
+        # The scoped rewrite inherited the recorded selection, not the default.
+        resolved = yaml.safe_load(
+            (_runs(env) / "r1" / "cluster" / "algoa.yaml").read_text()
+        )
+        assert resolved["scenario"][0]["model"]["name"] == "Qwen3-Next-80B"

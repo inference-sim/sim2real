@@ -1631,10 +1631,28 @@ def assemble_run(
     the same wrapper to surface (issue #851).
 
     ``baseline_request`` names the single baseline package to resolve every arm
-    against (issue #921); ``None`` selects the entry named ``baseline``, else the
-    first. The resolved name lands on ``assemble_run.baseline_name`` and the
-    algorithms whose ``defaults`` disagreed with it on
-    ``assemble_run.rebased_algorithms``, both for the CLI wrapper to surface.
+    against (issue #921). The resolved name lands on
+    ``assemble_run.baseline_name`` and the algorithms whose ``defaults``
+    disagreed with it on ``assemble_run.rebased_algorithms``, both for the CLI
+    wrapper to surface. Resolution of ``None``:
+
+    - On a fresh run, the entry named ``baseline``, else the first.
+    - On an existing run, the selection that run already recorded in its
+      ``manifest.assembly.yaml``. The flag is *sticky*, for the same reason
+      ``--replicas`` falls back to the recorded count: otherwise a ``--force``
+      re-assemble after an unrelated ``transfer.yaml`` edit would silently
+      re-resolve every arm against the default baseline, serving a different
+      model with no signal beyond a prune warning blaming ``transfer.yaml``.
+
+    An explicit ``baseline_request`` that disagrees with the record is *not*
+    absorbed — it trips the drift check, because changing which baseline a run
+    resolves is a parameter change rather than a silent rebase.
+
+    ``baseline_request`` is rejected outright when scoped. The baseline is
+    run-wide state, and a scoped assemble writes neither
+    ``manifest.assembly.yaml`` nor ``run_metadata.json``, so it has nowhere to
+    record one; honouring it would rewrite the scoped packages against a
+    different baseline while the snapshot kept describing the old one.
     """
     layout.set_experiment_root(experiment_root)
     # Reset side-band state each call — see docstring above.
@@ -1687,7 +1705,25 @@ def assemble_run(
         _scope.parse_name_list(workload_filter) is not None
         or _scope.parse_name_list(package_filter) is not None
     )
+    if scoped and baseline_request is not None:
+        raise AssembleError(
+            "--baseline cannot be combined with --workload/--package: the "
+            "baseline is a run-wide choice, and a scoped assemble writes "
+            "neither manifest.assembly.yaml nor run_metadata.json, so it "
+            "cannot record one. Honouring it would rewrite the scoped "
+            "packages against a different baseline while the snapshot kept "
+            "saying otherwise. Re-assemble unscoped with --baseline first, "
+            "then scope."
+        )
     run_dir = layout.runs_dir() / run_name
+    # An explicit --baseline is sticky: a re-assemble that omits the flag
+    # inherits the run's recorded selection rather than re-deriving the default,
+    # mirroring how --replicas falls back to the recorded count. Without this,
+    # `--force` after an unrelated transfer.yaml edit silently re-resolves every
+    # arm against the default baseline — a different model, with no
+    # operator-visible signal beyond a prune warning that blames transfer.yaml.
+    # Set below, once the prior snapshot has been read.
+    baseline_effective = baseline_request
     additive_grow_from: int | None = None
     # A scoped assemble cannot repair run-wide state, because it does not
     # rewrite manifest.assembly.yaml or run_metadata.json. Every structural
@@ -1744,6 +1780,16 @@ def assemble_run(
                     ) from exc
                 repairing = True
 
+        # Inherit the recorded baseline when the operator did not name one (see
+        # ``baseline_effective`` above). An explicit --baseline that disagrees
+        # with the record is left alone, so it still trips the drift check below
+        # — changing which baseline a run resolves is a parameter change, not a
+        # silent rebase.
+        if baseline_request is None and isinstance(prior_ma, dict):
+            recorded_baseline = prior_ma.get("baseline")
+            if isinstance(recorded_baseline, str) and recorded_baseline:
+                baseline_effective = recorded_baseline
+
         prior_replicas = (
             prior_ma.get("replicas") if isinstance(prior_ma, dict) else None
         )
@@ -1796,7 +1842,7 @@ def assemble_run(
             if isinstance(prior_ma, dict) and prior_ma.get("baseline") is not None:
                 new_slice = {
                     "baseline": select_baseline(
-                        manifest.get("baselines", []) or [], baseline_request
+                        manifest.get("baselines", []) or [], baseline_effective
                     )["name"],
                     **new_slice,
                 }
@@ -1871,7 +1917,7 @@ def assemble_run(
         tout_path=tout_path,
         cluster_config=cluster_config,
         translation_ref=translation_ref,
-        baseline_request=baseline_request,
+        baseline_request=baseline_effective,
     )
     packages = resolved.packages
     kept_algos = resolved.kept_algos
