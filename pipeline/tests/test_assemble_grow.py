@@ -486,3 +486,44 @@ class TestGrowBuildsBeforeWriting:
         assert rm["replicas"] == 2
         ma = yaml.safe_load((run_dir / "manifest.assembly.yaml").read_text())
         assert ma["replicas"] == 2
+
+
+class TestGrowPreservesRecordedBaseline:
+    def test_grow_keeps_the_snapshot_baseline_and_hash_consistent(self, tmp_path):
+        """Grow must not rewrite the recorded selection.
+
+        It preserves ``params_hash`` (the drift check already passed), so
+        writing a snapshot whose ``baseline`` key disagreed with that hash
+        would make the *next* assemble report false drift.
+        """
+        import json
+
+        from pipeline.tests.test_assemble_baseline_select import (
+            _make_two_baseline_experiment,
+        )
+
+        env = _make_two_baseline_experiment(tmp_path)
+        kwargs = dict(
+            translation_hash=env["translation_hash"],
+            translation_ref=env["translation_hash"][:12],
+            cluster_id=env["cluster_id"],
+            run_name="r1",
+            experiment_root=env["exp_root"],
+            manifest_path=env["manifest_path"],
+            force=False,
+            baseline_request="weka",
+            now_iso="2026-09-21T14:05:00Z",
+        )
+        assemble_run.assemble_run(replicas=1, **kwargs)
+        runs = env["exp_root"] / "workspace" / "runs" / "r1"
+        before = json.loads((runs / "run_metadata.json").read_text())["params_hash"]
+
+        assemble_run.assemble_run(replicas=2, **kwargs)
+        ma = yaml.safe_load((runs / "manifest.assembly.yaml").read_text())
+        after = json.loads((runs / "run_metadata.json").read_text())["params_hash"]
+        assert ma["baseline"] == "weka"
+        assert ma["replicas"] == 2
+        assert after == before
+
+        # And the next assemble sees no drift.
+        assemble_run.assemble_run(replicas=2, **kwargs)

@@ -423,3 +423,74 @@ class TestResolveTreatmentAlignsItsLayers:
         )
         assert len(resolved["scenario"]) == 1
         assert resolved["scenario"][0] == {"name": "s", "a": 1, "b": 2}
+
+
+class TestBaselineSelectionIsHashed:
+    def test_snapshot_records_the_selection(self, tmp_path):
+        env = _make_two_baseline_experiment(tmp_path)
+        _assemble(env, run="r1", baseline="weka")
+        ma = yaml.safe_load(
+            (_runs(env) / "r1" / "manifest.assembly.yaml").read_text()
+        )
+        assert ma["baseline"] == "weka"
+
+    def test_two_selections_get_different_params_hashes(self, tmp_path):
+        import json
+        env = _make_two_baseline_experiment(tmp_path)
+        _assemble(env, run="r1", baseline="baseline")
+        _assemble(env, run="r2", baseline="weka")
+        h1 = json.loads(
+            (_runs(env) / "r1" / "run_metadata.json").read_text()
+        )["params_hash"]
+        h2 = json.loads(
+            (_runs(env) / "r2" / "run_metadata.json").read_text()
+        )["params_hash"]
+        assert h1 != h2
+
+    def test_reassembling_with_a_different_baseline_is_drift(self, tmp_path):
+        env = _make_two_baseline_experiment(tmp_path)
+        _assemble(env, run="r1", baseline="baseline")
+        with pytest.raises(AssembleError) as exc:
+            _assemble(env, run="r1", baseline="weka")
+        assert "changed since last assemble" in str(exc.value)
+
+    def test_force_overrides_the_drift_refusal(self, tmp_path):
+        env = _make_two_baseline_experiment(tmp_path)
+        _assemble(env, run="r1", baseline="baseline")
+        _assemble(env, run="r1", baseline="weka", force=True)
+        ma = yaml.safe_load(
+            (_runs(env) / "r1" / "manifest.assembly.yaml").read_text()
+        )
+        assert ma["baseline"] == "weka"
+        assert _scenario_stems(env) == ["algoa", "weka"]
+
+    def test_reassembling_with_the_same_baseline_is_not_drift(self, tmp_path):
+        env = _make_two_baseline_experiment(tmp_path)
+        _assemble(env, run="r1", baseline="weka")
+        _assemble(env, run="r1", baseline="weka")
+        assert assemble_run.assemble_run.status == "noop"
+
+    def test_legacy_snapshot_without_the_key_does_not_report_false_drift(
+        self, tmp_path
+    ):
+        """A run assembled before #921 has no ``baseline`` key.
+
+        Its ``params_hash`` was computed without one, so the drift check must
+        compare without one too — otherwise every pre-existing run would refuse
+        its next assemble.
+        """
+        env = _make_two_baseline_experiment(tmp_path)
+        _assemble(env, run="r1", baseline="baseline")
+        ma_path = _runs(env) / "r1" / "manifest.assembly.yaml"
+        ma = yaml.safe_load(ma_path.read_text())
+        del ma["baseline"]
+        ma_path.write_text(yaml.dump(ma))
+        # Recompute params_hash the way a pre-#921 assemble would have.
+        import json
+        rm_path = _runs(env) / "r1" / "run_metadata.json"
+        rm = json.loads(rm_path.read_text())
+        rm["params_hash"] = assemble_run.compute_params_hash(ma_path)
+        rm_path.write_text(json.dumps(rm, indent=2, sort_keys=True) + "\n")
+        # Must not raise.
+        _assemble(env, run="r1", baseline="baseline")
+        assert assemble_run.assemble_run.status == "noop"

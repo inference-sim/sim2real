@@ -271,18 +271,35 @@ def inject_hf_secret_name(scenario_dict: dict, hf_secret_name: str) -> None:
 
 
 def write_manifest_assembly(
-    run_dir: Path, manifest: dict, *, now_iso: str, replicas: int = 1,
+    run_dir: Path,
+    manifest: dict,
+    *,
+    now_iso: str,
+    replicas: int = 1,
+    baseline: str | None = None,
 ) -> Path:
-    """Serialize ``slicer.assembly_slice(manifest)`` + ``replicas: N`` to
-    ``manifest.assembly.yaml``.
+    """Serialize ``slicer.assembly_slice(manifest)`` + ``replicas``/``baseline``
+    to ``manifest.assembly.yaml``.
+
+    ``baseline`` is the single baseline package this run resolves (issue #921).
+    Unlike ``replicas`` it is *included* in ``params_hash``: two runs that
+    differ only in ``--baseline`` can serve different models, so a hash that
+    could not tell them apart would report them as the same parameters.
+
+    ``baseline=None`` omits the key, producing the pre-#921 snapshot shape.
+    ``_additive_grow`` uses that to preserve a legacy run's shape, since it
+    preserves that run's ``params_hash`` too and the two must agree.
 
     Prepends a one-line comment header naming the tool and timestamp.
     Returns the written path.
     """
     slice_ = slicer.assembly_slice(manifest)
-    # Emit replicas at the top of the file for human readability, before the
-    # rest of the assembly slice.
-    out_dict = {"replicas": replicas, **slice_}
+    # Emit replicas and the baseline selection at the top of the file for human
+    # readability, before the rest of the assembly slice.
+    out_dict: dict = {"replicas": replicas}
+    if baseline is not None:
+        out_dict["baseline"] = baseline
+    out_dict.update(slice_)
     body = yaml.dump(
         out_dict, default_flow_style=False, allow_unicode=True, sort_keys=False
     )
@@ -299,6 +316,11 @@ def compute_params_hash(manifest_assembly_path: Path) -> str:
     trip drift detection on re-assemble. Canonical form uses
     ``sort_keys=True`` so the hash is deterministic across YAML formatter
     ordering differences.
+
+    ``baseline`` (issue #921) is deliberately NOT excluded. It names the single
+    baseline package the run resolves, and two runs differing only in it can
+    serve different models — so it belongs in the identity of the parameters.
+    Snapshots written before #921 carry no such key and hash exactly as before.
     """
     data = yaml.safe_load(manifest_assembly_path.read_text()) or {}
     if isinstance(data, dict):
@@ -1444,6 +1466,7 @@ def _additive_grow(
     prior_replicas: int,
     new_replicas: int,
     now_iso: str,
+    recorded_baseline: str | None = None,
 ) -> list[str]:
     """Grow an existing run's replica count from ``prior_replicas`` to
     ``new_replicas`` (``new_replicas > prior_replicas``).
@@ -1487,8 +1510,14 @@ def _additive_grow(
         run_dir, prior_replicas=prior_replicas, new_replicas=new_replicas
     )
 
-    # Rewrite manifest.assembly.yaml with new replicas count.
-    write_manifest_assembly(run_dir, manifest, now_iso=now_iso, replicas=new_replicas)
+    # Rewrite manifest.assembly.yaml with new replicas count. The baseline
+    # selection is carried over verbatim rather than re-derived: grow preserves
+    # params_hash (the drift check passed), and a snapshot whose baseline key
+    # disagreed with that hash would make the next assemble report false drift.
+    write_manifest_assembly(
+        run_dir, manifest, now_iso=now_iso, replicas=new_replicas,
+        baseline=recorded_baseline,
+    )
 
     # Rewrite run_metadata.json. params_hash is preserved (drift check passed).
     # `scenario` is also refreshed from the manifest so legacy runs (assembled
@@ -1748,7 +1777,22 @@ def assemble_run(
                     f"replicas; refusing to shrink to {replicas_effective}. "
                     "Replica shrink is tracked in #506."
                 )
+            # Mirror write_manifest_assembly + compute_params_hash exactly: the
+            # snapshot's ``baseline`` key is hashed, so the comparison dict must
+            # carry it too. A snapshot written before #921 has no such key;
+            # comparing without it there keeps every pre-existing run from
+            # reporting false drift on its next assemble. The cost is that a
+            # legacy run re-assembled with an explicit --baseline is rebased
+            # without a drift refusal — the operator asked for it, and the
+            # rewritten snapshot records it from then on.
             new_slice = slicer.assembly_slice(manifest)
+            if isinstance(prior_ma, dict) and prior_ma.get("baseline") is not None:
+                new_slice = {
+                    "baseline": select_baseline(
+                        manifest.get("baselines", []) or [], baseline_request
+                    )["name"],
+                    **new_slice,
+                }
             new_canonical = yaml.dump(
                 new_slice, sort_keys=True, default_flow_style=False,
                 allow_unicode=True,
@@ -1786,6 +1830,9 @@ def assemble_run(
             prior_replicas=additive_grow_from,
             new_replicas=replicas_effective,
             now_iso=now_iso,
+            recorded_baseline=(
+                prior_ma.get("baseline") if isinstance(prior_ma, dict) else None
+            ),
         )
         # Files in cluster/ whose names did not parse were skipped, so their
         # pairs did not grow. Surfaced rather than dropped: otherwise the only
@@ -1948,7 +1995,8 @@ def assemble_run(
     params_hash = ""
     if not scoped:
         manifest_assembly_path = write_manifest_assembly(
-            run_dir, manifest, now_iso=now_iso, replicas=replicas_effective
+            run_dir, manifest, now_iso=now_iso, replicas=replicas_effective,
+            baseline=resolved.baseline_name,
         )
         params_hash = compute_params_hash(manifest_assembly_path)
 
