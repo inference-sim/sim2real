@@ -396,6 +396,11 @@ def resolve_baseline(
     point at a non-existent file (BYO baseline without a baseline overlay).
     Bundle is required — a missing bundle raises AssembleError.
 
+    Both the framework defaults and the overlay have their ``scenario[0].name``
+    realigned to the bundle's before merging. The overlay needs it because
+    ``find_baseline_overlay`` may return an overlay generated for a *different*
+    baseline and reused (issue #921).
+
     Before the merge, ``framework_defaults[scenario][0].name`` is realigned
     to the bundle's ``scenario[0].name`` so both sides collapse into a single
     scenario entry (see ``_align_overlay_name``). Without this, a defaults
@@ -416,6 +421,13 @@ def resolve_baseline(
         if overlay_path is not None and overlay_path.exists()
         else {}
     )
+    # Realign the overlay's scenario name to the bundle's, for the same reason
+    # the framework defaults are realigned below: a name mismatch makes
+    # deep_merge append a second scenario entry, which llm-d-benchmark renders
+    # as a separate deployment (issue #516). This matters now that the overlay
+    # may have been generated for a different baseline and reused (issue #921),
+    # and is a no-op when the names already agree.
+    overlay = _align_overlay_name(bundle, overlay)
     aligned_defaults = _align_overlay_name(bundle, copy.deepcopy(framework_defaults))
     resolved = _merge_layer(
         aligned_defaults, bundle,
@@ -441,6 +453,16 @@ def resolve_treatment(
     point at non-existent files — the corresponding layer is treated as
     empty. Baseline is required (starts from an already-resolved dict).
 
+    Both layers have their ``scenario[0].name`` realigned to the resolved
+    baseline's, for the reason spelled out in ``_align_overlay_name``: a name
+    mismatch makes ``deep_merge`` append a second scenario entry, which
+    llm-d-benchmark renders as a separate deployment carrying the
+    framework-default model (issue #516). This is load-bearing now that an
+    algorithm rebases onto whichever baseline ``--baseline`` selected (issue
+    #921) — its generated overlay was authored against the scenario name of the
+    baseline its ``defaults`` named, which need not be the selected one. A
+    no-op when the names already agree.
+
     ``sink`` behaves as in ``resolve_baseline``: it collects scalar-list
     replacement warnings tagged with the layer pair that disagreed.
     """
@@ -454,6 +476,8 @@ def resolve_treatment(
         if overlay_path is not None and overlay_path.exists()
         else {}
     )
+    diffs = _align_overlay_name(baseline_resolved, diffs)
+    overlay = _align_overlay_name(baseline_resolved, overlay)
     resolved = _merge_layer(
         copy.deepcopy(baseline_resolved), diffs,
         layer="baseline -> treatment diffs", sink=sink,
@@ -1247,6 +1271,13 @@ class _ResolvedPackages(NamedTuple):
     """
     packages: list[tuple[str, dict]]
     resolved_baselines: dict[str, dict]
+    #: The single baseline this run resolves (issue #921). Recorded in
+    #: ``manifest.assembly.yaml`` and hashed into ``params_hash``.
+    baseline_name: str
+    #: Algorithms whose ``defaults`` names a baseline other than the selected
+    #: one, and which were therefore rebased onto the selection. Exposed for
+    #: the CLI wrapper to surface as a note.
+    rebased_algorithms: list[str]
     kept_algos: list[dict]
     skipped_algo_names: list[str]
     translated_algos: dict[str, dict]
@@ -1268,6 +1299,7 @@ def _resolve_packages(
     tout_path: Path,
     cluster_config: dict,
     translation_ref: str,
+    baseline_request: str | None = None,
 ) -> _ResolvedPackages:
     """Shared resolution pipeline for both fresh assemble and additive grow.
 
@@ -1321,54 +1353,54 @@ def _resolve_packages(
     generated_root = translation_dir / "generated"
 
     packages: list[tuple[str, dict]] = []
-    resolved_baselines: dict[str, dict] = {}
     scalar_list_conflicts: list[str] = []
-    for bl in manifest.get("baselines", []):
-        bl_name = bl["name"]
-        bundle_path = _resolve_scenario_path(
-            exp_root, bl.get("scenario"), "baseline.yaml"
-        )
-        if bundle_path is None:
-            raise AssembleError(f"baseline '{bl_name}' has no scenario file")
-        # Per-baseline overlay layout: ``generated/baselines/<name>/baseline_config.yaml``.
-        # The ``baselines/`` umbrella (issue #544) avoids the awkward
-        # ``baseline_baseline/`` shape from the pre-#544 flat layout under
-        # the standardized ``name: baseline`` identifier, and keeps
-        # multi-baseline test cases (``baselines/base/``, ``baselines/alt/``)
-        # readable.
-        overlay_path = generated_root / "baselines" / bl_name / "baseline_config.yaml"
-        if not overlay_path.exists():
-            # BYO ``translation register`` writes the shared step-1
-            # ``generated/baseline_config.yaml`` at the generated root.
-            # Fall back to that layout when the per-baseline dir is
-            # absent so BYO translations remain resolvable.
-            legacy_overlay = generated_root / "baseline_config.yaml"
-            overlay_path = legacy_overlay if legacy_overlay.exists() else None
-        resolved = resolve_baseline(
-            bundle_path=bundle_path,
-            overlay_path=overlay_path,
-            framework_defaults=framework_defaults,
-            sink=scalar_list_conflicts,
-        )
-        resolved_baselines[bl_name] = resolved
-        packages.append((bl_name, resolved))
 
+    # Exactly one baseline package per run (issue #921). Emitting one per entry
+    # in ``baselines[]`` deployed every declared baseline whether or not any
+    # algorithm named it, while ``sim2real translate`` only produced overlays
+    # for the named ones — so an unreferenced baseline was deployed with the
+    # Helm chart's stock plugin config, silently.
+    manifest_baselines = manifest.get("baselines", []) or []
+    selected = select_baseline(manifest_baselines, baseline_request)
+    baseline_name = selected["name"]
+    bundle_path = _resolve_scenario_path(
+        exp_root, selected.get("scenario"), "baseline.yaml"
+    )
+    if bundle_path is None:
+        raise AssembleError(f"baseline '{baseline_name}' has no scenario file")
+    overlay_path, _reused = find_baseline_overlay(
+        generated_root,
+        selected=baseline_name,
+        default_name=default_baseline_name(manifest_baselines),
+    )
+    baseline_resolved = resolve_baseline(
+        bundle_path=bundle_path,
+        overlay_path=overlay_path,
+        framework_defaults=framework_defaults,
+        sink=scalar_list_conflicts,
+    )
+    resolved_baselines: dict[str, dict] = {baseline_name: baseline_resolved}
+    packages.append((baseline_name, baseline_resolved))
+
+    # Every algorithm rebases onto the selected baseline, overriding its own
+    # ``defaults`` (issue #921). ``defaults`` still decides which baseline the
+    # translate skill generates an overlay for; here it is only recorded when it
+    # disagrees, so the CLI can say which arms were rebased. A ``defaults`` that
+    # names no baseline at all is still refused — by ``manifest.py``'s
+    # cross-reference check at load time, ahead of this.
+    rebased_algorithms: list[str] = []
     for algo in kept_algos:
         algo_name = algo["name"]
-        base_name = algo["defaults"]
-        if base_name not in resolved_baselines:
-            raise AssembleError(
-                f"algorithm '{algo_name}' references unknown baseline "
-                f"'{base_name}'; known: {sorted(resolved_baselines)}"
-            )
+        if algo.get("defaults") != baseline_name:
+            rebased_algorithms.append(algo_name)
         diffs_path = _resolve_scenario_path(
             exp_root, algo.get("scenario"), "treatment.yaml"
         )
-        overlay_path = generated_root / algo_name / f"{algo_name}_config.yaml"
+        algo_overlay_path = generated_root / algo_name / f"{algo_name}_config.yaml"
         resolved = resolve_treatment(
-            baseline_resolved=resolved_baselines[base_name],
+            baseline_resolved=baseline_resolved,
             diffs_path=diffs_path,
-            overlay_path=overlay_path,
+            overlay_path=algo_overlay_path,
             sink=scalar_list_conflicts,
         )
         algo_image_ref = translated_algos[algo_name]["image_ref"]
@@ -1392,6 +1424,8 @@ def _resolve_packages(
     return _ResolvedPackages(
         packages=packages,
         resolved_baselines=resolved_baselines,
+        baseline_name=baseline_name,
+        rebased_algorithms=rebased_algorithms,
         kept_algos=kept_algos,
         skipped_algo_names=skipped_algo_names,
         translated_algos=translated_algos,
@@ -1479,6 +1513,7 @@ def assemble_run(
     experiment_root: Path,
     manifest_path: Path,
     force: bool,
+    baseline_request: "str | None" = None,
     replicas: "int | None" = None,
     workload_filter: "list[str] | None" = None,
     package_filter: "list[str] | None" = None,
@@ -1571,6 +1606,7 @@ def assemble_run(
     assemble_run.skipped_algorithms = []  # type: ignore[attr-defined]
     assemble_run.missing_submodules = []  # type: ignore[attr-defined]
     assemble_run.scalar_list_conflicts = []  # type: ignore[attr-defined]
+    assemble_run.rebased_algorithms = []  # type: ignore[attr-defined]
     assemble_run.already_assembled = 0  # type: ignore[attr-defined]
     assemble_run.pruned_files = []  # type: ignore[attr-defined]
     assemble_run.wiped_results = []  # type: ignore[attr-defined]
@@ -1781,12 +1817,14 @@ def assemble_run(
         tout_path=tout_path,
         cluster_config=cluster_config,
         translation_ref=translation_ref,
+        baseline_request=baseline_request,
     )
     packages = resolved.packages
     kept_algos = resolved.kept_algos
     translated_algos = resolved.translated_algos
     assemble_run.missing_submodules = resolved.missing_submodules  # type: ignore[attr-defined]
     assemble_run.scalar_list_conflicts = resolved.scalar_list_conflicts  # type: ignore[attr-defined]
+    assemble_run.rebased_algorithms = resolved.rebased_algorithms  # type: ignore[attr-defined]
 
     # 5. Resolve the pair scope and decide what to do per pair -------------
     package_names = [name for name, _ in packages]

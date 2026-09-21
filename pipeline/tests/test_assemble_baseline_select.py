@@ -155,3 +155,271 @@ class TestFindBaselineOverlay:
         )
         assert path is None
         assert reused is False
+
+
+class TestResolveBaselineAlignsOverlay:
+    def test_overlay_scenario_name_is_realigned_to_the_bundle(self, tmp_path):
+        bundle = tmp_path / "b.yaml"
+        bundle.write_text(yaml.dump({"scenario": [{"name": "weka-scn", "a": 1}]}))
+        overlay = tmp_path / "o.yaml"
+        overlay.write_text(yaml.dump({"scenario": [{"name": "other-scn", "b": 2}]}))
+        resolved = assemble_run.resolve_baseline(
+            bundle_path=bundle, overlay_path=overlay, framework_defaults={}
+        )
+        # One scenario entry, not two: the overlay merged onto the bundle
+        # instead of appending a phantom entry (the issue #516 failure mode).
+        assert len(resolved["scenario"]) == 1
+        assert resolved["scenario"][0]["name"] == "weka-scn"
+        assert resolved["scenario"][0]["a"] == 1
+        assert resolved["scenario"][0]["b"] == 2
+
+    def test_matching_names_are_unaffected(self, tmp_path):
+        bundle = tmp_path / "b.yaml"
+        bundle.write_text(yaml.dump({"scenario": [{"name": "s", "a": 1}]}))
+        overlay = tmp_path / "o.yaml"
+        overlay.write_text(yaml.dump({"scenario": [{"name": "s", "b": 2}]}))
+        resolved = assemble_run.resolve_baseline(
+            bundle_path=bundle, overlay_path=overlay, framework_defaults={}
+        )
+        assert len(resolved["scenario"]) == 1
+        assert resolved["scenario"][0] == {"name": "s", "a": 1, "b": 2}
+
+
+def _write_yaml(path: Path, data) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.dump(data, sort_keys=False))
+
+
+def _write_json(path: Path, data) -> None:
+    import json
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2))
+
+
+def _make_two_baseline_experiment(tmp_path: Path) -> dict:
+    """A bundle shaped like pd-infocomm-4: two baselines, one overlay.
+
+    The algorithm declares ``defaults: baseline``; nothing names ``weka``, so
+    only ``generated/baselines/baseline/`` exists. That is the exact shape that
+    deployed an unconfigured EPP in issue #921.
+    """
+    exp_root = tmp_path / "exp"
+    layout._EXPERIMENT_ROOT = exp_root
+    workspace = exp_root / "workspace"
+
+    cluster_id = "ocp-east"
+    _write_json(
+        workspace / "clusters" / cluster_id / "cluster_config.json",
+        {
+            "cluster_id": cluster_id,
+            "namespaces": ["sim2real-slot-0"],
+            "secret_names": {"hf_token": "hf-secret"},
+            "workspaces": {},
+        },
+    )
+
+    manifest = {
+        "kind": "sim2real-transfer",
+        "version": 3,
+        "scenario": "test-scenario",
+        "component": {"repo": "acme/llm-d-inference-scheduler", "kind": "gaie"},
+        "context": {"text": "", "files": []},
+        "baselines": [
+            {"name": "baseline", "scenario": "baselines/baseline.yaml"},
+            {"name": "weka", "scenario": "baselines/baseline-weka.yaml"},
+        ],
+        "algorithms": [
+            {"name": "algoa", "source": "algo/algoa.py", "defaults": "baseline"},
+        ],
+        "workloads": ["workloads/w1.yaml"],
+        "defaults": {"disable": []},
+    }
+    _write_yaml(exp_root / "transfer.yaml", manifest)
+    _write_yaml(
+        exp_root / "baselines" / "baseline.yaml",
+        {"scenario": [{"name": "scn-30b", "model": {"name": "Qwen3-30B"}}]},
+    )
+    _write_yaml(
+        exp_root / "baselines" / "baseline-weka.yaml",
+        {"scenario": [{"name": "scn-weka", "model": {"name": "Qwen3-Next-80B"}}]},
+    )
+    _write_yaml(
+        exp_root / "workloads" / "w1.yaml", {"name": "wl_a", "num_requests": 10}
+    )
+    (exp_root / "algo").mkdir(parents=True, exist_ok=True)
+    (exp_root / "algo" / "algoa.py").write_text("# stub\n")
+
+    thash = "b" * 64
+    tdir = workspace / "translations" / thash
+    generated = tdir / "generated"
+    generated.mkdir(parents=True)
+    _write_json(
+        tdir / "translation_output.json",
+        {
+            "version": 1,
+            "translation_hash": thash,
+            "source": "byo",
+            "alias": "algoa",
+            "algorithms": [
+                {
+                    "name": "algoa",
+                    "source_path": None,
+                    "source_sha256": None,
+                    "config_path": "generated/algoa/algoa_config.yaml",
+                    "image_ref": "ghcr.io/foo/bar:v1",
+                    "image_digest": "sha256:aa",
+                }
+            ],
+            "created_at": "2026-09-21T14:00:00Z",
+        },
+    )
+    _write_yaml(
+        generated / "algoa" / "algoa_config.yaml",
+        {"scenario": [{"name": "scn-30b", "router": {"epp": {"replicas": 2}}}]},
+    )
+    # Only the referenced baseline gets an overlay — the #921 shape.
+    _write_yaml(
+        generated / "baselines" / "baseline" / "baseline_config.yaml",
+        {"scenario": [{"name": "scn-30b", "router": {"epp": {"replicas": 3}}}]},
+    )
+    return {
+        "exp_root": exp_root,
+        "cluster_id": cluster_id,
+        "translation_hash": thash,
+        "manifest_path": exp_root / "transfer.yaml",
+    }
+
+
+def _assemble(env, *, run="r1", baseline=None, force=False, replicas=None):
+    assemble_run.assemble_run(
+        translation_hash=env["translation_hash"],
+        translation_ref=env["translation_hash"][:12],
+        cluster_id=env["cluster_id"],
+        run_name=run,
+        experiment_root=env["exp_root"],
+        manifest_path=env["manifest_path"],
+        force=force,
+        replicas=replicas,
+        baseline_request=baseline,
+        now_iso="2026-09-21T14:05:00Z",
+    )
+
+
+def _runs(env) -> Path:
+    return env["exp_root"] / "workspace" / "runs"
+
+
+def _scenario_stems(env, run="r1") -> list[str]:
+    cluster = _runs(env) / run / "cluster"
+    return sorted(
+        p.stem for p in cluster.glob("*.yaml")
+        if not p.name.startswith("pipelinerun-")
+    )
+
+
+class TestAssembleEmitsOneBaseline:
+    def test_default_selection_emits_only_the_default_baseline(self, tmp_path):
+        env = _make_two_baseline_experiment(tmp_path)
+        _assemble(env)
+        assert _scenario_stems(env) == ["algoa", "baseline"]
+
+    def test_explicit_selection_emits_only_that_baseline(self, tmp_path):
+        env = _make_two_baseline_experiment(tmp_path)
+        _assemble(env, baseline="weka")
+        assert _scenario_stems(env) == ["algoa", "weka"]
+
+    def test_selected_baseline_reuses_the_only_overlay(self, tmp_path):
+        env = _make_two_baseline_experiment(tmp_path)
+        _assemble(env, baseline="weka")
+        resolved = yaml.safe_load(
+            (_runs(env) / "r1" / "cluster" / "weka.yaml").read_text()
+        )
+        # One scenario entry, carrying weka's model and the reused overlay's
+        # EPP config realigned onto weka's scenario name.
+        assert len(resolved["scenario"]) == 1
+        assert resolved["scenario"][0]["name"] == "scn-weka"
+        assert resolved["scenario"][0]["model"]["name"] == "Qwen3-Next-80B"
+        assert resolved["scenario"][0]["router"]["epp"]["replicas"] == 3
+
+    def test_algorithm_rebases_onto_the_selected_baseline(self, tmp_path):
+        env = _make_two_baseline_experiment(tmp_path)
+        _assemble(env, baseline="weka")
+        resolved = yaml.safe_load(
+            (_runs(env) / "r1" / "cluster" / "algoa.yaml").read_text()
+        )
+        assert len(resolved["scenario"]) == 1
+        assert resolved["scenario"][0]["name"] == "scn-weka"
+        assert resolved["scenario"][0]["model"]["name"] == "Qwen3-Next-80B"
+        # Treatment overlay still wins over the baseline overlay.
+        assert resolved["scenario"][0]["router"]["epp"]["replicas"] == 2
+
+    def test_rebased_algorithms_are_recorded_for_the_cli(self, tmp_path):
+        env = _make_two_baseline_experiment(tmp_path)
+        _assemble(env, baseline="weka")
+        assert assemble_run.assemble_run.rebased_algorithms == ["algoa"]
+
+    def test_no_rebase_note_when_defaults_already_match(self, tmp_path):
+        env = _make_two_baseline_experiment(tmp_path)
+        _assemble(env, baseline="baseline")
+        assert assemble_run.assemble_run.rebased_algorithms == []
+
+    def test_unknown_baseline_refuses(self, tmp_path):
+        env = _make_two_baseline_experiment(tmp_path)
+        with pytest.raises(AssembleError) as exc:
+            _assemble(env, baseline="nope")
+        assert "nope" in str(exc.value)
+
+    def test_pipelineruns_cover_only_the_selected_baseline(self, tmp_path):
+        env = _make_two_baseline_experiment(tmp_path)
+        _assemble(env, baseline="weka")
+        cluster = _runs(env) / "r1" / "cluster"
+        names = sorted(p.name for p in cluster.glob("pipelinerun-*.yaml"))
+        assert names == [
+            "pipelinerun-wl-a|algoa|i1.yaml",
+            "pipelinerun-wl-a|weka|i1.yaml",
+        ]
+
+
+class TestResolveTreatmentAlignsItsLayers:
+    """A rebased algorithm's overlay was authored against another baseline.
+
+    Its ``scenario[0].name`` therefore names the baseline its ``defaults``
+    pointed at, not the one ``--baseline`` selected. Without realignment
+    deep_merge appends a phantom second scenario entry, which llm-d-benchmark
+    renders as a separate deployment (issue #516) — so the arm would deploy
+    twice, once with the framework-default model.
+    """
+
+    def test_overlay_named_for_another_baseline_is_realigned(self, tmp_path):
+        baseline = {"scenario": [{"name": "scn-weka", "model": {"name": "big"}}]}
+        overlay = tmp_path / "o.yaml"
+        overlay.write_text(
+            yaml.dump({"scenario": [{"name": "scn-30b", "epp": {"replicas": 2}}]})
+        )
+        resolved = assemble_run.resolve_treatment(
+            baseline_resolved=baseline, diffs_path=None, overlay_path=overlay
+        )
+        assert len(resolved["scenario"]) == 1
+        assert resolved["scenario"][0]["name"] == "scn-weka"
+        assert resolved["scenario"][0]["model"]["name"] == "big"
+        assert resolved["scenario"][0]["epp"]["replicas"] == 2
+
+    def test_treatment_diffs_are_realigned_too(self, tmp_path):
+        baseline = {"scenario": [{"name": "scn-weka", "a": 1}]}
+        diffs = tmp_path / "d.yaml"
+        diffs.write_text(yaml.dump({"scenario": [{"name": "scn-30b", "b": 2}]}))
+        resolved = assemble_run.resolve_treatment(
+            baseline_resolved=baseline, diffs_path=diffs, overlay_path=None
+        )
+        assert len(resolved["scenario"]) == 1
+        assert resolved["scenario"][0] == {"name": "scn-weka", "a": 1, "b": 2}
+
+    def test_matching_names_are_unaffected(self, tmp_path):
+        baseline = {"scenario": [{"name": "s", "a": 1}]}
+        overlay = tmp_path / "o.yaml"
+        overlay.write_text(yaml.dump({"scenario": [{"name": "s", "b": 2}]}))
+        resolved = assemble_run.resolve_treatment(
+            baseline_resolved=baseline, diffs_path=None, overlay_path=overlay
+        )
+        assert len(resolved["scenario"]) == 1
+        assert resolved["scenario"][0] == {"name": "s", "a": 1, "b": 2}
