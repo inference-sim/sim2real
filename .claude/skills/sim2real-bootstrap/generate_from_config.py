@@ -221,6 +221,13 @@ OBSERVE_PIPELINE_INJECTED_FLAGS = {
     "--corpus-data",
     "--concurrent-sessions",
     "--total-sessions",
+    # --duration joined the pool flags in sim2real#923: it comes from the corpus
+    # workload's `replay.duration`, as the one-of alternative to
+    # `replay.total_sessions`. It MUST be listed here rather than left to the
+    # allowlist below, because observe_argv REFUSES a measurement.extraArgs that
+    # names either sizing flag — so transcribing it would turn a config.md that
+    # merely spells out its command into a failed assemble.
+    "--duration",
 }
 
 # The complete set of flags `blis observe` accepts, from inference-sim
@@ -244,7 +251,12 @@ OBSERVE_PIPELINE_INJECTED_FLAGS = {
 OBSERVE_VALID_FLAGS = {
     # --- cmd/observe_cmd.go (registered directly on observeCmd) ---
     "--api-format", "--api-key", "--concurrency", "--concurrent-sessions",
-    "--corpus-data", "--corpus-header", "--defaults-filepath", "--horizon",
+    "--corpus-data", "--corpus-header", "--defaults-filepath",
+    # --duration is a DurationVar on observeCmd, bounding a corpus run by the
+    # clock (mutually exclusive with --total-sessions). Present on the inference-sim
+    # `duration` branch; not in 583f7195, so regenerating this set from an older
+    # commit would silently drop it back out.
+    "--duration", "--horizon",
     "--itl-output", "--lazy-generation", "--max-concurrency", "--model",
     "--no-streaming", "--num-requests", "--output-tokens", "--output-tokens-max",
     "--output-tokens-min", "--output-tokens-stdev", "--prefix-tokens", "--prewarm-duration", "--prompt-tokens",
