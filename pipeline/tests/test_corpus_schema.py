@@ -769,3 +769,123 @@ def test_trace_path_is_the_cache_key_under_the_traces_prefix():
     cannot drift into different addressing schemes."""
     corpus = _VALID["corpus"]
     assert trace_path(corpus) == f"traces/{corpus_schema.corpus_cache_key(corpus)}"
+
+
+# ── replay one-of: total_sessions XOR duration (#923) ────────────────────────
+
+
+def _replay(**over):
+    """A valid corpus doc whose replay block is replaced wholesale."""
+    d = copy.deepcopy(_VALID)
+    d["replay"] = over
+    return d
+
+
+def test_one_of_group_and_table_cannot_drift():
+    """Every field marked ONE_OF is in REPLAY_ONE_OF and vice versa. Without
+    this, adding a third sizing flag and forgetting the group would silently
+    make it required alongside the others."""
+    marked = {name for name, f in corpus_schema.REPLAY_FIELDS.items()
+              if f.default is corpus_schema.ONE_OF}
+    assert marked == set(corpus_schema.REPLAY_ONE_OF)
+    assert corpus_schema.REPLAY_ONE_OF == {"total_sessions", "duration"}
+
+
+def test_one_of_members_are_never_also_REQUIRED():
+    for name in corpus_schema.REPLAY_ONE_OF:
+        assert (corpus_schema.REPLAY_FIELDS[name].default
+                is not corpus_schema.REQUIRED)
+
+
+def test_duration_accepted_in_place_of_total_sessions():
+    corpus_schema.validate_corpus_document(
+        _replay(concurrent_sessions=8, duration="20m"), "w.yaml")
+
+
+def test_total_sessions_still_accepted_alone():
+    corpus_schema.validate_corpus_document(
+        _replay(concurrent_sessions=8, total_sessions=8), "w.yaml")
+
+
+def test_total_sessions_zero_is_still_a_legal_value():
+    """AC 3. 0 means 'replay each corpus session once' and is in real use
+    (exgentic-agentic-multiturn-sess25 in pd-infocomm-4). The one-of keys on
+    whether the KEY is written, never on truthiness, so 0 must survive."""
+    corpus_schema.validate_corpus_document(
+        _replay(concurrent_sessions=25, total_sessions=0), "w.yaml")
+
+
+@pytest.mark.parametrize("value", [20, True, None, "60000", "-5m", "0", "0s"])
+def test_non_duration_values_refused(value):
+    """Review Focus 1 + AC 6. A bare number is the silent wrong-unit hazard
+    duration.py exists to refuse; 0 is the one that also passes
+    is_go_duration."""
+    with pytest.raises(AssembleError, match="replay.duration"):
+        corpus_schema.validate_corpus_document(
+            _replay(concurrent_sessions=8, duration=value), "w.yaml")
+
+
+def test_both_one_of_members_refused():
+    """AC 4."""
+    with pytest.raises(AssembleError, match="mutually exclusive"):
+        corpus_schema.validate_corpus_document(
+            _replay(concurrent_sessions=8, total_sessions=8, duration="20m"),
+            "w.yaml")
+
+
+def test_explicit_null_member_counts_as_written():
+    """Review Focus 2. Commenting out a value leaves 'total_sessions:' -> None.
+    blis keys on supplied-ness, so this must refuse rather than quietly treat
+    the key as absent and emit both flags."""
+    with pytest.raises(AssembleError, match="mutually exclusive"):
+        corpus_schema.validate_corpus_document(
+            _replay(concurrent_sessions=8, total_sessions=None,
+                    duration="20m"), "w.yaml")
+
+
+def test_neither_one_of_member_refused():
+    """AC 5."""
+    with pytest.raises(AssembleError, match="exactly one of"):
+        corpus_schema.validate_corpus_document(
+            _replay(concurrent_sessions=8), "w.yaml")
+
+
+def test_duration_is_legal_on_weka_jsonl():
+    """Review Focus 3. WEKA_INERT_FIELDS refuses three corpus: fields on this
+    format because build-otel is skipped. replay: is applied by blis observe,
+    not build-otel, so duration must stay legal here."""
+    doc = copy.deepcopy(_VALID)
+    doc["corpus"]["upstream"] = {"source": "hf:o/d", "format": "weka-jsonl"}
+    doc["corpus"]["select"] = {"min_rounds": 2}
+    doc["replay"] = {"concurrent_sessions": 8, "duration": "20m"}
+    corpus_schema.validate_corpus_document(doc, "w.yaml")
+
+
+def test_no_replay_field_is_weka_inert():
+    assert not any(p.startswith("replay.")
+                   for p in corpus_schema.WEKA_INERT_FIELDS)
+
+
+def test_replay_only_document_still_refused():
+    """Review Focus 4. DOCUMENT_MARKERS routes on the presence of corpus OR
+    replay, so a generative doc carrying a stray replay block lands here and
+    must be refused for the missing corpus -- not silently accepted."""
+    with pytest.raises(AssembleError, match="corpus"):
+        corpus_schema.validate_corpus_document(
+            {"replay": {"concurrent_sessions": 8, "duration": "20m"}},
+            "w.yaml")
+
+
+def test_duration_does_not_move_the_corpus_cache_key():
+    """AC 7. replay: is applied, never hashed -- two cells differing only in the
+    time bound must share one corpus build."""
+    corpus = {"upstream": {"source": "hf:o/d"},
+              "reconstruct": {"max_think_time": "60s"}}
+    keys = set()
+    for replay in ({"concurrent_sessions": 8, "total_sessions": 8},
+                   {"concurrent_sessions": 8, "duration": "20m"},
+                   {"concurrent_sessions": 8, "duration": "45m"}):
+        doc = {"corpus": copy.deepcopy(corpus), "replay": replay}
+        corpus_schema.validate_corpus_document(doc, "w.yaml")
+        keys.add(corpus_schema.corpus_cache_key(doc["corpus"]))
+    assert len(keys) == 1, "replay.duration must not move the corpus cache key"

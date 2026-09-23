@@ -12,11 +12,18 @@ Now it is rendered here, once, into a single ``observeArgs`` param. The Task
 
 WHAT THIS MODULE OWNS, because nothing downstream can:
 
-* **The three mutual exclusions.** Corpus-mode vs spec-mode inputs;
+* **The four mutual exclusions.** Corpus-mode vs spec-mode inputs;
   ``--record-itl`` vs ``--no-streaming`` (blis rejects the pair —
   ``validateITLStreamingFlags``); and ``--saturation-report`` without
   ``--detectors`` (blis errors: "requires --detectors"). All three were
   previously enforced by a shell conditional, by blis at runtime, or not at all.
+  The fourth is **the replay sizing one-of**: ``--total-sessions`` and
+  ``--duration`` answer the same question — when does the replay stop — and blis
+  rejects the pair on SUPPLIED-NESS rather than value, so
+  ``--total-sessions 0 --duration 20m`` is a conflict and not an override. Only
+  the producer chooses which to emit, so only the producer can keep the pair
+  from reaching blis together (#923). ``measurement.extraArgs`` may not name
+  either flag for the same reason.
 * **Value validation.** Tekton substitutes params TEXTUALLY into the Task's
   ``OBSERVE_ARGS="$(params.observeArgs)"`` assignment, and the Task word-splits
   the result unquoted. A quote, ``$``, backtick or ``;`` in a rendered value
@@ -341,13 +348,36 @@ def render_observe_argv(
             "--corpus-data", f"{_DATA_MOUNT}/{trace_path}.csv",
         ]
         replay = workload.get("replay") or {}
+        # Unconditionally required fields keep the old behavior: a missing one
+        # means validation was skipped, so raise rather than render a sentinel.
         for name, field in corpus_schema.REPLAY_FIELDS.items():
+            if name in corpus_schema.REPLAY_ONE_OF:
+                continue
             if name not in replay:
                 raise ObserveArgvError(
                     f"replay.{name} is required to render corpus-mode argv; "
                     f"validate the workload document first"
                 )
             argv += [field.flag, field.render(replay[name])]
+        # Then exactly one member of the sizing one-of. Iterated in TABLE order,
+        # not set order, so the rendered flag position is deterministic. Keyed on
+        # presence, matching blis's supplied-ness rule — a written 0 or null is
+        # written.
+        written = [name for name in corpus_schema.REPLAY_FIELDS
+                   if name in corpus_schema.REPLAY_ONE_OF and name in replay]
+        if len(written) > 1:
+            raise ObserveArgvError(
+                f"replay declares {sorted(written)}, which are mutually "
+                f"exclusive; validate the workload document first"
+            )
+        if not written:
+            raise ObserveArgvError(
+                f"replay must declare exactly one of "
+                f"{sorted(corpus_schema.REPLAY_ONE_OF)} to size the run; "
+                f"validate the workload document first"
+            )
+        sizing = corpus_schema.REPLAY_FIELDS[written[0]]
+        argv += [sizing.flag, sizing.render(replay[written[0]])]
     else:
         argv += ["--workload-spec", _WORKLOAD_SPEC_PATH]
 

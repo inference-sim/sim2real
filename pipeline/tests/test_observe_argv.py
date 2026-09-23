@@ -265,12 +265,33 @@ def test_glob_chars_absent_from_forbidden_set():
 
 def test_every_replay_field_reaches_a_flag():
     """#901's applied-or-rejected invariant, after #900 moved the destination
-    from a PipelineRun param to an argv flag."""
+    from a PipelineRun param to an argv flag.
+
+    Reachability is checked across every legal document shape, not within one:
+    #923 made ``total_sessions``/``duration`` a one-of, so no single cell can
+    render both and a same-argv assertion would be unsatisfiable. The invariant
+    being protected is unchanged — a replay field that reaches no flag in ANY
+    legal shape is silently ignored, which is what #901 exists to refuse.
+    """
     from pipeline.lib import corpus_schema
-    got = _render(workload=_CORPUS_WORKLOAD, trace_path="traces/x")
+    # One rendering per one-of member, so every member gets its turn.
+    renders = [
+        _render(workload=_CORPUS_WORKLOAD, trace_path="traces/x"),
+        _render(workload=_CORPUS_DURATION, trace_path="traces/x"),
+    ]
     for name, field in corpus_schema.REPLAY_FIELDS.items():
-        assert field.flag in got, f"replay.{name} reaches no flag"
+        assert any(field.flag in got for got in renders), (
+            f"replay.{name} reaches no flag in any legal document shape"
+        )
         assert field.param is None, f"replay.{name} must not name a param"
+    # And the one-of really is exclusive: never both in the same argv.
+    sizing_flags = [corpus_schema.REPLAY_FIELDS[n].flag
+                    for n in corpus_schema.REPLAY_ONE_OF]
+    for got in renders:
+        present = [f for f in sizing_flags if f in got]
+        assert len(present) == 1, (
+            f"expected exactly one sizing flag, got {present}"
+        )
 
 
 def test_rendered_argv_is_never_empty():
@@ -424,3 +445,61 @@ def test_timeout_stays_an_int_because_its_flag_is_an_intvar():
     rejected by blis. Pinned because the two flags look interchangeable."""
     assert observe_argv.check_observe_type("timeout", 1800) is None
     assert observe_argv.check_observe_type("timeout", "1800s") is not None
+
+
+# ── replay one-of rendering (#923) ──────────────────────────────────────────
+
+
+_CORPUS_DURATION = {
+    "corpus": {"upstream": {"source": "hf:Org/ds"}},
+    "replay": {"concurrent_sessions": 128, "duration": "20m"},
+}
+
+
+def test_duration_renders_and_total_sessions_is_absent():
+    """AC 1."""
+    argv = render_observe_argv(workload=_CORPUS_DURATION, observe=None,
+                               model="m", results_dir=_RD,
+                               trace_path="traces/x")
+    assert "--duration 20m" in argv
+    assert "--total-sessions" not in argv
+    assert "--concurrent-sessions 128" in argv
+
+
+def test_total_sessions_rendering_is_byte_identical_to_before():
+    """AC 2. The pre-#923 cell must produce exactly the same argv, which is why
+    duration is APPENDED to the table rather than inserted."""
+    argv = render_observe_argv(workload=_CORPUS_WORKLOAD, observe=None,
+                               model="m", results_dir=_RD,
+                               trace_path="traces/x")
+    assert "--concurrent-sessions 128 --total-sessions 192" in argv
+    assert "--duration" not in argv
+
+
+def test_total_sessions_zero_still_renders_the_flag():
+    """AC 3. Rendering must not drop a falsy-but-written value."""
+    wl = {"corpus": {"upstream": {"source": "hf:o/d"}},
+          "replay": {"concurrent_sessions": 25, "total_sessions": 0}}
+    argv = render_observe_argv(workload=wl, observe=None, model="m",
+                               results_dir=_RD, trace_path="traces/x")
+    assert "--total-sessions 0" in argv
+
+
+def test_both_one_of_members_raise_at_render_time():
+    """Defence in depth: validation should have caught this, so reaching the
+    renderer with both means validation was skipped. Fail loudly rather than
+    emitting a pair blis fatals on."""
+    wl = {"corpus": {"upstream": {"source": "hf:o/d"}},
+          "replay": {"concurrent_sessions": 4, "total_sessions": 8,
+                     "duration": "20m"}}
+    with pytest.raises(ObserveArgvError, match="mutually exclusive"):
+        render_observe_argv(workload=wl, observe=None, model="m",
+                            results_dir=_RD, trace_path="traces/x")
+
+
+def test_neither_one_of_member_raises_at_render_time():
+    wl = {"corpus": {"upstream": {"source": "hf:o/d"}},
+          "replay": {"concurrent_sessions": 4}}
+    with pytest.raises(ObserveArgvError, match="exactly one of"):
+        render_observe_argv(workload=wl, observe=None, model="m",
+                            results_dir=_RD, trace_path="traces/x")
