@@ -142,6 +142,46 @@ blis observe \\
     assert "extraArgs" not in parsed
 
 
+def test_dropping_duration_warns_and_names_where_to_put_it(capsys):
+    """Every other drop path in parse_observe_block prints a warning. The
+    injected-flag path does not, which is right for --concurrent-sessions and
+    --total-sessions (assemble ALWAYS supplies those for a corpus cell) and wrong
+    for --duration: the workload cell supplies it only if someone wrote
+    replay.duration, and bootstrap authors no replay: block at all. So a
+    config.md time bound would vanish with no signal and the bundle would run
+    session-bounded instead."""
+    text = """\
+```bash
+blis observe \\
+  --concurrent-sessions 128 \\
+  --duration 20m \\
+  --max-concurrency 10000
+```
+"""
+    parsed = gfc.parse_observe_block(text)
+    assert parsed == {"maxConcurrency": "10000"}
+    err = capsys.readouterr().err
+    assert "--duration" in err
+    assert "replay.duration" in err
+
+
+def test_dropping_an_always_supplied_injected_flag_stays_silent(capsys):
+    """The converse: assemble always emits these for a corpus cell, so warning
+    on them would be noise on every bundle."""
+    text = """\
+```bash
+blis observe \\
+  --concurrent-sessions 128 \\
+  --total-sessions 192 \\
+  --corpus-header t.yaml
+```
+"""
+    gfc.parse_observe_block(text)
+    err = capsys.readouterr().err
+    assert "--total-sessions" not in err
+    assert "--concurrent-sessions" not in err
+
+
 def test_duration_is_a_recognized_observe_flag():
     """It exists on blis observe as of the duration branch, so the allowlist
     must say so. If it were absent, --duration would be dropped by the

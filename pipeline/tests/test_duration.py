@@ -136,6 +136,24 @@ def test_positive_durations_accepted(value):
     assert duration.is_positive_go_duration(value) is True
 
 
+@pytest.mark.parametrize("value", ["0.4ns", "0.9ns", "0.5ns", "0.0000004us",
+                                   "0h0m0.4ns"])
+def test_sub_nanosecond_durations_refused(value):
+    """Go's ParseDuration truncates to integer nanoseconds, so every one of
+    these is exactly 0 to blis — and blis reads 0 as 'flag not set'. A
+    per-term check on the unscaled COEFFICIENT would accept them: 0.4 > 0 is
+    true while 0.4ns scales to 0ns. The sum must be in nanoseconds."""
+    assert duration.is_go_duration(value) is True
+    assert duration.is_positive_go_duration(value) is False
+
+
+@pytest.mark.parametrize("value", ["1ns", "0.001us", "0.000001ms"])
+def test_smallest_representable_durations_accepted(value):
+    """The boundary on the other side: these scale to exactly 1ns, which blis
+    treats as set. Refusing them would be the mirror bug."""
+    assert duration.is_positive_go_duration(value) is True
+
+
 @pytest.mark.parametrize("value", ["0", "+0", "0s", "0m", "0h", "0ms", "0ns",
                                    "0.0s", "0h0m0s", ".0s"])
 def test_zero_durations_refused(value):
@@ -151,6 +169,31 @@ def test_zero_durations_refused(value):
 def test_invalid_durations_refused(value):
     """Everything is_go_duration already refuses stays refused."""
     assert duration.is_positive_go_duration(value) is False
+
+
+def test_describe_nonzero_does_not_claim_zero_is_accepted():
+    """#923 asked for an error message saying blis treats 0 as unset. The shared
+    DESCRIBE opens with "'0' is the one accepted unitless value", which is true
+    for max_think_time and the opposite of the rule for --duration — an operator
+    who wrote 0 reads the contradiction first. DESCRIBE_NONZERO drops that
+    clause while keeping the unit rule, so one phrasing still explains the rule
+    everywhere it is enforced."""
+    assert "one accepted unitless value" in duration.DESCRIBE
+    assert "one accepted unitless value" not in duration.DESCRIBE_NONZERO
+    # The part that matters to every consumer survives in both.
+    for text in (duration.DESCRIBE, duration.DESCRIBE_NONZERO):
+        assert "explicit unit" in text
+        assert "15s from 15ms" in text
+
+
+def test_shared_describe_is_unchanged_for_its_existing_consumers():
+    """max_think_time and prewarmDuration both interpolate DESCRIBE. Splitting
+    it must not reword what they say."""
+    assert duration.DESCRIBE == (
+        "must be a Go duration STRING with an explicit unit (e.g. '60s', "
+        "'15m', '1h30m'); '0' is the one accepted unitless value. A bare "
+        "number is refused because the unit is what distinguishes 15s from 15ms"
+    )
 
 
 def test_positive_is_strictly_narrower_than_is_go_duration():

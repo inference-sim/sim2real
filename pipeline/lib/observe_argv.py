@@ -403,27 +403,36 @@ def render_observe_argv(
         # (Cobra takes the last occurrence) while the workload document says
         # otherwise, and naming the OTHER member collides with the flag already
         # rendered, which blis rejects outright (observe_corpus.go:84) — in-pod,
-        # after a namespace slot and a corpus download have been spent. Only
-        # refuse when THIS cell actually rendered a sizing flag: a generative
-        # cell renders none, so there is nothing to contradict and the flags are
-        # the operator's business.
-        if corpus_mode:
-            words = set(shlex.split(extra))
-            clashing = sorted(
-                corpus_schema.REPLAY_FIELDS[name].flag
-                for name in corpus_schema.REPLAY_ONE_OF
-                if corpus_schema.REPLAY_FIELDS[name].flag in words
+        # after a namespace slot and a corpus download have been spent.
+        #
+        # Compared on the flag NAME, so `--total-sessions=5` is caught alongside
+        # `--total-sessions 5`. pflag marks a flag Changed for either spelling,
+        # and generate_from_config.py deliberately PRESERVES the `=` form when it
+        # routes a flag into extraArgs — so a whole-word match would miss the
+        # spelling this repo's own producer emits.
+        #
+        # Applied in BOTH modes, not just corpus mode. measurement.yaml is
+        # bundle-level, so one extraArgs reaches generative and corpus cells
+        # alike, and a generative cell is not a safe place to leave these:
+        # `--duration` there is a hard blis fatal ("--duration requires
+        # --concurrent-sessions > 0", observe_corpus.go:60), and
+        # `--total-sessions` is silently inert, which is the accept-and-ignore
+        # shape this module refuses everywhere else.
+        names = {w.split("=", 1)[0] for w in shlex.split(extra)}
+        clashing = sorted(
+            corpus_schema.REPLAY_FIELDS[name].flag
+            for name in corpus_schema.REPLAY_ONE_OF
+            if corpus_schema.REPLAY_FIELDS[name].flag in names
+        )
+        if clashing:
+            raise ObserveArgvError(
+                f"{SOURCE_LABEL}.extraArgs names {clashing}, which size the "
+                f"replay. Those come from the workload cell's 'replay:' block, "
+                f"not from the measurement protocol: restating one here either "
+                f"silently re-sizes the run or collides with the flag already "
+                f"rendered, which blis rejects. Set replay.total_sessions or "
+                f"replay.duration instead"
             )
-            if clashing:
-                raise ObserveArgvError(
-                    f"{SOURCE_LABEL}.extraArgs names {clashing}, which size "
-                    f"the replay. Those come from the workload cell's "
-                    f"'replay:' block, not from the measurement protocol: "
-                    f"restating one here either silently re-sizes the run or "
-                    f"collides with the flag already rendered, which blis "
-                    f"rejects. Set replay.total_sessions or replay.duration "
-                    f"instead"
-                )
         argv += shlex.split(extra)
 
     # An EMPTY argv must never leave here. Tekton's "required param" means

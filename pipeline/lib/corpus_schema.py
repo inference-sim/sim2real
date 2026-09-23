@@ -255,10 +255,14 @@ REPLAY_FIELDS: dict[str, _Field] = {
     "duration": _Field(
         flag="--duration", default=ONE_OF, render=str,
         check=duration.is_positive_go_duration,
+        # DESCRIBE_NONZERO, not DESCRIBE: the shared wording opens by saying
+        # "'0' is the one accepted unitless value", which is true for
+        # max_think_time and the opposite of the rule here — an operator who
+        # wrote 0 would read that clause before the refusal explaining it.
         describe=(
-            f"{duration.DESCRIBE}, and must be non-zero: blis reads "
-            f"--duration 0 as 'flag not set', so a zero would leave the run "
-            f"bounded by neither the clock nor a session count"
+            f"{duration.DESCRIBE_NONZERO} A zero is refused because blis reads "
+            f"--duration 0 as 'flag not set', which would leave the run bounded "
+            f"by neither the clock nor a session count"
         ),
     ),
 }

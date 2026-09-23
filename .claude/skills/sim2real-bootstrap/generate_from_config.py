@@ -230,6 +230,18 @@ OBSERVE_PIPELINE_INJECTED_FLAGS = {
     "--duration",
 }
 
+# Injected flags the workload cell supplies ONLY if the operator put them there,
+# mapped to the descriptor key that supplies each. Dropping one of these silently
+# loses intent: assemble always emits --concurrent-sessions / --total-sessions /
+# --corpus-* for a corpus cell, so warning on those would be noise on every
+# bundle, but --duration reaches the argv only when a workload's `replay:` block
+# names it — and this script authors no `replay:` block at all. So a config.md
+# time bound would vanish and the bundle would run session-bounded instead.
+# Every other drop path in parse_observe_block warns; this one must too.
+OBSERVE_INJECTED_OPTIONAL_FLAGS = {
+    "--duration": "replay.duration",
+}
+
 # The complete set of flags `blis observe` accepts, from inference-sim
 # @ 583f7195 (PR #1499, corpus-mode). This is the allowlist: a flag in
 # config.md's observe block is written to transfer.yaml only if it appears here
@@ -1419,7 +1431,18 @@ def parse_observe_block(config_md_text: str) -> dict[str, str]:
                     file=sys.stderr,
                 )
         elif flag_name in OBSERVE_PIPELINE_INJECTED_FLAGS:
-            pass  # Drop entirely — the Tekton task supplies these.
+            # Drop entirely — assemble supplies these from the workload cell.
+            # Silent for the ones it ALWAYS supplies; warned for the ones it
+            # supplies only on request, since those would otherwise be lost.
+            where = OBSERVE_INJECTED_OPTIONAL_FLAGS.get(flag_name)
+            if where:
+                print(
+                    f"WARNING: dropping '{flag_name}' from the blis observe "
+                    f"block (assemble renders it from the workload cell, not "
+                    f"from config.md). To keep this bound, set '{where}' in the "
+                    f"corpus workload YAML — this script does not author it.",
+                    file=sys.stderr,
+                )
         elif flag_name in OBSERVE_VALID_FLAGS:
             # A real blis observe flag with no first-class key — pass it
             # through verbatim (preserving --flag=value vs --flag value) so the

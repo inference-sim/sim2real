@@ -1315,11 +1315,20 @@ keys. A zero `duration` is refused too, for the mirror-image reason: blis reads
 `--duration 0` as "flag not set", which would leave the run bounded by neither
 the clock nor a session count.
 
-`measurement.extraArgs` may not name `--total-sessions` or `--duration`. Those
+`measurement.extraArgs` may not name `--total-sessions` or `--duration`, in
+either spelling (`--duration 20m` and `--duration=20m` are both refused). Those
 come from the workload cell, and restating one there is not the override
 `extraArgs` otherwise provides: a duplicate silently re-sizes the run (the last
 occurrence wins) and the other member collides with the flag already rendered,
-which blis rejects in-pod.
+which blis rejects in-pod. The refusal applies to **generative cells too**, even
+though they render no sizing flag — `measurement.yaml` is bundle-level, so one
+`extraArgs` reaches every cell, and on a generative cell `--duration` is a hard
+blis fatal ("requires `--concurrent-sessions > 0`") while `--total-sessions` is
+silently inert.
+
+If a `config.md` observe block spells out `--duration`, `/sim2real-bootstrap`
+drops it with a warning pointing at `replay.duration` — it is not transcribed
+into `extraArgs`, because that would assemble into the refusal above.
 
 See #924 for the interaction between a long `duration` and the observe task's
 3h Tekton timeout, which assemble does **not** yet check.

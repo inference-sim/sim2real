@@ -505,8 +505,17 @@ def test_neither_one_of_member_raises_at_render_time():
                             results_dir=_RD, trace_path="traces/x")
 
 
-@pytest.mark.parametrize("extra", ["--total-sessions 5", "--duration 5m",
-                                   "--record-itl --total-sessions 5"])
+@pytest.mark.parametrize("extra", [
+    "--total-sessions 5", "--duration 5m",
+    "--record-itl --total-sessions 5",
+    # The `=` spelling is an ordinary one, and pflag marks the flag Changed for
+    # it identically to the space form — so matching whole words only let the
+    # exact in-pod fatal this check exists to prevent through. Worse,
+    # generate_from_config.py deliberately PRESERVES --flag=value when routing a
+    # flag into extraArgs, so this is the spelling the surrounding code produces.
+    "--total-sessions=5", "--duration=5m",
+    "--record-itl --total-sessions=5",
+])
 def test_extra_args_naming_a_sizing_flag_is_refused(extra):
     """#923. extraArgs is a documented override for everything else, but for the
     sizing pair an override is either a silent re-size (Cobra takes the last
@@ -515,6 +524,21 @@ def test_extra_args_naming_a_sizing_flag_is_refused(extra):
         render_observe_argv(workload=_CORPUS_DURATION,
                             observe={"extraArgs": extra}, model="m",
                             results_dir=_RD, trace_path="traces/x")
+
+
+@pytest.mark.parametrize("extra", ["--duration 20m", "--duration=20m",
+                                   "--total-sessions 5"])
+def test_sizing_flags_in_extra_args_refused_on_a_generative_cell_too(extra):
+    """The corpus-mode carve-out was wrong for --duration: blis returns
+    "--duration requires --concurrent-sessions > 0" (observe_corpus.go:60), so a
+    generative cell carrying it in extraArgs cannot start at all. --total-sessions
+    is merely inert there, which is the accept-and-ignore shape this module
+    refuses anyway. measurement.yaml is bundle-level, so one extraArgs reaches
+    generative and corpus cells alike — the refusal has to as well."""
+    with pytest.raises(ObserveArgvError, match="extraArgs"):
+        render_observe_argv(workload=_SPEC_WORKLOAD,
+                            observe={"extraArgs": extra}, model="m",
+                            results_dir=_RD)
 
 
 def test_extra_args_unrelated_to_sizing_still_allowed():
