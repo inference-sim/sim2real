@@ -118,3 +118,38 @@ def is_go_duration(value) -> bool:
         if total > _MAX_INT64:
             return False
     return True
+
+
+def is_positive_go_duration(value) -> bool:
+    """Return True iff ``value`` is a duration blis will accept AND is non-zero.
+
+    A strictly narrower sibling of :func:`is_go_duration`, which accepts ``"0"``
+    and ``"0s"`` deliberately — ``prepare-trace`` documents ``0`` as "no cap" for
+    ``max_think_time``, so the shared predicate must keep taking it.
+
+    ``blis observe --duration`` cannot. Its Cobra ``DurationVar`` defaults to 0,
+    and the corpus validator keys its one-of against ``--total-sessions`` on
+    SUPPLIED-NESS, reading ``duration == 0`` as "flag not set"
+    (``cmd/observe_corpus.go:84``). So a zero passes every check on both sides
+    and yields a run bounded by neither the clock nor a session count, while the
+    workload document says a time bound was requested. That is the
+    accept-and-ignore shape ``corpus_schema`` exists to refuse, so it is refused
+    here instead — and note the reason is "blis treats 0 as unset", NOT "blis
+    rejects 0". Only a NEGATIVE duration is something blis rejects itself
+    (``observe_cmd.go:355``), and :func:`is_go_duration` already refuses those.
+
+    Zero is SUMMED rather than pattern-matched because it has many spellings:
+    ``0``, ``0s``, ``0.0s``, ``.0s``, ``0h0m0s``. Reusing the already-validated
+    :data:`_TERM_RE` grammar keeps one parser for the whole module — the unit is
+    irrelevant to the sign, so only the numeric terms are inspected.
+    """
+    if not is_go_duration(value):
+        return False
+    # The two unitless zeros never reach _TERM_RE: is_go_duration short-circuits
+    # them before the grammar runs, so findall() would see no terms and any()
+    # would answer False by accident rather than by decision. Say it explicitly.
+    if value in ("0", "+0"):
+        return False
+    return any(
+        decimal.Decimal(num) > 0 for num, _unit in _TERM_RE.findall(value)
+    )

@@ -126,3 +126,35 @@ def test_longer_units_are_matched_before_shorter_ones():
     assert duration.is_go_duration("500ms") is True
     assert duration.is_go_duration("500ns") is True
     assert duration.is_go_duration("500us") is True
+
+
+# -- is_positive_go_duration (#923) ------------------------------------------
+
+
+@pytest.mark.parametrize("value", ["20m", "1h30m", "1ns", "0.5s", "1h0m0s"])
+def test_positive_durations_accepted(value):
+    assert duration.is_positive_go_duration(value) is True
+
+
+@pytest.mark.parametrize("value", ["0", "+0", "0s", "0m", "0h", "0ms", "0ns",
+                                   "0.0s", "0h0m0s", ".0s"])
+def test_zero_durations_refused(value):
+    """is_go_duration accepts these on purpose (max_think_time documents '0' as
+    'no cap'). --duration cannot: blis reads 0 as 'flag not set', so a zero
+    would silently produce a run bounded by nothing."""
+    assert duration.is_go_duration(value) is True
+    assert duration.is_positive_go_duration(value) is False
+
+
+@pytest.mark.parametrize("value", ["-5m", "60000", "", "20", 20, True, None,
+                                   "9999999999999s", "20x"])
+def test_invalid_durations_refused(value):
+    """Everything is_go_duration already refuses stays refused."""
+    assert duration.is_positive_go_duration(value) is False
+
+
+def test_positive_is_strictly_narrower_than_is_go_duration():
+    """The two predicates differ only in which side of zero they sit on."""
+    for value in ["20m", "1h30m", "0", "0s", "0.0s", "-5m", "60000", "1ns"]:
+        if duration.is_positive_go_duration(value):
+            assert duration.is_go_duration(value), value
