@@ -119,6 +119,83 @@ blis observe \\
     assert "extraArgs" not in parsed
 
 
+def test_duration_is_dropped_as_pipeline_injected_not_extraargs():
+    """#923 made `--duration` a pipeline-injected flag: it comes from the corpus
+    workload's `replay.duration`, exactly like the pool flags beside it. A
+    config.md block that spells it out must be DROPPED, not transcribed into
+    extraArgs — observe_argv refuses an extraArgs naming a sizing flag, so
+    transcribing it would turn a readable config.md into a failed assemble."""
+    text = """\
+```bash
+blis observe \\
+  --server-url http://gateway:80 \\
+  --model foo/bar \\
+  --corpus-header trace.yaml \\
+  --corpus-data trace.csv \\
+  --concurrent-sessions 128 \\
+  --duration 20m \\
+  --max-concurrency 10000
+```
+"""
+    parsed = gfc.parse_observe_block(text)
+    assert parsed == {"maxConcurrency": "10000"}
+    assert "extraArgs" not in parsed
+
+
+def test_dropping_duration_warns_and_names_where_to_put_it(capsys):
+    """Every other drop path in parse_observe_block prints a warning. The
+    injected-flag path does not, which is right for --concurrent-sessions and
+    --total-sessions (assemble ALWAYS supplies those for a corpus cell) and wrong
+    for --duration: the workload cell supplies it only if someone wrote
+    replay.duration, and bootstrap authors no replay: block at all. So a
+    config.md time bound would vanish with no signal and the bundle would run
+    session-bounded instead."""
+    text = """\
+```bash
+blis observe \\
+  --concurrent-sessions 128 \\
+  --duration 20m \\
+  --max-concurrency 10000
+```
+"""
+    parsed = gfc.parse_observe_block(text)
+    assert parsed == {"maxConcurrency": "10000"}
+    err = capsys.readouterr().err
+    assert "--duration" in err
+    assert "replay.duration" in err
+
+
+def test_dropping_an_always_supplied_injected_flag_stays_silent(capsys):
+    """The converse: assemble always emits these for a corpus cell, so warning
+    on them would be noise on every bundle."""
+    text = """\
+```bash
+blis observe \\
+  --concurrent-sessions 128 \\
+  --total-sessions 192 \\
+  --corpus-header t.yaml
+```
+"""
+    gfc.parse_observe_block(text)
+    err = capsys.readouterr().err
+    assert "--total-sessions" not in err
+    assert "--concurrent-sessions" not in err
+
+
+def test_duration_is_a_recognized_observe_flag():
+    """It exists on blis observe as of the duration branch, so the allowlist
+    must say so. If it were absent, --duration would be dropped by the
+    not-a-blis-flag branch with a warning that misdescribes the reason."""
+    assert "--duration" in gfc.OBSERVE_VALID_FLAGS
+    assert "--duration" in gfc.OBSERVE_PIPELINE_INJECTED_FLAGS
+
+
+def test_every_pipeline_injected_flag_is_also_a_valid_observe_flag():
+    """The injected set is a subset of what blis accepts: injecting a flag blis
+    does not have would fail in-pod. Pins the two lists together."""
+    assert gfc.OBSERVE_PIPELINE_INJECTED_FLAGS <= gfc.OBSERVE_VALID_FLAGS
+
+
 def test_non_observe_flags_are_dropped_not_extraargs():
     """Flags that are not in blis observe's namespace are refused, not folded
     into extraArgs (which would abort observe at runtime). Issue #602."""

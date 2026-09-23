@@ -1286,8 +1286,52 @@ corpus:
                                 #   think gap. "0" = no cap. No default: see below
 replay:                         # REQUIRED — consumed by blis observe at replay time
   concurrent_sessions: 128      # REQUIRED, int >= 1  → --concurrent-sessions
-  total_sessions: 192           # REQUIRED, int >= 0  → --total-sessions (0 = exhaust the corpus)
+  total_sessions: 192           # int >= 0  → --total-sessions (0 = exhaust the corpus)
+  # duration: 20m               # Go duration, non-zero → --duration
 ```
+
+##### `total_sessions` and `duration` are a one-of: write exactly one
+
+They are the two answers to "when does this replay stop" — by session count, or
+by the clock. `duration` bounds the *measured window*: once that much has
+elapsed, blis stops sending (no new sessions, and no further rounds of sessions
+already running), then drains the requests already on the wire, so the output
+trace contains partial sessions. Until the bound the session queue is open-ended
+— the corpus is cycled with cache-busting clones — so it never runs dry. The
+window is measured from the start of the dispatch loop, so it excludes
+`measurement.prewarmDuration` and tokenizer calibration.
+
+Reach for `duration` when session count is a poor proxy for run length. It
+usually is on a multi-turn corpus: in one measured 8-session run the individual
+sessions ran 7, 29, 33, 41, 131, 199, 255 and 664 rounds, so `total_sessions`
+said very little about how long the run would take.
+
+The choice is keyed on **whether the key is written**, not on its value, because
+blis keys its own exclusion the same way — `--total-sessions 0 --duration 20m` is
+a conflict, not an override. `total_sessions: 0` is a meaningful value ("replay
+each corpus session once"), so to switch a cell to a time bound you must *remove*
+the `total_sessions` key; setting it to `0` or `null` is refused, naming both
+keys. A zero `duration` is refused too, for the mirror-image reason: blis reads
+`--duration 0` as "flag not set", which would leave the run bounded by neither
+the clock nor a session count.
+
+`measurement.extraArgs` may not name `--total-sessions` or `--duration`, in
+either spelling (`--duration 20m` and `--duration=20m` are both refused). Those
+come from the workload cell, and restating one there is not the override
+`extraArgs` otherwise provides: a duplicate silently re-sizes the run (the last
+occurrence wins) and the other member collides with the flag already rendered,
+which blis rejects in-pod. The refusal applies to **generative cells too**, even
+though they render no sizing flag — `measurement.yaml` is bundle-level, so one
+`extraArgs` reaches every cell, and on a generative cell `--duration` is a hard
+blis fatal ("requires `--concurrent-sessions > 0`") while `--total-sessions` is
+silently inert.
+
+If a `config.md` observe block spells out `--duration`, `/sim2real-bootstrap`
+drops it with a warning pointing at `replay.duration` — it is not transcribed
+into `extraArgs`, because that would assemble into the refusal above.
+
+See #924 for the interaction between a long `duration` and the observe task's
+3h Tekton timeout, which assemble does **not** yet check.
 
 ##### `max_think_time` is required, and has no default on purpose
 
@@ -1393,7 +1437,7 @@ Corpus workloads emit these; generative workloads emit **none** of them (and a n
 | `traceSplit`, `traceMinRounds`, `traceDedupByConversation`, `traceShuffleSeed` | `corpus.select.*` |
 | `traceContextGrowth`, `traceMaxThinkTime` | `corpus.reconstruct.*` |
 
-`replay.*` emits **no** params of its own: #900 folded `concurrent_sessions` / `total_sessions` into the rendered `observeArgs` as `--concurrent-sessions` / `--total-sessions`, so the standalone `concurrentSessions` / `totalSessions` params no longer exist.
+`replay.*` emits **no** params of its own: #900 folded `concurrent_sessions` / `total_sessions` into the rendered `observeArgs` as `--concurrent-sessions` / `--total-sessions`, so the standalone `concurrentSessions` / `totalSessions` params no longer exist. #923 added `duration` the same way, as `--duration` — a new replay field needs no Pipeline or Task change, only a table entry and a renderer that knows when to emit it.
 
 Every param above must be both **declared** in `pipeline/pipeline.yaml` and **forwarded** to the `prepare-trace` taskRef, and the two failures differ:
 

@@ -221,6 +221,25 @@ OBSERVE_PIPELINE_INJECTED_FLAGS = {
     "--corpus-data",
     "--concurrent-sessions",
     "--total-sessions",
+    # --duration joined the pool flags in sim2real#923: it comes from the corpus
+    # workload's `replay.duration`, as the one-of alternative to
+    # `replay.total_sessions`. It MUST be listed here rather than left to the
+    # allowlist below, because observe_argv REFUSES a measurement.extraArgs that
+    # names either sizing flag — so transcribing it would turn a config.md that
+    # merely spells out its command into a failed assemble.
+    "--duration",
+}
+
+# Injected flags the workload cell supplies ONLY if the operator put them there,
+# mapped to the descriptor key that supplies each. Dropping one of these silently
+# loses intent: assemble always emits --concurrent-sessions / --total-sessions /
+# --corpus-* for a corpus cell, so warning on those would be noise on every
+# bundle, but --duration reaches the argv only when a workload's `replay:` block
+# names it — and this script authors no `replay:` block at all. So a config.md
+# time bound would vanish and the bundle would run session-bounded instead.
+# Every other drop path in parse_observe_block warns; this one must too.
+OBSERVE_INJECTED_OPTIONAL_FLAGS = {
+    "--duration": "replay.duration",
 }
 
 # The complete set of flags `blis observe` accepts, from inference-sim
@@ -244,7 +263,12 @@ OBSERVE_PIPELINE_INJECTED_FLAGS = {
 OBSERVE_VALID_FLAGS = {
     # --- cmd/observe_cmd.go (registered directly on observeCmd) ---
     "--api-format", "--api-key", "--concurrency", "--concurrent-sessions",
-    "--corpus-data", "--corpus-header", "--defaults-filepath", "--horizon",
+    "--corpus-data", "--corpus-header", "--defaults-filepath",
+    # --duration is a DurationVar on observeCmd, bounding a corpus run by the
+    # clock (mutually exclusive with --total-sessions). Present on the inference-sim
+    # `duration` branch; not in 583f7195, so regenerating this set from an older
+    # commit would silently drop it back out.
+    "--duration", "--horizon",
     "--itl-output", "--lazy-generation", "--max-concurrency", "--model",
     "--no-streaming", "--num-requests", "--output-tokens", "--output-tokens-max",
     "--output-tokens-min", "--output-tokens-stdev", "--prefix-tokens", "--prewarm-duration", "--prompt-tokens",
@@ -1407,7 +1431,18 @@ def parse_observe_block(config_md_text: str) -> dict[str, str]:
                     file=sys.stderr,
                 )
         elif flag_name in OBSERVE_PIPELINE_INJECTED_FLAGS:
-            pass  # Drop entirely — the Tekton task supplies these.
+            # Drop entirely — assemble supplies these from the workload cell.
+            # Silent for the ones it ALWAYS supplies; warned for the ones it
+            # supplies only on request, since those would otherwise be lost.
+            where = OBSERVE_INJECTED_OPTIONAL_FLAGS.get(flag_name)
+            if where:
+                print(
+                    f"WARNING: dropping '{flag_name}' from the blis observe "
+                    f"block (assemble renders it from the workload cell, not "
+                    f"from config.md). To keep this bound, set '{where}' in the "
+                    f"corpus workload YAML — this script does not author it.",
+                    file=sys.stderr,
+                )
         elif flag_name in OBSERVE_VALID_FLAGS:
             # A real blis observe flag with no first-class key — pass it
             # through verbatim (preserving --flag=value vs --flag value) so the

@@ -45,6 +45,13 @@ from pipeline.lib.errors import AssembleError
 # ``None`` cannot serve here — it is a legitimate default for a nullable field.
 REQUIRED = object()
 
+# Sentinel for a field that is required as one MEMBER OF A GROUP rather than on
+# its own: exactly one member of the group must be written. Distinct from
+# REQUIRED so a test can assert the marked fields and the group agree, and so
+# ``_validate_replay`` can tell "you must write this" from "you must write one of
+# these" without carrying a hardcoded name list.
+ONE_OF = object()
+
 
 class _Field:
     """One legal field of the corpus/replay document.
@@ -214,6 +221,19 @@ CORPUS_FIELDS: dict[str, dict[str, _Field]] = {
     },
 }
 
+#: ``replay:`` fields that SIZE the run. Exactly one must be written — they are
+#: the two answers to "when does this replay stop", and blis rejects the pair
+#: outright (``cmd/observe_corpus.go:84``).
+#:
+#: MEMBERSHIP IS KEYED ON WHETHER THE KEY IS WRITTEN, never on its value. blis
+#: does the same, deliberately: its check is
+#: ``duration != 0 && totalSessionsSupplied``, so ``--total-sessions 0
+#: --duration 20m`` is a conflict rather than a silent override. ``0`` is a
+#: documented, meaningful value for ``total_sessions`` ("replay each corpus
+#: session once") and is in real use, so a truthiness test here would silently
+#: convert an exhaust-the-corpus cell into an unbounded one.
+REPLAY_ONE_OF: frozenset[str] = frozenset({"total_sessions", "duration"})
+
 #: ``replay:`` — consumed by ``blis observe`` at replay time. Applied, never
 #: hashed: two cells differing only here build the identical corpus and share
 #: one cache entry, which is the property ``corpus_cache_key`` exists to give.
@@ -224,9 +244,26 @@ REPLAY_FIELDS: dict[str, _Field] = {
         describe="must be an int >= 1",
     ),
     "total_sessions": _Field(
-        flag="--total-sessions", default=REQUIRED, render=str,
+        flag="--total-sessions", default=ONE_OF, render=str,
         check=_int_at_least(0),
         describe="must be an int >= 0 (0 = exhaust the corpus)",
+    ),
+    # Appended, not inserted: this table's order is the rendered flag order, and
+    # a cell that sizes by total_sessions must keep producing byte-identical
+    # observeArgs. See REPLAY_ONE_OF for why this is a one-of rather than a third
+    # independent knob.
+    "duration": _Field(
+        flag="--duration", default=ONE_OF, render=str,
+        check=duration.is_positive_go_duration,
+        # DESCRIBE_NONZERO, not DESCRIBE: the shared wording opens by saying
+        # "'0' is the one accepted unitless value", which is true for
+        # max_think_time and the opposite of the rule here — an operator who
+        # wrote 0 would read that clause before the refusal explaining it.
+        describe=(
+            f"{duration.DESCRIBE_NONZERO} A zero is refused because blis reads "
+            f"--duration 0 as 'flag not set', which would leave the run bounded "
+            f"by neither the clock nor a session count"
+        ),
     ),
 }
 
@@ -459,10 +496,12 @@ def _validate_format_conditional(corpus: dict, where: str) -> None:
 
 
 def _validate_replay(replay, where: str) -> None:
+    required = sorted(set(REPLAY_FIELDS) - REPLAY_ONE_OF)
     if not isinstance(replay, dict) or not replay:
         raise AssembleError(
             f"workload {where}: 'replay' is required and must be a mapping "
-            f"declaring {sorted(REPLAY_FIELDS)}"
+            f"declaring {required} plus exactly one of "
+            f"{sorted(REPLAY_ONE_OF)}"
         )
     unknown = set(replay) - set(REPLAY_FIELDS)
     if unknown:
@@ -470,8 +509,30 @@ def _validate_replay(replay, where: str) -> None:
             f"workload {where}: unrecognized key(s) {sorted(unknown)} under "
             f"'replay'. Legal keys: {sorted(REPLAY_FIELDS)}"
         )
+    # The one-of, checked on PRESENCE. An explicitly null value counts as
+    # written: commenting a value out leaves the key behind, and blis keys its
+    # own exclusion on supplied-ness, so treating null as absent here would emit
+    # a flag pair blis fatals on.
+    written = sorted(REPLAY_ONE_OF & set(replay))
+    if len(written) > 1:
+        raise AssembleError(
+            f"workload {where}: replay declares {written}, but they are "
+            f"mutually exclusive — 'total_sessions' bounds the run by session "
+            f"count and 'duration' bounds it by the clock. blis rejects the "
+            f"pair on SUPPLIED-NESS, not value, so 'total_sessions: 0' "
+            f"alongside 'duration' is a conflict rather than an override: "
+            f"remove the key you do not want, do not set it to 0 or null"
+        )
+    if not written:
+        raise AssembleError(
+            f"workload {where}: replay must declare exactly one of "
+            f"{sorted(REPLAY_ONE_OF)} to size the run — 'total_sessions' by "
+            f"session count, 'duration' by the clock"
+        )
     for key, field in REPLAY_FIELDS.items():
         if key not in replay:
+            if key in REPLAY_ONE_OF:
+                continue          # the unwritten member of the one-of
             raise AssembleError(f"workload {where}: replay.{key} is required")
         value = replay[key]
         if not field.check(value):

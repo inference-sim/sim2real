@@ -265,12 +265,33 @@ def test_glob_chars_absent_from_forbidden_set():
 
 def test_every_replay_field_reaches_a_flag():
     """#901's applied-or-rejected invariant, after #900 moved the destination
-    from a PipelineRun param to an argv flag."""
+    from a PipelineRun param to an argv flag.
+
+    Reachability is checked across every legal document shape, not within one:
+    #923 made ``total_sessions``/``duration`` a one-of, so no single cell can
+    render both and a same-argv assertion would be unsatisfiable. The invariant
+    being protected is unchanged — a replay field that reaches no flag in ANY
+    legal shape is silently ignored, which is what #901 exists to refuse.
+    """
     from pipeline.lib import corpus_schema
-    got = _render(workload=_CORPUS_WORKLOAD, trace_path="traces/x")
+    # One rendering per one-of member, so every member gets its turn.
+    renders = [
+        _render(workload=_CORPUS_WORKLOAD, trace_path="traces/x"),
+        _render(workload=_CORPUS_DURATION, trace_path="traces/x"),
+    ]
     for name, field in corpus_schema.REPLAY_FIELDS.items():
-        assert field.flag in got, f"replay.{name} reaches no flag"
+        assert any(field.flag in got for got in renders), (
+            f"replay.{name} reaches no flag in any legal document shape"
+        )
         assert field.param is None, f"replay.{name} must not name a param"
+    # And the one-of really is exclusive: never both in the same argv.
+    sizing_flags = [corpus_schema.REPLAY_FIELDS[n].flag
+                    for n in corpus_schema.REPLAY_ONE_OF]
+    for got in renders:
+        present = [f for f in sizing_flags if f in got]
+        assert len(present) == 1, (
+            f"expected exactly one sizing flag, got {present}"
+        )
 
 
 def test_rendered_argv_is_never_empty():
@@ -424,3 +445,112 @@ def test_timeout_stays_an_int_because_its_flag_is_an_intvar():
     rejected by blis. Pinned because the two flags look interchangeable."""
     assert observe_argv.check_observe_type("timeout", 1800) is None
     assert observe_argv.check_observe_type("timeout", "1800s") is not None
+
+
+# ── replay one-of rendering (#923) ──────────────────────────────────────────
+
+
+_CORPUS_DURATION = {
+    "corpus": {"upstream": {"source": "hf:Org/ds"}},
+    "replay": {"concurrent_sessions": 128, "duration": "20m"},
+}
+
+
+def test_duration_renders_and_total_sessions_is_absent():
+    """AC 1."""
+    argv = render_observe_argv(workload=_CORPUS_DURATION, observe=None,
+                               model="m", results_dir=_RD,
+                               trace_path="traces/x")
+    assert "--duration 20m" in argv
+    assert "--total-sessions" not in argv
+    assert "--concurrent-sessions 128" in argv
+
+
+def test_total_sessions_rendering_is_byte_identical_to_before():
+    """AC 2. The pre-#923 cell must produce exactly the same argv, which is why
+    duration is APPENDED to the table rather than inserted."""
+    argv = render_observe_argv(workload=_CORPUS_WORKLOAD, observe=None,
+                               model="m", results_dir=_RD,
+                               trace_path="traces/x")
+    assert "--concurrent-sessions 128 --total-sessions 192" in argv
+    assert "--duration" not in argv
+
+
+def test_total_sessions_zero_still_renders_the_flag():
+    """AC 3. Rendering must not drop a falsy-but-written value."""
+    wl = {"corpus": {"upstream": {"source": "hf:o/d"}},
+          "replay": {"concurrent_sessions": 25, "total_sessions": 0}}
+    argv = render_observe_argv(workload=wl, observe=None, model="m",
+                               results_dir=_RD, trace_path="traces/x")
+    assert "--total-sessions 0" in argv
+
+
+def test_both_one_of_members_raise_at_render_time():
+    """Defence in depth: validation should have caught this, so reaching the
+    renderer with both means validation was skipped. Fail loudly rather than
+    emitting a pair blis fatals on."""
+    wl = {"corpus": {"upstream": {"source": "hf:o/d"}},
+          "replay": {"concurrent_sessions": 4, "total_sessions": 8,
+                     "duration": "20m"}}
+    with pytest.raises(ObserveArgvError, match="mutually exclusive"):
+        render_observe_argv(workload=wl, observe=None, model="m",
+                            results_dir=_RD, trace_path="traces/x")
+
+
+def test_neither_one_of_member_raises_at_render_time():
+    wl = {"corpus": {"upstream": {"source": "hf:o/d"}},
+          "replay": {"concurrent_sessions": 4}}
+    with pytest.raises(ObserveArgvError, match="exactly one of"):
+        render_observe_argv(workload=wl, observe=None, model="m",
+                            results_dir=_RD, trace_path="traces/x")
+
+
+@pytest.mark.parametrize("extra", [
+    "--total-sessions 5", "--duration 5m",
+    "--record-itl --total-sessions 5",
+    # The `=` spelling is an ordinary one, and pflag marks the flag Changed for
+    # it identically to the space form — so matching whole words only let the
+    # exact in-pod fatal this check exists to prevent through. Worse,
+    # generate_from_config.py deliberately PRESERVES --flag=value when routing a
+    # flag into extraArgs, so this is the spelling the surrounding code produces.
+    "--total-sessions=5", "--duration=5m",
+    "--record-itl --total-sessions=5",
+])
+def test_extra_args_naming_a_sizing_flag_is_refused(extra):
+    """#923. extraArgs is a documented override for everything else, but for the
+    sizing pair an override is either a silent re-size (Cobra takes the last
+    occurrence) or a hard blis fatal."""
+    with pytest.raises(ObserveArgvError, match="extraArgs"):
+        render_observe_argv(workload=_CORPUS_DURATION,
+                            observe={"extraArgs": extra}, model="m",
+                            results_dir=_RD, trace_path="traces/x")
+
+
+@pytest.mark.parametrize("extra", ["--duration 20m", "--duration=20m",
+                                   "--total-sessions 5"])
+def test_sizing_flags_in_extra_args_refused_on_a_generative_cell_too(extra):
+    """The corpus-mode carve-out was wrong for --duration: blis returns
+    "--duration requires --concurrent-sessions > 0" (observe_corpus.go:60), so a
+    generative cell carrying it in extraArgs cannot start at all. --total-sessions
+    is merely inert there, which is the accept-and-ignore shape this module
+    refuses anyway. measurement.yaml is bundle-level, so one extraArgs reaches
+    generative and corpus cells alike — the refusal has to as well."""
+    with pytest.raises(ObserveArgvError, match="extraArgs"):
+        render_observe_argv(workload=_SPEC_WORKLOAD,
+                            observe={"extraArgs": extra}, model="m",
+                            results_dir=_RD)
+
+
+def test_extra_args_unrelated_to_sizing_still_allowed():
+    argv = render_observe_argv(workload=_CORPUS_DURATION,
+                               observe={"extraArgs": "--shuffle-corpus"},
+                               model="m", results_dir=_RD,
+                               trace_path="traces/x")
+    assert argv.endswith("--shuffle-corpus")
+
+
+def test_sizing_flag_check_does_not_fire_on_a_generative_cell():
+    """A spec-mode cell renders no sizing flag, so extraArgs naming one is the
+    operator's business and collides with nothing this module emitted."""
+    argv = _render(observe={"extraArgs": "--num-requests 10"})
+    assert "--num-requests 10" in argv

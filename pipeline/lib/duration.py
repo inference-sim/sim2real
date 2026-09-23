@@ -85,13 +85,27 @@ _TERM_RE = re.compile(rf"({_NUM})({_UNITS})")
 #: ceiling (~292 years).
 _MAX_INT64 = 2**63 - 1
 
-#: Shared wording for the two ``describe`` strings, so one phrasing explains the
-#: rule everywhere it is enforced.
-DESCRIBE = (
+#: The unit rule, shared by every ``describe`` below so one phrasing explains it
+#: everywhere it is enforced.
+_DESCRIBE_UNIT = (
     "must be a Go duration STRING with an explicit unit (e.g. '60s', '15m', "
-    "'1h30m'); '0' is the one accepted unitless value. A bare number is "
-    "refused because the unit is what distinguishes 15s from 15ms"
+    "'1h30m')"
 )
+_DESCRIBE_WHY = (
+    "A bare number is refused because the unit is what distinguishes 15s from "
+    "15ms"
+)
+
+#: For consumers where zero is MEANINGFUL (``max_think_time``: "no cap").
+DESCRIBE = (
+    f"{_DESCRIBE_UNIT}; '0' is the one accepted unitless value. {_DESCRIBE_WHY}"
+)
+
+#: For consumers where zero is REFUSED (``replay.duration``). The ``'0' is the
+#: one accepted unitless value`` clause is dropped rather than contradicted: an
+#: operator who wrote ``0`` would otherwise read that clause first and conclude
+#: the value is fine, which is the opposite of the rule being enforced on them.
+DESCRIBE_NONZERO = f"{_DESCRIBE_UNIT}, and must be non-zero. {_DESCRIBE_WHY}"
 
 
 def is_go_duration(value) -> bool:
@@ -118,3 +132,46 @@ def is_go_duration(value) -> bool:
         if total > _MAX_INT64:
             return False
     return True
+
+
+def is_positive_go_duration(value) -> bool:
+    """Return True iff ``value`` is a duration blis will accept AND is non-zero.
+
+    A strictly narrower sibling of :func:`is_go_duration`, which accepts ``"0"``
+    and ``"0s"`` deliberately — ``prepare-trace`` documents ``0`` as "no cap" for
+    ``max_think_time``, so the shared predicate must keep taking it.
+
+    ``blis observe --duration`` cannot. Its Cobra ``DurationVar`` defaults to 0,
+    and the corpus validator keys its one-of against ``--total-sessions`` on
+    SUPPLIED-NESS, reading ``duration == 0`` as "flag not set"
+    (``cmd/observe_corpus.go:84``). So a zero passes every check on both sides
+    and yields a run bounded by neither the clock nor a session count, while the
+    workload document says a time bound was requested. That is the
+    accept-and-ignore shape ``corpus_schema`` exists to refuse, so it is refused
+    here instead — and note the reason is "blis treats 0 as unset", NOT "blis
+    rejects 0". Only a NEGATIVE duration is something blis rejects itself
+    (``observe_cmd.go:355``), and :func:`is_go_duration` already refuses those.
+
+    Zero is SUMMED IN NANOSECONDS rather than pattern-matched, because it has
+    many spellings and not all of them look like zero. ``0``, ``0s``, ``0.0s``,
+    ``.0s`` and ``0h0m0s`` do — but ``0.4ns`` does not, and Go truncates a
+    Duration to integer nanoseconds, so it parses to exactly 0 and blis reads it
+    as unset. A per-term test on the unscaled COEFFICIENT would accept it
+    (``0.4 > 0``); only the scaled sum catches it. The threshold is therefore
+    ``>= 1`` nanosecond, the smallest value Go can represent as set.
+
+    Reusing the already-validated :data:`_TERM_RE` and :data:`_UNIT_NS` keeps one
+    parser and one unit table for the whole module.
+    """
+    if not is_go_duration(value):
+        return False
+    # The two unitless zeros never reach _TERM_RE: is_go_duration short-circuits
+    # them before the grammar runs, so findall() would see no terms and the sum
+    # would be 0 by accident rather than by decision. Say it explicitly.
+    if value in ("0", "+0"):
+        return False
+    total = decimal.Decimal(0)
+    for num, unit in _TERM_RE.findall(value):
+        total += decimal.Decimal(num) * _UNIT_NS[unit]
+    # Truncation, not rounding, mirrors Go: 0.9ns is 0ns to time.ParseDuration.
+    return total >= 1

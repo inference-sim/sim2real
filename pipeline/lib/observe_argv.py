@@ -12,11 +12,18 @@ Now it is rendered here, once, into a single ``observeArgs`` param. The Task
 
 WHAT THIS MODULE OWNS, because nothing downstream can:
 
-* **The three mutual exclusions.** Corpus-mode vs spec-mode inputs;
+* **The four mutual exclusions.** Corpus-mode vs spec-mode inputs;
   ``--record-itl`` vs ``--no-streaming`` (blis rejects the pair —
   ``validateITLStreamingFlags``); and ``--saturation-report`` without
   ``--detectors`` (blis errors: "requires --detectors"). All three were
   previously enforced by a shell conditional, by blis at runtime, or not at all.
+  The fourth is **the replay sizing one-of**: ``--total-sessions`` and
+  ``--duration`` answer the same question — when does the replay stop — and blis
+  rejects the pair on SUPPLIED-NESS rather than value, so
+  ``--total-sessions 0 --duration 20m`` is a conflict and not an override. Only
+  the producer chooses which to emit, so only the producer can keep the pair
+  from reaching blis together (#923). ``measurement.extraArgs`` may not name
+  either flag for the same reason.
 * **Value validation.** Tekton substitutes params TEXTUALLY into the Task's
   ``OBSERVE_ARGS="$(params.observeArgs)"`` assignment, and the Task word-splits
   the result unquoted. A quote, ``$``, backtick or ``;`` in a rendered value
@@ -341,13 +348,36 @@ def render_observe_argv(
             "--corpus-data", f"{_DATA_MOUNT}/{trace_path}.csv",
         ]
         replay = workload.get("replay") or {}
+        # Unconditionally required fields keep the old behavior: a missing one
+        # means validation was skipped, so raise rather than render a sentinel.
         for name, field in corpus_schema.REPLAY_FIELDS.items():
+            if name in corpus_schema.REPLAY_ONE_OF:
+                continue
             if name not in replay:
                 raise ObserveArgvError(
                     f"replay.{name} is required to render corpus-mode argv; "
                     f"validate the workload document first"
                 )
             argv += [field.flag, field.render(replay[name])]
+        # Then exactly one member of the sizing one-of. Iterated in TABLE order,
+        # not set order, so the rendered flag position is deterministic. Keyed on
+        # presence, matching blis's supplied-ness rule — a written 0 or null is
+        # written.
+        written = [name for name in corpus_schema.REPLAY_FIELDS
+                   if name in corpus_schema.REPLAY_ONE_OF and name in replay]
+        if len(written) > 1:
+            raise ObserveArgvError(
+                f"replay declares {sorted(written)}, which are mutually "
+                f"exclusive; validate the workload document first"
+            )
+        if not written:
+            raise ObserveArgvError(
+                f"replay must declare exactly one of "
+                f"{sorted(corpus_schema.REPLAY_ONE_OF)} to size the run; "
+                f"validate the workload document first"
+            )
+        sizing = corpus_schema.REPLAY_FIELDS[written[0]]
+        argv += [sizing.flag, sizing.render(replay[written[0]])]
     else:
         argv += ["--workload-spec", _WORKLOAD_SPEC_PATH]
 
@@ -361,12 +391,48 @@ def render_observe_argv(
         argv += ["--saturation-report", f"{base}/saturation.json"]
 
     # extraArgs is a flag TAIL, rendered last so it can override anything above
-    # (matching its position in the Task's command before #900). Multiple words
-    # are its purpose, so whitespace is allowed — but the metacharacter rule
-    # still applies, since a ';' here is injection into the Task's step.
+    # (matching its position in the Task's command before #900) — with ONE
+    # exception, the sizing one-of, enforced below. Multiple words are its
+    # purpose, so whitespace is allowed — but the metacharacter rule still
+    # applies, since a ';' here is injection into the Task's step.
     extra = str(observe.get("extraArgs", "") or "").strip()
     if extra:
         _validate_word(extra, f"{SOURCE_LABEL}.extraArgs", allow_space=True)
+        # The one exception to "extraArgs overrides anything above". Restating a
+        # sizing flag is never an override: a duplicate silently re-sizes the run
+        # (Cobra takes the last occurrence) while the workload document says
+        # otherwise, and naming the OTHER member collides with the flag already
+        # rendered, which blis rejects outright (observe_corpus.go:84) — in-pod,
+        # after a namespace slot and a corpus download have been spent.
+        #
+        # Compared on the flag NAME, so `--total-sessions=5` is caught alongside
+        # `--total-sessions 5`. pflag marks a flag Changed for either spelling,
+        # and generate_from_config.py deliberately PRESERVES the `=` form when it
+        # routes a flag into extraArgs — so a whole-word match would miss the
+        # spelling this repo's own producer emits.
+        #
+        # Applied in BOTH modes, not just corpus mode. measurement.yaml is
+        # bundle-level, so one extraArgs reaches generative and corpus cells
+        # alike, and a generative cell is not a safe place to leave these:
+        # `--duration` there is a hard blis fatal ("--duration requires
+        # --concurrent-sessions > 0", observe_corpus.go:60), and
+        # `--total-sessions` is silently inert, which is the accept-and-ignore
+        # shape this module refuses everywhere else.
+        names = {w.split("=", 1)[0] for w in shlex.split(extra)}
+        clashing = sorted(
+            corpus_schema.REPLAY_FIELDS[name].flag
+            for name in corpus_schema.REPLAY_ONE_OF
+            if corpus_schema.REPLAY_FIELDS[name].flag in names
+        )
+        if clashing:
+            raise ObserveArgvError(
+                f"{SOURCE_LABEL}.extraArgs names {clashing}, which size the "
+                f"replay. Those come from the workload cell's 'replay:' block, "
+                f"not from the measurement protocol: restating one here either "
+                f"silently re-sizes the run or collides with the flag already "
+                f"rendered, which blis rejects. Set replay.total_sessions or "
+                f"replay.duration instead"
+            )
         argv += shlex.split(extra)
 
     # An EMPTY argv must never leave here. Tekton's "required param" means
