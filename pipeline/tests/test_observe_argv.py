@@ -503,3 +503,30 @@ def test_neither_one_of_member_raises_at_render_time():
     with pytest.raises(ObserveArgvError, match="exactly one of"):
         render_observe_argv(workload=wl, observe=None, model="m",
                             results_dir=_RD, trace_path="traces/x")
+
+
+@pytest.mark.parametrize("extra", ["--total-sessions 5", "--duration 5m",
+                                   "--record-itl --total-sessions 5"])
+def test_extra_args_naming_a_sizing_flag_is_refused(extra):
+    """#923. extraArgs is a documented override for everything else, but for the
+    sizing pair an override is either a silent re-size (Cobra takes the last
+    occurrence) or a hard blis fatal."""
+    with pytest.raises(ObserveArgvError, match="extraArgs"):
+        render_observe_argv(workload=_CORPUS_DURATION,
+                            observe={"extraArgs": extra}, model="m",
+                            results_dir=_RD, trace_path="traces/x")
+
+
+def test_extra_args_unrelated_to_sizing_still_allowed():
+    argv = render_observe_argv(workload=_CORPUS_DURATION,
+                               observe={"extraArgs": "--shuffle-corpus"},
+                               model="m", results_dir=_RD,
+                               trace_path="traces/x")
+    assert argv.endswith("--shuffle-corpus")
+
+
+def test_sizing_flag_check_does_not_fire_on_a_generative_cell():
+    """A spec-mode cell renders no sizing flag, so extraArgs naming one is the
+    operator's business and collides with nothing this module emitted."""
+    argv = _render(observe={"extraArgs": "--num-requests 10"})
+    assert "--num-requests 10" in argv

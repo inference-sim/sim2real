@@ -391,12 +391,39 @@ def render_observe_argv(
         argv += ["--saturation-report", f"{base}/saturation.json"]
 
     # extraArgs is a flag TAIL, rendered last so it can override anything above
-    # (matching its position in the Task's command before #900). Multiple words
-    # are its purpose, so whitespace is allowed — but the metacharacter rule
-    # still applies, since a ';' here is injection into the Task's step.
+    # (matching its position in the Task's command before #900) — with ONE
+    # exception, the sizing one-of, enforced below. Multiple words are its
+    # purpose, so whitespace is allowed — but the metacharacter rule still
+    # applies, since a ';' here is injection into the Task's step.
     extra = str(observe.get("extraArgs", "") or "").strip()
     if extra:
         _validate_word(extra, f"{SOURCE_LABEL}.extraArgs", allow_space=True)
+        # The one exception to "extraArgs overrides anything above". Restating a
+        # sizing flag is never an override: a duplicate silently re-sizes the run
+        # (Cobra takes the last occurrence) while the workload document says
+        # otherwise, and naming the OTHER member collides with the flag already
+        # rendered, which blis rejects outright (observe_corpus.go:84) — in-pod,
+        # after a namespace slot and a corpus download have been spent. Only
+        # refuse when THIS cell actually rendered a sizing flag: a generative
+        # cell renders none, so there is nothing to contradict and the flags are
+        # the operator's business.
+        if corpus_mode:
+            words = set(shlex.split(extra))
+            clashing = sorted(
+                corpus_schema.REPLAY_FIELDS[name].flag
+                for name in corpus_schema.REPLAY_ONE_OF
+                if corpus_schema.REPLAY_FIELDS[name].flag in words
+            )
+            if clashing:
+                raise ObserveArgvError(
+                    f"{SOURCE_LABEL}.extraArgs names {clashing}, which size "
+                    f"the replay. Those come from the workload cell's "
+                    f"'replay:' block, not from the measurement protocol: "
+                    f"restating one here either silently re-sizes the run or "
+                    f"collides with the flag already rendered, which blis "
+                    f"rejects. Set replay.total_sessions or replay.duration "
+                    f"instead"
+                )
         argv += shlex.split(extra)
 
     # An EMPTY argv must never leave here. Tekton's "required param" means
