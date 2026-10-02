@@ -152,7 +152,7 @@ Refs #930"
 ### Task 2: Pin the behaviour the mechanism change actually alters
 
 **Files:**
-- Modify: `pipeline/tests/test_sim2real.py` (add to `class TestBuildOverlayLifecycle`, after `test_finally_restore_baseline_failure_fails_loud`, which ends at line 2977)
+- Modify: `pipeline/tests/test_sim2real.py` (add to `class TestCmdBuildOverlayLifecycle`, line 2768, after `test_finally_restore_baseline_failure_fails_loud`, which ends at line 2975)
 
 **Interfaces:**
 - Consumes: `self._make_fixture(tmp_path, monkeypatch) -> (exp_root, src, thash)` from the same class (defined at line 2778). It builds a two-algorithm translation (`algo1`, `algo2`) with a real git repo at `exp_root/myrepo`.
