@@ -2974,6 +2974,171 @@ class TestCmdBuildOverlayLifecycle:
         err = capsys.readouterr().err
         assert "failed to restore baseline after build for algo1" in err
 
+    def test_in_flight_exception_survives_a_failed_restore(
+        self, tmp_path, monkeypatch
+    ):
+        """An exception escaping the try body must not be eaten by the finally.
+
+        This is the one path the #930 fix actually changes, and it needs both
+        halves to reproduce: an uncaught exception already propagating out of
+        the try body, AND a restore failure the finally's handler DOES catch.
+        `probe_image_digest` (sim2real.py:2481) sits in the try with no
+        handler, so it supplies the first half.
+
+        With the old `break` inside the finally, the caught restore failure
+        jumped out of the loop and discarded the pending RuntimeError, so a
+        genuine bug surfaced as a tidy exit 2 that reads like a handled build
+        failure. Note that a RuntimeError raised by `restore_baseline` itself
+        would NOT show this — it escapes the finally before reaching the
+        `break`, in both the old and new code.
+        """
+        import subprocess as _sub
+        exp_root, src, thash = self._make_fixture(tmp_path, monkeypatch)
+
+        monkeypatch.setattr(
+            "pipeline.lib.build.dispatch_buildkit_build", lambda **_kw: 0
+        )
+
+        def exploding_probe(*_a, **_k):
+            raise RuntimeError("probe blew up")
+
+        monkeypatch.setattr(
+            "pipeline.lib.build.probe_image_digest", exploding_probe
+        )
+
+        import pipeline.lib.source_toggle as st
+        real_restore = st.restore_baseline
+        calls = {"n": 0}
+
+        def flaky_restore(component_dir, translation_output):
+            calls["n"] += 1
+            # Call 1 is algo1's pre-build restore; call 2 is its post-build
+            # restore inside the finally. CalledProcessError IS in the
+            # finally's except tuple, so the old code reached the `break`.
+            if calls["n"] == 2:
+                raise _sub.CalledProcessError(
+                    1, ["git", "checkout"], output=b"", stderr=b"simulated"
+                )
+            real_restore(component_dir, translation_output)
+
+        monkeypatch.setattr(
+            "pipeline.lib.source_toggle.restore_baseline", flaky_restore
+        )
+
+        with pytest.raises(RuntimeError, match="probe blew up"):
+            sim2real.main(["build", "--translation", thash, "--force-rebuild"])
+
+    def test_finally_restore_failure_on_last_algo_still_exits_2(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A failed restore on the final algorithm still fails the run.
+
+        With no next iteration to protect, the exit code is the only thing
+        carrying the failure — `any_failure` must be what decides it, not the
+        jump out of the loop (issue #930).
+        """
+        import subprocess as _sub
+        exp_root, src, thash = self._make_fixture(tmp_path, monkeypatch)
+
+        dispatched = []
+        monkeypatch.setattr(
+            "pipeline.lib.build.probe_image_digest", lambda *a, **k: "sha256:x"
+        )
+
+        def fake_dispatch(*, image_ref, **_kw):
+            dispatched.append(image_ref)
+            return 0
+
+        monkeypatch.setattr(
+            "pipeline.lib.build.dispatch_buildkit_build", fake_dispatch
+        )
+
+        import pipeline.lib.source_toggle as st
+        real_restore = st.restore_baseline
+        calls = {"n": 0}
+
+        def flaky_restore(component_dir, translation_output):
+            calls["n"] += 1
+            # Calls run pre/post per algo: 1,2 = algo1; 3,4 = algo2. Fail on
+            # algo2's post-build restore, the last one in the run.
+            if calls["n"] == 4:
+                raise _sub.CalledProcessError(
+                    1, ["git", "checkout"], output=b"", stderr=b"simulated"
+                )
+            real_restore(component_dir, translation_output)
+
+        monkeypatch.setattr(
+            "pipeline.lib.source_toggle.restore_baseline", flaky_restore
+        )
+
+        rc = sim2real.main(["build", "--translation", thash, "--force-rebuild"])
+        assert rc == 2
+        # Both algorithms built — the failure is in the final cleanup only.
+        assert len(dispatched) == 2
+        err = capsys.readouterr().err
+        assert "failed to restore baseline after build for algo2" in err
+
+    def test_digest_write_failure_and_failed_restore_still_exits_2(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A pending `return 2` must survive a failed restore.
+
+        The try body returns 2 when the digest write fails; the finally then
+        fails too. The old `break` inside the finally cancelled that return
+        and let the post-loop expression produce the 2 instead. Either way the
+        caller sees 2 and no later algorithm runs — assert the outcome, which
+        is what the contract promises (issue #930).
+        """
+        import subprocess as _sub
+        exp_root, src, thash = self._make_fixture(tmp_path, monkeypatch)
+
+        dispatched = []
+        monkeypatch.setattr(
+            "pipeline.lib.build.probe_image_digest", lambda *a, **k: "sha256:x"
+        )
+
+        def fake_dispatch(*, image_ref, **_kw):
+            dispatched.append(image_ref)
+            return 0
+
+        monkeypatch.setattr(
+            "pipeline.lib.build.dispatch_buildkit_build", fake_dispatch
+        )
+        # The post-build digest write fails for every algorithm. Patching the
+        # module attribute hits the `build.atomic_write_json(...)` call inside
+        # the try — not the module-level `_atomic_write_json` alias bound at
+        # import, nor the pre-build-probe write that --force-rebuild skips.
+        def exploding_write(*_a, **_k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(
+            "pipeline.lib.build.atomic_write_json", exploding_write
+        )
+
+        import pipeline.lib.source_toggle as st
+        real_restore = st.restore_baseline
+        calls = {"n": 0}
+
+        def flaky_restore(component_dir, translation_output):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise _sub.CalledProcessError(
+                    1, ["git", "checkout"], output=b"", stderr=b"simulated"
+                )
+            real_restore(component_dir, translation_output)
+
+        monkeypatch.setattr(
+            "pipeline.lib.source_toggle.restore_baseline", flaky_restore
+        )
+
+        rc = sim2real.main(["build", "--translation", thash, "--force-rebuild"])
+        assert rc == 2
+        # algo2 must not be attempted on an unknown tree state.
+        assert len(dispatched) == 1
+        err = capsys.readouterr().err
+        assert "failed to record digest" in err
+        assert "failed to restore baseline after build for algo1" in err
+
     def test_read_algo_output_failure_returns_2(self, tmp_path, monkeypatch, capsys):
         """OSError reading algo_output.json returns exit code 2.
 

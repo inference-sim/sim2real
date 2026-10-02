@@ -22,7 +22,7 @@
 
 Five conditions the spec implies but does not pin with a test. Each has a test assigned to the task that owns the code.
 
-1. **An exception outside `(subprocess.CalledProcessError, OSError)` raised by the restore** — e.g. `KeyboardInterrupt`. A reasonable person expects a traceback, not a tidy exit 2 that looks like a handled build failure. *Covered: Task 2, Step 1.*
+1. **An exception already propagating out of the try body while the restore fails with a caught error.** This is the only shape that reproduces the swallow, and it needs both halves. An exception raised by the restore *itself* escapes the `finally` before reaching the `break` and behaves identically before and after the fix — the `break` runs only when the inner `except (subprocess.CalledProcessError, OSError)` catches. `probe_image_digest` (`sim2real.py:2481`) sits in the try with no handler and supplies the first half. A reasonable person expects a traceback, not a tidy exit 2 that looks like a handled build failure. *Covered: Task 2, Step 1.*
 2. **The restore fails on the LAST algorithm**, so there is no next iteration for the `break` to protect. Exit code must still be 2. *Covered: Task 2, Step 5.*
 3. **The restore fails while the `try` body is already returning 2** (digest write failed, line 2489). Exit must stay 2, and no later algorithm may be attempted. *Covered: Task 2, Step 7.*
 4. **A second `break`-in-`finally` added anywhere in the repo later.** The warning is invisible in CI today — nothing fails on it. *Covered: Task 3.*
@@ -162,68 +162,38 @@ The existing suite already covers the paths that *do not* change (normal, buildk
 
 - [ ] **Step 1: Write the failing test for exception propagation**
 
-This is the one real behaviour change in the fix. Append to `class TestBuildOverlayLifecycle`:
+This is the one real behaviour change in the fix. It needs BOTH halves to
+reproduce: an uncaught exception already propagating out of the try body, and a
+restore failure the `finally`'s handler *does* catch. An exception raised by
+`restore_baseline` itself does not work -- it escapes the `finally` before
+reaching the `break`, identically before and after the fix. `probe_image_digest`
+(`sim2real.py:2481`) sits in the try with no handler, so it supplies the first
+half.
 
-```python
-    def test_finally_restore_unexpected_exception_propagates(
-        self, tmp_path, monkeypatch
-    ):
-        """An exception the finally's except tuple does not name must escape.
-
-        The old `break` inside the finally swallowed anything the handler
-        did not catch and reported a tidy exit 2, which reads like a handled
-        build failure. A RuntimeError from restore_baseline is a bug, not a
-        build outcome, and must surface as itself (issue #930).
-        """
-        exp_root, src, thash = self._make_fixture(tmp_path, monkeypatch)
-
-        monkeypatch.setattr(
-            "pipeline.lib.build.probe_image_digest", lambda *a, **k: "sha256:x"
-        )
-        monkeypatch.setattr(
-            "pipeline.lib.build.dispatch_buildkit_build", lambda **_kw: 0
-        )
-
-        import pipeline.lib.source_toggle as st
-        real_restore = st.restore_baseline
-        calls = {"n": 0}
-
-        def exploding_restore(component_dir, translation_output):
-            calls["n"] += 1
-            # Call 1 is algo1's pre-build restore; call 2 is its post-build
-            # restore inside the finally.
-            if calls["n"] == 2:
-                raise RuntimeError("unexpected")
-            real_restore(component_dir, translation_output)
-
-        monkeypatch.setattr(
-            "pipeline.lib.source_toggle.restore_baseline", exploding_restore
-        )
-
-        with pytest.raises(RuntimeError, match="unexpected"):
-            sim2real.main(["build", "--translation", thash, "--force-rebuild"])
-```
+Append to `class TestCmdBuildOverlayLifecycle` a test
+`test_in_flight_exception_survives_a_failed_restore` that monkeypatches
+`dispatch_buildkit_build` to return 0, `probe_image_digest` to raise
+`RuntimeError("probe blew up")`, and `restore_baseline` to raise
+`subprocess.CalledProcessError` on its second call (algo1's post-build
+restore), then asserts `pytest.raises(RuntimeError, match="probe blew up")`
+around `sim2real.main(["build", "--translation", thash, "--force-rebuild"])`.
 
 - [ ] **Step 2: Run it to verify it fails on the unfixed code**
 
-Stash the Task 1 edit to prove the test is sensitive to it, then restore:
+Task 1 is already committed, so recover the pre-fix file from history rather
+than touching the stash stack (which is shared with every other worktree):
+write `HEAD~1`'s copy of `pipeline/sim2real.py` over the working file, run the
+three tests, then restore the working file from `HEAD`.
 
 ```bash
-git stash push -u -m "issue930-verify-test-sensitivity" -- pipeline/sim2real.py
-git stash list --format='%H %gs' | head -3   # capture the SHA of the entry just pushed
-.venv/bin/python -m pytest pipeline/tests/test_sim2real.py -v -k \
-  "finally_restore_unexpected_exception_propagates"
+.venv/bin/python -m pytest pipeline/tests/test_sim2real.py -q -k \
+  "in_flight_exception_survives or finally_restore_failure_on_last_algo or digest_write_failure_and_failed_restore"
 ```
 
-Expected: FAIL — `DID NOT RAISE <class 'RuntimeError'>`, because the old `break` swallows it and `main` returns 2.
-
-Then restore the fix (use `apply` with the captured SHA, not `pop` — the stash stack is shared with other worktrees):
-
-```bash
-git stash apply <sha-from-above>
-git stash list --format='%H %gs' | head -3   # re-find the entry by its tag
-git stash drop stash@{<n>}
-```
+Expected on the pre-fix file: `1 failed, 2 passed`. The in-flight test fails
+with `DID NOT RAISE <class 'RuntimeError'>` -- the old `break` discarded it and
+`main` returned 2. The other two passing on BOTH files is the evidence that the
+mechanism change preserved behaviour.
 
 - [ ] **Step 3: Run it against the fixed code**
 
