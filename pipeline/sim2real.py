@@ -2371,9 +2371,6 @@ def _cmd_build(args) -> int:
 
     for algo in algorithms:
         algo_name = algo["name"]
-        # Set by the finally-block restore below; acted on after the
-        # try/finally has unwound. Reset per iteration so one algorithm's
-        # failed restore cannot break the next.
         restore_failed = False
         try:
             image_ref = build.compose_image_ref(
@@ -2502,9 +2499,9 @@ def _cmd_build(args) -> int:
             # from a clean tree. If this cleanup fails partway (files_created
             # partially deleted, git checkout not yet run) the tree is in an
             # unknown state and subsequent iterations would silently upload
-            # the wrong sources — fail loud, set any_failure, and flag the
-            # loop to break once this block has unwound, so the caller sees
-            # exit 2 instead of a false success.
+            # the wrong sources — fail loud, set any_failure, and break once
+            # this block unwinds, so the caller sees exit 2 instead of a
+            # false success.
             print(
                 f"[sim2real build] restoring baseline after {algo_name} build",
                 flush=True,
@@ -2520,9 +2517,8 @@ def _cmd_build(args) -> int:
                 any_failure = True
                 restore_failed = True
 
-        # Outside the finally: a `break` *inside* it would cancel whatever
-        # the try body had already started — a pending `return 2`, a pending
-        # `break`, or an in-flight exception (PEP 765; SyntaxWarning on 3.14).
+        # Breaking inside the finally would cancel a pending return or an
+        # in-flight exception (PEP 765).
         if restore_failed:
             break
 
