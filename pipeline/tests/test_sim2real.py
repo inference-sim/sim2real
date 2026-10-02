@@ -3028,6 +3028,49 @@ class TestCmdBuildOverlayLifecycle:
         with pytest.raises(RuntimeError, match="probe blew up"):
             sim2real.main(["build", "--translation", thash, "--force-rebuild"])
 
+    def test_restore_exception_outside_the_caught_tuple_propagates(
+        self, tmp_path, monkeypatch
+    ):
+        """The finally's handler must stay narrow.
+
+        An exception `restore_baseline` raises that the handler does not name
+        escapes the `finally` before reaching the break, so this passed before
+        the #930 fix too — it is not a regression test for that fix. It guards
+        something else: that nobody widens
+        `except (subprocess.CalledProcessError, OSError)` to `except Exception`.
+        Widening it converts every unexpected failure — a bug in the restore,
+        a KeyboardInterrupt mid-cleanup — into a tidy exit 2 that reads like a
+        handled build failure. Verified that the widening leaves every other
+        test in this repo green, so without this test nothing would catch it.
+        """
+        exp_root, src, thash = self._make_fixture(tmp_path, monkeypatch)
+
+        monkeypatch.setattr(
+            "pipeline.lib.build.probe_image_digest", lambda *a, **k: "sha256:x"
+        )
+        monkeypatch.setattr(
+            "pipeline.lib.build.dispatch_buildkit_build", lambda **_kw: 0
+        )
+
+        import pipeline.lib.source_toggle as st
+        real_restore = st.restore_baseline
+        calls = {"n": 0}
+
+        def exploding_restore(component_dir, translation_output):
+            calls["n"] += 1
+            # Call 1 is algo1's pre-build restore; call 2 is its post-build
+            # restore inside the finally.
+            if calls["n"] == 2:
+                raise RuntimeError("restore bug")
+            real_restore(component_dir, translation_output)
+
+        monkeypatch.setattr(
+            "pipeline.lib.source_toggle.restore_baseline", exploding_restore
+        )
+
+        with pytest.raises(RuntimeError, match="restore bug"):
+            sim2real.main(["build", "--translation", thash, "--force-rebuild"])
+
     def test_finally_restore_failure_on_last_algo_still_exits_2(
         self, tmp_path, monkeypatch, capsys
     ):

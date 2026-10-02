@@ -43,11 +43,27 @@ def _own_python_files():
     )
 
 
+def _files_under(root):
+    return [f for f in _own_python_files() if f.is_relative_to(REPO_ROOT / root)]
+
+
 def test_found_the_python_files():
     """A glob that silently matches nothing would make this file vacuous."""
     files = _own_python_files()
     assert len(files) > 50
     assert REPO_ROOT / "pipeline" / "sim2real.py" in files
+
+
+@pytest.mark.parametrize("root", OWN_PYTHON_ROOTS)
+def test_every_root_contributes_files(root):
+    """Each root must match on its own.
+
+    ``Path.rglob`` on a directory that no longer exists yields nothing and
+    raises nothing, and ``pipeline/`` alone clears the aggregate floor above —
+    so renaming or relocating a root would drop its files out of the warning
+    gate while every other assertion here still passed.
+    """
+    assert _files_under(root), f"{root} matched no Python files"
 
 
 @pytest.mark.parametrize(

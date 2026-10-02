@@ -199,10 +199,12 @@ mechanism change preserved behaviour.
 
 ```bash
 .venv/bin/python -m pytest pipeline/tests/test_sim2real.py -v -k \
-  "finally_restore_unexpected_exception_propagates"
+  "in_flight_exception_survives_a_failed_restore"
 ```
 
-Expected: PASS.
+Expected: 1 passed. Check the selected count, not just the exit status — a `-k`
+filter that matches no test prints `N deselected` and still exits 0, so a stale
+name here reads as a pass while nothing ran.
 
 - [ ] **Step 4: Commit**
 
