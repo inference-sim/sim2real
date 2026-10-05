@@ -2371,6 +2371,7 @@ def _cmd_build(args) -> int:
 
     for algo in algorithms:
         algo_name = algo["name"]
+        restore_failed = False
         try:
             image_ref = build.compose_image_ref(
                 registry, repo_name, f"{tag_prefix}-{algo_name}"
@@ -2498,8 +2499,9 @@ def _cmd_build(args) -> int:
             # from a clean tree. If this cleanup fails partway (files_created
             # partially deleted, git checkout not yet run) the tree is in an
             # unknown state and subsequent iterations would silently upload
-            # the wrong sources — fail loud, set any_failure, and break so
-            # the caller sees exit 2 instead of a false success.
+            # the wrong sources — fail loud, set any_failure, and break once
+            # this block unwinds, so the caller sees exit 2 instead of a
+            # false success.
             print(
                 f"[sim2real build] restoring baseline after {algo_name} build",
                 flush=True,
@@ -2513,7 +2515,12 @@ def _cmd_build(args) -> int:
                     file=sys.stderr,
                 )
                 any_failure = True
-                break
+                restore_failed = True
+
+        # Breaking inside the finally would cancel a pending return or an
+        # in-flight exception (PEP 765).
+        if restore_failed:
+            break
 
     return 2 if any_failure else 0
 
