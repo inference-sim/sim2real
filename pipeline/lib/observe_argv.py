@@ -279,6 +279,15 @@ def _check_exclusions(resolved: dict) -> None:
         )
 
 
+def _declares_adapters(workload: dict) -> bool:
+    """True iff a client or cohort names an adapter (blis ``SpecAdapterIDs``)."""
+    return any(
+        isinstance(entry, dict) and entry.get("adapter")
+        for key in ("clients", "cohorts")
+        for entry in workload.get(key) or []
+    )
+
+
 def render_observe_argv(
     *,
     workload: dict,
@@ -380,6 +389,10 @@ def render_observe_argv(
         argv += [sizing.flag, sizing.render(replay[written[0]])]
     else:
         argv += ["--workload-spec", _WORKLOAD_SPEC_PATH]
+        # blis sends a spec's adapter ids only under --dispatch-adapters;
+        # without it every request names the base --model.
+        if _declares_adapters(workload):
+            argv.append("--dispatch-adapters")
 
     _validate_word(results_dir, "resultsDir", allow_space=False)
     base = f"{_DATA_MOUNT}/{results_dir}"
@@ -432,6 +445,12 @@ def render_observe_argv(
                 f"silently re-sizes the run or collides with the flag already "
                 f"rendered, which blis rejects. Set replay.total_sessions or "
                 f"replay.duration instead"
+            )
+        if "--dispatch-adapters" in names:
+            raise ObserveArgvError(
+                f"{SOURCE_LABEL}.extraArgs names --dispatch-adapters, which is "
+                f"rendered from the workload: it is set when a client or cohort "
+                f"declares an adapter. Remove it from extraArgs"
             )
         argv += shlex.split(extra)
 
