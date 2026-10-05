@@ -1218,6 +1218,12 @@ generative spec to `/workspace/workload.yaml`. Both are also documented in the
 Task's own `observeArgs` param description, so the coupling is visible from
 either end.
 
+**`--dispatch-adapters` is rendered from the workload.** A generative workload
+with a non-empty `adapter` on any `clients[]` or `cohorts[]` entry gets
+`--dispatch-adapters`, so blis sends each request to its adapter rather than the
+base `--model`. It is never rendered for a corpus workload, and
+`measurement.extraArgs` may not name it.
+
 **Three mutual exclusions are enforced at assemble**, each previously upheld by a
 shell conditional, by blis at runtime, or not at all:
 

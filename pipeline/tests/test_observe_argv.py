@@ -92,6 +92,31 @@ def test_extra_args_absent_when_empty():
     assert _render(observe={"extraArgs": ""}) == _render(observe={})
 
 
+# ── --dispatch-adapters (#933) ──────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("key", ["clients", "cohorts"])
+def test_dispatch_adapters_rendered_when_workload_declares_an_adapter(key):
+    wl = {**_SPEC_WORKLOAD, key: [{"id": "a"}, {"id": "b", "adapter": "citations"}]}
+    assert "--dispatch-adapters" in _render(workload=wl).split()
+
+
+def test_dispatch_adapters_absent_without_adapters():
+    wl = {**_SPEC_WORKLOAD, "clients": [{"id": "a"}, {"id": "b", "adapter": ""}]}
+    assert "--dispatch-adapters" not in _render(workload=wl).split()
+
+
+def test_dispatch_adapters_never_rendered_for_a_corpus_workload():
+    got = _render(workload=_CORPUS_WORKLOAD, trace_path="traces/abc")
+    assert "--dispatch-adapters" not in got.split()
+
+
+@pytest.mark.parametrize("extra", ["--dispatch-adapters", "--dispatch-adapters=true"])
+def test_dispatch_adapters_refused_in_extra_args(extra):
+    with pytest.raises(ObserveArgvError, match="--dispatch-adapters"):
+        _render(observe={"extraArgs": extra})
+
+
 # ── the three exclusions ────────────────────────────────────────────────────
 
 
